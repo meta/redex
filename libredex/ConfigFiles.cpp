@@ -661,6 +661,16 @@ void ConfigFiles::ensure_agg_method_stats_loaded() {
   }
   m_method_profiles->initialize(csv_filenames, baseline_profile_csv_filenames,
                                 get_baseline_profile_configs());
+  bool ignore_split_methods = false;
+  get_json_config().get("agg_method_stats_ignore_split_methods", false,
+                        ignore_split_methods);
+  if (ignore_split_methods) {
+    auto dropped = m_method_profiles->drop_unresolved_split_lines();
+    TRACE(METH_PROF, 1,
+          "Dropped %zu unresolved method profile lines of split "
+          "methods",
+          dropped);
+  }
 }
 
 bool ConfigFiles::get_did_use_bzl_baseline_profile_config() {

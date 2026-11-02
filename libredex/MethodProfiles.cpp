@@ -841,6 +841,15 @@ std::optional<uint32_t> MethodProfiles::get_interaction_count(
   }
 }
 
+size_t MethodProfiles::drop_unresolved_split_lines() {
+  auto is_split = [](const ParsedMain& line) {
+    always_assert(line.mdt);
+    return line.mdt->name.find("$split$") != std::string_view::npos;
+  };
+  return std::erase_if(m_unresolved_lines, is_split) +
+         std::erase_if(m_baseline_profile_unresolved_lines, is_split);
+}
+
 void MethodProfiles::process_unresolved_lines() {
   Timer::scope("Processing unresolved profile lines", [&] {
     process_unresolved_lines(false);

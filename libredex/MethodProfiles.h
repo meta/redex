@@ -131,6 +131,13 @@ class MethodProfiles {
   // Try to resolve previously unresolved lines
   void process_unresolved_lines();
 
+  // Drops the unresolved lines of split methods, so methods created later by
+  // method splitting are never matched to them by name. Split names such as
+  // `get$split$hot_cold$0$2` give a position, not the code: the method with
+  // that name in this build can hold different code from the profiled one.
+  // Returns how many lines were dropped.
+  size_t drop_unresolved_split_lines();
+
   struct ManualProfileLine {
     std::string current_line;
     std::string flags;

@@ -16,6 +16,7 @@
 #include "ConfigFiles.h"
 #include "Creators.h"
 #include "GlobalConfig.h"
+#include "MethodProfiles.h"
 #include "RedexTest.h"
 #include "RedexTestUtils.h"
 #include "SourceBlocksViolations.h"
@@ -450,4 +451,51 @@ TEST_F(ConfigFilesTest, complement_betamap_rejects_unknown_mode) {
   cfg["complement_betamap_with_method_profiles_symbols"] = "20pct";
   ConfigFiles conf(cfg);
   EXPECT_ANY_THROW(conf.get_coldstart_classes());
+}
+
+// `agg_method_stats_ignore_split_methods` keeps method-profile rows for split
+// methods from being matched by name to the split methods created later, while
+// other generated methods are still matched.
+TEST_F(ConfigFilesTest, agg_method_stats_ignore_split_methods) {
+  auto tmp_dir = redex::make_tmp_dir("redex_ignore_split_methods_%%%%%%%%");
+
+  // Each case uses its own class, since methods outlive a ConfigFiles. Loading
+  // requires at least one row that resolves.
+  auto stats_after_creating_methods = [&](const std::string& cls,
+                                          bool ignore_split_methods) {
+    DexMethod::make_method(cls + ".existing:()V");
+    auto profiles = write_lines(
+        tmp_dir.path,
+        cls.substr(1, cls.size() - 2) + ".csv",
+        {"interaction,appear#", "ColdStart,2",
+         std::string("index,name,appear100,appear#,avg_call,avg_order,") +
+             "avg_rank100,min_api_level",
+         "0," + cls + ".existing:()V,90.0000,1,1.0000,0.0000,0.0,-1",
+         "1," + cls + ".get$split$hot_cold$0$1:()V,70.0000,1,2.0,0.0,0.0,-1",
+         "2," + cls + ".$outlined$0$abcdef:()V,60.0000,1,5.0,0.0,0.0,-1"});
+    Json::Value cfg;
+    std::istringstream ss(R"({"redex": {"passes": []}})");
+    ss >> cfg;
+    Json::Value mp = Json::arrayValue;
+    mp.resize(1);
+    mp[0] = profiles;
+    cfg["agg_method_stats_files"] = mp;
+    cfg["agg_method_stats_ignore_split_methods"] = ignore_split_methods;
+    ConfigFiles conf(cfg);
+    auto& method_profiles = conf.get_method_profiles();
+    // Both methods are created after the profiles are loaded, as a pass would.
+    auto* split = DexMethod::make_method(cls + ".get$split$hot_cold$0$1:()V");
+    auto* outlined = DexMethod::make_method(cls + ".$outlined$0$abcdef:()V");
+    method_profiles.process_unresolved_lines();
+    return std::make_pair(
+        method_profiles.get_method_stat(method_profiles::COLD_START, split)
+            .has_value(),
+        method_profiles.get_method_stat(method_profiles::COLD_START, outlined)
+            .has_value());
+  };
+
+  EXPECT_EQ(stats_after_creating_methods("LMatched;", false),
+            std::make_pair(true, true));
+  EXPECT_EQ(stats_after_creating_methods("LIgnored;", true),
+            std::make_pair(false, true));
 }

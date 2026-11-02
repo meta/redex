@@ -7,10 +7,12 @@
 
 #include "ReachableNatives.h"
 
+#include <algorithm>
 #include <array>
 #include <fstream>
 #include <iterator>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 
@@ -49,16 +51,16 @@ void ReachableNativesPass::bind_config() {
       [this] { always_assert(!m_sweep_native_methods || m_sweep); });
 }
 
-bool ReachableNativesPass::gather_load_library(
+std::vector<const IRInstruction*> ReachableNativesPass::gather_load_library(
     DexMethod* caller, InsertOnlyConcurrentSet<const DexString*>* names) {
+  std::vector<const IRInstruction*> non_const_defs;
   if ((m_load_library_methods.count(caller) != 0u) ||
       (m_load_library_unsafe_methods.count(caller) != 0u)) {
-    return true;
+    return non_const_defs;
   }
   cfg::ScopedCFG cfg(caller->get_code());
   Lazy<live_range::UseDefChains> udchain(
       [&]() { return live_range::MoveAwareChains(*cfg).get_use_def_chains(); });
-  bool success = true;
   for (auto& mie : InstructionIterable(*cfg)) {
     auto* insn = mie.insn;
     if (!opcode::is_invoke_static(insn->opcode())) {
@@ -76,10 +78,10 @@ bool ReachableNativesPass::gather_load_library(
         names->insert(def->get_string());
         continue;
       }
-      success = false;
+      non_const_defs.push_back(def);
     }
   }
-  return success;
+  return non_const_defs;
 }
 
 namespace {
@@ -196,6 +198,40 @@ void assert_class_fully_recognized(std::string_view class_name,
                     std::string(class_name).c_str(), pinned, expected);
 }
 
+// The callers that pass a load-library entry point a library name that is not
+// a constant string, each with the instructions that define that name.
+using NonConstNameCallers =
+    InsertOnlyConcurrentMap<DexMethod*, std::vector<std::string>>;
+
+void record_non_const_name_caller(
+    DexMethod* caller,
+    const std::vector<const IRInstruction*>& non_const_defs,
+    NonConstNameCallers* callers) {
+  if (non_const_defs.empty()) {
+    return;
+  }
+  std::vector<std::string> shown_defs;
+  shown_defs.reserve(non_const_defs.size());
+  for (const auto* def : non_const_defs) {
+    shown_defs.push_back(show(def));
+  }
+  std::sort(shown_defs.begin(), shown_defs.end());
+  shown_defs.erase(std::unique(shown_defs.begin(), shown_defs.end()),
+                   shown_defs.end());
+  callers->emplace(caller, std::move(shown_defs));
+}
+
+std::string show_non_const_name_callers(const NonConstNameCallers& callers) {
+  std::ostringstream oss;
+  for (auto* caller : unordered_to_ordered_keys(callers, compare_dexmethods)) {
+    oss << "  " << show(caller) << "\n";
+    for (const auto& def : callers.at(caller)) {
+      oss << "    library name defined by: " << def << "\n";
+    }
+  }
+  return oss.str();
+}
+
 } // namespace
 
 void ReachableNativesPass::eval_pass(DexStoresVector& stores,
@@ -233,24 +269,15 @@ void ReachableNativesPass::eval_pass(DexStoresVector& stores,
     // match nothing.
     return;
   }
-  InsertOnlyConcurrentSet<DexMethod*> concurrent_non_const_load_library_names;
+  NonConstNameCallers non_const_name_callers;
   walk::parallel::code(
       build_class_scope(stores), [&](DexMethod* caller, IRCode&) {
-        if (!gather_load_library(caller, &g_redex->library_names)) {
-          concurrent_non_const_load_library_names.insert(caller);
-        }
+        record_non_const_name_caller(
+            caller, gather_load_library(caller, &g_redex->library_names),
+            &non_const_name_callers);
       });
-  if (concurrent_non_const_load_library_names.empty()) {
-    return;
-  }
-  auto ordered = unordered_to_ordered(concurrent_non_const_load_library_names,
-                                      compare_dexmethods);
-  std::ostringstream oss;
-  for (auto* caller : ordered) {
-    oss << "  " << show(caller) << "\n";
-  }
   always_assert_log(
-      false,
+      non_const_name_callers.empty(),
       "Found callers of SoLoader.loadLibrary / NativeLoader.loadLibrary that "
       "do not supply a constant library name string:\n%sThis is not supported, "
       "as it prevents identifying which libraries are referenced. Either "
@@ -258,7 +285,7 @@ void ReachableNativesPass::eval_pass(DexStoresVector& stores,
       "to via additional_load_library_names option to the "
       "ReachableNativesPass, or, preferably, refactor the code so that "
       "loadLibrary is called with string constants only.",
-      oss.str().c_str());
+      show_non_const_name_callers(non_const_name_callers).c_str());
 }
 
 void ReachableNativesPass::analyze_final_load_library(
@@ -270,21 +297,28 @@ void ReachableNativesPass::analyze_final_load_library(
   for (auto& library_name : m_additional_load_library_names) {
     final_library_names.insert(DexString::make_string(library_name));
   }
-  InsertOnlyConcurrentSet<DexMethod*> concurrent_non_const_load_library_names;
+  NonConstNameCallers non_const_name_callers;
   walk::parallel::code(scope, [&](DexMethod* caller, IRCode&) {
     if (!reachable_fn(caller)) {
       return;
     }
-    if (!gather_load_library(caller, &final_library_names)) {
-      concurrent_non_const_load_library_names.insert(caller);
-    }
+    record_non_const_name_caller(
+        caller, gather_load_library(caller, &final_library_names),
+        &non_const_name_callers);
   });
 
   // TODO: There is chance that some Redex pass does a code transformation that
   // moves the const-string away, e.g. DedupStringsPass. Consider introducing a
   // "load-library" (pseudo) instruction that takes a string literal, to avoid
   // that.
-  always_assert(concurrent_non_const_load_library_names.empty());
+  always_assert_log(
+      non_const_name_callers.empty(),
+      "Found reachable callers of SoLoader.loadLibrary / "
+      "NativeLoader.loadLibrary that no longer supply a constant library name "
+      "string:\n%sThe first ReachableNativesPass accepted every call, so a "
+      "pass that ran since then moved the library name away from the call, "
+      "and the libraries that remain live can no longer be determined.",
+      show_non_const_name_callers(non_const_name_callers).c_str());
 
   mgr.set_metric("initial_library_names", g_redex->library_names.size());
   mgr.set_metric("final_library_names", final_library_names.size());

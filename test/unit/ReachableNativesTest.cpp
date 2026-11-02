@@ -7,6 +7,11 @@
 
 #include <gtest/gtest.h>
 
+#include <fstream>
+#include <functional>
+#include <sstream>
+#include <string>
+
 #include "ConfigFiles.h"
 #include "Creators.h"
 #include "DexClass.h"
@@ -17,6 +22,8 @@
 #include "ReachableNatives.h"
 #include "RedexException.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
+#include "Show.h"
 #include "Walkers.h"
 
 namespace {
@@ -144,6 +151,132 @@ class ReachableNativesTest : public RedexTest {
     PassManager manager(passes, conf);
     pass.eval_pass(stores, conf, manager);
   }
+
+  // A SoLoader whose entry points have code that passes the IR type checker,
+  // for the tests that run the whole PassManager.
+  void add_checkable_soloader_class(DexStore& store) {
+    auto* owner = DexType::make_type(kSoLoader);
+    ClassCreator creator(owner);
+    creator.set_super(type::java_lang_Object());
+    for (const auto* name : {"loadLibraryUnsafe", "loadLibrary"}) {
+      add_static_method_with_code(creator, owner, name, string_proto(), R"(
+        ((load-param-object v0) (const v1 1) (return v1))
+      )");
+      add_static_method_with_code(creator, owner, name, string_int_proto(), R"(
+        ((load-param-object v0) (load-param v1) (const v2 1) (return v2))
+      )");
+    }
+    store.add_classes({creator.create()});
+  }
+
+  static DexMethod* add_static_method_with_code(ClassCreator& creator,
+                                                DexType* owner,
+                                                const std::string& name,
+                                                DexProto* proto,
+                                                const std::string& code) {
+    auto* method = dynamic_cast<DexMethod*>(
+        DexMethod::make_method(owner, DexString::make_string(name), proto));
+    method->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+    method->set_code(assembler::ircode_from_string(code));
+    creator.add_method(method);
+    return method;
+  }
+
+  // Adds `Lcom/example/Names;.foo:()Ljava/lang/String;`, which returns "foo"
+  // where the analysis cannot see it.
+  void add_names_class(DexStore& store) {
+    auto* owner = DexType::make_type("Lcom/example/Names;");
+    ClassCreator creator(owner);
+    creator.set_super(type::java_lang_Object());
+    add_static_method_with_code(
+        creator, owner, "foo",
+        DexProto::make_proto(type::java_lang_String(),
+                             DexTypeList::make_type_list({})),
+        R"(((const-string "foo") (move-result-pseudo-object v0) (return-object v0)))");
+    store.add_classes({creator.create()});
+  }
+
+  // Adds `Lcom/example/Loader;` with one method per entry of `bodies`, each a
+  // root, so that the reachability analysis of run_pass keeps them.
+  std::vector<DexMethod*> add_loader_class(
+      DexStore& store, const std::vector<std::string>& bodies) {
+    auto* owner = DexType::make_type("Lcom/example/Loader;");
+    ClassCreator creator(owner);
+    creator.set_super(type::java_lang_Object());
+    std::vector<DexMethod*> methods;
+    for (size_t i = 0; i < bodies.size(); ++i) {
+      auto* method = dynamic_cast<DexMethod*>(DexMethod::make_method(
+          owner, DexString::make_string("load" + std::to_string(i)),
+          DexProto::make_proto(type::_void(),
+                               DexTypeList::make_type_list({}))));
+      method->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+      method->set_code(assembler::ircode_from_string(bodies[i]));
+      method->rstate.set_root();
+      creator.add_method(method);
+      methods.push_back(method);
+    }
+    auto* cls = creator.create();
+    // A root method is only a seed once its class is retained.
+    cls->rstate.set_root();
+    store.add_classes({cls});
+    return methods;
+  }
+
+  // The library names the final analysis wrote out, one per line.
+  struct LibraryNames {
+    std::string live;
+    std::string dead;
+  };
+
+  // Runs the pass the way an app config does: listed twice, so that the first
+  // run analyzes the input and the second, after `in_between` has run, does
+  // the final analysis of the live library names.
+  LibraryNames run_pass_twice(const std::function<void()>& in_between) {
+    Json::Value global_config(Json::objectValue);
+    global_config["ReachableNativesPass"]["analyze_load_library"] = true;
+    global_config["redex"]["passes"].append("ReachableNativesPass");
+    global_config["redex"]["passes"].append("InBetweenPass");
+    global_config["redex"]["passes"].append("ReachableNativesPass");
+    ConfigFiles conf(global_config);
+    conf.parse_global_config();
+    auto tmp_dir = redex::make_tmp_dir("reachable_natives_%%%%%%%%");
+    conf.set_outdir(tmp_dir.path);
+
+    ReachableNativesPass pass;
+    InBetweenPass in_between_pass(in_between);
+    PassManager manager({&pass, &in_between_pass}, conf, RedexOptions{});
+    manager.run_passes(stores, conf);
+
+    auto read = [&](const std::string& file_name) {
+      std::ifstream file(conf.metafile(file_name));
+      std::stringstream contents;
+      contents << file.rdbuf();
+      return contents.str();
+    };
+    return {read("redex-live-load-library.txt"),
+            read("redex-dead-load-library.txt")};
+  }
+
+ private:
+  // Stands in for the passes that run between the two ReachableNativesPass
+  // runs, and can rewrite the code the final analysis sees.
+  class InBetweenPass : public Pass {
+   public:
+    explicit InBetweenPass(std::function<void()> fn)
+        : Pass("InBetweenPass"), m_fn(std::move(fn)) {}
+
+    redex_properties::PropertyInteractions get_property_interactions()
+        const override {
+      return {};
+    }
+
+    void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override {
+      m_fn();
+    }
+
+   private:
+    std::function<void()> m_fn;
+  };
 };
 
 // An app that links no native libraries never pulls in SoLoader. That used to
@@ -304,4 +437,48 @@ TEST_F(ReachableNativesTest, evalPassRejectsNonStaticEntryPoint) {
   stores.emplace_back(std::move(store));
 
   EXPECT_THROW(run_eval_pass(), RedexException);
+}
+
+// A pass that rewrites a load-library call so that its library name is no
+// longer a constant leaves the final analysis unable to tell which libraries
+// stay live. The failure has to name the caller and what now defines the name,
+// or nobody can tell which pass and which code to look at.
+TEST_F(ReachableNativesTest, finalAnalysisNamesCallerOfNonConstantName) {
+  DexStore store("classes");
+  add_checkable_soloader_class(store);
+  add_names_class(store);
+  auto loaders = add_loader_class(store, {R"(
+    (
+      (const-string "foo")
+      (move-result-pseudo-object v0)
+      (const v1 16)
+      (invoke-static (v0 v1) "Lcom/facebook/soloader/SoLoader;.loadLibrary:(Ljava/lang/String;I)Z")
+      (return-void)
+    )
+  )"});
+  stores.emplace_back(std::move(store));
+
+  auto* loader = loaders.front();
+  std::string message;
+  try {
+    run_pass_twice([&]() {
+      loader->get_code()->clear_cfg();
+      loader->set_code(assembler::ircode_from_string(R"(
+        (
+          (invoke-static () "Lcom/example/Names;.foo:()Ljava/lang/String;")
+          (move-result-object v0)
+          (const v1 16)
+          (invoke-static (v0 v1) "Lcom/facebook/soloader/SoLoader;.loadLibrary:(Ljava/lang/String;I)Z")
+          (return-void)
+        )
+      )"));
+      loader->get_code()->build_cfg();
+    });
+  } catch (const RedexException& e) {
+    message = e.what();
+  }
+  EXPECT_NE(message.find(show(loader)), std::string::npos) << message;
+  EXPECT_NE(message.find("INVOKE_STATIC Lcom/example/Names;.foo"),
+            std::string::npos)
+      << message;
 }

@@ -60,8 +60,11 @@ class ReachableNativesPass : public Pass {
   void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
 
  private:
-  bool gather_load_library(DexMethod* caller,
-                           InsertOnlyConcurrentSet<const DexString*>* names);
+  // Adds the constant library names `caller` passes to load-library entry
+  // points to `names`, and returns the instructions that define any library
+  // name that is not a constant string.
+  std::vector<const IRInstruction*> gather_load_library(
+      DexMethod* caller, InsertOnlyConcurrentSet<const DexString*>* names);
 
   void analyze_final_load_library(
       const DexClasses&,

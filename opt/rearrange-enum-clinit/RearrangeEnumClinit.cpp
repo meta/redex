@@ -232,8 +232,6 @@ struct Rearranger {
           b, mrp_it, source_blocks::clone_as_synthetic(first_sb));
     }
 
-    array_sput->set_src(0, new_reg);
-
     // Leave the size around in case it was referenced for something else.
     // Will be cleaned up by shrinker.
 
@@ -284,6 +282,24 @@ struct Rearranger {
     return find_move_point_new_instance(object_insn);
   }
 
+  bool validate_array_uses() {
+    auto uses = def_use.find(array_new_array->insn);
+    if (uses == def_use.end()) {
+      return false;
+    }
+    method_stats.unsupported_uses = static_cast<size_t>(
+        unordered_count_if(uses->second, [&](const live_range::Use& use) {
+          if (use.insn == array_sput ||
+              use.insn->opcode() == OPCODE_MOVE_OBJECT) {
+            return use.src_index != 0;
+          }
+          return use.insn->opcode() != OPCODE_APUT_OBJECT || use.src_index != 1;
+        }));
+    // Observers can see partial contents; changing their register is not
+    // enough.
+    return method_stats.unsupported_uses == 0;
+  }
+
   bool run() {
     // Find a sput-object for `$VALUES`.
     array_sput = find_values_sput();
@@ -300,25 +316,33 @@ struct Rearranger {
       return false;
     }
 
+    if (!validate_array_uses()) {
+      return false;
+    }
+    const auto& uses = def_use.at(array_new_array->insn);
+
     bool moved_new_array{false};
     auto move_array = [&]() {
       if (moved_new_array) {
         return;
       }
       alloc_reg = move_new_array_to_front();
+      for (const auto& use : UnorderedIterable(uses)) {
+        use.insn->set_src(use.src_index, alloc_reg);
+      }
       moved_new_array = true;
     };
+    size_t retained_field_stores = 0;
 
     // Move array to front, use a new register.
 
     // Find all the users of the array. This should be aput-object things.
     {
-      auto new_array_uses_it = def_use.find(array_new_array->insn);
-      redex_assert(new_array_uses_it != def_use.cend());
       std::optional<reg_t> extra_reg{};
-      for (const auto& use : UnorderedIterable(new_array_uses_it->second)) {
+      for (const auto& use : UnorderedIterable(uses)) {
         // Skip the sput.
-        if (use.insn == array_sput) {
+        if (use.insn == array_sput ||
+            use.insn->opcode() == OPCODE_MOVE_OBJECT) {
           continue;
         }
         assert_log(use.insn->opcode() == OPCODE_APUT_OBJECT,
@@ -329,6 +353,7 @@ struct Rearranger {
         IRInstruction* object_insn = find_singleton_def(use.insn, 0);
         if (object_insn->opcode() == OPCODE_SGET_OBJECT) {
           // Field read style, does not really benefit from moving.
+          ++retained_field_stores;
           continue;
         }
 
@@ -380,6 +405,11 @@ struct Rearranger {
     if (!moved_new_array) {
       return false;
     }
+    method_stats.retained_field_stores = retained_field_stores;
+    method_stats.aliases =
+        static_cast<size_t>(unordered_count_if(uses, [](const auto& use) {
+          return use.insn->opcode() == OPCODE_MOVE_OBJECT;
+        }));
 
     // Finally remove the old new-array. Do it late so there's no undefined
     // behavior with deleted things.
@@ -420,6 +450,11 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
   std::atomic<size_t> cnt_below_threshold{0};
   std::atomic<size_t> cnt_failed{0};
   std::atomic<size_t> cnt_changed{0};
+  AtomicStatCounter<size_t> cnt_unsupported_array_uses{0};
+  AtomicStatCounter<size_t> cnt_retained_field_stores{0};
+  AtomicStatCounter<size_t> cnt_arrays_with_retained_field_stores{0};
+  AtomicStatCounter<size_t> cnt_array_aliases{0};
+  AtomicStatCounter<size_t> cnt_arrays_with_aliases{0};
   AtomicStatCounter<size_t> cnt_values_without_code{0};
   AtomicStatCounter<size_t> cnt_values_without_return{0};
   std::atomic<size_t> cnt_no_optimizations{0};
@@ -451,6 +486,15 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
 
     MethodStats method_stats;
     auto res = run(m, m->get_code(), &method_stats);
+    cnt_unsupported_array_uses += method_stats.unsupported_uses;
+    cnt_retained_field_stores += method_stats.retained_field_stores;
+    cnt_array_aliases += method_stats.aliases;
+    if (method_stats.retained_field_stores != 0) {
+      ++cnt_arrays_with_retained_field_stores;
+    }
+    if (method_stats.aliases != 0) {
+      ++cnt_arrays_with_aliases;
+    }
     cnt_values_without_code += method_stats.values_without_code;
     cnt_values_without_return += method_stats.values_without_return;
 
@@ -472,6 +516,12 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
     }
   });
 
+  mgr.set_metric("unsupported_array_uses", cnt_unsupported_array_uses.load());
+  mgr.set_metric("retained_field_stores", cnt_retained_field_stores.load());
+  mgr.set_metric("changed_with_retained_field_stores",
+                 cnt_arrays_with_retained_field_stores.load());
+  mgr.set_metric("retargeted_array_aliases", cnt_array_aliases.load());
+  mgr.set_metric("changed_with_array_aliases", cnt_arrays_with_aliases.load());
   mgr.set_metric("values_without_code", cnt_values_without_code.load());
   mgr.set_metric("values_without_return", cnt_values_without_return.load());
   mgr.set_metric("changed", cnt_changed.load());

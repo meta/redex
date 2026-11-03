@@ -19,6 +19,9 @@ namespace rearrange_enum_clinit {
 struct MethodStats {
   size_t values_without_code{0};
   size_t values_without_return{0};
+  size_t unsupported_uses{0};
+  size_t retained_field_stores{0};
+  size_t aliases{0};
 };
 
 enum class MethodResult {

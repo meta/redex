@@ -77,6 +77,32 @@ class RearrangeEnumClinitTest : public RedexTest {
                                         method_stats);
   }
 
+  static std::string mixed_array_initializer(const std::string& extra = "",
+                                             const std::string& array = "v3") {
+    const std::string prefix = R"((
+      (const v2 0)
+      (const-string ALPHA)
+      (move-result-pseudo-object v1)
+      (new-instance "LTest;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+      (sput-object v0 "LTest;.ALPHA:LTest;")
+      (const v3 2)
+      (new-array v3 "[LTest;")
+      (move-result-pseudo-object v3)
+    )";
+    return prefix + extra + "(aput-object v0 " + array + R"( v2)
+      (sget-object "LTest;.BETA:LTest;")
+      (move-result-pseudo-object v0)
+      (const v2 1)
+      (aput-object v0 )" +
+           array + R"( v2)
+      (sput-object )" +
+           array + R"( "LTest;.$VALUES:[LTest;")
+      (return-void)
+    ))";
+  }
+
   static std::string normalize(const std::string& in) {
     auto code = assembler::ircode_from_string(in);
     return assembler::to_string(code.get());
@@ -590,6 +616,119 @@ TEST_F(RearrangeEnumClinitTest, ThrowOnlyValuesWithoutReturnIsNotAnalyzed) {
   EXPECT_EQ(normalize(source), assembler::to_string(code.get()));
   EXPECT_EQ(stats.values_without_code, 0);
   EXPECT_EQ(stats.values_without_return, 1);
+}
+
+TEST_F(RearrangeEnumClinitTest, MixedFieldReadsUseMovedArray) {
+  auto code = assembler::ircode_from_string(mixed_array_initializer());
+  MethodStats stats;
+  ASSERT_EQ(run(code.get(), false, &stats), MethodResult::kChanged);
+  EXPECT_EQ(stats.retained_field_stores, 1);
+  EXPECT_EQ(stats.aliases, 0);
+  EXPECT_EQ(stats.unsupported_uses, 0);
+  cfg::ScopedCFG cfg(code.get());
+  std::optional<reg_t> array;
+  size_t stores = 0;
+  for (auto& mie : cfg::InstructionIterable(*cfg)) {
+    if (mie.insn->opcode() == OPCODE_NEW_ARRAY) {
+      array = cfg->move_result_of(cfg->find_insn(mie.insn))->insn->dest();
+    } else if (mie.insn->opcode() == OPCODE_APUT_OBJECT) {
+      ASSERT_TRUE(array);
+      EXPECT_EQ(mie.insn->src(1), *array);
+      ++stores;
+    } else if (mie.insn->opcode() == OPCODE_SPUT_OBJECT &&
+               mie.insn->get_field()->get_name()->str() == "$VALUES") {
+      ASSERT_TRUE(array);
+      EXPECT_EQ(mie.insn->src(0), *array);
+    }
+  }
+  EXPECT_EQ(stores, 2);
+}
+
+TEST_F(RearrangeEnumClinitTest, RetargetArrayAliasesAndPublication) {
+  auto code = assembler::ircode_from_string(mixed_array_initializer(R"(
+    (move-object v4 v3)
+    (const v3 99)
+    (invoke-static (v3) "LObserver;.seeInt:(I)V")
+  )",
+                                                                    "v4"));
+  MethodStats stats;
+  ASSERT_EQ(run(code.get(), false, &stats), MethodResult::kChanged);
+  EXPECT_EQ(stats.retained_field_stores, 1);
+  EXPECT_EQ(stats.aliases, 1);
+  EXPECT_EQ(stats.unsupported_uses, 0);
+  cfg::ScopedCFG cfg(code.get());
+  std::optional<reg_t> array;
+  size_t aliases = 0;
+  size_t stores = 0;
+  size_t publications = 0;
+  for (auto& mie : cfg::InstructionIterable(*cfg)) {
+    if (mie.insn->opcode() == OPCODE_NEW_ARRAY) {
+      array = cfg->move_result_of(cfg->find_insn(mie.insn))->insn->dest();
+    } else if (mie.insn->opcode() == OPCODE_MOVE_OBJECT) {
+      ASSERT_TRUE(array);
+      EXPECT_EQ(mie.insn->src(0), *array);
+      ++aliases;
+    } else if (mie.insn->opcode() == OPCODE_APUT_OBJECT) {
+      ASSERT_TRUE(array);
+      EXPECT_EQ(mie.insn->src(1), *array);
+      ++stores;
+    } else if (mie.insn->opcode() == OPCODE_SPUT_OBJECT &&
+               mie.insn->get_field()->get_name()->str() == "$VALUES") {
+      ASSERT_TRUE(array);
+      EXPECT_EQ(mie.insn->src(0), *array);
+      ++publications;
+    } else if (mie.insn->opcode() == OPCODE_INVOKE_STATIC) {
+      EXPECT_EQ(mie.insn->src(0), 3);
+    }
+  }
+  EXPECT_EQ(aliases, 1);
+  EXPECT_EQ(stores, 2);
+  EXPECT_EQ(publications, 1);
+}
+
+TEST_F(RearrangeEnumClinitTest, RejectUnsupportedArrayUsesBeforeMutation) {
+  for (const auto* extra :
+       {R"((invoke-static (v3 v3) "LObserver;.see:([LTest;[LTest;)V"))",
+        R"((aget-object v3 v2) (move-result-pseudo-object v5))",
+        R"((array-length v3) (move-result-pseudo v5))",
+        R"((check-cast v3 "Ljava/lang/Object;")
+              (move-result-pseudo-object v5))",
+        R"((sput-object v3 "LTest;.OTHER:[LTest;"))",
+        R"((filled-new-array (v3) "[[LTest;") (move-result-object v5))",
+        R"((move-object v4 v3)
+           (invoke-static (v4) "LObserver;.see:([LTest;)V"))",
+        R"((const v5 1) (new-array v5 "[Ljava/lang/Object;")
+           (move-result-pseudo-object v5) (aput-object v3 v5 v2))"}) {
+    auto source = mixed_array_initializer(extra);
+    auto code = assembler::ircode_from_string(source);
+    MethodStats stats;
+    EXPECT_EQ(run(code.get(), false, &stats), MethodResult::kFailed) << extra;
+    EXPECT_EQ(normalize(source), assembler::to_string(code.get())) << extra;
+    EXPECT_EQ(stats.retained_field_stores, 0);
+    EXPECT_EQ(stats.aliases, 0);
+    EXPECT_GT(stats.unsupported_uses, 0);
+  }
+}
+
+TEST_F(RearrangeEnumClinitTest, RetargetChainedArrayAliases) {
+  auto code = assembler::ircode_from_string(mixed_array_initializer(R"(
+    (move-object v4 v3)
+    (move-object v6 v4)
+  )",
+                                                                    "v6"));
+  MethodStats stats;
+  ASSERT_EQ(run(code.get(), false, &stats), MethodResult::kChanged);
+  EXPECT_EQ(stats.aliases, 2);
+  cfg::ScopedCFG cfg(code.get());
+  std::optional<reg_t> array;
+  for (auto& mie : cfg::InstructionIterable(*cfg)) {
+    if (mie.insn->opcode() == OPCODE_NEW_ARRAY) {
+      array = cfg->move_result_of(cfg->find_insn(mie.insn))->insn->dest();
+    } else if (mie.insn->opcode() == OPCODE_MOVE_OBJECT) {
+      ASSERT_TRUE(array);
+      EXPECT_EQ(mie.insn->src(0), *array);
+    }
+  }
 }
 
 } // namespace rearrange_enum_clinit

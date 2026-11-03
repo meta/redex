@@ -8,6 +8,7 @@
 #include "RearrangeEnumClinit.h"
 #include "ControlFlow.h"
 
+#include <algorithm>
 #include <atomic>
 #include <optional>
 
@@ -42,7 +43,6 @@ struct Rearranger {
 
   IRInstruction* array_sput{nullptr};
   IRList::iterator array_new_array;
-  reg_t alloc_reg;
   MethodStats method_stats;
 
   Rearranger(DexMethod* m, cfg::ControlFlowGraph& cfg)
@@ -78,7 +78,9 @@ struct Rearranger {
 
     // Look for the `values()` function and analyze it.
     auto* c = type_class(m->get_class());
-    redex_assert(c != nullptr);
+    if (c == nullptr) {
+      return nullptr;
+    }
 
     auto* values_method = [&c]() -> DexMethod* {
       for (auto* dm : c->get_dmethods()) {
@@ -191,38 +193,19 @@ struct Rearranger {
   }
 
   reg_t move_new_array_to_front() {
-    redex_assert(array_new_array != CONSTP(b)->begin());
-
-    auto size_def_it = use_def.find({array_new_array->insn, 0});
-    redex_assert(size_def_it != std::as_const(use_def).end());
-    redex_assert(size_def_it->second.size() == 1);
-    auto orig_new_array_size_cfg_it =
-        cfg.find_insn(*size_def_it->second.begin(), b);
-    redex_assert(!orig_new_array_size_cfg_it.is_end());
-    redex_assert(orig_new_array_size_cfg_it.block() == b);
-    auto orig_new_array_size_it = orig_new_array_size_cfg_it.unwrap();
-    always_assert(orig_new_array_size_it->insn->opcode() == OPCODE_CONST);
-
     auto new_array_it = b->begin();
     while (new_array_it->type != MFLOW_OPCODE) {
       ++new_array_it;
     }
-
     // Should not be necessary, but for safety.
-    reg_t size_reg = cfg.allocate_temp();
-
-    reg_t new_reg = cfg.allocate_temp();
-
+    const auto size_reg = cfg.allocate_temp();
+    const auto new_reg = cfg.allocate_temp();
     b->insert_before(
         b->to_cfg_instruction_iterator(new_array_it),
-        {
-            (new IRInstruction(*orig_new_array_size_it->insn))
-                ->set_dest(size_reg),
-            (new IRInstruction(*array_new_array->insn))->set_src(0, size_reg),
-            (new IRInstruction(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT))
-                ->set_dest(new_reg),
-        });
-
+        {(new IRInstruction(*array_size_definition))->set_dest(size_reg),
+         (new IRInstruction(*array_new_array->insn))->set_src(0, size_reg),
+         (new IRInstruction(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT))
+             ->set_dest(new_reg)});
     // NEW_ARRAY is throwable — insert a source block after its
     // MOVE_RESULT_PSEUDO to cover the new throw-delineated segment.
     auto* first_sb = source_blocks::get_first_source_block(b);
@@ -232,21 +215,28 @@ struct Rearranger {
       source_blocks::impl::BlockAccessor::insert_source_block_after(
           b, mrp_it, source_blocks::clone_as_synthetic(first_sb));
     }
-
     // Leave the size around in case it was referenced for something else.
     // Will be cleaned up by shrinker.
-
     return new_reg;
   }
 
+  struct StorePlan {
+    IRInstruction& store;
+    IRInstruction& value;
+    IRInstruction& index;
+    std::optional<std::pair<IRList::iterator, reg_t>> insertion;
+  };
+
+  IRInstruction* array_size_definition{nullptr};
+  std::vector<StorePlan> stores;
+  const live_range::Uses* array_uses{nullptr};
   FailureReason failure_reason{FailureReason::NoMovableElements};
 
   IRInstruction* find_singleton_def(IRInstruction* use_insn,
-                                    src_index_t src_index) {
-    auto it = use_def.find(live_range::Use{use_insn, src_index});
-    redex_assert(it != use_def.cend());
-    redex_assert(it->second.size() == 1);
-    return *it->second.begin();
+                                    src_index_t src_index) const {
+    auto it = use_def.find({use_insn, src_index});
+    return it == use_def.end() || it->second.size() != 1 ? nullptr
+                                                         : *it->second.begin();
   }
 
   std::pair<IRList::iterator, reg_t> find_move_point_new_instance(
@@ -291,6 +281,7 @@ struct Rearranger {
       failure_reason = FailureReason::NoArrayUses;
       return false;
     }
+    array_uses = &uses->second;
     method_stats.unsupported_uses = static_cast<size_t>(
         unordered_count_if(uses->second, [&](const live_range::Use& use) {
           if (use.insn == array_sput ||
@@ -308,124 +299,140 @@ struct Rearranger {
     return true;
   }
 
-  bool run() {
+  bool prepare() {
     // Find a sput-object for `$VALUES`.
     array_sput = find_values_sput();
     if (array_sput == nullptr) {
       failure_reason = FailureReason::NoValuesStore;
       return false;
     }
-    redex_assert(array_sput->opcode() == OPCODE_SPUT_OBJECT);
-
     // Find the definition of the field object.
-    array_new_array = insn_map.at(find_singleton_def(array_sput, 0));
-
-    if (array_new_array->insn->opcode() != OPCODE_NEW_ARRAY) {
+    auto* array = find_singleton_def(array_sput, 0);
+    auto position = insn_map.find(array);
+    if (array == nullptr || position == insn_map.end()) {
+      failure_reason = FailureReason::AmbiguousArray;
+      return false;
+    }
+    if (array->opcode() != OPCODE_NEW_ARRAY) {
       // Possibly Kotlin enum with `.$values()` not inlined, yet.
       failure_reason = FailureReason::ValuesNotNewArray;
       return false;
     }
-
+    array_new_array = position->second;
+    array_size_definition = find_singleton_def(array, 0);
+    if (array_size_definition == nullptr ||
+        array_size_definition->opcode() != OPCODE_CONST ||
+        array_size_definition->get_literal() < 0 ||
+        type::get_array_component_type(array->get_type()) != m->get_class() ||
+        insn_map.find(array_size_definition) == insn_map.end()) {
+      failure_reason = FailureReason::UnsupportedArraySizeOrType;
+      return false;
+    }
     if (!validate_array_uses()) {
       return false;
     }
-    const auto& uses = def_use.at(array_new_array->insn);
-
-    bool moved_new_array{false};
-    auto move_array = [&]() {
-      if (moved_new_array) {
-        return;
-      }
-      alloc_reg = move_new_array_to_front();
-      for (const auto& use : UnorderedIterable(uses)) {
-        use.insn->set_src(use.src_index, alloc_reg);
-      }
-      moved_new_array = true;
-    };
-    size_t retained_field_stores = 0;
-
-    // Move array to front, use a new register.
-
     // Find all the users of the array. This should be aput-object things.
-    {
-      std::optional<reg_t> extra_reg{};
-      for (const auto& use : UnorderedIterable(uses)) {
-        // Skip the sput.
-        if (use.insn == array_sput ||
-            use.insn->opcode() == OPCODE_MOVE_OBJECT) {
-          continue;
-        }
-        assert_log(use.insn->opcode() == OPCODE_APUT_OBJECT,
-                   "Unexpected opcode %x",
-                   use.insn->opcode());
-
-        // Check what the definition is.
-        IRInstruction* object_insn = find_singleton_def(use.insn, 0);
-        if (object_insn->opcode() == OPCODE_SGET_OBJECT) {
-          // Field read style, does not really benefit from moving.
-          ++retained_field_stores;
-          continue;
-        }
-
+    UnorderedSet<IRInstruction*> selected_stores;
+    for (const auto& use : UnorderedIterable(*array_uses)) {
+      // Skip the sput.
+      if (use.insn == array_sput || use.insn->opcode() == OPCODE_MOVE_OBJECT) {
+        continue;
+      }
+      if (find_singleton_def(use.insn, use.src_index) != array) {
+        failure_reason = FailureReason::AmbiguousArray;
+        return false;
+      }
+      selected_stores.insert(use.insn);
+    }
+    UnorderedSet<int64_t> indices;
+    for (auto& mie : InstructionIterable(b)) {
+      if (selected_stores.find(mie.insn) == selected_stores.end()) {
+        continue;
+      }
+      // See if we can hoist it. Check the input parameters.
+      // 1. First parameter is object.
+      auto* object_insn = find_singleton_def(mie.insn, 0);
+      // 2. Third parameter is index, should be const.
+      auto* index_insn = find_singleton_def(mie.insn, 2);
+      if (object_insn == nullptr || index_insn == nullptr ||
+          index_insn->opcode() != OPCODE_CONST ||
+          index_insn->get_literal() < 0 ||
+          index_insn->get_literal() >= array_size_definition->get_literal() ||
+          !indices.insert(index_insn->get_literal()).second) {
+        failure_reason = FailureReason::UnsupportedElementOrIndex;
+        return false;
+      }
+      std::optional<std::pair<IRList::iterator, reg_t>> point;
+      // Check what the definition is.
+      // Field read style, does not really benefit from moving.
+      if (object_insn->opcode() != OPCODE_SGET_OBJECT) {
         // OK, may be beneficial.
-        move_array();
-
-        if (!extra_reg) {
-          extra_reg = cfg.allocate_temp();
-        }
-
-        // See if we can hoist it. Check the input parameters.
-        // 1. First parameter is object. Already checked above.
-
-        // 2. Third parameter is index, should be const.
-        IRInstruction* index_insn = find_singleton_def(use.insn, 2);
-        redex_assert(index_insn->opcode() == OPCODE_CONST);
-
         // We need to find the point where the object is fully
         // constructed. If the object_insn is a NEW_INSTANCE, search for the
         // following <init> call. Otherwise just use the result.
-        auto [insert_after_it, obj_reg] = find_move_point(object_insn);
-
-        b->insert_after(
-            b->to_cfg_instruction_iterator(insert_after_it),
-            {
-                (new IRInstruction(*index_insn))->set_dest(*extra_reg),
-                (new IRInstruction(*use.insn))
-                    ->set_src(0, obj_reg)
-                    ->set_src(1, alloc_reg)
-                    ->set_src(2, *extra_reg),
-            });
-
-        // INVOKE_DIRECT is throwable — insert a source block after it
-        // to cover the segment up to APUT_OBJECT.
-        {
-          auto* sb = source_blocks::find_between(
-              IRList::reverse_iterator(insert_after_it), b->rend());
-          if (sb != nullptr) {
-            source_blocks::impl::BlockAccessor::insert_source_block_after(
-                b, insert_after_it, source_blocks::clone_as_synthetic(sb));
-          }
-        }
-
-        // Remove the old aput.
-        b->remove_insn(cfg.find_insn(use.insn, b).unwrap());
+        point = find_move_point(object_insn);
       }
+      stores.push_back(StorePlan{*mie.insn, *object_insn, *index_insn, point});
     }
+    if (indices.size() !=
+        static_cast<uint64_t>(array_size_definition->get_literal())) {
+      failure_reason = FailureReason::IncompleteArray;
+      return false;
+    }
+    return true;
+  }
 
-    if (!moved_new_array) {
+  bool run() {
+    if (!prepare()) {
+      return false;
+    }
+    std::optional<reg_t> alloc_reg;
+    std::optional<reg_t> extra_reg;
+    for (const auto& plan : stores) {
+      if (!plan.insertion) {
+        continue;
+      }
+      if (!alloc_reg) {
+        method_stats.retained_field_stores = static_cast<size_t>(
+            std::count_if(stores.begin(), stores.end(),
+                          [](const auto& item) { return !item.insertion; }));
+        const auto& uses = *array_uses;
+        method_stats.aliases =
+            static_cast<size_t>(unordered_count_if(uses, [](const auto& use) {
+              return use.insn->opcode() == OPCODE_MOVE_OBJECT;
+            }));
+        // Move array to front, use a new register.
+        alloc_reg = move_new_array_to_front();
+        for (const auto& use : UnorderedIterable(uses)) {
+          use.insn->set_src(use.src_index, *alloc_reg);
+        }
+        extra_reg = cfg.allocate_temp();
+      }
+      auto [insert_after_it, obj_reg] = *plan.insertion;
+      b->insert_after(b->to_cfg_instruction_iterator(insert_after_it),
+                      {(new IRInstruction(plan.index))->set_dest(*extra_reg),
+                       (new IRInstruction(plan.store))
+                           ->set_src(0, obj_reg)
+                           ->set_src(1, *alloc_reg)
+                           ->set_src(2, *extra_reg)});
+      // INVOKE_DIRECT is throwable -- insert a source block after it
+      // to cover the segment up to APUT_OBJECT.
+      auto* sb = source_blocks::find_between(
+          IRList::reverse_iterator(insert_after_it), b->rend());
+      if (sb != nullptr) {
+        source_blocks::impl::BlockAccessor::insert_source_block_after(
+            b, insert_after_it, source_blocks::clone_as_synthetic(sb));
+      }
+      // Remove the old aput.
+      b->remove_insn(insn_map.at(&plan.store));
+    }
+    if (!alloc_reg) {
       failure_reason = FailureReason::NoMovableElements;
       return false;
     }
-    method_stats.retained_field_stores = retained_field_stores;
-    method_stats.aliases =
-        static_cast<size_t>(unordered_count_if(uses, [](const auto& use) {
-          return use.insn->opcode() == OPCODE_MOVE_OBJECT;
-        }));
-
     // Finally remove the old new-array. Do it late so there's no undefined
     // behavior with deleted things.
     b->remove_insn(array_new_array);
-
     return true;
   }
 };
@@ -436,18 +443,28 @@ std::string_view describe(FailureReason reason) {
   switch (reason) {
   case FailureReason::None:
     return "none";
+  case FailureReason::ClinitWithoutCode:
+    return "clinit_without_code";
   case FailureReason::NotOneBlock:
     return "not_one_block";
   case FailureReason::NoMovableElements:
     return "no_movable_elements";
   case FailureReason::NoValuesStore:
     return "no_values_store";
+  case FailureReason::AmbiguousArray:
+    return "ambiguous_array";
   case FailureReason::ValuesNotNewArray:
     return "values_not_new_array";
+  case FailureReason::UnsupportedArraySizeOrType:
+    return "unsupported_array_size_or_type";
   case FailureReason::NoArrayUses:
     return "no_array_uses";
   case FailureReason::ArrayEscapes:
     return "array_escapes";
+  case FailureReason::UnsupportedElementOrIndex:
+    return "unsupported_element_or_index";
+  case FailureReason::IncompleteArray:
+    return "incomplete_array";
   }
   not_reached();
 }
@@ -461,6 +478,15 @@ MethodResult RearrangeEnumClinitPass::run(DexMethod* m,
   }
   if (failure_reason != nullptr) {
     *failure_reason = FailureReason::None;
+  }
+  if (code == nullptr) {
+    if (method_stats != nullptr) {
+      method_stats->failed_preflight = 1;
+    }
+    if (failure_reason != nullptr) {
+      *failure_reason = FailureReason::ClinitWithoutCode;
+    }
+    return MethodResult::kFailed;
   }
   auto cfg = cfg::ScopedCFG(code);
   if (cfg->num_blocks() != 1) {
@@ -500,6 +526,7 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
   std::atomic<size_t> cnt_changed{0};
   AtomicStatCounter<size_t> cnt_failed_preflight{0};
   AtomicStatCounter<size_t> cnt_unsupported_array_uses{0};
+  AtomicStatCounter<size_t> cnt_clinit_without_code{0};
   AtomicStatCounter<size_t> cnt_retained_field_stores{0};
   AtomicStatCounter<size_t> cnt_arrays_with_retained_field_stores{0};
   AtomicStatCounter<size_t> cnt_array_aliases{0};
@@ -524,6 +551,11 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
       // This case can happen for anonymous classes used when an enum case is
       // specialized.
       cnt_no_clinit.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+
+    if (m->get_code() == nullptr) {
+      ++cnt_clinit_without_code;
       return;
     }
 
@@ -564,8 +596,13 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
       case FailureReason::NoMovableElements:
         ++cnt_no_movable_elements;
         break;
+      case FailureReason::ClinitWithoutCode:
+      case FailureReason::AmbiguousArray:
+      case FailureReason::UnsupportedArraySizeOrType:
       case FailureReason::NoArrayUses:
       case FailureReason::ArrayEscapes:
+      case FailureReason::UnsupportedElementOrIndex:
+      case FailureReason::IncompleteArray:
         ++cnt_unsupported_shape;
         break;
       // run() records a reason with every kFailed: the rearranger starts from
@@ -597,6 +634,7 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
 
   mgr.set_metric("failed_preflight", cnt_failed_preflight.load());
   mgr.set_metric("unsupported_array_uses", cnt_unsupported_array_uses.load());
+  mgr.set_metric("clinit_without_code", cnt_clinit_without_code.load());
   mgr.set_metric("retained_field_stores", cnt_retained_field_stores.load());
   mgr.set_metric("changed_with_retained_field_stores",
                  cnt_arrays_with_retained_field_stores.load());

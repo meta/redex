@@ -28,12 +28,17 @@ struct MethodStats {
 
 enum class FailureReason {
   None,
+  ClinitWithoutCode,
   NotOneBlock,
   NoMovableElements,
   NoValuesStore,
+  AmbiguousArray,
   ValuesNotNewArray,
+  UnsupportedArraySizeOrType,
   NoArrayUses,
   ArrayEscapes,
+  UnsupportedElementOrIndex,
+  IncompleteArray,
 };
 
 std::string_view describe(FailureReason reason);

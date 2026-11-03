@@ -6,9 +6,11 @@
  */
 
 #include "gtest/gtest.h"
+#include <array>
 #include <memory>
 #include <string_view>
 
+#include "Debug.h"
 #include "IRCode.h"
 #include "RearrangeEnumClinit.h"
 
@@ -74,6 +76,10 @@ class RearrangeEnumClinitTest : public RedexTest {
                    bool with_int = false,
                    MethodStats* method_stats = nullptr,
                    FailureReason* failure_reason = nullptr) {
+    if (code == nullptr) {
+      return RearrangeEnumClinitPass::run(with_int ? clinit_int : clinit, code,
+                                          method_stats, failure_reason);
+    }
     cfg::ScopedCFG cfg(code);
     return RearrangeEnumClinitPass::run(with_int ? clinit_int : clinit, code,
                                         method_stats, failure_reason);
@@ -620,6 +626,125 @@ TEST_F(RearrangeEnumClinitTest, ThrowOnlyValuesWithoutReturnIsNotAnalyzed) {
   EXPECT_EQ(stats.values_without_return, 1);
 }
 
+TEST_F(RearrangeEnumClinitTest, RejectDynamicSizeBeforeMutation) {
+#ifdef NDEBUG
+  ASSERT_FALSE(debug);
+#endif
+  const auto* source = R"((
+    (const v2 0)
+    (const-string ALPHA)
+    (move-result-pseudo-object v1)
+    (new-instance "LTest;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+    (invoke-static () "LInputs;.size:()I")
+    (move-result v3)
+    (new-array v3 "[LTest;")
+    (move-result-pseudo-object v3)
+    (aput-object v0 v3 v2)
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (return-void)
+  ))";
+  auto code = assembler::ircode_from_string(source);
+  EXPECT_EQ(run(code.get()), MethodResult::kFailed);
+  EXPECT_EQ(normalize(source), assembler::to_string(code.get()));
+}
+
+TEST_F(RearrangeEnumClinitTest, RejectDynamicIndexBeforeMutation) {
+#ifdef NDEBUG
+  ASSERT_FALSE(debug);
+#endif
+  const auto* source = R"((
+    (const v2 0)
+    (const-string ALPHA)
+    (move-result-pseudo-object v1)
+    (new-instance "LTest;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+    (const v3 1)
+    (new-array v3 "[LTest;")
+    (move-result-pseudo-object v3)
+    (invoke-static () "LInputs;.index:()I")
+    (move-result v2)
+    (aput-object v0 v3 v2)
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (return-void)
+  ))";
+  auto code = assembler::ircode_from_string(source);
+  EXPECT_EQ(run(code.get()), MethodResult::kFailed);
+  EXPECT_EQ(normalize(source), assembler::to_string(code.get()));
+}
+
+TEST_F(RearrangeEnumClinitTest, LastInvalidStoreLeavesInitializerUnchanged) {
+#ifdef NDEBUG
+  ASSERT_FALSE(debug);
+#endif
+  const auto* source = R"((
+    (const v2 0)
+    (const-string ALPHA)
+    (move-result-pseudo-object v1)
+    (new-instance "LTest;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+    (const-string BETA)
+    (move-result-pseudo-object v1)
+    (new-instance "LTest;")
+    (move-result-pseudo-object v4)
+    (invoke-direct (v4 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+    (const v3 2)
+    (new-array v3 "[LTest;")
+    (move-result-pseudo-object v3)
+    (aput-object v0 v3 v2)
+    (invoke-static () "LInputs;.index:()I")
+    (move-result v2)
+    (aput-object v4 v3 v2)
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (return-void)
+  ))";
+  auto code = assembler::ircode_from_string(source);
+  EXPECT_EQ(run(code.get()), MethodResult::kFailed);
+  EXPECT_EQ(normalize(source), assembler::to_string(code.get()));
+}
+
+TEST_F(RearrangeEnumClinitTest, RejectUnsupportedShapesBeforeMutation) {
+  const std::string prefix = R"((
+    (const v2 0)
+    (const-string ALPHA)
+    (move-result-pseudo-object v1)
+    (new-instance "LTest;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+    (sput-object v0 "LTest;.ALPHA:LTest;")
+    (const v3 1)
+    (new-array v3 "[LTest;")
+    (move-result-pseudo-object v3)
+  )";
+  const std::string suffix = R"(
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (return-void)
+  ))";
+  const auto cases = std::to_array<std::pair<std::string_view, FailureReason>>({
+      {"(const v2 -1) (aput-object v0 v3 v2)",
+       FailureReason::UnsupportedElementOrIndex},
+      {"(const v2 1) (aput-object v0 v3 v2)",
+       FailureReason::UnsupportedElementOrIndex},
+      {"(aput-object v0 v3 v2) (aput-object v0 v3 v2)",
+       FailureReason::UnsupportedElementOrIndex},
+      {R"((aput-object v0 v3 v2) (invoke-static (v3) "LObserver;.see:([LTest;)V"))",
+       FailureReason::ArrayEscapes},
+      {"", FailureReason::IncompleteArray},
+  });
+  for (const auto& [stores, expected] : cases) {
+    const auto src = prefix + std::string(stores) + suffix;
+    auto code = assembler::ircode_from_string(src);
+    FailureReason reason;
+    EXPECT_EQ(run(code.get(), false, nullptr, &reason), MethodResult::kFailed)
+        << stores;
+    EXPECT_EQ(reason, expected) << stores;
+    EXPECT_EQ(normalize(src), assembler::to_string(code.get())) << stores;
+  }
+}
+
 TEST_F(RearrangeEnumClinitTest, HelperProducerIsNotAnArray) {
   const auto* const src = R"((
     (invoke-static () "LTest;.$values:()[LTest;")
@@ -632,6 +757,61 @@ TEST_F(RearrangeEnumClinitTest, HelperProducerIsNotAnArray) {
   EXPECT_EQ(run(code.get(), false, nullptr, &reason), MethodResult::kFailed);
   EXPECT_EQ(reason, FailureReason::ValuesNotNewArray);
   EXPECT_EQ(normalize(src), assembler::to_string(code.get()));
+}
+
+TEST_F(RearrangeEnumClinitTest, NoCodeInitializerIsRejected) {
+  FailureReason reason;
+  EXPECT_EQ(run(nullptr, false, nullptr, &reason), MethodResult::kFailed);
+  EXPECT_EQ(reason, FailureReason::ClinitWithoutCode);
+}
+
+TEST_F(RearrangeEnumClinitTest,
+       RejectIncompatibleArrayComponentBeforeMutation) {
+  const auto* source = R"((
+    (const v2 0)
+    (const-string ALPHA)
+    (move-result-pseudo-object v1)
+    (new-instance "LTest;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+    (const v3 1)
+    (new-array v3 "[Ljava/lang/String;")
+    (move-result-pseudo-object v3)
+    (aput-object v0 v3 v2)
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (return-void)
+  ))";
+  auto code = assembler::ircode_from_string(source);
+  FailureReason reason;
+  EXPECT_EQ(run(code.get(), false, nullptr, &reason), MethodResult::kFailed);
+  EXPECT_EQ(reason, FailureReason::UnsupportedArraySizeOrType);
+  EXPECT_EQ(normalize(source), assembler::to_string(code.get()));
+}
+
+TEST_F(RearrangeEnumClinitTest, FactoryProducedElementRemainsSupported) {
+  auto code = assembler::ircode_from_string(R"((
+    (const v2 0)
+    (invoke-static () "LInputs;.create:()LTest;")
+    (move-result-object v0)
+    (const v3 1)
+    (new-array v3 "[LTest;")
+    (move-result-pseudo-object v3)
+    (aput-object v0 v3 v2)
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (return-void)
+  ))");
+  EXPECT_EQ(run(code.get()), MethodResult::kChanged);
+  cfg::ScopedCFG cfg(code.get());
+  std::vector<IROpcode> opcodes;
+  for (auto& mie : cfg::InstructionIterable(*cfg)) {
+    opcodes.push_back(mie.insn->opcode());
+  }
+  EXPECT_EQ(opcodes, (std::vector<IROpcode>{
+                         OPCODE_CONST, OPCODE_NEW_ARRAY,
+                         IOPCODE_MOVE_RESULT_PSEUDO_OBJECT, OPCODE_CONST,
+                         OPCODE_INVOKE_STATIC, OPCODE_MOVE_RESULT_OBJECT,
+                         OPCODE_CONST, OPCODE_APUT_OBJECT, OPCODE_CONST,
+                         OPCODE_SPUT_OBJECT, OPCODE_RETURN_VOID}));
 }
 
 TEST_F(RearrangeEnumClinitTest, MixedFieldReadsUseMovedArray) {
@@ -745,6 +925,25 @@ TEST_F(RearrangeEnumClinitTest, RetargetChainedArrayAliases) {
       EXPECT_EQ(mie.insn->src(0), *array);
     }
   }
+}
+
+TEST_F(RearrangeEnumClinitTest, OtherElementUsesRemainValid) {
+  auto code = assembler::ircode_from_string(mixed_array_initializer(R"(
+    (invoke-static (v0) "LObserver;.seeElement:(LTest;)V")
+  )"));
+  FailureReason reason;
+  EXPECT_EQ(run(code.get(), false, nullptr, &reason), MethodResult::kChanged);
+  EXPECT_EQ(reason, FailureReason::None);
+  cfg::ScopedCFG cfg(code.get());
+  size_t calls = 0;
+  for (auto& mie : cfg::InstructionIterable(*cfg)) {
+    if (mie.insn->opcode() == OPCODE_INVOKE_STATIC) {
+      EXPECT_EQ(mie.insn->get_method()->get_name()->str(), "seeElement");
+      EXPECT_EQ(mie.insn->src(0), 0);
+      ++calls;
+    }
+  }
+  EXPECT_EQ(calls, 1);
 }
 
 } // namespace rearrange_enum_clinit

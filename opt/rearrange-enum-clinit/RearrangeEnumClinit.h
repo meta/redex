@@ -30,6 +30,7 @@ enum class FailureReason {
   None,
   ClinitWithoutCode,
   NotOneBlock,
+  CyclicInitializer,
   NoMovableElements,
   NoValuesStore,
   AmbiguousArray,
@@ -38,6 +39,10 @@ enum class FailureReason {
   NoArrayUses,
   ArrayEscapes,
   UnsupportedElementOrIndex,
+  UnsupportedElementProducer,
+  UninitializedElement,
+  AmbiguousConstructor,
+  UnsupportedConstructor,
   IncompleteArray,
   InitializationAfterPublication,
 };

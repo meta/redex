@@ -782,6 +782,153 @@ TEST_F(RearrangeEnumClinitTest, RejectInitializationAfterPublication) {
   EXPECT_EQ(normalize(src), assembler::to_string(code.get()));
 }
 
+TEST_F(RearrangeEnumClinitTest, RelaxedSuperclassConstructorIsSupported) {
+  auto* subtype = DexType::make_type("LCase;");
+  ClassCreator cc{subtype};
+  cc.set_super(clinit->get_class());
+  cc.create();
+  auto code = assembler::ircode_from_string(R"((
+    (const v2 0)
+    (const-string ALPHA)
+    (move-result-pseudo-object v1)
+    (new-instance "LCase;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+    (const v3 1)
+    (new-array v3 "[LTest;")
+    (move-result-pseudo-object v3)
+    (aput-object v0 v3 v2)
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (return-void)
+  ))");
+  FailureReason reason;
+  EXPECT_EQ(run(code.get(), false, nullptr, &reason), MethodResult::kChanged);
+  EXPECT_EQ(reason, FailureReason::None);
+}
+
+TEST_F(RearrangeEnumClinitTest, RejectConstructorAfterArrayStore) {
+  const auto* source = R"((
+    (const v2 0)
+    (const-string ALPHA)
+    (move-result-pseudo-object v1)
+    (new-instance "LTest;")
+    (move-result-pseudo-object v0)
+    (const v3 1)
+    (new-array v3 "[LTest;")
+    (move-result-pseudo-object v3)
+    (aput-object v0 v3 v2)
+    (invoke-direct (v0 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (return-void)
+  ))";
+  auto code = assembler::ircode_from_string(source);
+  FailureReason reason;
+  EXPECT_EQ(run(code.get(), false, nullptr, &reason), MethodResult::kFailed);
+  EXPECT_EQ(reason, FailureReason::UninitializedElement);
+  EXPECT_EQ(normalize(source), assembler::to_string(code.get()));
+}
+
+TEST_F(RearrangeEnumClinitTest, RejectConstructorOnDifferentBranch) {
+  const auto* source = R"((
+    (const v2 0)
+    (const-string ALPHA)
+    (move-result-pseudo-object v1)
+    (new-instance "LTest;")
+    (move-result-pseudo-object v0)
+    (const v4 0)
+    (if-eqz v4 :skip)
+    (invoke-direct (v0 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+    (:skip)
+    (const v3 1)
+    (new-array v3 "[LTest;")
+    (move-result-pseudo-object v3)
+    (aput-object v0 v3 v2)
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (return-void)
+  ))";
+  auto code = assembler::ircode_from_string(source);
+  FailureReason reason;
+  EXPECT_EQ(run(code.get(), false, nullptr, &reason),
+            MethodResult::kNotOneBlock);
+  EXPECT_EQ(reason, FailureReason::NotOneBlock);
+  EXPECT_EQ(normalize(source), assembler::to_string(code.get()));
+}
+
+TEST_F(RearrangeEnumClinitTest, RejectConstructorInLoop) {
+  const auto* source = R"((
+    (:loop)
+    (const v2 0)
+    (const-string ALPHA)
+    (move-result-pseudo-object v1)
+    (new-instance "LTest;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+    (const v3 1)
+    (new-array v3 "[LTest;")
+    (move-result-pseudo-object v3)
+    (aput-object v0 v3 v2)
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (goto :loop)
+  ))";
+  auto code = assembler::ircode_from_string(source);
+  {
+    cfg::ScopedCFG cfg(code.get());
+    ASSERT_EQ(cfg->num_blocks(), 1);
+    FailureReason reason;
+    EXPECT_EQ(run(code.get(), false, nullptr, &reason), MethodResult::kFailed);
+    EXPECT_EQ(reason, FailureReason::CyclicInitializer);
+  }
+  EXPECT_EQ(normalize(source), assembler::to_string(code.get()));
+}
+
+TEST_F(RearrangeEnumClinitTest, RejectIncompatibleConstructorOwner) {
+  auto* other = DexType::make_type("LOther;");
+  ClassCreator cc{other};
+  cc.set_super(type::java_lang_Object());
+  cc.add_method(DexMethod::make_method("LOther;.<init>:(Ljava/lang/String;I)V")
+                    ->make_concrete(ACC_PUBLIC | ACC_CONSTRUCTOR, false));
+  cc.create();
+  const auto* source = R"((
+    (const v2 0)
+    (const-string ALPHA)
+    (move-result-pseudo-object v1)
+    (new-instance "LTest;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0 v1 v2) "LOther;.<init>:(Ljava/lang/String;I)V")
+    (const v3 1)
+    (new-array v3 "[LTest;")
+    (move-result-pseudo-object v3)
+    (aput-object v0 v3 v2)
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (return-void)
+  ))";
+  auto code = assembler::ircode_from_string(source);
+  FailureReason reason;
+  EXPECT_EQ(run(code.get(), false, nullptr, &reason), MethodResult::kFailed);
+  EXPECT_EQ(reason, FailureReason::UnsupportedConstructor);
+  EXPECT_EQ(normalize(source), assembler::to_string(code.get()));
+}
+
+TEST_F(RearrangeEnumClinitTest, RejectIncompatibleElementBeforeMutation) {
+  const auto* source = R"((
+    (const-string NOT_AN_ENUM)
+    (move-result-pseudo-object v0)
+    (invoke-static () "LObserver;.mark:()V")
+    (const v1 1)
+    (new-array v1 "[LTest;")
+    (move-result-pseudo-object v1)
+    (const v2 0)
+    (aput-object v0 v1 v2)
+    (sput-object v1 "LTest;.$VALUES:[LTest;")
+    (return-void)
+  ))";
+  auto code = assembler::ircode_from_string(source);
+  FailureReason reason;
+  EXPECT_EQ(run(code.get(), false, nullptr, &reason), MethodResult::kFailed);
+  EXPECT_EQ(reason, FailureReason::UnsupportedElementProducer);
+  EXPECT_EQ(normalize(source), assembler::to_string(code.get()));
+}
+
 TEST_F(RearrangeEnumClinitTest, NoCodeInitializerIsRejected) {
   FailureReason reason;
   EXPECT_EQ(run(nullptr, false, nullptr, &reason), MethodResult::kFailed);

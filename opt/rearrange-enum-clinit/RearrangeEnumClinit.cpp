@@ -239,40 +239,66 @@ struct Rearranger {
                                                          : *it->second.begin();
   }
 
-  std::pair<IRList::iterator, reg_t> find_move_point_new_instance(
-      IRInstruction* object_insn) {
-    auto it = def_use.find(object_insn);
-    redex_assert(it != def_use.cend());
-    std::optional<reg_t> which_reg{};
-    std::optional<IRList::iterator> which_it{};
-    for (const auto& obj_use : UnorderedIterable(it->second)) {
-      if (obj_use.src_index == 0 &&
-          opcode::is_an_invoke(obj_use.insn->opcode()) &&
-          method::is_constructor(obj_use.insn->get_method())) {
-        redex_assert(!which_reg);
-        which_reg = obj_use.insn->src(0);
-        which_it = insn_map.at(obj_use.insn);
-      }
-    }
-    redex_assert(which_reg);
-    return std::make_pair(*which_it, *which_reg);
+  static bool is_constructor_receiver_use(const live_range::Use& use) {
+    return use.src_index == 0 && use.insn->srcs_size() != 0 &&
+           use.insn->opcode() == OPCODE_INVOKE_DIRECT &&
+           method::is_constructor(use.insn->get_method()) &&
+           method::is_init(use.insn->get_method());
   }
 
-  std::pair<IRList::iterator, reg_t> find_move_point(
-      IRInstruction* object_insn) {
-    if (object_insn->opcode() != OPCODE_NEW_INSTANCE) {
-      auto object_it = insn_map.at(object_insn);
-
-      if (object_insn->has_move_result_any()) {
-        ++object_it;
-        while (object_it->type != MFLOW_OPCODE) {
-          ++object_it;
-        }
-        redex_assert(opcode::is_move_result_any(object_it->insn->opcode()));
-      }
-      return std::make_pair(object_it, object_it->insn->dest());
+  // Whether the declared type of the value `producer` defines (a new
+  // instance's class, an invoke's return type or a cast's type) makes it null
+  // or an instance of the enum class, so storing it cannot throw
+  // ArrayStoreException.
+  bool produces_element(const IRInstruction& producer) const {
+    const DexType* type = nullptr;
+    if (producer.opcode() == OPCODE_NEW_INSTANCE ||
+        producer.opcode() == OPCODE_CHECK_CAST) {
+      type = producer.get_type();
+    } else if (opcode::is_an_invoke(producer.opcode())) {
+      type = producer.get_method()->get_proto()->get_rtype();
     }
-    return find_move_point_new_instance(object_insn);
+    return type != nullptr && type::check_cast(type, m->get_class());
+  }
+
+  std::optional<std::pair<IRList::iterator, reg_t>> find_move_point(
+      IRInstruction& value) const {
+    auto position = insn_map.find(&value);
+    if (position == insn_map.end()) {
+      return std::nullopt;
+    }
+    if (value.opcode() == OPCODE_NEW_INSTANCE) {
+      // A constructor returns void: the store cannot split off a move-result.
+      auto uses = def_use.find(&value);
+      if (uses == def_use.end()) {
+        return std::nullopt;
+      }
+      std::optional<std::pair<IRList::iterator, reg_t>> result;
+      for (const auto& use : UnorderedIterable(uses->second)) {
+        if (!is_constructor_receiver_use(use)) {
+          continue;
+        }
+        auto constructor = insn_map.find(use.insn);
+        if (result || constructor == insn_map.end()) {
+          return std::nullopt;
+        }
+        result = std::make_pair(constructor->second, use.insn->src(0));
+      }
+      return result;
+    }
+    auto it = position->second;
+    if (value.has_move_result_any()) {
+      do {
+        ++it;
+      } while (it != b->end() && it->type != MFLOW_OPCODE);
+      if (it == b->end() || !opcode::is_move_result_any(it->insn->opcode())) {
+        return std::nullopt;
+      }
+    }
+    if (!it->insn->has_dest()) {
+      return std::nullopt;
+    }
+    return std::make_pair(it, it->insn->dest());
   }
 
   bool validate_array_uses() {
@@ -345,8 +371,10 @@ struct Rearranger {
       selected_stores.insert(use.insn);
     }
     UnorderedSet<int64_t> indices;
+    UnorderedSet<IRInstruction*> seen;
     bool published = false;
     for (auto& mie : InstructionIterable(b)) {
+      seen.insert(mie.insn);
       if (mie.insn == array_sput) {
         published = true;
       }
@@ -370,6 +398,11 @@ struct Rearranger {
         failure_reason = FailureReason::UnsupportedElementOrIndex;
         return false;
       }
+      if (object_insn->opcode() != OPCODE_SGET_OBJECT &&
+          !produces_element(*object_insn)) {
+        failure_reason = FailureReason::UnsupportedElementProducer;
+        return false;
+      }
       std::optional<std::pair<IRList::iterator, reg_t>> point;
       // Check what the definition is.
       // Field read style, does not really benefit from moving.
@@ -378,7 +411,21 @@ struct Rearranger {
         // We need to find the point where the object is fully
         // constructed. If the object_insn is a NEW_INSTANCE, search for the
         // following <init> call. Otherwise just use the result.
-        point = find_move_point(object_insn);
+        point = find_move_point(*object_insn);
+        if (!point) {
+          failure_reason = FailureReason::AmbiguousConstructor;
+          return false;
+        }
+        if (object_insn->opcode() == OPCODE_NEW_INSTANCE &&
+            !type::check_cast(object_insn->get_type(),
+                              point->first->insn->get_method()->get_class())) {
+          failure_reason = FailureReason::UnsupportedConstructor;
+          return false;
+        }
+        if (seen.find(point->first->insn) == seen.end()) {
+          failure_reason = FailureReason::UninitializedElement;
+          return false;
+        }
       }
       stores.push_back(StorePlan{*mie.insn, *object_insn, *index_insn, point});
     }
@@ -455,6 +502,8 @@ std::string_view describe(FailureReason reason) {
     return "clinit_without_code";
   case FailureReason::NotOneBlock:
     return "not_one_block";
+  case FailureReason::CyclicInitializer:
+    return "cyclic_initializer";
   case FailureReason::NoMovableElements:
     return "no_movable_elements";
   case FailureReason::NoValuesStore:
@@ -471,6 +520,14 @@ std::string_view describe(FailureReason reason) {
     return "array_escapes";
   case FailureReason::UnsupportedElementOrIndex:
     return "unsupported_element_or_index";
+  case FailureReason::UnsupportedElementProducer:
+    return "unsupported_element_producer";
+  case FailureReason::UninitializedElement:
+    return "uninitialized_element";
+  case FailureReason::AmbiguousConstructor:
+    return "ambiguous_constructor";
+  case FailureReason::UnsupportedConstructor:
+    return "unsupported_constructor";
   case FailureReason::IncompleteArray:
     return "incomplete_array";
   case FailureReason::InitializationAfterPublication:
@@ -507,6 +564,21 @@ MethodResult RearrangeEnumClinitPass::run(DexMethod* m,
           static_cast<int>(describe(FailureReason::NotOneBlock).size()),
           describe(FailureReason::NotOneBlock).data());
     return MethodResult::kNotOneBlock;
+  }
+  auto* block = cfg->entry_block();
+  if (std::any_of(
+          block->succs().begin(), block->succs().end(),
+          [block](const auto* edge) { return edge->target() == block; })) {
+    if (method_stats != nullptr) {
+      method_stats->failed_preflight = 1;
+    }
+    if (failure_reason != nullptr) {
+      *failure_reason = FailureReason::CyclicInitializer;
+    }
+    TRACE(ENUM, 2, "RearrangeEnumClinit: %s: %.*s", SHOW(m),
+          static_cast<int>(describe(FailureReason::CyclicInitializer).size()),
+          describe(FailureReason::CyclicInitializer).data());
+    return MethodResult::kFailed;
   }
   Rearranger rearranger(m, *cfg);
   auto res = rearranger.run();
@@ -607,11 +679,16 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
         ++cnt_no_movable_elements;
         break;
       case FailureReason::ClinitWithoutCode:
+      case FailureReason::CyclicInitializer:
       case FailureReason::AmbiguousArray:
       case FailureReason::UnsupportedArraySizeOrType:
       case FailureReason::NoArrayUses:
       case FailureReason::ArrayEscapes:
       case FailureReason::UnsupportedElementOrIndex:
+      case FailureReason::UnsupportedElementProducer:
+      case FailureReason::UninitializedElement:
+      case FailureReason::AmbiguousConstructor:
+      case FailureReason::UnsupportedConstructor:
       case FailureReason::IncompleteArray:
       case FailureReason::InitializationAfterPublication:
         ++cnt_unsupported_shape;

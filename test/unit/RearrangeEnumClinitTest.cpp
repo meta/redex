@@ -11,6 +11,7 @@
 #include <string_view>
 
 #include "Debug.h"
+#include "DexPosition.h"
 #include "IRCode.h"
 #include "RearrangeEnumClinit.h"
 
@@ -20,6 +21,7 @@
 #include "MethodUtil.h"
 #include "RedexTest.h"
 #include "ScopedCFG.h"
+#include "Show.h"
 #include "TypeUtil.h"
 
 namespace rearrange_enum_clinit {
@@ -109,6 +111,28 @@ class RearrangeEnumClinitTest : public RedexTest {
            array + R"( "LTest;.$VALUES:[LTest;")
       (return-void)
     ))";
+  }
+
+  // The position each instruction would be emitted with, as its opcode
+  // followed by every method and line of the inlining chain.
+  static std::vector<std::string> instruction_positions(IRCode* code) {
+    cfg::ScopedCFG cfg(code);
+    std::vector<std::string> positions;
+    for (auto it = cfg::InstructionIterable(*cfg).begin();
+         it != cfg::InstructionIterable(*cfg).end();
+         ++it) {
+      std::string entry{SHOW(it->insn->opcode())};
+      auto* position = cfg->get_dbg_pos(it);
+      if (position == nullptr) {
+        entry += " none";
+      }
+      for (; position != nullptr; position = position->parent) {
+        entry += " " + position->method->str_copy() + ":" +
+                 std::to_string(position->line);
+      }
+      positions.push_back(entry);
+    }
+    return positions;
   }
 
   static std::string normalize(const std::string& in) {
@@ -1161,6 +1185,184 @@ TEST_F(RearrangeEnumClinitTest, OtherElementUsesRemainValid) {
     }
   }
   EXPECT_EQ(calls, 1);
+}
+
+TEST_F(RearrangeEnumClinitTest, InlinedArrayKeepsItsPositionChain) {
+  auto code = assembler::ircode_from_string(R"((
+    (.pos:dbg_0 "LTest;.<clinit>:()V" "Test.java" 3)
+    (const v2 0)
+    (const-string ALPHA)
+    (move-result-pseudo-object v1)
+    (new-instance "LTest;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+    (sput-object v0 "LTest;.ALPHA:LTest;")
+    (.pos:dbg_1 "LTest;.<clinit>:()V" "Test.java" 4)
+    (.pos:dbg_2 "LTest;.$values:()[LTest;" "Test.java" 1 dbg_1)
+    (const v3 1)
+    (new-array v3 "[LTest;")
+    (move-result-pseudo-object v3)
+    (aput-object v0 v3 v2)
+    (.pos:dbg_3 "LTest;.<clinit>:()V" "Test.java" 4)
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (return-void)
+  ))");
+  const DexPosition* callsite = nullptr;
+  for (const auto& mie : *code) {
+    if (mie.type == MFLOW_POSITION && mie.pos->parent != nullptr) {
+      callsite = mie.pos->parent;
+    }
+  }
+  ASSERT_NE(callsite, nullptr);
+
+  ASSERT_EQ(run(code.get()), MethodResult::kChanged);
+
+  // The allocation and the store inlined from `$values()`, with the constants
+  // they use, keep their inlined position; every other instruction keeps the
+  // one it had.
+  const std::string inlined =
+      " LTest;.$values:()[LTest;:1 LTest;.<clinit>:()V:4";
+  EXPECT_EQ(instruction_positions(code.get()),
+            (std::vector<std::string>{
+                "CONST" + inlined,
+                "NEW_ARRAY" + inlined,
+                "IOPCODE_MOVE_RESULT_PSEUDO_OBJECT" + inlined,
+                "CONST LTest;.<clinit>:()V:3",
+                "CONST_STRING LTest;.<clinit>:()V:3",
+                "IOPCODE_MOVE_RESULT_PSEUDO_OBJECT LTest;.<clinit>:()V:3",
+                "NEW_INSTANCE LTest;.<clinit>:()V:3",
+                "IOPCODE_MOVE_RESULT_PSEUDO_OBJECT LTest;.<clinit>:()V:3",
+                "INVOKE_DIRECT LTest;.<clinit>:()V:3",
+                "CONST" + inlined,
+                "APUT_OBJECT" + inlined,
+                "SPUT_OBJECT LTest;.<clinit>:()V:3",
+                "CONST" + inlined,
+                "SPUT_OBJECT LTest;.<clinit>:()V:4",
+                "RETURN_VOID LTest;.<clinit>:()V:4",
+            }));
+  cfg::ScopedCFG cfg(code.get());
+  for (auto it = cfg::InstructionIterable(*cfg).begin();
+       it != cfg::InstructionIterable(*cfg).end();
+       ++it) {
+    if (it->insn->opcode() == OPCODE_NEW_ARRAY ||
+        it->insn->opcode() == OPCODE_APUT_OBJECT) {
+      auto* position = cfg->get_dbg_pos(it);
+      ASSERT_NE(position, nullptr);
+      EXPECT_EQ(position->parent, callsite);
+    }
+  }
+}
+
+TEST_F(RearrangeEnumClinitTest, RepeatedValueStoresKeepTheirPositions) {
+  auto code = assembler::ircode_from_string(R"((
+    (.pos:dbg_0 "LTest;.<clinit>:()V" "Test.java" 10)
+    (const v2 0)
+    (const v4 1)
+    (const-string ALPHA)
+    (move-result-pseudo-object v1)
+    (new-instance "LTest;")
+    (move-result-pseudo-object v0)
+    (.pos:dbg_1 "LTest;.<clinit>:()V" "Test.java" 11)
+    (invoke-direct (v0 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+    (sput-object v0 "LTest;.ALPHA:LTest;")
+    (.pos:dbg_2 "LTest;.<clinit>:()V" "Test.java" 12)
+    (const v3 2)
+    (new-array v3 "[LTest;")
+    (move-result-pseudo-object v3)
+    (.pos:dbg_3 "LTest;.<clinit>:()V" "Test.java" 13)
+    (aput-object v0 v3 v2)
+    (.pos:dbg_4 "LTest;.<clinit>:()V" "Test.java" 14)
+    (aput-object v0 v3 v4)
+    (.pos:dbg_5 "LTest;.<clinit>:()V" "Test.java" 15)
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (return-void)
+  ))");
+  ASSERT_EQ(run(code.get()), MethodResult::kChanged);
+
+  EXPECT_EQ(instruction_positions(code.get()),
+            (std::vector<std::string>{
+                "CONST LTest;.<clinit>:()V:12",
+                "NEW_ARRAY LTest;.<clinit>:()V:12",
+                "IOPCODE_MOVE_RESULT_PSEUDO_OBJECT LTest;.<clinit>:()V:12",
+                "CONST LTest;.<clinit>:()V:10",
+                "CONST LTest;.<clinit>:()V:10",
+                "CONST_STRING LTest;.<clinit>:()V:10",
+                "IOPCODE_MOVE_RESULT_PSEUDO_OBJECT LTest;.<clinit>:()V:10",
+                "NEW_INSTANCE LTest;.<clinit>:()V:10",
+                "IOPCODE_MOVE_RESULT_PSEUDO_OBJECT LTest;.<clinit>:()V:10",
+                "INVOKE_DIRECT LTest;.<clinit>:()V:11",
+                "CONST LTest;.<clinit>:()V:13",
+                "APUT_OBJECT LTest;.<clinit>:()V:13",
+                "CONST LTest;.<clinit>:()V:14",
+                "APUT_OBJECT LTest;.<clinit>:()V:14",
+                "SPUT_OBJECT LTest;.<clinit>:()V:11",
+                "CONST LTest;.<clinit>:()V:12",
+                "SPUT_OBJECT LTest;.<clinit>:()V:15",
+                "RETURN_VOID LTest;.<clinit>:()V:15",
+            }));
+}
+
+TEST_F(RearrangeEnumClinitTest, UnpositionedDestinationKeepsMovedChain) {
+  auto code = assembler::ircode_from_string(R"((
+    (const v2 0)
+    (const-string ALPHA)
+    (move-result-pseudo-object v1)
+    (new-instance "LTest;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+    (.pos:dbg_0 "LTest;.<clinit>:()V" "Test.java" 19)
+    (.pos:dbg_1 "LTest;.$values:()[LTest;" "Test.java" 20 dbg_0)
+    (const v3 1)
+    (new-array v3 "[LTest;")
+    (move-result-pseudo-object v3)
+    (aput-object v0 v3 v2)
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (return-void)
+  ))");
+  const DexPosition* callsite = nullptr;
+  for (const auto& mie : *code) {
+    if (mie.type == MFLOW_POSITION && mie.pos->parent != nullptr) {
+      callsite = mie.pos->parent;
+    }
+  }
+  ASSERT_NE(callsite, nullptr);
+
+  ASSERT_EQ(run(code.get()), MethodResult::kChanged);
+
+  // The moved allocation keeps its inlined position; the instructions before
+  // the first position get the synthetic entry position, which has no line,
+  // rather than the moved allocation's.
+  const std::string inlined =
+      " LTest;.$values:()[LTest;:20 LTest;.<clinit>:()V:19";
+  const std::string entry = " LTest;.<clinit>:()V:0";
+  EXPECT_EQ(instruction_positions(code.get()),
+            (std::vector<std::string>{
+                "CONST" + inlined,
+                "NEW_ARRAY" + inlined,
+                "IOPCODE_MOVE_RESULT_PSEUDO_OBJECT" + inlined,
+                "CONST" + entry,
+                "CONST_STRING" + entry,
+                "IOPCODE_MOVE_RESULT_PSEUDO_OBJECT" + entry,
+                "NEW_INSTANCE" + entry,
+                "IOPCODE_MOVE_RESULT_PSEUDO_OBJECT" + entry,
+                "INVOKE_DIRECT" + entry,
+                "CONST" + inlined,
+                "APUT_OBJECT" + inlined,
+                "CONST" + inlined,
+                "SPUT_OBJECT" + inlined,
+                "RETURN_VOID" + inlined,
+            }));
+  cfg::ScopedCFG cfg(code.get());
+  for (auto it = cfg::InstructionIterable(*cfg).begin();
+       it != cfg::InstructionIterable(*cfg).end();
+       ++it) {
+    if (it->insn->opcode() == OPCODE_NEW_ARRAY ||
+        it->insn->opcode() == OPCODE_APUT_OBJECT) {
+      auto* position = cfg->get_dbg_pos(it);
+      ASSERT_NE(position, nullptr);
+      EXPECT_EQ(position->parent, callsite);
+    }
+  }
 }
 
 } // namespace rearrange_enum_clinit

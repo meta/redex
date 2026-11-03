@@ -10,11 +10,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <memory>
 #include <optional>
+#include <vector>
 
 #include "AtomicStatCounter.h"
 #include "Debug.h"
 #include "DeterministicContainers.h"
+#include "DexPosition.h"
 #include "DexUtil.h"
 #include "IRCode.h"
 #include "LiveRange.h"
@@ -192,6 +195,49 @@ struct Rearranger {
     return nullptr;
   }
 
+  using Insertion = std::vector<cfg::ControlFlowGraph::InsertVariant>;
+
+  static bool precedes_instruction(IRList::iterator it,
+                                   const IRList::iterator& end) {
+    while (it != end && it->type != MFLOW_POSITION &&
+           it->type != MFLOW_OPCODE) {
+      ++it;
+    }
+    return it != end && it->type == MFLOW_OPCODE;
+  }
+
+  // A position applies to the instructions after it, so a moved instruction
+  // would take its destination's position and lose its own, including the
+  // inlining parents of an instruction inlined into the initializer. A moved
+  // allocation or store, with the constant it uses, is preceded by a copy of
+  // its own position, and the destination's position is restored for any
+  // instruction that follows. Instructions that had no position get the
+  // synthetic entry position, which has no line either.
+  void append_with_position(Insertion& insertion,
+                            std::initializer_list<IRInstruction*> moved,
+                            const DexPosition* own,
+                            const DexPosition* destination,
+                            bool followed_by_instruction) const {
+    const bool keep =
+        own != nullptr && (destination == nullptr || !(*own == *destination));
+    if (keep) {
+      insertion.emplace_back(std::make_unique<DexPosition>(*own));
+    }
+    for (auto* insn : moved) {
+      insertion.emplace_back(insn);
+    }
+    if (keep && followed_by_instruction) {
+      insertion.emplace_back(
+          destination != nullptr
+              ? std::make_unique<DexPosition>(*destination)
+              : DexPosition::make_synthetic_entry_position(m));
+    }
+  }
+
+  const DexPosition* position_of(const IRList::iterator& it) {
+    return cfg.get_dbg_pos(b->to_cfg_instruction_iterator(it));
+  }
+
   reg_t move_new_array_to_front() {
     auto new_array_it = b->begin();
     while (new_array_it->type != MFLOW_OPCODE) {
@@ -200,12 +246,17 @@ struct Rearranger {
     // Should not be necessary, but for safety.
     const auto size_reg = cfg.allocate_temp();
     const auto new_reg = cfg.allocate_temp();
-    b->insert_before(
-        b->to_cfg_instruction_iterator(new_array_it),
+    Insertion insertion;
+    append_with_position(
+        insertion,
         {(new IRInstruction(*array_size_definition))->set_dest(size_reg),
          (new IRInstruction(*array_new_array->insn))->set_src(0, size_reg),
          (new IRInstruction(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT))
-             ->set_dest(new_reg)});
+             ->set_dest(new_reg)},
+        position_of(array_new_array), position_of(new_array_it),
+        /* followed_by_instruction */ true);
+    b->insert_before(b->to_cfg_instruction_iterator(new_array_it),
+                     insertion.begin(), insertion.end());
     // NEW_ARRAY is throwable — insert a source block after its
     // MOVE_RESULT_PSEUDO to cover the new throw-delineated segment.
     auto* first_sb = source_blocks::get_first_source_block(b);
@@ -474,9 +525,14 @@ struct Rearranger {
                               ->set_src(0, obj_reg)
                               ->set_src(1, *alloc_reg)
                               ->set_src(2, *extra_reg);
-      b->insert_after(
-          b->to_cfg_instruction_iterator(insert_after_it),
-          {(new IRInstruction(plan.index))->set_dest(*extra_reg), moved_store});
+      Insertion insertion;
+      append_with_position(
+          insertion,
+          {(new IRInstruction(plan.index))->set_dest(*extra_reg), moved_store},
+          position_of(insn_map.at(&plan.store)), position_of(insert_after_it),
+          precedes_instruction(std::next(insert_after_it), b->end()));
+      b->insert_after(b->to_cfg_instruction_iterator(insert_after_it),
+                      insertion.begin(), insertion.end());
       auto inserted_store =
           std::next(b->to_cfg_instruction_iterator(insert_after_it), 2)
               .unwrap();

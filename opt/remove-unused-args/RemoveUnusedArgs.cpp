@@ -422,18 +422,14 @@ std::map<uint16_t, cfg::InstructionIterator> compute_dead_insns(
   // successors.
   auto live_vars = fixpoint_iter.get_live_out_vars_at(entry_block);
 
-  for (auto it = entry_block->rbegin(); it != entry_block->rend(); ++it) {
-    if (it->type != MFLOW_OPCODE) {
-      continue;
-    }
-    auto* insn = it->insn;
+  for (auto& mie : InstructionIterable(entry_block).reversed()) {
+    auto* insn = mie.insn;
     if (opcode::is_a_load_param(insn->opcode())) {
       if (!live_vars.contains(insn->dest()) &&
-          (!is_instance_method || it->insn != first_insn)) {
+          (!is_instance_method || mie.insn != first_insn)) {
         // Mark dead args as dead and never mark the "this" arg.
         dead_args_and_insns.emplace(
-            last_arg_idx,
-            entry_block->to_cfg_instruction_iterator(--(it.base())));
+            last_arg_idx, entry_block->to_cfg_instruction_iterator(mie));
       }
       last_arg_idx--;
     }

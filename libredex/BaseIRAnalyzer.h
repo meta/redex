@@ -145,10 +145,8 @@ class BaseBackwardsIRAnalyzer
             Domain>(cfg, cfg.num_blocks()) {}
 
   void analyze_node(const NodeId& node, Domain* current_state) const override {
-    for (auto it = node->rbegin(); it != node->rend(); ++it) {
-      if (it->type == MFLOW_OPCODE) {
-        analyze_instruction(it->insn, current_state);
-      }
+    for (auto& mie : InstructionIterable(node).reversed()) {
+      analyze_instruction(mie.insn, current_state);
     }
   }
 

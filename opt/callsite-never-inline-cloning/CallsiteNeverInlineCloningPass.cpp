@@ -284,11 +284,8 @@ CallsiteProfile collect_callsite_profiles(
             {
               bool has_throw = false;
               bool has_non_init_invoke = false;
-              for (auto rit = block->rbegin(); rit != block->rend(); ++rit) {
-                if (rit->type != MFLOW_OPCODE) {
-                  continue;
-                }
-                auto* insn = rit->insn;
+              for (auto& mie : InstructionIterable(block).reversed()) {
+                auto* insn = mie.insn;
                 if (!opcode::is_an_invoke(insn->opcode())) {
                   if (opcode::is_throw(insn->opcode())) {
                     has_throw = true;

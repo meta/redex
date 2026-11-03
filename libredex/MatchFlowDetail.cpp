@@ -523,12 +523,8 @@ DataFlowGraph instruction_graph(cfg::ControlFlowGraph& cfg,
     // The obligations at the *end* of the block.
     auto env = analysis.get_entry_state_at(block);
 
-    for (auto it = block->rbegin(); it != block->rend(); ++it) {
-      if (it->type != MFLOW_OPCODE) {
-        continue;
-      }
-
-      auto* insn = it->insn;
+    for (auto& mie : InstructionIterable(block).reversed()) {
+      auto* insn = mie.insn;
       for (auto root : roots) {
         test_node(root, insn);
       }

@@ -951,12 +951,9 @@ static MethodCandidates find_method_candidates(
       live_outs([&liveness_fp_iter](cfg::Block* block) {
         UnorderedMap<IRInstruction*, LivenessDomain> res;
         auto live_out = liveness_fp_iter->get_live_out_vars_at(block);
-        for (auto it = block->rbegin(); it != block->rend(); ++it) {
-          if (it->type != MFLOW_OPCODE) {
-            continue;
-          }
-          res.emplace(it->insn, live_out);
-          liveness_fp_iter->analyze_instruction(it->insn, &live_out);
+        for (auto& mie : InstructionIterable(block).reversed()) {
+          res.emplace(mie.insn, live_out);
+          liveness_fp_iter->analyze_instruction(mie.insn, &live_out);
         }
         return res;
       });

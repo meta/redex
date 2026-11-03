@@ -128,25 +128,22 @@ LocalDce::get_dead_instructions(const cfg::ControlFlowGraph& cfg,
 
       // Compute live-in for this block by walking its instruction list in
       // reverse and applying the liveness rules.
-      for (auto it = b->rbegin(); it != b->rend(); ++it) {
-        if (it->type != MFLOW_OPCODE) {
-          continue;
-        }
-        bool required = is_required(cfg, b, it->insn, bliveness);
+      for (auto& mie : InstructionIterable(b).reversed()) {
+        bool required = is_required(cfg, b, mie.insn, bliveness);
         if (required) {
-          update_liveness(it->insn, bliveness);
-          if (it->insn->opcode() == IOPCODE_INIT_CLASS) {
+          update_liveness(mie.insn, bliveness);
+          if (mie.insn->opcode() == IOPCODE_INIT_CLASS) {
             *any_init_class_insns = true;
           }
         } else {
           // move-result-pseudo instructions will be automatically removed
           // when their primary instruction is deleted.
-          if (!opcode::is_a_move_result_pseudo(it->insn->opcode())) {
-            auto forward_it = std::prev(it.base());
-            dead_instructions.emplace_back(b, forward_it);
+          if (!opcode::is_a_move_result_pseudo(mie.insn->opcode())) {
+            dead_instructions.emplace_back(
+                b, b->to_cfg_instruction_iterator(mie).unwrap());
           }
         }
-        TRACE(CFG, 5, "%s\n%s", show(it->insn).c_str(),
+        TRACE(CFG, 5, "%s\n%s", show(mie.insn).c_str(),
               show(bliveness).c_str());
       }
       if (bliveness != prev_liveness) {

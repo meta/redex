@@ -75,13 +75,12 @@ struct Rearranger {
 
   IRInstruction* find_values_sput() {
     // Optimistically look for the `$VALUES` field and accept it.
-    for (auto it = b->rbegin(); it != b->rend(); ++it) {
-      if (it->type == MFLOW_OPCODE &&
-          it->insn->opcode() == OPCODE_SPUT_OBJECT) {
-        auto* f = it->insn->get_field();
+    for (auto& mie : InstructionIterable(b).reversed()) {
+      if (mie.insn->opcode() == OPCODE_SPUT_OBJECT) {
+        auto* f = mie.insn->get_field();
         if (f->get_class() == m->get_class() &&
             f->get_name()->str() == "$VALUES") {
-          return it->insn;
+          return mie.insn;
         }
       }
     }
@@ -117,11 +116,10 @@ struct Rearranger {
       return nullptr;
     }
 
-    for (auto it = b->rbegin(); it != b->rend(); ++it) {
-      if (it->type == MFLOW_OPCODE &&
-          it->insn->opcode() == OPCODE_SPUT_OBJECT) {
-        if (field == it->insn->get_field()) {
-          return it->insn;
+    for (auto& mie : InstructionIterable(b).reversed()) {
+      if (mie.insn->opcode() == OPCODE_SPUT_OBJECT) {
+        if (field == mie.insn->get_field()) {
+          return mie.insn;
         }
       }
     }

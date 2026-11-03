@@ -78,20 +78,16 @@ void InitClassPruner::apply_backward() {
   cfg::CFGMutation mutation(m_cfg);
   for (cfg::Block* block : m_cfg.blocks()) {
     auto env = fp_iter.get_entry_state_at(block);
-    for (auto it = block->rbegin(); it != block->rend(); it++) {
-      if (it->type != MFLOW_OPCODE) {
-        continue;
-      }
-      auto* insn = it->insn;
+    for (auto& mie : InstructionIterable(block).reversed()) {
+      auto* insn = mie.insn;
       if (opcode::is_init_class(insn->opcode())) {
         const auto& c = env.get_constant();
         if (c && insn->get_type() == *c) {
-          auto forward_it = std::prev(it.base());
-          mutation.remove(block->to_cfg_instruction_iterator(forward_it));
+          mutation.remove(block->to_cfg_instruction_iterator(mie));
           m_stats.init_class_instructions_removed++;
         }
       }
-      fp_iter.analyze_instruction(it->insn, &env);
+      fp_iter.analyze_instruction(mie.insn, &env);
     }
   }
   mutation.flush();

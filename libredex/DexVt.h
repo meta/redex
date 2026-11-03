@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+#include <boost/functional/hash.hpp>
+
 #include "ConcurrentContainers.h"
 #include "DeterministicContainers.h"
 #include "DexStore.h"
@@ -82,11 +84,19 @@ struct MethodRecord {
   bool baseline_post_startup{false};
   // Ids of methods that call this method (virtual/interface callers included
   // via the MethodOverrideGraph-resolved call graph); sorted for stable output.
-  std::vector<uint32_t> callers;
+  // Methods with the same callers share one list, owned by the Exporter;
+  // nullptr when nothing calls this method.
+  const std::vector<uint32_t>* callers{nullptr};
   // Containing dex after the InterDex split ("<store>/<dex_index>"), so the
   // read-side can group methods by dex file. Empty if the class wasn't found in
   // any store's dexen.
   std::string dex;
+};
+
+struct CallerIdsHash {
+  size_t operator()(const std::vector<uint32_t>& ids) const {
+    return boost::hash_range(ids.begin(), ids.end());
+  }
 };
 
 /*
@@ -149,6 +159,11 @@ class Exporter {
   // before the parallel capture and reused by emit().
   UnorderedMap<const DexMethod*, uint32_t> m_ids;
   InsertOnlyConcurrentMap<const DexMethod*, MethodRecord> m_records;
+  // The distinct caller lists MethodRecord::callers points into. Methods share
+  // a list whenever they inherit their callers from the same virtual call
+  // sites: every override of an interface method has the callers of that
+  // interface method.
+  InsertOnlyConcurrentSet<std::vector<uint32_t>, CallerIdsHash> m_caller_sets;
   // SourceBlock interaction index -> name (for the manifest / block labelling).
   std::vector<std::string> m_sb_interaction_names;
   // MethodProfiles interaction ids (the pgo{} axis), recorded for the manifest.

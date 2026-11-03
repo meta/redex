@@ -558,12 +558,17 @@ void Exporter::capture_pre_lowering(DexStoresVector& stores,
     }
 
     const auto callers = complete_callers.get_callers(method);
+    std::vector<uint32_t> caller_ids;
+    caller_ids.reserve(callers.size());
     for (const auto* caller : UnorderedIterable(callers)) {
       if (auto it = m_ids.find(caller); it != m_ids.end()) {
-        rec.callers.push_back(it->second);
+        caller_ids.push_back(it->second);
       }
     }
-    std::sort(rec.callers.begin(), rec.callers.end());
+    if (!caller_ids.empty()) {
+      std::sort(caller_ids.begin(), caller_ids.end());
+      rec.callers = m_caller_sets.insert(std::move(caller_ids)).first;
+    }
 
     if (auto* dcls = type_class(cls_type); dcls != nullptr) {
       if (auto it = class_dex.find(dcls); it != class_dex.end()) {
@@ -647,18 +652,18 @@ void Exporter::emit(ConfigFiles& conf,
   // callsites) IDENTICAL caller lists, so store each distinct (already
   // sorted+unique) list once in redex-dexvt.callersets.tsv and reference it by
   // a dense set_id. First-seen over the id-sorted `order` makes the set_ids
-  // deterministic; &it->first is a stable std::map key pointer.
-  std::map<std::vector<uint32_t>, uint32_t> caller_set_ids;
+  // deterministic.
+  UnorderedMap<const std::vector<uint32_t>*, uint32_t> caller_set_ids;
   std::vector<const std::vector<uint32_t>*> sets_by_id;
   for (const DexMethod* method : order) {
     const MethodRecord& rec = m_records.at_unsafe(method);
-    if (rec.callers.empty()) {
+    if (rec.callers == nullptr) {
       continue;
     }
     auto [it, inserted] = caller_set_ids.emplace(
         rec.callers, static_cast<uint32_t>(sets_by_id.size()));
     if (inserted) {
-      sets_by_id.push_back(&it->first);
+      sets_by_id.push_back(rec.callers);
     }
   }
 
@@ -854,7 +859,7 @@ void Exporter::emit(ConfigFiles& conf,
       bp["post_startup"] = rec.baseline_post_startup;
       r["baseline"] = bp;
     }
-    if (!rec.callers.empty()) {
+    if (rec.callers != nullptr) {
       // Reference the interned caller set (caller lists are often huge and
       // shared). Empty sets omit the field entirely.
       r["caller_set"] = static_cast<Json::UInt>(caller_set_ids.at(rec.callers));

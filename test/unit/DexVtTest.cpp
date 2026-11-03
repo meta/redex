@@ -423,15 +423,53 @@ TEST_F(DexVtTest, capturesCallGraphCallers) {
   const auto* caller_rec = exporter.get_record(caller);
   ASSERT_NE(callee_rec, nullptr);
   ASSERT_NE(caller_rec, nullptr);
-  EXPECT_NE(std::find(callee_rec->callers.begin(), callee_rec->callers.end(),
+  ASSERT_NE(callee_rec->callers, nullptr);
+  EXPECT_NE(std::find(callee_rec->callers->begin(), callee_rec->callers->end(),
                       caller_rec->id),
-            callee_rec->callers.end());
+            callee_rec->callers->end());
 }
 
 // emit() writes schema_version 10, references caller-sets by a `caller_set`
 // int, resolves each set through the redex-dexvt.callersets.tsv sidecar, emits
 // kind:"class" inheritance records (v5), and omits the loop fields on
 // methods without loops (v9).
+// Methods with the same callers share one caller list.
+TEST_F(DexVtTest, capturesSharedCallerListsOnce) {
+  ClassCreator cc(DexType::make_type("LSharedCallers;"));
+  cc.set_super(type::java_lang_Object());
+  for (const char* callee : {"first", "second"}) {
+    cc.add_method(assembler::method_from_string(
+        std::string(R"((method (public static) "LSharedCallers;.)") + callee +
+        R"(:()V" ((return-void))))"));
+  }
+  auto* caller = assembler::method_from_string(R"(
+    (method (public static) "LSharedCallers;.caller:()V"
+      (
+        (invoke-static () "LSharedCallers;.first:()V")
+        (invoke-static () "LSharedCallers;.second:()V")
+        (return-void)
+      )
+    )
+  )");
+  caller->rstate.set_root();
+  cc.add_method(caller);
+  auto* cls = cc.create();
+  auto stores = make_stores(cls);
+  auto conf = make_config();
+
+  dexvt::Exporter exporter;
+  exporter.capture_pre_lowering(stores, conf);
+
+  const auto* first = exporter.get_record(find_method(cls, "first"));
+  const auto* second = exporter.get_record(find_method(cls, "second"));
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  ASSERT_NE(first->callers, nullptr);
+  EXPECT_EQ(first->callers, second->callers);
+  EXPECT_EQ(*first->callers,
+            std::vector<uint32_t>{exporter.get_record(caller)->id});
+}
+
 TEST_F(DexVtTest, emitInternsCallerSets) {
   auto* cls = create_caller_class();
   auto stores = make_stores(cls);

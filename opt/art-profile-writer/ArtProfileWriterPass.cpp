@@ -15,6 +15,7 @@
 
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/regex.hpp> // NOLINT
+#include <climits>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -108,10 +109,16 @@ struct NeverInlineThresholds {
   size_t min_callee_instructions;
 };
 
+struct MinHotCallsitesThresholds {
+  size_t min_hot_callsites;
+  uint32_t min_code_units;
+};
+
 void never_inline(bool attach_annotations,
                   float hot_block_appear_threshold,
                   float hot_method_appear_threshold,
                   const NeverInlineThresholds& thresholds,
+                  const MinHotCallsitesThresholds& min_hot_callsites_thresholds,
                   const Scope& scope,
                   const baseline_profiles::BaselineProfile& baseline_profile,
                   PassManager& mgr,
@@ -174,7 +181,7 @@ void never_inline(bool attach_annotations,
   std::atomic<size_t> callers_too_many_instructions{0};
   std::atomic<size_t> callers_too_many_registers{0};
   InsertOnlyConcurrentSet<DexMethod*> hot_cold_callees;
-  InsertOnlyConcurrentSet<DexMethod*> hot_hot_callees;
+  AtomicMap<DexMethod*, size_t> hot_callsite_counts;
   InsertOnlyConcurrentMap<DexMethod*, size_t> estimated_instructions;
   InsertOnlyConcurrentMap<DexMethod*, bool> has_catches;
   walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {
@@ -283,7 +290,7 @@ void never_inline(bool attach_annotations,
         }
 
         if (is_sufficiently_hot(b, callee)) {
-          hot_hot_callees.insert(callee);
+          hot_callsite_counts.fetch_add(callee, 1);
         } else {
           hot_cold_callees.insert(callee);
         }
@@ -295,7 +302,7 @@ void never_inline(bool attach_annotations,
   mgr.incr_metric("never_inline_callers_too_many_registers",
                   callers_too_many_registers.load());
   mgr.incr_metric("never_inline_hot_cold_callees", hot_cold_callees.size());
-  mgr.incr_metric("never_inline_hot_hot_callees", hot_hot_callees.size());
+  mgr.incr_metric("never_inline_hot_hot_callees", hot_callsite_counts.size());
 
   // Attach annotation to callees where beneficial.
   std::atomic<size_t> callees_already_never_inline = 0;
@@ -305,17 +312,27 @@ void never_inline(bool attach_annotations,
   std::atomic<size_t> callees_too_large = 0;
   std::atomic<size_t> callees_always_throw = 0;
   std::atomic<size_t> callees_annotation_attached = 0;
-  walk::code(scope, [&](DexMethod* method, IRCode&) {
+  size_t callees_min_hot_callsites = 0;
+  UnorderedMap<DexMethod*, size_t> min_hot_callsites_callees;
+  walk::code(scope, [&](DexMethod* method, IRCode& code) {
     if (has_anno(method, type::dalvik_annotation_optimization_NeverInline())) {
       callees_already_never_inline.fetch_add(1);
       return;
     }
 
-    if (hot_cold_callees.count_unsafe(method) == 0u) {
+    bool min_hot_callsites_rule_met =
+        hot_callsite_counts.load(method) >=
+            min_hot_callsites_thresholds.min_hot_callsites &&
+        code.estimate_code_units() >=
+            min_hot_callsites_thresholds.min_code_units;
+
+    if (hot_cold_callees.count_unsafe(method) == 0u &&
+        !min_hot_callsites_rule_met) {
       return;
     }
 
-    if (hot_hot_callees.count(method) != 0u) {
+    if (hot_callsite_counts.count(method) != 0u &&
+        !min_hot_callsites_rule_met) {
       callees_too_hot.fetch_add(1);
       return;
     }
@@ -340,6 +357,11 @@ void never_inline(bool attach_annotations,
     }
 
     callees_annotation_attached.fetch_add(1);
+    if (min_hot_callsites_rule_met) {
+      ++callees_min_hot_callsites;
+      min_hot_callsites_callees.emplace(method,
+                                        hot_callsite_counts.load(method));
+    }
     if (!attach_annotations) {
       return;
     }
@@ -367,6 +389,17 @@ void never_inline(bool attach_annotations,
                   callees_always_throw.load());
   mgr.incr_metric("never_inline_callees_annotation_attached",
                   callees_annotation_attached.load());
+  // Callees that pass the gates solely through `min_hot_callsites`.
+  mgr.incr_metric("never_inline_callees_min_hot_callsites",
+                  callees_min_hot_callsites);
+  // For each such callee, there is one metric whose value is the number of its
+  // call sites that count toward `min_hot_callsites`.
+  for (const auto& [method, callsites] :
+       UnorderedIterable(min_hot_callsites_callees)) {
+    mgr.set_metric(
+        "never_inline_min_hot_callsites_" + show_deobfuscated(method),
+        static_cast<int64_t>(callsites));
+  }
 }
 
 bool never_compile_callcount_threshold_met(
@@ -835,6 +868,26 @@ void ArtProfileWriterPass::bind_config() {
        "Do not annotate a callee with fewer estimated instructions than this: "
        "ART inlines trivial bodies whatever the annotation says, so the "
        "annotation would be dead DEX weight.");
+  bind("never_inline_min_hot_callsites", INT_MAX,
+       m_never_inline_min_hot_callsites,
+       "Annotate a callee with `@NeverInline` if at least this many of its "
+       "call sites are hot, with hotness defined by "
+       "`never_inline_hot_block_appear_threshold` and "
+       "`never_inline_hot_method_appear_threshold`. INT_MAX disables this. "
+       "Inlining puts a compiled copy of the callee's body in every caller, so "
+       "a callee with many hot call sites gets many copies, which increase the "
+       "OAT size and the amount of code loaded at startup. Annotating it keeps "
+       "one shared copy, at the cost of a call at each site.");
+  bind("never_inline_min_hot_callsites_min_code_units",
+       kDefaultNeverInlineMinHotCallsitesMinCodeUnits,
+       m_never_inline_min_hot_callsites_min_code_units,
+       "Apply `never_inline_min_hot_callsites` only to callees that have at "
+       "least this many estimated code units (`IRCode::estimate_code_units`).");
+  after_configuration([this] {
+    always_assert_log(m_never_inline_min_hot_callsites >= 1,
+                      "Set never_inline_min_hot_callsites to an integer >= 1, "
+                      "or leave it unset to turn the rule off.");
+  });
 
   bind("include_strings_lookup_class", false, m_include_strings_lookup_class);
   bind("override_strip_classes", std::nullopt, m_override_strip_classes,
@@ -1580,6 +1633,10 @@ void ArtProfileWriterPass::run_pass(DexStoresVector& stores,
           .max_caller_registers = m_never_inline_max_caller_registers,
           .max_callee_code_units = m_never_inline_max_callee_code_units,
           .min_callee_instructions = m_never_inline_min_callee_instructions,
+      },
+      MinHotCallsitesThresholds{
+          .min_hot_callsites = m_never_inline_min_hot_callsites,
+          .min_code_units = m_never_inline_min_hot_callsites_min_code_units,
       },
       scope, *never_inline_profile, mgr, method_profiles);
 }

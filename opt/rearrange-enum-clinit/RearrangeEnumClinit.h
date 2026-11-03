@@ -39,6 +39,7 @@ enum class FailureReason {
   ArrayEscapes,
   UnsupportedElementOrIndex,
   IncompleteArray,
+  InitializationAfterPublication,
 };
 
 std::string_view describe(FailureReason reason);

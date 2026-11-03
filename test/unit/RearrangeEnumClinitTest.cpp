@@ -759,6 +759,29 @@ TEST_F(RearrangeEnumClinitTest, HelperProducerIsNotAnArray) {
   EXPECT_EQ(normalize(src), assembler::to_string(code.get()));
 }
 
+TEST_F(RearrangeEnumClinitTest, RejectInitializationAfterPublication) {
+  const auto* const src = R"((
+    (const v2 0)
+    (const-string ALPHA)
+    (move-result-pseudo-object v1)
+    (new-instance "LTest;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+    (const v3 1)
+    (new-array v3 "[LTest;")
+    (move-result-pseudo-object v3)
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (invoke-static () "LObserver;.readValues:()V")
+    (aput-object v0 v3 v2)
+    (return-void)
+  ))";
+  auto code = assembler::ircode_from_string(src);
+  FailureReason reason;
+  EXPECT_EQ(run(code.get(), false, nullptr, &reason), MethodResult::kFailed);
+  EXPECT_EQ(reason, FailureReason::InitializationAfterPublication);
+  EXPECT_EQ(normalize(src), assembler::to_string(code.get()));
+}
+
 TEST_F(RearrangeEnumClinitTest, NoCodeInitializerIsRejected) {
   FailureReason reason;
   EXPECT_EQ(run(nullptr, false, nullptr, &reason), MethodResult::kFailed);

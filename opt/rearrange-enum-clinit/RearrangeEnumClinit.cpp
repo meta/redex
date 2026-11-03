@@ -345,9 +345,17 @@ struct Rearranger {
       selected_stores.insert(use.insn);
     }
     UnorderedSet<int64_t> indices;
+    bool published = false;
     for (auto& mie : InstructionIterable(b)) {
+      if (mie.insn == array_sput) {
+        published = true;
+      }
       if (selected_stores.find(mie.insn) == selected_stores.end()) {
         continue;
+      }
+      if (published) {
+        failure_reason = FailureReason::InitializationAfterPublication;
+        return false;
       }
       // See if we can hoist it. Check the input parameters.
       // 1. First parameter is object.
@@ -465,6 +473,8 @@ std::string_view describe(FailureReason reason) {
     return "unsupported_element_or_index";
   case FailureReason::IncompleteArray:
     return "incomplete_array";
+  case FailureReason::InitializationAfterPublication:
+    return "initialization_after_publication";
   }
   not_reached();
 }
@@ -603,6 +613,7 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
       case FailureReason::ArrayEscapes:
       case FailureReason::UnsupportedElementOrIndex:
       case FailureReason::IncompleteArray:
+      case FailureReason::InitializationAfterPublication:
         ++cnt_unsupported_shape;
         break;
       // run() records a reason with every kFailed: the rearranger starts from

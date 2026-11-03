@@ -8,7 +8,7 @@
 #include "Native.h"
 
 #include <fstream>
-#include <json/json.h>
+#include <json/reader.h>
 #include <json/value.h>
 #include <string_view>
 

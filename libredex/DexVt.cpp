@@ -372,7 +372,7 @@ void Exporter::capture_pre_lowering(DexStoresVector& stores,
   // resolution into the caller edges, so virtual/interface callers are
   // complete.
   auto override_graph = method_override_graph::build_graph(scope);
-  auto callgraph = call_graph::complete_call_graph(*override_graph, scope);
+  const call_graph::CompleteCallers complete_callers(*override_graph, scope);
 
   // 4) Parallel per-method capture. The CFG was cleared by PassManager before
   // the backend. It is rebuilt on a copy of the code, never on the code
@@ -557,18 +557,13 @@ void Exporter::capture_pre_lowering(DexStoresVector& stores,
       rec.baseline_post_startup = it->second.post_startup;
     }
 
-    if (callgraph.has_node(method)) {
-      for (const auto* caller :
-           UnorderedIterable(callgraph.get_callers(method))) {
-        if (caller == nullptr) {
-          continue;
-        }
-        if (auto it = m_ids.find(caller); it != m_ids.end()) {
-          rec.callers.push_back(it->second);
-        }
+    const auto callers = complete_callers.get_callers(method);
+    for (const auto* caller : UnorderedIterable(callers)) {
+      if (auto it = m_ids.find(caller); it != m_ids.end()) {
+        rec.callers.push_back(it->second);
       }
-      std::sort(rec.callers.begin(), rec.callers.end());
     }
+    std::sort(rec.callers.begin(), rec.callers.end());
 
     if (auto* dcls = type_class(cls_type); dcls != nullptr) {
       if (auto it = class_dex.find(dcls); it != class_dex.end()) {

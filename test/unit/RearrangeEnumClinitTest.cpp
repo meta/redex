@@ -69,9 +69,12 @@ class RearrangeEnumClinitTest : public RedexTest {
     std::tie(clinit_int, values_int) = create_test_class("LTestInt;", "I");
   }
 
-  MethodResult run(IRCode* code, bool with_int = false) {
+  MethodResult run(IRCode* code,
+                   bool with_int = false,
+                   MethodStats* method_stats = nullptr) {
     cfg::ScopedCFG cfg(code);
-    return RearrangeEnumClinitPass::run(with_int ? clinit_int : clinit, code);
+    return RearrangeEnumClinitPass::run(with_int ? clinit_int : clinit, code,
+                                        method_stats);
   }
 
   static std::string normalize(const std::string& in) {
@@ -547,6 +550,46 @@ TEST_F(RearrangeEnumClinitTest, SourceBlocksCoverage) {
   EXPECT_EQ(invoke_direct_count, 3);
   EXPECT_EQ(sb_after_invoke_direct_count, 3)
       << "Expected source block after each INVOKE_DIRECT";
+}
+
+TEST_F(RearrangeEnumClinitTest, NativeValuesWithoutCodeIsNotAnalyzed) {
+  values->set_access(ACC_PUBLIC | ACC_STATIC | ACC_NATIVE);
+  ASSERT_EQ(values->get_code(), nullptr);
+  const auto* source = R"((
+    (const v0 1)
+    (new-array v0 "[LTest;")
+    (move-result-pseudo-object v0)
+    (sput-object v0 "LTest;.OTHER:[LTest;")
+    (return-void)
+  ))";
+  auto code = assembler::ircode_from_string(source);
+  MethodStats stats;
+  EXPECT_EQ(run(code.get(), false, &stats), MethodResult::kFailed);
+  EXPECT_EQ(normalize(source), assembler::to_string(code.get()));
+  EXPECT_EQ(stats.values_without_code, 1);
+  EXPECT_EQ(stats.values_without_return, 0);
+}
+
+TEST_F(RearrangeEnumClinitTest, ThrowOnlyValuesWithoutReturnIsNotAnalyzed) {
+  values->set_code(assembler::ircode_from_string(R"((
+    (new-instance "Ljava/lang/RuntimeException;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0) "Ljava/lang/RuntimeException;.<init>:()V")
+    (throw v0)
+  ))"));
+  const auto* source = R"((
+    (const v0 1)
+    (new-array v0 "[LTest;")
+    (move-result-pseudo-object v0)
+    (sput-object v0 "LTest;.OTHER:[LTest;")
+    (return-void)
+  ))";
+  auto code = assembler::ircode_from_string(source);
+  MethodStats stats;
+  EXPECT_EQ(run(code.get(), false, &stats), MethodResult::kFailed);
+  EXPECT_EQ(normalize(source), assembler::to_string(code.get()));
+  EXPECT_EQ(stats.values_without_code, 0);
+  EXPECT_EQ(stats.values_without_return, 1);
 }
 
 } // namespace rearrange_enum_clinit

@@ -7,12 +7,19 @@
 
 #pragma once
 
+#include <cstddef>
+
 #include "Pass.h"
 
 class DexMethod;
 class IRCode;
 
 namespace rearrange_enum_clinit {
+
+struct MethodStats {
+  size_t values_without_code{0};
+  size_t values_without_return{0};
+};
 
 enum class MethodResult {
   kUnknown,
@@ -36,7 +43,9 @@ class RearrangeEnumClinitPass : public Pass {
 
  private:
   // "Exposed" for testing purposes.
-  static MethodResult run(DexMethod* m, IRCode* code);
+  static MethodResult run(DexMethod* m,
+                          IRCode* code,
+                          MethodStats* method_stats = nullptr);
 
   size_t m_threshold{10000000};
 

@@ -11,6 +11,7 @@
 #include <atomic>
 #include <optional>
 
+#include "AtomicStatCounter.h"
 #include "Debug.h"
 #include "DeterministicContainers.h"
 #include "DexUtil.h"
@@ -41,6 +42,7 @@ struct Rearranger {
   IRInstruction* array_sput{nullptr};
   IRList::iterator array_new_array;
   reg_t alloc_reg;
+  MethodStats method_stats;
 
   Rearranger(DexMethod* m, cfg::ControlFlowGraph& cfg)
       : m(m),
@@ -92,8 +94,12 @@ struct Rearranger {
     if (values_method == nullptr) {
       return nullptr;
     }
+    if (values_method->get_code() == nullptr) {
+      ++method_stats.values_without_code;
+      return nullptr;
+    }
 
-    auto* field = analyze_values_method(values_method);
+    auto* field = analyze_values_method(values_method, method_stats);
     if (field == nullptr) {
       return nullptr;
     }
@@ -110,7 +116,8 @@ struct Rearranger {
     return nullptr;
   }
 
-  static DexFieldRef* analyze_values_method(DexMethod* values_method) {
+  static DexFieldRef* analyze_values_method(DexMethod* values_method,
+                                            MethodStats& method_stats) {
     cfg::ScopedCFG cfg(values_method->get_code());
 
     std::optional<IRInstruction*> ret_opt{};
@@ -122,7 +129,10 @@ struct Rearranger {
         ret_opt = mie.insn;
       }
     }
-    redex_assert(ret_opt);
+    if (!ret_opt) {
+      ++method_stats.values_without_return;
+      return nullptr;
+    }
 
     using namespace live_range;
     MoveAwareChains mac(*cfg);
@@ -381,13 +391,22 @@ struct Rearranger {
 
 } // namespace
 
-MethodResult RearrangeEnumClinitPass::run(DexMethod* m, IRCode* code) {
+MethodResult RearrangeEnumClinitPass::run(DexMethod* m,
+                                          IRCode* code,
+                                          MethodStats* method_stats) {
+  if (method_stats != nullptr) {
+    *method_stats = {};
+  }
   auto cfg = cfg::ScopedCFG(code);
   if (cfg->num_blocks() != 1) {
     return MethodResult::kNotOneBlock;
   }
 
-  auto res = Rearranger(m, *cfg).run();
+  Rearranger rearranger(m, *cfg);
+  auto res = rearranger.run();
+  if (method_stats != nullptr) {
+    *method_stats = rearranger.method_stats;
+  }
 
   return res ? MethodResult::kChanged : MethodResult::kFailed;
 }
@@ -401,6 +420,8 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
   std::atomic<size_t> cnt_below_threshold{0};
   std::atomic<size_t> cnt_failed{0};
   std::atomic<size_t> cnt_changed{0};
+  AtomicStatCounter<size_t> cnt_values_without_code{0};
+  AtomicStatCounter<size_t> cnt_values_without_return{0};
   std::atomic<size_t> cnt_no_optimizations{0};
 
   walk::parallel::classes(build_class_scope(stores), [&](DexClass* c) {
@@ -428,7 +449,10 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
       return;
     }
 
-    auto res = run(m, m->get_code());
+    MethodStats method_stats;
+    auto res = run(m, m->get_code(), &method_stats);
+    cnt_values_without_code += method_stats.values_without_code;
+    cnt_values_without_return += method_stats.values_without_return;
 
     switch (res) {
     case MethodResult::kUnknown:
@@ -448,6 +472,8 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
     }
   });
 
+  mgr.set_metric("values_without_code", cnt_values_without_code.load());
+  mgr.set_metric("values_without_return", cnt_values_without_return.load());
   mgr.set_metric("changed", cnt_changed.load());
   mgr.set_metric("failed", cnt_failed.load());
   mgr.set_metric("no_clinit", cnt_no_clinit.load());

@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstddef>
+#include <string_view>
 
 #include "Pass.h"
 
@@ -20,9 +21,22 @@ struct MethodStats {
   size_t values_without_code{0};
   size_t values_without_return{0};
   size_t unsupported_uses{0};
+  size_t failed_preflight{0};
   size_t retained_field_stores{0};
   size_t aliases{0};
 };
+
+enum class FailureReason {
+  None,
+  NotOneBlock,
+  NoMovableElements,
+  NoValuesStore,
+  ValuesNotNewArray,
+  NoArrayUses,
+  ArrayEscapes,
+};
+
+std::string_view describe(FailureReason reason);
 
 enum class MethodResult {
   kUnknown,
@@ -48,7 +62,8 @@ class RearrangeEnumClinitPass : public Pass {
   // "Exposed" for testing purposes.
   static MethodResult run(DexMethod* m,
                           IRCode* code,
-                          MethodStats* method_stats = nullptr);
+                          MethodStats* method_stats = nullptr,
+                          FailureReason* failure_reason = nullptr);
 
   size_t m_threshold{10000000};
 

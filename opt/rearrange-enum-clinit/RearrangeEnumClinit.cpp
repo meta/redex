@@ -22,6 +22,7 @@
 #include "ScopedCFG.h"
 #include "Show.h"
 #include "SourceBlocks.h"
+#include "Trace.h"
 #include "TypeUtil.h"
 #include "Walkers.h"
 
@@ -238,6 +239,8 @@ struct Rearranger {
     return new_reg;
   }
 
+  FailureReason failure_reason{FailureReason::NoMovableElements};
+
   IRInstruction* find_singleton_def(IRInstruction* use_insn,
                                     src_index_t src_index) {
     auto it = use_def.find(live_range::Use{use_insn, src_index});
@@ -285,6 +288,7 @@ struct Rearranger {
   bool validate_array_uses() {
     auto uses = def_use.find(array_new_array->insn);
     if (uses == def_use.end()) {
+      failure_reason = FailureReason::NoArrayUses;
       return false;
     }
     method_stats.unsupported_uses = static_cast<size_t>(
@@ -297,13 +301,18 @@ struct Rearranger {
         }));
     // Observers can see partial contents; changing their register is not
     // enough.
-    return method_stats.unsupported_uses == 0;
+    if (method_stats.unsupported_uses != 0) {
+      failure_reason = FailureReason::ArrayEscapes;
+      return false;
+    }
+    return true;
   }
 
   bool run() {
     // Find a sput-object for `$VALUES`.
     array_sput = find_values_sput();
     if (array_sput == nullptr) {
+      failure_reason = FailureReason::NoValuesStore;
       return false;
     }
     redex_assert(array_sput->opcode() == OPCODE_SPUT_OBJECT);
@@ -313,6 +322,7 @@ struct Rearranger {
 
     if (array_new_array->insn->opcode() != OPCODE_NEW_ARRAY) {
       // Possibly Kotlin enum with `.$values()` not inlined, yet.
+      failure_reason = FailureReason::ValuesNotNewArray;
       return false;
     }
 
@@ -403,6 +413,7 @@ struct Rearranger {
     }
 
     if (!moved_new_array) {
+      failure_reason = FailureReason::NoMovableElements;
       return false;
     }
     method_stats.retained_field_stores = retained_field_stores;
@@ -421,23 +432,60 @@ struct Rearranger {
 
 } // namespace
 
+std::string_view describe(FailureReason reason) {
+  switch (reason) {
+  case FailureReason::None:
+    return "none";
+  case FailureReason::NotOneBlock:
+    return "not_one_block";
+  case FailureReason::NoMovableElements:
+    return "no_movable_elements";
+  case FailureReason::NoValuesStore:
+    return "no_values_store";
+  case FailureReason::ValuesNotNewArray:
+    return "values_not_new_array";
+  case FailureReason::NoArrayUses:
+    return "no_array_uses";
+  case FailureReason::ArrayEscapes:
+    return "array_escapes";
+  }
+  not_reached();
+}
+
 MethodResult RearrangeEnumClinitPass::run(DexMethod* m,
                                           IRCode* code,
-                                          MethodStats* method_stats) {
+                                          MethodStats* method_stats,
+                                          FailureReason* failure_reason) {
   if (method_stats != nullptr) {
     *method_stats = {};
   }
+  if (failure_reason != nullptr) {
+    *failure_reason = FailureReason::None;
+  }
   auto cfg = cfg::ScopedCFG(code);
   if (cfg->num_blocks() != 1) {
+    if (failure_reason != nullptr) {
+      *failure_reason = FailureReason::NotOneBlock;
+    }
+    TRACE(ENUM, 2, "RearrangeEnumClinit: %s: %.*s", SHOW(m),
+          static_cast<int>(describe(FailureReason::NotOneBlock).size()),
+          describe(FailureReason::NotOneBlock).data());
     return MethodResult::kNotOneBlock;
   }
-
   Rearranger rearranger(m, *cfg);
   auto res = rearranger.run();
+  rearranger.method_stats.failed_preflight = res ? 0 : 1;
   if (method_stats != nullptr) {
     *method_stats = rearranger.method_stats;
   }
-
+  if (!res) {
+    if (failure_reason != nullptr) {
+      *failure_reason = rearranger.failure_reason;
+    }
+    TRACE(ENUM, 2, "RearrangeEnumClinit: %s: %.*s", SHOW(m),
+          static_cast<int>(describe(rearranger.failure_reason).size()),
+          describe(rearranger.failure_reason).data());
+  }
   return res ? MethodResult::kChanged : MethodResult::kFailed;
 }
 
@@ -450,11 +498,16 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
   std::atomic<size_t> cnt_below_threshold{0};
   std::atomic<size_t> cnt_failed{0};
   std::atomic<size_t> cnt_changed{0};
+  AtomicStatCounter<size_t> cnt_failed_preflight{0};
   AtomicStatCounter<size_t> cnt_unsupported_array_uses{0};
   AtomicStatCounter<size_t> cnt_retained_field_stores{0};
   AtomicStatCounter<size_t> cnt_arrays_with_retained_field_stores{0};
   AtomicStatCounter<size_t> cnt_array_aliases{0};
   AtomicStatCounter<size_t> cnt_arrays_with_aliases{0};
+  AtomicStatCounter<size_t> cnt_values_not_new_array{0};
+  AtomicStatCounter<size_t> cnt_no_values_store{0};
+  AtomicStatCounter<size_t> cnt_no_movable_elements{0};
+  AtomicStatCounter<size_t> cnt_unsupported_shape{0};
   AtomicStatCounter<size_t> cnt_values_without_code{0};
   AtomicStatCounter<size_t> cnt_values_without_return{0};
   std::atomic<size_t> cnt_no_optimizations{0};
@@ -485,7 +538,9 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
     }
 
     MethodStats method_stats;
-    auto res = run(m, m->get_code(), &method_stats);
+    FailureReason failure_reason{FailureReason::None};
+    auto res = run(m, m->get_code(), &method_stats, &failure_reason);
+    cnt_failed_preflight += method_stats.failed_preflight;
     cnt_unsupported_array_uses += method_stats.unsupported_uses;
     cnt_retained_field_stores += method_stats.retained_field_stores;
     cnt_array_aliases += method_stats.aliases;
@@ -497,6 +552,30 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
     }
     cnt_values_without_code += method_stats.values_without_code;
     cnt_values_without_return += method_stats.values_without_return;
+
+    if (res == MethodResult::kFailed) {
+      switch (failure_reason) {
+      case FailureReason::ValuesNotNewArray:
+        ++cnt_values_not_new_array;
+        break;
+      case FailureReason::NoValuesStore:
+        ++cnt_no_values_store;
+        break;
+      case FailureReason::NoMovableElements:
+        ++cnt_no_movable_elements;
+        break;
+      case FailureReason::NoArrayUses:
+      case FailureReason::ArrayEscapes:
+        ++cnt_unsupported_shape;
+        break;
+      // run() records a reason with every kFailed: the rearranger starts from
+      // NoMovableElements and each rejection sets its own, and NotOneBlock
+      // comes only with kNotOneBlock.
+      case FailureReason::None:
+      case FailureReason::NotOneBlock:
+        not_reached();
+      }
+    }
 
     switch (res) {
     case MethodResult::kUnknown:
@@ -516,6 +595,7 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
     }
   });
 
+  mgr.set_metric("failed_preflight", cnt_failed_preflight.load());
   mgr.set_metric("unsupported_array_uses", cnt_unsupported_array_uses.load());
   mgr.set_metric("retained_field_stores", cnt_retained_field_stores.load());
   mgr.set_metric("changed_with_retained_field_stores",
@@ -524,6 +604,11 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
   mgr.set_metric("changed_with_array_aliases", cnt_arrays_with_aliases.load());
   mgr.set_metric("values_without_code", cnt_values_without_code.load());
   mgr.set_metric("values_without_return", cnt_values_without_return.load());
+  mgr.set_metric("failed.values_not_new_array",
+                 cnt_values_not_new_array.load());
+  mgr.set_metric("failed.no_values_store", cnt_no_values_store.load());
+  mgr.set_metric("failed.no_movable_elements", cnt_no_movable_elements.load());
+  mgr.set_metric("failed.unsupported_shape", cnt_unsupported_shape.load());
   mgr.set_metric("changed", cnt_changed.load());
   mgr.set_metric("failed", cnt_failed.load());
   mgr.set_metric("no_clinit", cnt_no_clinit.load());

@@ -7,6 +7,7 @@
 
 #include "gtest/gtest.h"
 #include <memory>
+#include <string_view>
 
 #include "IRCode.h"
 #include "RearrangeEnumClinit.h"
@@ -71,10 +72,11 @@ class RearrangeEnumClinitTest : public RedexTest {
 
   MethodResult run(IRCode* code,
                    bool with_int = false,
-                   MethodStats* method_stats = nullptr) {
+                   MethodStats* method_stats = nullptr,
+                   FailureReason* failure_reason = nullptr) {
     cfg::ScopedCFG cfg(code);
     return RearrangeEnumClinitPass::run(with_int ? clinit_int : clinit, code,
-                                        method_stats);
+                                        method_stats, failure_reason);
   }
 
   static std::string mixed_array_initializer(const std::string& extra = "",
@@ -616,6 +618,20 @@ TEST_F(RearrangeEnumClinitTest, ThrowOnlyValuesWithoutReturnIsNotAnalyzed) {
   EXPECT_EQ(normalize(source), assembler::to_string(code.get()));
   EXPECT_EQ(stats.values_without_code, 0);
   EXPECT_EQ(stats.values_without_return, 1);
+}
+
+TEST_F(RearrangeEnumClinitTest, HelperProducerIsNotAnArray) {
+  const auto* const src = R"((
+    (invoke-static () "LTest;.$values:()[LTest;")
+    (move-result-object v0)
+    (sput-object v0 "LTest;.$VALUES:[LTest;")
+    (return-void)
+  ))";
+  auto code = assembler::ircode_from_string(src);
+  FailureReason reason;
+  EXPECT_EQ(run(code.get(), false, nullptr, &reason), MethodResult::kFailed);
+  EXPECT_EQ(reason, FailureReason::ValuesNotNewArray);
+  EXPECT_EQ(normalize(src), assembler::to_string(code.get()));
 }
 
 TEST_F(RearrangeEnumClinitTest, MixedFieldReadsUseMovedArray) {

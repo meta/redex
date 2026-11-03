@@ -33,15 +33,22 @@
 namespace rearrange_enum_clinit {
 namespace {
 
+// Rearranges one enum <clinit>. RearrangeEnumClinitPass::run creates a
+// Rearranger only for a <clinit> that is a single block without a back edge,
+// so `b` is the whole method body, instruction order is execution order, and
+// each instruction runs at most once. The checks below rely on that.
 struct Rearranger {
   DexMethod* m;
   cfg::ControlFlowGraph& cfg;
-  cfg::Block* b;
+  cfg::Block* b; // The entry block, which is the whole method.
 
   live_range::MoveAwareChains mac;
   live_range::DefUseChains def_use;
   live_range::UseDefChains use_def;
 
+  // Maps each instruction in `b` to its entry. Only MFLOW_OPCODE entries are
+  // included, so a looked-up iterator always holds an instruction. Built once
+  // at construction; inserted instructions are not added.
   UnorderedMap<const IRInstruction*, IRList::iterator> insn_map;
 
   IRInstruction* array_sput{nullptr};
@@ -281,6 +288,7 @@ struct Rearranger {
   IRInstruction* array_size_definition{nullptr};
   std::vector<StorePlan> stores;
   const live_range::Uses* array_uses{nullptr};
+  UnorderedSet<const IRInstruction*> post_publication_uses;
   FailureReason failure_reason{FailureReason::NoMovableElements};
 
   IRInstruction* find_singleton_def(IRInstruction* use_insn,
@@ -359,13 +367,33 @@ struct Rearranger {
       return false;
     }
     array_uses = &uses->second;
+    // Every store precedes the publication of the array in both the original
+    // and the rearranged initializer, and `b` has no back edge, so an
+    // instruction after the publication runs after it and observes the
+    // completed array either way. A store after the publication is not such a
+    // use; the store checks reject it.
+    const auto publication = insn_map.at(array_sput);
+    UnorderedSet<const IRInstruction*> after_publication;
+    for (auto it = std::next(publication); it != b->end(); ++it) {
+      // The block also holds positions and source blocks.
+      if (it->type == MFLOW_OPCODE) {
+        after_publication.insert(it->insn);
+      }
+    }
     method_stats.unsupported_uses = static_cast<size_t>(
         unordered_count_if(uses->second, [&](const live_range::Use& use) {
           if (use.insn == array_sput ||
               use.insn->opcode() == OPCODE_MOVE_OBJECT) {
             return use.src_index != 0;
           }
-          return use.insn->opcode() != OPCODE_APUT_OBJECT || use.src_index != 1;
+          if (use.insn->opcode() == OPCODE_APUT_OBJECT && use.src_index == 1) {
+            return false;
+          }
+          if (after_publication.find(use.insn) != after_publication.end()) {
+            post_publication_uses.insert(use.insn);
+            return false;
+          }
+          return true;
         }));
     // Observers can see partial contents; changing their register is not
     // enough.
@@ -418,6 +446,10 @@ struct Rearranger {
       if (find_singleton_def(use.insn, use.src_index) != array) {
         failure_reason = FailureReason::AmbiguousArray;
         return false;
+      }
+      if (post_publication_uses.find(use.insn) != post_publication_uses.end() &&
+          (use.insn->opcode() != OPCODE_APUT_OBJECT || use.src_index != 1)) {
+        continue;
       }
       selected_stores.insert(use.insn);
     }
@@ -508,6 +540,7 @@ struct Rearranger {
             static_cast<size_t>(unordered_count_if(uses, [](const auto& use) {
               return use.insn->opcode() == OPCODE_MOVE_OBJECT;
             }));
+        method_stats.post_publication_uses = post_publication_uses.size();
         // Move array to front, use a new register.
         alloc_reg = move_new_array_to_front();
         for (const auto& use : UnorderedIterable(uses)) {
@@ -680,6 +713,8 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
   AtomicStatCounter<size_t> cnt_arrays_with_retained_field_stores{0};
   AtomicStatCounter<size_t> cnt_array_aliases{0};
   AtomicStatCounter<size_t> cnt_arrays_with_aliases{0};
+  AtomicStatCounter<size_t> cnt_post_publication_uses{0};
+  AtomicStatCounter<size_t> cnt_arrays_with_post_publication_uses{0};
   AtomicStatCounter<size_t> cnt_values_not_new_array{0};
   AtomicStatCounter<size_t> cnt_no_values_store{0};
   AtomicStatCounter<size_t> cnt_no_movable_elements{0};
@@ -730,6 +765,10 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
     }
     if (method_stats.aliases != 0) {
       ++cnt_arrays_with_aliases;
+    }
+    cnt_post_publication_uses += method_stats.post_publication_uses;
+    if (method_stats.post_publication_uses != 0) {
+      ++cnt_arrays_with_post_publication_uses;
     }
     cnt_values_without_code += method_stats.values_without_code;
     cnt_values_without_return += method_stats.values_without_return;
@@ -795,6 +834,10 @@ void RearrangeEnumClinitPass::run_pass(DexStoresVector& stores,
                  cnt_arrays_with_retained_field_stores.load());
   mgr.set_metric("retargeted_array_aliases", cnt_array_aliases.load());
   mgr.set_metric("changed_with_array_aliases", cnt_arrays_with_aliases.load());
+  mgr.set_metric("retargeted_post_publication_uses",
+                 cnt_post_publication_uses.load());
+  mgr.set_metric("changed_with_post_publication_uses",
+                 cnt_arrays_with_post_publication_uses.load());
   mgr.set_metric("values_without_code", cnt_values_without_code.load());
   mgr.set_metric("values_without_return", cnt_values_without_return.load());
   mgr.set_metric("failed.values_not_new_array",

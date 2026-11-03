@@ -24,6 +24,7 @@ struct MethodStats {
   size_t failed_preflight{0};
   size_t retained_field_stores{0};
   size_t aliases{0};
+  size_t post_publication_uses{0};
 };
 
 enum class FailureReason {

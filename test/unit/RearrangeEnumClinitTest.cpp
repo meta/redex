@@ -1100,6 +1100,80 @@ TEST_F(RearrangeEnumClinitTest, RejectUnsupportedArrayUsesBeforeMutation) {
   }
 }
 
+TEST_F(RearrangeEnumClinitTest, RetargetUsesAfterPublication) {
+  auto source = mixed_array_initializer();
+  const std::string tail = "(return-void)";
+  const auto at = source.rfind(tail);
+  ASSERT_NE(at, std::string::npos);
+  source.replace(at, tail.size(), R"(
+    (check-cast v3 "[Ljava/lang/Enum;")
+    (move-result-pseudo-object v4)
+    (invoke-static (v4) "Lkotlin/enums/EnumEntriesKt;.enumEntries:([Ljava/lang/Enum;)Lkotlin/enums/EnumEntries;")
+    (move-result-object v4)
+    (sput-object v4 "LTest;.$ENTRIES:Lkotlin/enums/EnumEntries;")
+    (invoke-static (v3) "LObserver;.see:([LTest;)V")
+    (return-void)
+  )");
+  auto code = assembler::ircode_from_string(source);
+  MethodStats stats;
+  ASSERT_EQ(run(code.get(), false, &stats), MethodResult::kChanged);
+  EXPECT_EQ(stats.unsupported_uses, 0);
+  EXPECT_EQ(stats.post_publication_uses, 2);
+  cfg::ScopedCFG cfg(code.get());
+  std::optional<reg_t> array;
+  size_t observers = 0;
+  for (auto& mie : cfg::InstructionIterable(*cfg)) {
+    if (mie.insn->opcode() == OPCODE_NEW_ARRAY) {
+      array = cfg->move_result_of(cfg->find_insn(mie.insn))->insn->dest();
+    } else if (mie.insn->opcode() == OPCODE_CHECK_CAST ||
+               (mie.insn->opcode() == OPCODE_INVOKE_STATIC &&
+                mie.insn->get_method()->get_name()->str() == "see")) {
+      ASSERT_TRUE(array);
+      EXPECT_EQ(mie.insn->src(0), *array);
+      ++observers;
+    }
+  }
+  EXPECT_EQ(observers, 2);
+}
+
+TEST_F(RearrangeEnumClinitTest, RejectUseBeforePublication) {
+  auto source = mixed_array_initializer();
+  const std::string publication =
+      R"((sput-object v3 "LTest;.$VALUES:[LTest;"))";
+  const auto at = source.find(publication);
+  ASSERT_NE(at, std::string::npos);
+  source.insert(at, R"((invoke-static (v3) "LObserver;.see:([LTest;)V") )");
+  auto code = assembler::ircode_from_string(source);
+  MethodStats stats;
+  EXPECT_EQ(run(code.get(), false, &stats), MethodResult::kFailed);
+  EXPECT_EQ(normalize(source), assembler::to_string(code.get()));
+  EXPECT_EQ(stats.unsupported_uses, 1);
+  EXPECT_EQ(stats.post_publication_uses, 0);
+}
+
+TEST_F(RearrangeEnumClinitTest, RejectStoreIntoArrayAfterPublication) {
+  const auto* source = R"((
+    (const v2 0)
+    (const-string ALPHA)
+    (move-result-pseudo-object v1)
+    (new-instance "LTest;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+    (const v3 1)
+    (new-array v3 "[LTest;")
+    (move-result-pseudo-object v3)
+    (aput-object v0 v3 v2)
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (aput-object v3 v3 v2)
+    (return-void)
+  ))";
+  auto code = assembler::ircode_from_string(source);
+  FailureReason reason;
+  EXPECT_EQ(run(code.get(), false, nullptr, &reason), MethodResult::kFailed);
+  EXPECT_EQ(reason, FailureReason::InitializationAfterPublication);
+  EXPECT_EQ(normalize(source), assembler::to_string(code.get()));
+}
+
 TEST_F(RearrangeEnumClinitTest, RetargetChainedArrayAliases) {
   auto code = assembler::ircode_from_string(mixed_array_initializer(R"(
     (move-object v4 v3)

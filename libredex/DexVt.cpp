@@ -16,6 +16,7 @@
 #include <unordered_map>
 
 #include <boost/io/quoted.hpp>
+#include <boost/locale/encoding_utf.hpp>
 #include <json/value.h>
 #include <json/writer.h>
 #include <memory>
@@ -33,6 +34,7 @@
 #include "Debug.h"
 #include "DeterministicContainers.h"
 #include "DexClass.h"
+#include "DexEncoding.h"
 #include "DexOutput.h"
 #include "DexPosition.h"
 #include "DexUtil.h"
@@ -52,6 +54,25 @@
 namespace dexvt {
 
 namespace {
+// Descriptors are interned MUTF-8, while JsonCpp accepts UTF-8. Decode before
+// serialization so supplementary identifiers retain their catalog join key.
+std::string json_descriptor(const std::string& value) {
+  std::string result;
+  const char* ptr = value.c_str();
+  while (*ptr != '\0') {
+    char32_t cp = mutf8_next_code_point(ptr);
+    if (cp >= 0xd800 && cp <= 0xdbff) {
+      always_assert_log(*ptr != '\0', "Unpaired surrogate in descriptor");
+      const auto low = mutf8_next_code_point(ptr);
+      always_assert_log(low >= 0xdc00 && low <= 0xdfff,
+                        "Invalid surrogate in descriptor");
+      cp = 0x10000 + ((cp - 0xd800) << 10) + low - 0xdc00;
+    }
+    result += boost::locale::conv::utf_to_utf<char>(&cp, &cp + 1);
+  }
+  return result;
+}
+
 // The deobfuscated method name is fully-qualified ("Lclass;.name:proto"); strip
 // the class prefix so the record's `method` field holds just "name:proto"
 // (class is a separate field; the full canonical id is `obfuscated_name`).
@@ -122,7 +143,7 @@ std::string render_disasm(const cfg::ControlFlowGraph& cfg) {
           }
           ss << '\n';
         } else {
-          ss << "  " << show(insn) << '\n';
+          ss << "  " << json_descriptor(show(insn)) << '\n';
         }
       }
     }
@@ -718,13 +739,14 @@ void Exporter::emit(ConfigFiles& conf,
     const MethodRecord& rec = m_records.at_unsafe(method);
     Json::Value r;
     r["id"] = static_cast<Json::UInt>(rec.id);
-    r["obfuscated_name"] = show(method); // canonical cross-artifact join key
-    r["method"] =
-        bare_method(method->get_deobfuscated_name_or_empty_copy()); // display
+    r["obfuscated_name"] =
+        json_descriptor(show(method)); // canonical cross-artifact join key
+    r["method"] = json_descriptor(
+        bare_method(method->get_deobfuscated_name_or_empty_copy())); // display
     if (auto* cls = type_class(method->get_class()); cls != nullptr) {
-      r["class"] = cls->get_deobfuscated_name_or_empty_copy();
+      r["class"] = json_descriptor(cls->get_deobfuscated_name_or_empty_copy());
     } else {
-      r["class"] = show(method->get_class());
+      r["class"] = json_descriptor(show(method->get_class()));
     }
     r["access"] = static_cast<Json::UInt>(method->get_access());
     r["kind"] = "method";
@@ -862,13 +884,14 @@ void Exporter::emit(ConfigFiles& conf,
     Json::Value r;
     r["id"] = static_cast<Json::UInt>(fr.id);
     r["kind"] = "field";
-    r["obfuscated_name"] = show(fr.field);
+    r["obfuscated_name"] = json_descriptor(show(fr.field));
     if (auto* cls = type_class(fr.field->get_class()); cls != nullptr) {
-      r["class"] = cls->get_deobfuscated_name_or_empty_copy();
+      r["class"] = json_descriptor(cls->get_deobfuscated_name_or_empty_copy());
     } else {
-      r["class"] = show(fr.field->get_class());
+      r["class"] = json_descriptor(show(fr.field->get_class()));
     }
-    r["field"] = bare_method(fr.field->get_deobfuscated_name_or_empty());
+    r["field"] = json_descriptor(
+        bare_method(fr.field->get_deobfuscated_name_or_empty()));
     r["access"] = static_cast<Json::UInt>(fr.field->get_access());
     if (!fr.dex.empty()) {
       r["dex"] = fr.dex;
@@ -887,14 +910,14 @@ void Exporter::emit(ConfigFiles& conf,
   for (const ClassRecord& cr : m_classes) {
     Json::Value r;
     r["kind"] = "class";
-    r["class"] = cr.name;
+    r["class"] = json_descriptor(cr.name);
     if (!cr.super.empty()) {
-      r["super"] = cr.super;
+      r["super"] = json_descriptor(cr.super);
     }
     if (!cr.interfaces.empty()) {
       Json::Value intfs(Json::arrayValue);
       for (const auto& i : cr.interfaces) {
-        intfs.append(i);
+        intfs.append(json_descriptor(i));
       }
       r["interfaces"] = intfs;
     }

@@ -1160,3 +1160,70 @@ TEST_F(DexVtTest, ordersLoopsByDepthNotHeaderId) {
       << "fixture must put the inner header first\n"
       << rec->disasm;
 }
+
+namespace {
+
+// Dex strings are MUTF-8: U+1F600 and U+1F601 are surrogate pairs there,
+// four-byte sequences in UTF-8.
+const std::string kMutfA = "\xed\xa0\xbd\xed\xb8\x80";
+const std::string kMutfB = "\xed\xa0\xbd\xed\xb8\x81";
+const std::string kUtfA = "\xf0\x9f\x98\x80";
+const std::string kUtfB = "\xf0\x9f\x98\x81";
+
+// Emits a class whose method kMutfA calls kMutfB inside a try block caught by
+// type L<kMutfA>;, and returns the exported method records.
+std::vector<Json::Value> emit_unicode_methods(bool facts) {
+  ClassCreator cc(DexType::make_type("LUnicode;"));
+  cc.set_super(type::java_lang_Object());
+  cc.add_method(assembler::method_from_string(
+      "(method (public static) \"LUnicode;." + kMutfA +
+      ":()V\" ("
+      "(.try_start a) (invoke-static () \"LUnicode;." +
+      kMutfB +
+      ":()V\")"
+      "(.try_end a) (return-void) (.catch (a) \"L" +
+      kMutfA +
+      ";\")"
+      "(move-exception v0) (throw v0)))"));
+  cc.add_method(
+      assembler::method_from_string("(method (public static) \"LUnicode;." +
+                                    kMutfB + ":()V\" ((return-void)))"));
+  auto* cls = cc.create();
+  auto stores = make_stores(cls);
+  Json::Value config;
+  config["emit_dexvt_facts"] = facts;
+  ConfigFiles conf(config);
+  auto tmp = redex::make_tmp_dir("dexvt_unicode%%%%%%%%");
+  conf.set_outdir(tmp.path);
+  dexvt::Exporter exporter;
+  exporter.capture_pre_lowering(stores, conf);
+  enhanced_dex_stats_t sizes;
+  exporter.emit(conf, sizes);
+  std::ifstream input(conf.metafile("redex-dexvt.ndjson"));
+  std::string line;
+  std::vector<Json::Value> methods;
+  while (std::getline(input, line)) {
+    Json::Value r;
+    EXPECT_TRUE(Json::Reader().parse(line, r));
+    if (r["kind"].asString() == "method") {
+      methods.push_back(r);
+    }
+  }
+  return methods;
+}
+
+} // namespace
+
+TEST_F(DexVtTest, unicodeNamesAreUtf8InTheExport) {
+  std::set<std::string> names;
+  bool call_found = false;
+  for (const auto& r : emit_unicode_methods(/* facts */ false)) {
+    names.insert(r["obfuscated_name"].asString());
+    call_found |= r["disasm"].asString().find("LUnicode;." + kUtfB + ":()V") !=
+                  std::string::npos;
+    EXPECT_FALSE(r.isMember("facts"));
+  }
+  EXPECT_EQ(names, (std::set<std::string>{"LUnicode;." + kUtfA + ":()V",
+                                          "LUnicode;." + kUtfB + ":()V"}));
+  EXPECT_TRUE(call_found);
+}

@@ -15,6 +15,8 @@
 #include "MethodOverrideGraph.h"
 #include "MethodUtil.h"
 #include "RedexTest.h"
+#include "Show.h"
+#include "Walkers.h"
 
 struct CallGraphTest : public RedexIntegrationTest {
  protected:
@@ -277,4 +279,29 @@ TEST_F(CallGraphTest, test_multiple_callee_graph_invoke_super) {
                              more_than_5_class_extends_1_return_super_num);
   EXPECT_THAT(callees,
               ::testing::UnorderedElementsAre(more_than_5_class_return_num));
+}
+
+TEST_F(CallGraphTest, test_complete_callers_inherit_virtual_callers) {
+  call_graph::CompleteCallers complete_callers(*method_override_graph, scope);
+  // callsReturnsInt invokes Base.returnsInt virtually, so it may run every
+  // override.
+  auto callers = complete_callers.get_callers(extendedextended_returns_int);
+  EXPECT_THAT(unordered_to_ordered(callers, compare_dexmethods),
+              ::testing::Contains(calls_returns_int));
+}
+
+TEST_F(CallGraphTest, test_complete_callers_match_complete_call_graph) {
+  call_graph::CompleteCallers complete_callers(*method_override_graph, scope);
+  size_t methods_with_callers = 0;
+  walk::methods(scope, [&](DexMethod* method) {
+    const auto& graph_callers = complete_graph->get_callers(method);
+    auto expected = unordered_to_ordered(graph_callers, compare_dexmethods);
+    auto callers = complete_callers.get_callers(method);
+    auto actual = unordered_to_ordered(callers, compare_dexmethods);
+    EXPECT_EQ(expected, actual) << show(method);
+    if (!expected.empty()) {
+      ++methods_with_callers;
+    }
+  });
+  EXPECT_GT(methods_with_callers, 0);
 }

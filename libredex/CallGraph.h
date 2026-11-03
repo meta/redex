@@ -311,6 +311,52 @@ class CompleteCallGraphStrategy : public MultipleCalleeBaseStrategy {
                                      const Scope& scope);
   CallSites get_callsites(const DexMethod* method) const override;
   RootAndDynamic get_roots() const override;
+
+  // A callee of one resolved invoke of a method: the resolved method itself,
+  // or, when `overriding` is set, each of its overriding methods with code or
+  // native.
+  struct InvokeTarget {
+    IRInstruction* invoke_insn;
+    const DexMethod* callee;
+    bool overriding;
+  };
+  // The targets of the invokes of `method` whose callee resolves, in
+  // instruction order. get_callsites() is these with each `overriding` target
+  // replaced by its overriding methods with code or native.
+  std::vector<InvokeTarget> get_invoke_targets(const DexMethod* method) const;
+
+  using MultipleCalleeBaseStrategy::
+      get_ordered_overriding_methods_with_code_or_native;
+};
+
+/*
+ * The callers complete_call_graph() records for each method, without building
+ * that graph. The graph gives an invoke-virtual or invoke-interface one edge
+ * per overriding method with code and records each invoke's callees, so N call
+ * sites of an interface method with M implementations cost N * M edges and N
+ * sets of M callees. This keeps, for each method reachable from the graph's
+ * roots, only its resolved callees, and assembles one method's callers when
+ * asked: its direct callers plus the callers of each virtually invoked method
+ * it overrides.
+ */
+class CompleteCallers final {
+ public:
+  CompleteCallers(const method_override_graph::Graph&, const Scope&);
+
+  // The same set as complete_call_graph(...).get_callers(callee).
+  MethodSet get_callers(const DexMethod* callee) const;
+
+ private:
+  // Resolved callee -> the reachable methods with an invoke resolved to it.
+  ConcurrentMap<const DexMethod*, std::vector<const DexMethod*>>
+      m_direct_callers;
+  // Callee of a virtual or interface invoke -> the reachable methods with such
+  // an invoke. Each of its overriding methods with code or native has them as
+  // callers too.
+  ConcurrentMap<const DexMethod*, std::vector<const DexMethod*>>
+      m_virtual_callers;
+  // Overriding method -> the keys of m_virtual_callers it overrides.
+  ConcurrentMap<const DexMethod*, std::vector<const DexMethod*>> m_overridden;
 };
 
 class MultipleCalleeStrategy : public MultipleCalleeBaseStrategy {

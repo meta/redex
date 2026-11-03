@@ -199,12 +199,12 @@ CompleteCallGraphStrategy::CompleteCallGraphStrategy(
     const mog::Graph& method_override_graph, const Scope& scope)
     : MultipleCalleeBaseStrategy(method_override_graph, scope) {}
 
-CallSites CompleteCallGraphStrategy::get_callsites(
-    const DexMethod* method) const {
-  CallSites callsites;
+std::vector<CompleteCallGraphStrategy::InvokeTarget>
+CompleteCallGraphStrategy::get_invoke_targets(const DexMethod* method) const {
+  std::vector<InvokeTarget> targets;
   const auto* code = method->get_code();
   if (code == nullptr) {
-    return callsites;
+    return targets;
   }
   cfg_adapter::iterate_with_iterator(
       code, [&](const IRList::const_iterator& it) {
@@ -215,20 +215,33 @@ CallSites CompleteCallGraphStrategy::get_callsites(
             return cfg_adapter::LOOP_CONTINUE;
           }
           if ((callee->get_code() != nullptr) || is_native(callee)) {
-            callsites.emplace_back(callee, insn);
+            targets.push_back(InvokeTarget{insn, callee, /*overriding=*/false});
           }
           if (opcode::is_invoke_virtual(insn->opcode()) ||
               opcode::is_invoke_interface(insn->opcode())) {
-            const auto& overriding_methods =
-                get_ordered_overriding_methods_with_code_or_native(callee);
-            for (const auto* overriding_method :
-                 UnorderedIterable(overriding_methods)) {
-              callsites.emplace_back(overriding_method, insn);
-            }
+            targets.push_back(InvokeTarget{insn, callee, /*overriding=*/true});
           }
         }
         return cfg_adapter::LOOP_CONTINUE;
       });
+  return targets;
+}
+
+CallSites CompleteCallGraphStrategy::get_callsites(
+    const DexMethod* method) const {
+  CallSites callsites;
+  for (const auto& target : get_invoke_targets(method)) {
+    if (!target.overriding) {
+      callsites.emplace_back(target.callee, target.invoke_insn);
+      continue;
+    }
+    const auto& overriding_methods =
+        get_ordered_overriding_methods_with_code_or_native(target.callee);
+    for (const auto* overriding_method :
+         UnorderedIterable(overriding_methods)) {
+      callsites.emplace_back(overriding_method, target.invoke_insn);
+    }
+  }
   return callsites;
 }
 
@@ -581,6 +594,80 @@ CallgraphStats get_num_nodes_edges(const Graph& graph) {
   }
   return CallgraphStats(static_cast<uint32_t>(visited_node.size()), num_edge,
                         num_callsites);
+}
+
+CompleteCallers::CompleteCallers(const mog::Graph& method_override_graph,
+                                 const Scope& scope) {
+  Timer t("CompleteCallers");
+  CompleteCallGraphStrategy strat(method_override_graph, scope);
+  auto add_caller = [](auto& callers, const DexMethod* callee,
+                       const DexMethod* caller) {
+    callers.update(callee, [&](auto, auto& v, bool) { v.push_back(caller); });
+  };
+
+  // The methods complete_call_graph() makes nodes of: its roots and, from each
+  // node, every callee of get_callsites(). A node records each callee once as
+  // a caller, however many of its invokes reach that callee.
+  InsertOnlyConcurrentSet<const DexMethod*> reached;
+  auto wq = workqueue_foreach<const DexMethod*>(
+      [&](sparta::WorkerState<const DexMethod*>* worker_state,
+          const DexMethod* caller) {
+        auto reach = [&](const DexMethod* method) {
+          if (reached.insert(method).second) {
+            worker_state->push_task(method);
+          }
+        };
+        UnorderedSet<const DexMethod*> callees;
+        UnorderedSet<const DexMethod*> overridden;
+        for (const auto& target : strat.get_invoke_targets(caller)) {
+          (target.overriding ? overridden : callees).insert(target.callee);
+        }
+        for (const auto* callee : UnorderedIterable(callees)) {
+          reach(callee);
+          add_caller(m_direct_callers, callee, caller);
+        }
+        for (const auto* method : UnorderedIterable(overridden)) {
+          bool first_caller = false;
+          m_virtual_callers.update(method,
+                                   [&](auto, auto& callers, bool exists) {
+                                     first_caller = !exists;
+                                     callers.push_back(caller);
+                                   });
+          for (const auto* overriding_method : UnorderedIterable(
+                   strat.get_ordered_overriding_methods_with_code_or_native(
+                       method))) {
+            reach(overriding_method);
+            if (first_caller) {
+              add_caller(m_overridden, overriding_method, method);
+            }
+          }
+        }
+      },
+      redex_parallel::default_num_threads(),
+      /*push_tasks_while_running=*/true);
+  const auto roots = strat.get_roots().roots;
+  for (const auto* root : UnorderedIterable(roots)) {
+    if (reached.insert(root).second) {
+      wq.add_item(root);
+    }
+  }
+  wq.run_all();
+}
+
+MethodSet CompleteCallers::get_callers(const DexMethod* callee) const {
+  MethodSet callers;
+  auto add_callers = [&](const auto& map, const DexMethod* method) {
+    if (const auto* found = map.get_unsafe(method); found != nullptr) {
+      callers.insert(found->begin(), found->end());
+    }
+  };
+  add_callers(m_direct_callers, callee);
+  if (const auto* found = m_overridden.get_unsafe(callee); found != nullptr) {
+    for (const auto* method : *found) {
+      add_callers(m_virtual_callers, method);
+    }
+  }
+  return callers;
 }
 
 const MethodBag& Graph::get_callers(const DexMethod* callee) const {

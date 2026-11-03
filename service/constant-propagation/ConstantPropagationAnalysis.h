@@ -245,26 +245,38 @@ class LocalArrayAnalyzer final
                                        ConstantEnvironment* env);
 };
 
-/*
- * Handle static fields in <clinit> methods. Since class method_initializers
- * must (in most cases) complete running before any other piece of code can
- * modify these fields, we can treat them as non-escaping while analyzing these
- * methods.
- */
+// State for tracking a class's static fields during its <clinit>.
+struct ClinitFieldAnalyzerState {
+  const DexType* class_under_init;
+  // If this is nullptr, calls invalidate all tracked fields.
+  const UnorderedSet<const DexField*>* clinit_only_fields;
+
+  explicit ClinitFieldAnalyzerState(
+      const DexType* type = nullptr,
+      const UnorderedSet<const DexField*>* fields = nullptr)
+      : class_under_init(type), clinit_only_fields(fields) {}
+};
+
+// Returns the static fields that no code other than their declaring class's
+// <clinit> writes, excluding volatile, external and kept fields. The returned
+// set must outlive any analyzer state that refers to it.
+UnorderedSet<const DexField*> get_clinit_only_written_fields(
+    const Scope& scope);
+
 class ClinitFieldAnalyzer final
     : public InstructionAnalyzerBase<ClinitFieldAnalyzer,
                                      ConstantEnvironment,
-                                     DexType* /* class_under_init */> {
+                                     ClinitFieldAnalyzerState> {
  public:
-  static bool analyze_sget(const DexType* class_under_init,
+  static bool analyze_sget(const ClinitFieldAnalyzerState& state,
                            const IRInstruction* insn,
                            ConstantEnvironment* env);
 
-  static bool analyze_sput(const DexType* class_under_init,
+  static bool analyze_sput(const ClinitFieldAnalyzerState& state,
                            const IRInstruction* insn,
                            ConstantEnvironment* env);
 
-  static bool analyze_invoke(const DexType* class_under_init,
+  static bool analyze_invoke(const ClinitFieldAnalyzerState& state,
                              const IRInstruction* insn,
                              ConstantEnvironment* env);
 };

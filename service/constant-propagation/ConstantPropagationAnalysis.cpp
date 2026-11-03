@@ -37,6 +37,7 @@ std::enable_if_t<std::is_integral<T>::value, int> fpclassify(T x) {
 #include "DexInstruction.h"
 #include "Resolver.h"
 #include "Trace.h"
+#include "Walkers.h"
 
 // Signed integer overflow is undefined behavior in C++20, but the two's
 // complement wrapping matches the required Java semantics. So silence ubsan.
@@ -1050,44 +1051,91 @@ bool InjectionIdAnalyzer::analyze_injection_id(const IRInstruction* insn,
   return true;
 }
 
-bool ClinitFieldAnalyzer::analyze_sget(const DexType* class_under_init,
+UnorderedSet<const DexField*> get_clinit_only_written_fields(
+    const Scope& scope) {
+  InsertOnlyConcurrentSet<const DexField*> written_outside_clinit;
+  walk::parallel::opcodes(scope, [&](DexMethod* method, IRInstruction* insn) {
+    if (!opcode::is_an_sput(insn->opcode())) {
+      return;
+    }
+    auto* field = resolve_field(insn->get_field(), FieldSearch::Static);
+    if (field != nullptr && (!method::is_clinit(method) ||
+                             field->get_class() != method->get_class())) {
+      written_outside_clinit.insert(field);
+    }
+  });
+  UnorderedSet<const DexField*> fields;
+  for (const auto* cls : scope) {
+    for (const auto* field : cls->get_sfields()) {
+      if (!is_volatile(field) && field->rstate.can_delete() &&
+          !field->is_external() && written_outside_clinit.count(field) == 0) {
+        fields.emplace(field);
+      }
+    }
+  }
+  return fields;
+}
+
+bool ClinitFieldAnalyzer::analyze_sget(const ClinitFieldAnalyzerState& state,
                                        const IRInstruction* insn,
                                        ConstantEnvironment* env) {
   auto* field = resolve_field(insn->get_field());
   if (field == nullptr) {
     return false;
   }
-  if (field->get_class() == class_under_init) {
+  if (field->get_class() == state.class_under_init) {
     env->set(RESULT_REGISTER, env->get(field));
     return true;
   }
   return false;
 }
 
-bool ClinitFieldAnalyzer::analyze_sput(const DexType* class_under_init,
+bool ClinitFieldAnalyzer::analyze_sput(const ClinitFieldAnalyzerState& state,
                                        const IRInstruction* insn,
                                        ConstantEnvironment* env) {
   auto* field = resolve_field(insn->get_field());
   if (field == nullptr) {
     return false;
   }
-  if (field->get_class() == class_under_init) {
+  if (field->get_class() == state.class_under_init) {
     env->set(field, env->get(insn->src(0)));
     return true;
   }
   return false;
 }
 
-bool ClinitFieldAnalyzer::analyze_invoke(const DexType* class_under_init,
+bool ClinitFieldAnalyzer::analyze_invoke(const ClinitFieldAnalyzerState& state,
                                          const IRInstruction* insn,
                                          ConstantEnvironment* env) {
-  // If the class initializer invokes a static method on its own class, that
-  // static method can modify the class' static fields. We would have to
-  // inspect the static method to find out. Here we take the conservative
-  // approach of marking all static fields as unknown after the invoke.
-  if (insn->opcode() == OPCODE_INVOKE_STATIC &&
-      class_under_init == insn->get_method()->get_class()) {
+  if (state.class_under_init == nullptr) {
+    return false;
+  }
+  if (insn->opcode() == OPCODE_INVOKE_CUSTOM ||
+      insn->opcode() == OPCODE_INVOKE_POLYMORPHIC) {
+    // The target of a dynamic invoke cannot be resolved here.
     env->clear_field_environment();
+    return false;
+  }
+  // As in StaticFieldReadAnalysis, external and unresolved cross-class
+  // calls are assumed not to modify the tracked fields.
+  if (state.class_under_init != insn->get_method()->get_class()) {
+    auto* callee = resolve_method(insn->get_method(), opcode_to_search(insn));
+    if (callee == nullptr || callee->is_external()) {
+      return false;
+    }
+  }
+  if (state.clinit_only_fields == nullptr) {
+    env->clear_field_environment();
+  } else {
+    env->mutate_field_environment([&](FieldEnvironment* fields) {
+      auto retained = *fields;
+      fields->visit([&](const auto& binding) {
+        if (state.clinit_only_fields->count(binding.first) == 0) {
+          retained.set(binding.first, ConstantValue::top());
+        }
+      });
+      *fields = std::move(retained);
+    });
   }
   return false;
 }

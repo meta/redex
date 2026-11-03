@@ -68,6 +68,7 @@ using CombinedAnalyzer =
 namespace {
 
 class AnalyzerGenerator {
+  UnorderedSet<const DexField*> m_clinit_only_fields;
   ImmutableAttributeAnalyzerState* m_immut_analyzer_state;
   ApiLevelAnalyzerState* m_api_level_analyzer_state;
   BoxedBooleanAnalyzerState m_boxed_boolean_analyzer_state{};
@@ -78,12 +79,14 @@ class AnalyzerGenerator {
 
  public:
   explicit AnalyzerGenerator(
+      const Scope& scope,
       ImmutableAttributeAnalyzerState* immut_analyzer_state,
       ApiLevelAnalyzerState* api_level_analyzer_state,
       StringAnalyzerState* string_analyzer_state,
       PackageNameState* package_name_state,
       const NullCheckMethods& null_check_methods)
-      : m_immut_analyzer_state(immut_analyzer_state),
+      : m_clinit_only_fields(get_clinit_only_written_fields(scope)),
+        m_immut_analyzer_state(immut_analyzer_state),
         m_api_level_analyzer_state(api_level_analyzer_state),
         m_string_analyzer_state(string_analyzer_state),
         m_package_name_state(package_name_state),
@@ -117,7 +120,8 @@ class AnalyzerGenerator {
     return std::make_unique<IntraproceduralAnalysis>(
         &m_null_check_methods, std::move(wps_accessor), code.cfg(),
         CombinedAnalyzer(
-            class_under_init, m_immut_analyzer_state, wps_accessor_ptr,
+            ClinitFieldAnalyzerState(class_under_init, &m_clinit_only_fields),
+            m_immut_analyzer_state, wps_accessor_ptr,
             m_enum_field_analyzer_state, m_boxed_boolean_analyzer_state,
             m_string_analyzer_state, nullptr, *m_api_level_analyzer_state,
             m_package_name_state, m_immut_analyzer_state, nullptr, nullptr),
@@ -166,7 +170,7 @@ std::unique_ptr<FixpointIterator> PassImpl::analyze(
   m_stats.callgraph_callsites = cg_stats.num_callsites;
   auto fp_iter = std::make_unique<FixpointIterator>(
       cg,
-      AnalyzerGenerator(immut_analyzer_state, api_level_analyzer_state,
+      AnalyzerGenerator(scope, immut_analyzer_state, api_level_analyzer_state,
                         string_analyzer_state, package_name_state,
                         null_check_methods),
       cg_for_wps);

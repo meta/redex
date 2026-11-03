@@ -319,6 +319,7 @@ cp::WholeProgramState analyze_and_simplify_clinits(
     size_t* deleted_methods) {
   const UnorderedSet<DexMethodRef*> pure_methods = get_pure_methods();
   cp::WholeProgramState wps(blocklist_types);
+  const auto clinit_only_fields = cp::get_clinit_only_written_fields(scope);
 
   auto method_override_graph = method_override_graph::build_graph(scope);
   auto graph =
@@ -343,8 +344,9 @@ cp::WholeProgramState analyze_and_simplify_clinits(
         constant_propagation::WholeProgramStateAccessor wps_accessor(wps);
         cp::intraprocedural::FixpointIterator intra_cp(
             cfg,
-            CombinedAnalyzer(cls->get_type(), &wps_accessor, nullptr, nullptr,
-                             nullptr, nullptr),
+            CombinedAnalyzer(cp::ClinitFieldAnalyzerState(cls->get_type(),
+                                                          &clinit_only_fields),
+                             &wps_accessor, nullptr, nullptr, nullptr, nullptr),
             cp::intraprocedural::make_default_no_throw_analyzer(
                 &null_check_methods));
         intra_cp.run(env);

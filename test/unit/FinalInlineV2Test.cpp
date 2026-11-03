@@ -78,6 +78,62 @@ TEST_F(FinalInlineTest, encodeValues) {
   EXPECT_EQ(field->get_static_value()->value(), 1);
 }
 
+TEST_F(FinalInlineTest, constructorUpdatesStaticFieldInClinit) {
+  create_field_with_zero_value("LFoo;.sNextId:I", m_cc.get(),
+                               ACC_PRIVATE | ACC_STATIC);
+  create_field_with_zero_value("LFoo;.DEFAULT:LFoo;", m_cc.get(),
+                               ACC_PUBLIC | ACC_STATIC | ACC_FINAL);
+  create_field_with_zero_value("LFoo;.NUM_TYPES:I", m_cc.get(),
+                               ACC_PUBLIC | ACC_STATIC | ACC_FINAL);
+  auto* clinit = assembler::method_from_string(R"(
+    (method (public static constructor) "LFoo;.<clinit>:()V"
+      (
+        (new-instance "LFoo;")
+        (move-result-pseudo-object v0)
+        (invoke-direct (v0) "LFoo;.<init>:()V")
+        (sput-object v0 "LFoo;.DEFAULT:LFoo;")
+        (sget "LFoo;.sNextId:I")
+        (move-result-pseudo v1)
+        (sput v1 "LFoo;.NUM_TYPES:I")
+        (return-void)
+      )
+    )
+  )");
+  m_cc->add_method(clinit);
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+      (
+        (load-param-object v0)
+        (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+        (sget "LFoo;.sNextId:I")
+        (move-result-pseudo v1)
+        (add-int/lit v1 v1 1)
+        (sput v1 "LFoo;.sNextId:I")
+        (return-void)
+      )
+    )
+  )"));
+  auto* num_types = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.numTypes:()I"
+      (
+        (sget "LFoo;.NUM_TYPES:I")
+        (move-result-pseudo v0)
+        (return v0)
+      )
+    )
+  )");
+  m_cc->add_method(num_types);
+  auto* cls = m_cc->create();
+  const auto original_clinit = assembler::to_s_expr(clinit->get_code());
+  const auto original_reader = assembler::to_s_expr(num_types->get_code());
+
+  run({cls}, /* xstores */ nullptr);
+
+  ASSERT_EQ(cls->get_clinit(), clinit);
+  EXPECT_EQ(assembler::to_s_expr(clinit->get_code()), original_clinit);
+  EXPECT_EQ(assembler::to_s_expr(num_types->get_code()), original_reader);
+}
+
 TEST_F(FinalInlineTest, encodeTypeValues) {
   ClassCreator cc2(DexType::make_type("LBar;"));
   cc2.set_super(type::java_lang_Object());

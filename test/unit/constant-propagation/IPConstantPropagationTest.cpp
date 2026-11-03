@@ -66,6 +66,73 @@ static DexStoresVector make_simple_stores(const Scope& scope) {
   return DexStoresVector({store});
 }
 
+TEST_F(InterproceduralConstantPropagationTest,
+       constructorUpdatesStaticFieldInClinit) {
+  ClassCreator creator(DexType::make_type("LFoo;"));
+  creator.set_super(type::java_lang_Object());
+  creator.add_field(DexField::make_field("LFoo;.sNextId:I")
+                        ->make_concrete(ACC_PRIVATE | ACC_STATIC));
+  creator.add_field(DexField::make_field("LFoo;.DEFAULT:LFoo;")
+                        ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL));
+  creator.add_field(DexField::make_field("LFoo;.NUM_TYPES:I")
+                        ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL));
+  auto* clinit = assembler::method_from_string(R"(
+    (method (public static constructor) "LFoo;.<clinit>:()V"
+      (
+        (new-instance "LFoo;")
+        (move-result-pseudo-object v0)
+        (invoke-direct (v0) "LFoo;.<init>:()V")
+        (sput-object v0 "LFoo;.DEFAULT:LFoo;")
+        (sget "LFoo;.sNextId:I")
+        (move-result-pseudo v1)
+        (sput v1 "LFoo;.NUM_TYPES:I")
+        (return-void)
+      )
+    )
+  )");
+  clinit->rstate.set_root();
+  creator.add_method(clinit);
+  creator.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+      (
+        (load-param-object v0)
+        (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+        (sget "LFoo;.sNextId:I")
+        (move-result-pseudo v1)
+        (add-int/lit v1 v1 1)
+        (sput v1 "LFoo;.sNextId:I")
+        (return-void)
+      )
+    )
+  )"));
+  auto* num_types = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.numTypes:()I"
+      (
+        (sget "LFoo;.NUM_TYPES:I")
+        (move-result-pseudo v0)
+        (return v0)
+      )
+    )
+  )");
+  num_types->rstate.set_root();
+  creator.add_method(num_types);
+  Scope scope{creator.create()};
+  const auto original_clinit = assembler::to_s_expr(clinit->get_code());
+  const auto original_reader = assembler::to_s_expr(num_types->get_code());
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+  PassImpl::Config config;
+  config.max_heap_analysis_iterations = 3;
+  config.include_virtuals = true;
+  config.use_multiple_callee_callgraph = true;
+
+  PassImpl(config).run(make_simple_stores(scope), conf);
+
+  clinit->get_code()->clear_cfg();
+  num_types->get_code()->clear_cfg();
+  EXPECT_EQ(assembler::to_s_expr(clinit->get_code()), original_clinit);
+  EXPECT_EQ(assembler::to_s_expr(num_types->get_code()), original_reader);
+}
+
 TEST_F(InterproceduralConstantPropagationTest, constantArgument) {
   // Let bar() be the only method calling baz(I)V, passing it a constant
   // argument. baz() should be optimized for that constant argument.

@@ -274,7 +274,8 @@ FieldArrayValues RClassReader::analyze_clinit(
   cfg.calculate_exit_block();
 
   cp::intraprocedural::FixpointIterator intra_cp(
-      cfg, ArrayAnalyzer(cls->get_type(), nullptr, nullptr, nullptr));
+      cfg, ArrayAnalyzer(cp::ClinitFieldAnalyzerState(cls->get_type()), nullptr,
+                         nullptr, nullptr));
   intra_cp.run(ConstantEnvironment());
 
   Lazy<live_range::UseDefChains> udchain(

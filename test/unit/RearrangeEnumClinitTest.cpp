@@ -1097,6 +1097,53 @@ TEST_F(RearrangeEnumClinitTest, RetargetChainedArrayAliases) {
   }
 }
 
+TEST_F(RearrangeEnumClinitTest, RepeatedValuePreservesOrderAndSourceBlocks) {
+  auto code = assembler::ircode_from_string(R"((
+    (.src_block "LTest;.<clinit>:()V" 0 (1.0 1.0))
+    (const v2 0)
+    (const v4 1)
+    (const-string ALPHA)
+    (move-result-pseudo-object v1)
+    (new-instance "LTest;")
+    (move-result-pseudo-object v0)
+    (.src_block "LTest;.<clinit>:()V" 1 (1.0 1.0))
+    (invoke-direct (v0 v1 v2) "LTest;.<init>:(Ljava/lang/String;I)V")
+    (.src_block "LTest;.<clinit>:()V" 2 (1.0 1.0))
+    (const v3 2)
+    (new-array v3 "[LTest;")
+    (move-result-pseudo-object v3)
+    (.src_block "LTest;.<clinit>:()V" 3 (1.0 1.0))
+    (aput-object v0 v3 v2)
+    (.src_block "LTest;.<clinit>:()V" 4 (1.0 1.0))
+    (aput-object v0 v3 v4)
+    (sput-object v3 "LTest;.$VALUES:[LTest;")
+    (return-void)
+  ))");
+  ASSERT_EQ(run(code.get()), MethodResult::kChanged);
+  cfg::ScopedCFG cfg(code.get());
+  bool covered = false;
+  std::optional<int64_t> last_const;
+  std::vector<int64_t> indices;
+  for (auto& mie : *cfg->entry_block()) {
+    if (mie.type == MFLOW_SOURCE_BLOCK) {
+      covered = true;
+    } else if (mie.type == MFLOW_OPCODE) {
+      if (mie.insn->opcode() == OPCODE_CONST) {
+        last_const = mie.insn->get_literal();
+      }
+      if (mie.insn->opcode() == OPCODE_APUT_OBJECT) {
+        EXPECT_TRUE(covered);
+        ASSERT_TRUE(last_const);
+        indices.push_back(*last_const);
+      }
+      if (opcode::can_throw(mie.insn->opcode())) {
+        covered = false;
+      }
+    }
+  }
+  EXPECT_EQ(indices, (std::vector<int64_t>{0, 1}));
+}
+
 TEST_F(RearrangeEnumClinitTest, OtherElementUsesRemainValid) {
   auto code = assembler::ircode_from_string(mixed_array_initializer(R"(
     (invoke-static (v0) "LObserver;.seeElement:(LTest;)V")

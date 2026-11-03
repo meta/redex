@@ -443,6 +443,7 @@ struct Rearranger {
     }
     std::optional<reg_t> alloc_reg;
     std::optional<reg_t> extra_reg;
+    UnorderedMap<IRInstruction*, IRList::iterator> last_insertions;
     for (const auto& plan : stores) {
       if (!plan.insertion) {
         continue;
@@ -464,12 +465,21 @@ struct Rearranger {
         extra_reg = cfg.allocate_temp();
       }
       auto [insert_after_it, obj_reg] = *plan.insertion;
-      b->insert_after(b->to_cfg_instruction_iterator(insert_after_it),
-                      {(new IRInstruction(plan.index))->set_dest(*extra_reg),
-                       (new IRInstruction(plan.store))
-                           ->set_src(0, obj_reg)
-                           ->set_src(1, *alloc_reg)
-                           ->set_src(2, *extra_reg)});
+      auto* anchor = insert_after_it->insn;
+      auto previous = last_insertions.find(anchor);
+      if (previous != last_insertions.end()) {
+        insert_after_it = previous->second;
+      }
+      auto* moved_store = (new IRInstruction(plan.store))
+                              ->set_src(0, obj_reg)
+                              ->set_src(1, *alloc_reg)
+                              ->set_src(2, *extra_reg);
+      b->insert_after(
+          b->to_cfg_instruction_iterator(insert_after_it),
+          {(new IRInstruction(plan.index))->set_dest(*extra_reg), moved_store});
+      auto inserted_store =
+          std::next(b->to_cfg_instruction_iterator(insert_after_it), 2)
+              .unwrap();
       // INVOKE_DIRECT is throwable -- insert a source block after it
       // to cover the segment up to APUT_OBJECT.
       auto* sb = source_blocks::find_between(
@@ -478,6 +488,7 @@ struct Rearranger {
         source_blocks::impl::BlockAccessor::insert_source_block_after(
             b, insert_after_it, source_blocks::clone_as_synthetic(sb));
       }
+      last_insertions[anchor] = inserted_store;
       // Remove the old aput.
       b->remove_insn(insn_map.at(&plan.store));
     }

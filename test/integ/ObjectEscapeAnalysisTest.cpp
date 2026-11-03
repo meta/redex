@@ -403,6 +403,107 @@ TEST_F(ObjectEscapeAnalysisTest, optionalLoopyReduceTo42) {
   ASSERT_EQ(actual.str(), assembler::to_s_expr(expected.get()).str());
 }
 
+TEST_F(ObjectEscapeAnalysisTest, loopFieldAliasing) {
+  run();
+  auto actual = get_s_expr(
+      "Lcom/facebook/redextest/"
+      "ObjectEscapeAnalysisTest;.loopFieldAliasing:()I");
+  auto expected = assembler::ircode_from_string(R"((
+    (const v0 0)
+    (const v1 0)
+    (const v2 1)
+    (:L0)
+    (const v3 2)
+    (if-gt v2 v3 :L1)
+    (new-instance "Lcom/facebook/redextest/ObjectEscapeAnalysisTest$LoopFieldObject;")
+    (move-result-pseudo-object v4)
+    (invoke-direct (v4 v2) "Lcom/facebook/redextest/ObjectEscapeAnalysisTest$LoopFieldObject;.<init>:(I)V")
+    (if-ne v2 v3 :L2)
+    (iget v0 "Lcom/facebook/redextest/ObjectEscapeAnalysisTest$LoopFieldObject;.x:I")
+    (move-result-pseudo v1)
+    (:L1)
+    (return v1)
+    (:L2)
+    (move-object v0 v4)
+    (add-int/lit v2 v2 1)
+    (goto :L0)
+  ))");
+  ASSERT_EQ(actual.str(), assembler::to_s_expr(expected.get()).str());
+}
+
+TEST_F(ObjectEscapeAnalysisTest, loopNullTracking) {
+  run();
+  auto actual = get_s_expr(
+      "Lcom/facebook/redextest/"
+      "ObjectEscapeAnalysisTest;.loopNullTracking:()I");
+  auto expected = assembler::ircode_from_string(R"((
+    (const v0 0)
+    (const v1 0)
+    (const v2 1)
+    (:L0)
+    (new-instance "Lcom/facebook/redextest/ObjectEscapeAnalysisTest$LoopNullObject;")
+    (move-result-pseudo-object v3)
+    (invoke-direct (v3 v2) "Lcom/facebook/redextest/ObjectEscapeAnalysisTest$LoopNullObject;.<init>:(I)V")
+    (if-eqz v0 :L1)
+    (iget v0 "Lcom/facebook/redextest/ObjectEscapeAnalysisTest$LoopNullObject;.x:I")
+    (move-result-pseudo v4)
+    (mul-int/lit v4 v4 10)
+    (iget v3 "Lcom/facebook/redextest/ObjectEscapeAnalysisTest$LoopNullObject;.x:I")
+    (move-result-pseudo v5)
+    (add-int v4 v4 v5)
+    (move v1 v4)
+    (:L1)
+    (move-object v0 v3)
+    (add-int/lit v2 v2 1)
+    (const v3 2)
+    (if-gt v2 v3 :L2)
+    (goto :L0)
+    (:L2)
+    (return v1)
+  ))");
+  ASSERT_EQ(actual.str(), assembler::to_s_expr(expected.get()).str());
+}
+
+TEST_F(ObjectEscapeAnalysisTest, independentObjects) {
+  run();
+  auto actual = get_s_expr(
+      "Lcom/facebook/redextest/"
+      "ObjectEscapeAnalysisTest;.independentObjects:(I)I");
+  EXPECT_EQ(actual.str().find("new-instance"), std::string::npos);
+  EXPECT_FALSE(
+      contains_invoke("Lcom/facebook/redextest/"
+                      "ObjectEscapeAnalysisTest;.independentObjects:(I)I"));
+  const auto& metrics = pass_manager->get_pass_info().at(1).metrics;
+  const auto analyses = metrics.at("root_method_stackify_lifetime_analyses");
+  EXPECT_GT(analyses, 0);
+  const auto completed_or_rejected =
+      metrics.at("reduced_methods_variants") +
+      metrics.at("root_method_stackify_overlapping_lifetimes") +
+      metrics.at("root_method_stackify_returns_objects");
+  EXPECT_LE(analyses, completed_or_rejected);
+}
+
+TEST_F(ObjectEscapeAnalysisTest, independentObjectWithMultipleReturns) {
+  run();
+  auto actual = get_s_expr(
+      "Lcom/facebook/redextest/"
+      "ObjectEscapeAnalysisTest;.independentObjectWithMultipleReturns:(ZI)I");
+  EXPECT_EQ(actual.str().find("new-instance"), std::string::npos);
+  EXPECT_EQ(actual.str().find("iget"), std::string::npos);
+  EXPECT_FALSE(contains_invoke(
+      "Lcom/facebook/redextest/"
+      "ObjectEscapeAnalysisTest;.independentObjectWithMultipleReturns:(ZI)I"));
+}
+
+TEST_F(ObjectEscapeAnalysisTest, loopFieldAliasingWithCast) {
+  run();
+  auto actual = get_s_expr(
+      "Lcom/facebook/redextest/"
+      "ObjectEscapeAnalysisTest;.loopFieldAliasingWithCast:()I");
+  EXPECT_NE(actual.str().find("new-instance"), std::string::npos);
+  EXPECT_NE(actual.str().find("iget"), std::string::npos);
+}
+
 TEST_F(ObjectEscapeAnalysisTest, objectIsNotNull) {
   run();
 

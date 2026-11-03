@@ -45,6 +45,7 @@
 
 #include <optional>
 
+#include "AtomicStatCounter.h"
 #include "CFGMutation.h"
 #include "ClassHierarchy.h"
 #include "ConfigFiles.h"
@@ -56,10 +57,12 @@
 #include "IRInstruction.h"
 #include "Inliner.h"
 #include "LinearScan.h"
+#include "Liveness.h"
 #include "MutablePriorityQueue.h"
 #include "ObjectEscapeAnalysisImpl.h"
 #include "ObjectEscapeAnalysisPlugin.h"
 #include "PassManager.h"
+#include "ReachingDefinitions.h"
 #include "RedexContext.h"
 #include "Show.h"
 #include "Thread.h"
@@ -720,6 +723,10 @@ struct Stats {
       0};
   alignas(CACHE_LINE_SIZE) std::atomic<size_t> invoke_supers{0};
   alignas(CACHE_LINE_SIZE) std::atomic<size_t> stackify_returns_objects{0};
+  alignas(CACHE_LINE_SIZE)
+      AtomicStatCounter<size_t> stackify_overlapping_lifetimes{0};
+  alignas(CACHE_LINE_SIZE) AtomicStatCounter<size_t> stackify_lifetime_analyses{
+      0};
   alignas(CACHE_LINE_SIZE) std::atomic<size_t> too_costly_globally{0};
   alignas(CACHE_LINE_SIZE) std::atomic<size_t> expanded_methods{0};
   alignas(CACHE_LINE_SIZE) std::atomic<size_t> calls_inlined{0};
@@ -913,6 +920,10 @@ class RootMethodReducer {
       }
     }
 
+    if (has_overlapping_lifetimes()) {
+      m_stats->stackify_overlapping_lifetimes++;
+      return std::nullopt;
+    }
     while (auto opt_p = find_inlinable_new_instance()) {
       if (!stackify(opt_p->first, opt_p->second)) {
         return std::nullopt;
@@ -1320,6 +1331,98 @@ class RootMethodReducer {
     }
 
     m_stats->invokes_not_inlinable_too_many_iterations++;
+    return false;
+  }
+
+  // Before an allocation executes, a live reference with that allocation among
+  // its possible origins (including casts) can still hold an older object.
+  // Reusing its field registers could overwrite an object that is still needed.
+  bool has_overlapping_lifetimes() {
+    bool throwing_check_cast = false;
+    auto du_chains = get_augmented_du_chains_for_inlinable_new_instances(
+        &throwing_check_cast);
+    always_assert_log(!throwing_check_cast,
+                      "Throwing check-cast after invoke expansion in %s",
+                      SHOW(m_method));
+    auto& cfg = m_method->get_code()->cfg();
+    UnorderedMap<IRInstruction*, UnorderedSet<const IRInstruction*>>
+        allocation_defs;
+    UnorderedSet<const IRInstruction*> tracked_defs;
+    for (const auto& mie : InstructionIterable(cfg)) {
+      auto* insn = mie.insn;
+      if (!is_inlinable_new_instance(insn)) {
+        continue;
+      }
+      const auto& uses = du_chains[insn];
+      if (m_types.at(insn->get_type()).kind == InlinableTypeKind::Incomplete &&
+          !has_incomplete_marker(uses)) {
+        continue;
+      }
+      auto& defs = allocation_defs[insn];
+      defs.insert(insn);
+      tracked_defs.insert(insn);
+      for (const auto& use : UnorderedIterable(uses)) {
+        if (opcode::is_check_cast(use.insn->opcode())) {
+          defs.insert(use.insn);
+          tracked_defs.insert(use.insn);
+        }
+      }
+    }
+    if (allocation_defs.empty()) {
+      return false;
+    }
+
+    // Check every candidate on the same CFG, before stackification removes
+    // definitions or rewrites object registers into scalar registers.
+    cfg.calculate_exit_block();
+    reaching_defs::MoveAwareFixpointIterator rdefs(
+        cfg, [&](const auto* insn) { return tracked_defs.count(insn) != 0u; });
+    rdefs.run(reaching_defs::Environment());
+    LivenessFixpointIterator liveness(cfg);
+    liveness.run(LivenessDomain());
+    m_stats->stackify_lifetime_analyses++;
+    for (auto* block : cfg.blocks()) {
+      UnorderedMap<IRInstruction*, LivenessDomain> live_at_allocations;
+      auto live = liveness.get_live_out_vars_at(block);
+      for (auto it = block->rbegin(); it != block->rend(); ++it) {
+        if (it->type != MFLOW_OPCODE) {
+          continue;
+        }
+        liveness.analyze_instruction(it->insn, &live);
+        if (allocation_defs.count(it->insn) != 0u) {
+          live_at_allocations.emplace(it->insn, live);
+        }
+      }
+      auto env = rdefs.get_entry_state_at(block);
+      for (const auto& mie : InstructionIterable(block)) {
+        auto it = live_at_allocations.find(mie.insn);
+        if (it != live_at_allocations.end()) {
+          const auto& live_at_allocation = it->second;
+          if (live_at_allocation.is_top()) {
+            return true;
+          }
+          if (live_at_allocation.is_value()) {
+            const auto& alloc_defs = allocation_defs.at(mie.insn);
+            for (auto reg : live_at_allocation.elements()) {
+              const auto& defs = env.get(reg);
+              if (defs.is_top()) {
+                return true;
+              }
+              if (defs.is_value()) {
+                const auto& reaching = defs.elements();
+                if (std::any_of(reaching.begin(), reaching.end(),
+                                [&](const auto* def) {
+                                  return alloc_defs.count(def) != 0u;
+                                })) {
+                  return true;
+                }
+              }
+            }
+          }
+        }
+        rdefs.analyze_instruction(mie.insn, &env);
+      }
+    }
     return false;
   }
 
@@ -2182,6 +2285,10 @@ void ObjectEscapeAnalysisPass::run_pass(DexStoresVector& stores,
   mgr.incr_metric("root_method_invoke_supers", (size_t)stats.invoke_supers);
   mgr.incr_metric("root_method_stackify_returns_objects",
                   (size_t)stats.stackify_returns_objects);
+  mgr.incr_metric("root_method_stackify_overlapping_lifetimes",
+                  stats.stackify_overlapping_lifetimes.load());
+  mgr.incr_metric("root_method_stackify_lifetime_analyses",
+                  stats.stackify_lifetime_analyses.load());
   mgr.incr_metric("root_method_too_costly_globally",
                   (size_t)stats.too_costly_globally);
   mgr.incr_metric("expanded_methods", (size_t)stats.expanded_methods);

@@ -636,6 +636,143 @@ TEST_F(StringBuilderAppendChainTest,
   EXPECT_EQ(original, assembler::to_s_expr(method->get_code()));
 }
 
+struct BetweenAppendsCase {
+  // Instructions placed between two constant appends on the builder in v0.
+  std::string_view instructions;
+  std::string_view name;
+};
+
+// Both operands are loaded ahead of the appends, so BETWEEN is the only thing
+// separating them.
+constexpr std::string_view kAppendsAroundBetween = R"(
+    (method (public static) "LTest;.f:()Ljava/lang/String;"
+      (
+        (new-instance "Ljava/lang/StringBuilder;")
+        (move-result-pseudo-object v0)
+        (invoke-direct (v0) "Ljava/lang/StringBuilder;.<init>:()V")
+        (const-string "a")
+        (move-result-pseudo-object v1)
+        (const-string "b")
+        (move-result-pseudo-object v2)
+        (invoke-virtual (v0 v1) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
+        BETWEEN
+        (invoke-virtual (v0 v2) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
+        (invoke-virtual (v0) "Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;")
+        (move-result-object v3)
+        (return-object v3)
+      )
+    )
+  )";
+
+class AllowedBetweenAppendsTest
+    : public StringBuilderAppendChainTest,
+      public ::testing::WithParamInterface<BetweenAppendsCase> {};
+
+TEST_P(AllowedBetweenAppendsTest, appendsMerge) {
+  std::string body(kAppendsAroundBetween);
+  boost::replace_all(body, "BETWEEN", GetParam().instructions);
+  auto* method = assembler::method_from_string(body);
+
+  EXPECT_EQ(run_merge(method), 1);
+
+  std::string expected = R"(
+    (
+      (new-instance "Ljava/lang/StringBuilder;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "Ljava/lang/StringBuilder;.<init>:()V")
+      (const-string "a")
+      (move-result-pseudo-object v1)
+      (const-string "b")
+      (move-result-pseudo-object v2)
+      (const-string "ab")
+      (move-result-pseudo-object v4)
+      (invoke-virtual (v0 v4) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
+      BETWEEN
+      (invoke-virtual (v0) "Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;")
+      (move-result-object v3)
+      (return-object v3)
+    )
+  )";
+  boost::replace_all(expected, "BETWEEN", GetParam().instructions);
+  auto expected_code = assembler::ircode_from_string(expected);
+  EXPECT_CODE_EQ(expected_code.get(), method->get_code());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AllowedBetweenAppendsTests,
+    AllowedBetweenAppendsTest,
+    ::testing::Values(
+        BetweenAppendsCase{
+            R"((const-string "x") (move-result-pseudo-object v3))",
+            "stringConstantLoad"},
+        BetweenAppendsCase{"(move-result-object v0)", "selfLoopAppend"}),
+    [](const testing::TestParamInfo<AllowedBetweenAppendsTest::ParamType>&
+           info) { return std::string(info.param.name); });
+
+class DisallowedBetweenAppendsTest
+    : public StringBuilderAppendChainTest,
+      public ::testing::WithParamInterface<BetweenAppendsCase> {};
+
+TEST_P(DisallowedBetweenAppendsTest, appendsNotMerged) {
+  std::string body(kAppendsAroundBetween);
+  boost::replace_all(body, "BETWEEN", GetParam().instructions);
+  auto* method = assembler::method_from_string(body);
+
+  auto original = assembler::to_s_expr(method->get_code());
+  EXPECT_EQ(run_merge(method), 0);
+  EXPECT_EQ(original, assembler::to_s_expr(method->get_code()));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    DisallowedBetweenAppendsTests,
+    DisallowedBetweenAppendsTest,
+    ::testing::Values(
+        BetweenAppendsCase{
+            R"((const-string "x") (move-result-pseudo-object v0))",
+            "builderRegisterOverwrite"},
+        BetweenAppendsCase{"(move-result-object v4)", "nonSelfLoopAppend"},
+        BetweenAppendsCase{
+            R"((invoke-virtual (v0 v4) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;"))",
+            "nonConstantAppend"},
+        BetweenAppendsCase{
+            R"((invoke-virtual (v4 v1) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;"))",
+            "appendOnOtherRegister"},
+        BetweenAppendsCase{"(const v4 0)", "disallowedOpcode"}),
+    [](const testing::TestParamInfo<DisallowedBetweenAppendsTest::ParamType>&
+           info) { return std::string(info.param.name); });
+
+/*
+ * The jump to :skip bypasses append("a"), so merging the two appends would lose
+ * "b" on that path.
+ */
+TEST_F(StringBuilderAppendChainTest, appendsSeparatedByBlockBoundaryNotMerged) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LTest;.f:(Z)Ljava/lang/String;"
+      (
+        (load-param v5)
+        (new-instance "Ljava/lang/StringBuilder;")
+        (move-result-pseudo-object v0)
+        (invoke-direct (v0) "Ljava/lang/StringBuilder;.<init>:()V")
+        (const-string "a")
+        (move-result-pseudo-object v1)
+        (const-string "b")
+        (move-result-pseudo-object v2)
+        (if-eqz v5 :skip)
+        (invoke-virtual (v0 v1) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
+        (:skip)
+        (invoke-virtual (v0 v2) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
+        (invoke-virtual (v0) "Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;")
+        (move-result-object v3)
+        (return-object v3)
+      )
+    )
+  )");
+
+  auto original = assembler::to_s_expr(method->get_code());
+  EXPECT_EQ(run_merge(method), 0);
+  EXPECT_EQ(original, assembler::to_s_expr(method->get_code()));
+}
+
 /*
  * A lone constant append (its only neighbor is non-constant) has no adjacent
  * constant to merge with, so the builder is left alone.
@@ -739,149 +876,6 @@ TEST_F(StringBuilderAppendChainTest, buildersSharingARegisterNotMerged) {
 }
 
 /*
- * Each append's move-result sits in a successor block rather than next to it,
- * which the try region forces. The appends still merge, and the dropped one's
- * move-result is removed along with it.
- */
-TEST_F(StringBuilderAppendChainTest, crossBlockMoveResultConstantAppendsMerge) {
-  auto* method = assembler::method_from_string(R"(
-    (method (public static) "LTest;.f:(Ljava/lang/String;)Ljava/lang/String;"
-      (
-        (load-param-object v5)
-        (new-instance "Ljava/lang/StringBuilder;")
-        (move-result-pseudo-object v0)
-        (invoke-direct (v0) "Ljava/lang/StringBuilder;.<init>:()V")
-        (invoke-virtual (v0 v5) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
-        (move-result-object v0)
-        (const-string "b")
-        (move-result-pseudo-object v1)
-        (.try_start t)
-        (invoke-virtual (v0 v1) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
-        (move-result-object v0)
-        (const-string "c")
-        (move-result-pseudo-object v2)
-        (invoke-virtual (v0 v2) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
-        (move-result-object v0)
-        (.try_end t)
-        (invoke-virtual (v0) "Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;")
-        (move-result-object v0)
-        (return-object v0)
-        (.catch (t))
-        (move-exception v0)
-        (throw v0)
-      )
-    )
-  )");
-
-  EXPECT_EQ(run_merge(method), 1);
-
-  auto expected_code = assembler::ircode_from_string(R"(
-    (
-      (load-param-object v5)
-      (new-instance "Ljava/lang/StringBuilder;")
-      (move-result-pseudo-object v0)
-      (invoke-direct (v0) "Ljava/lang/StringBuilder;.<init>:()V")
-      (invoke-virtual (v0 v5) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
-      (move-result-object v0)
-      (const-string "b")
-      (move-result-pseudo-object v1)
-      (.try_start t)
-      (const-string "bc")
-      (move-result-pseudo-object v6)
-      (invoke-virtual (v0 v6) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
-      (move-result-object v0)
-      (const-string "c")
-      (move-result-pseudo-object v2)
-      (.try_end t)
-      (invoke-virtual (v0) "Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;")
-      (move-result-object v0)
-      (return-object v0)
-      (.catch (t))
-      (move-exception v0)
-      (throw v0)
-    )
-  )");
-  EXPECT_CODE_EQ(expected_code.get(), method->get_code());
-}
-
-/*
- * Each append's move-result sits in a successor block, which the try region
- * forces. The first of two constant appends writes a register other than the
- * builder, so it is not a self loop and the two are left alone.
- */
-TEST_F(StringBuilderAppendChainTest,
-       crossBlockMoveResultFirstAppendInOtherRegisterNotMerged) {
-  auto* method = assembler::method_from_string(R"(
-    (method (public static) "LTest;.f:()Ljava/lang/String;"
-      (
-        (new-instance "Ljava/lang/StringBuilder;")
-        (move-result-pseudo-object v0)
-        (invoke-direct (v0) "Ljava/lang/StringBuilder;.<init>:()V")
-        (const-string "b")
-        (move-result-pseudo-object v1)
-        (.try_start t)
-        (invoke-virtual (v0 v1) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
-        (move-result-object v3)
-        (const-string "c")
-        (move-result-pseudo-object v2)
-        (invoke-virtual (v0 v2) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
-        (move-result-object v0)
-        (.try_end t)
-        (invoke-virtual (v3) "Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;")
-        (move-result-object v0)
-        (return-object v0)
-        (.catch (t))
-        (move-exception v0)
-        (throw v0)
-      )
-    )
-  )");
-
-  auto original = assembler::to_s_expr(method->get_code());
-  EXPECT_EQ(run_merge(method), 0);
-  EXPECT_EQ(original, assembler::to_s_expr(method->get_code()));
-}
-
-/*
- * Each append's move-result sits in a successor block, which the try region
- * forces. The second of two constant appends writes a register other than the
- * builder and the toString() reads it, so merging would drop that append and
- * delete the register's only definition.
- */
-TEST_F(StringBuilderAppendChainTest,
-       crossBlockMoveResultDroppedAppendInOtherRegisterNotMerged) {
-  auto* method = assembler::method_from_string(R"(
-    (method (public static) "LTest;.f:()Ljava/lang/String;"
-      (
-        (new-instance "Ljava/lang/StringBuilder;")
-        (move-result-pseudo-object v0)
-        (invoke-direct (v0) "Ljava/lang/StringBuilder;.<init>:()V")
-        (const-string "b")
-        (move-result-pseudo-object v1)
-        (.try_start t)
-        (invoke-virtual (v0 v1) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
-        (move-result-object v0)
-        (const-string "c")
-        (move-result-pseudo-object v2)
-        (invoke-virtual (v0 v2) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
-        (move-result-object v3)
-        (.try_end t)
-        (invoke-virtual (v3) "Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;")
-        (move-result-object v0)
-        (return-object v0)
-        (.catch (t))
-        (move-exception v0)
-        (throw v0)
-      )
-    )
-  )");
-
-  auto original = assembler::to_s_expr(method->get_code());
-  EXPECT_EQ(run_merge(method), 0);
-  EXPECT_EQ(original, assembler::to_s_expr(method->get_code()));
-}
-
-/*
  * Both reductions together: the merge shortens a three-append chain to the two
  * appends `reduce_two_append_concats` needs, which then rewrites the
  * toString().
@@ -941,9 +935,9 @@ TEST_F(StringBuilderAppendChainTest, mergedChainIsReducedToConcat) {
 }
 
 /*
- * Two appends past the branch, reaching only the later toString(). They agree
- * with each other on that, so they are their own group and merge together --
- * a group ends where the set of toString()s changes, not at the branch.
+ * Appends are only merged within a single basic block, not across a branch.
+ * Here, "a" and "b" before the branch merge into "ab", while "c" and "d" after
+ * the branch merge separately into "cd".
  *
  *   static String f(int c) {
  *     StringBuilder sb = new StringBuilder();
@@ -1031,13 +1025,9 @@ TEST_F(StringBuilderAppendChainTest, appendsPastABranchMergeAmongThemselves) {
 }
 
 /*
- * One builder reaching two toString()s past a branch: the shared appends
- * belong to both, the branch's own append only to the later one. Collapsing
- * all three would put "abc" at the shared appends' position, where the
- * toString() that skips the branch reads it, so only the shared pair merges.
- * Which toString() the walk reaches first is block iteration order, which is
- * not dominance order, so the resulting code has to be the same either way --
- * hence the two orderings, each asserted against its exact IR.
+ * Checks that constant appends are not merged across a branch. Here, "a" and
+ * "b" are before the branch and merge into "ab", while "c" is in only one
+ * branch and must stay separate so the early return still produces "ab":
  *
  *   static String f(int c) {
  *     StringBuilder sb = new StringBuilder();
@@ -1050,8 +1040,8 @@ TEST_F(StringBuilderAppendChainTest, appendsPastABranchMergeAmongThemselves) {
  *     return sb.toString();     // "abc"
  *   }
  *
- * `g` is the same with the condition inverted, which lays out the arm holding
- * the third append first.
+ * `f` and `g` test both branch orderings (`g` inverts the condition so the
+ * `append("c")` block immediately follows `append("b")` in the IR).
  */
 TEST_F(StringBuilderAppendChainTest,
        appendPastABranchNotMergedIntoSharedPrefix) {
@@ -1180,6 +1170,101 @@ TEST_F(StringBuilderAppendChainTest,
     )
   )");
   EXPECT_CODE_EQ(long_first_expected.get(), long_first->get_code());
+}
+
+/*
+ * Shouldn't merge in this case.
+ *
+ *   static String f(boolean c, boolean d) {
+ *     StringBuilder sb = new StringBuilder();
+ *     sb = sb.append("a");
+ *     if (c) {
+ *       sb = sb.append("b");
+ *       if (d) return sb.toString();   // "ab"
+ *     }
+ *     return sb.toString();            // "a" or "ab"
+ *   }
+ */
+TEST_F(StringBuilderAppendChainTest,
+       toStringReachedWithDifferentContentsNotMerged) {
+  const std::string body = R"(
+    (
+      (load-param v5)
+      (load-param v6)
+      (new-instance "Ljava/lang/StringBuilder;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "Ljava/lang/StringBuilder;.<init>:()V")
+      (const-string "a")
+      (move-result-pseudo-object v1)
+      (invoke-virtual (v0 v1) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
+      (move-result-object v0)
+      (if-eqz v5 :out)
+      (const-string "b")
+      (move-result-pseudo-object v1)
+      (invoke-virtual (v0 v1) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
+      (move-result-object v0)
+      (if-eqz v6 :out)
+      (invoke-virtual (v0) "Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;")
+      (move-result-object v2)
+      (return-object v2)
+      (:out)
+      (invoke-virtual (v0) "Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;")
+      (move-result-object v3)
+      (return-object v3)
+    )
+  )";
+  auto* method = assembler::method_from_string(
+      "(method (public static) \"LTest;.f:(ZZ)Ljava/lang/String;\" " + body +
+      ")");
+  auto expected = assembler::ircode_from_string(body);
+
+  EXPECT_EQ(run_merge(method), 0);
+  EXPECT_CODE_EQ(expected.get(), method->get_code());
+}
+
+/*
+ * Shouldn't merge in this case.
+ *
+ *   static Object f(boolean c) {
+ *     StringBuilder sb = new StringBuilder();
+ *     sb = sb.append("a");
+ *     if (c) {
+ *       sb = sb.append("b");
+ *       return sb.toString();   // "ab"
+ *     }
+ *     return sb;                // holds "a"
+ *   }
+ */
+TEST_F(StringBuilderAppendChainTest, builderReturnedOnOtherPathNotMerged) {
+  const std::string body = R"(
+    (
+      (load-param v5)
+      (new-instance "Ljava/lang/StringBuilder;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "Ljava/lang/StringBuilder;.<init>:()V")
+      (const-string "a")
+      (move-result-pseudo-object v1)
+      (invoke-virtual (v0 v1) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
+      (move-result-object v0)
+      (if-eqz v5 :out)
+      (const-string "b")
+      (move-result-pseudo-object v1)
+      (invoke-virtual (v0 v1) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
+      (move-result-object v0)
+      (invoke-virtual (v0) "Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;")
+      (move-result-object v2)
+      (return-object v2)
+      (:out)
+      (return-object v0)
+    )
+  )";
+  auto* method = assembler::method_from_string(
+      "(method (public static) \"LTest;.f:(Z)Ljava/lang/Object;\" " + body +
+      ")");
+  auto expected = assembler::ircode_from_string(body);
+
+  EXPECT_EQ(run_merge(method), 0);
+  EXPECT_CODE_EQ(expected.get(), method->get_code());
 }
 
 /*

@@ -101,9 +101,14 @@ size_t reduce_two_append_concats(
  * (R = R.append(...)) are merged, so dropping all but the first leaves that
  * register holding the builder for the following code.
  *
- * An append is merged only with others that reach the same set of
- * `toString()` calls, because a branch can let one `toString()` read the
- * builder before a later append runs. Before:
+ * All merged appends must be in one basic block and use the same builder
+ * register. Each merged append must either discard its return value or write
+ * it back to that register. Between merged appends, allow only string constant
+ * loads that leave the builder register unchanged and instructions that write
+ * an append's return value back to it. These restrictions prevent intervening
+ * instructions from observing the builder's contents before all the strings
+ * are appended.
+ * Before:
  *
  *   new-instance v0, StringBuilder
  *   invoke-direct {v0} StringBuilder.<init>:()V
@@ -145,9 +150,8 @@ size_t reduce_two_append_concats(
  *   move-result-object v3
  *   return-object v3
  *
- * "a" and "b" reach both `toString()` calls and "c" and "d" only the second,
- * so they form two groups and each merges on its own. A group ends where that
- * set changes, not at the branch.
+ * "a" and "b" sit in one block and "c" and "d" in another, so each pair
+ * merges on its own.
  */
 size_t merge_adjacent_constant_appends(
     const intraprocedural::FixpointIterator& fp_iter,
@@ -162,11 +166,10 @@ size_t merge_adjacent_constant_appends(
  * builder built from one is left alone.
  *
  * A builder with several operations is left alone as well.
- * `merge_adjacent_constant_appends` collapses a constant run to one append
- * ahead of this, and what it cannot collapse is a builder that several
- * toString()s read at different points, which is rare enough not to be worth
- * the concatenation. Returns the number of toString() calls replaced, which
- * exceeds the number of builders when several of them read one builder. Before:
+ * `merge_adjacent_constant_appends` collapses a run of constant appends within
+ * one block to one append ahead of this. Returns the number of toString() calls
+ * replaced, which exceeds the number of builders when several of them read one
+ * builder. Before:
  *
  *   new-instance v0, StringBuilder
  *   invoke-direct {v0} StringBuilder.<init>:()V

@@ -253,6 +253,7 @@ message ConfigValue {
   Configuration config = 1;
   Value value = 2;
   reserved 3;
+  bool uses_readwrite_feature_flags = 4;
 }
 
 // The generic meta-data for every value in a resource table.
@@ -608,6 +609,12 @@ message XmlElement {
 
   // The children of this element.
   repeated XmlNode child = 5;
+
+  // Whether the feature flag for this element is negated.
+  bool flag_negated = 6;
+
+  // The name of the feature flag for this element.
+  string flag_name = 7;
 }
 
 // A namespace declaration on an XmlElement (xmlns:android="http://...").

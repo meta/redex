@@ -6,6 +6,7 @@
  */
 
 package com.facebook.redextest;
+import java.util.Locale;
 import java.lang.String;
 
 class Base {
@@ -16,14 +17,14 @@ class Base {
   String fn2(String st, int i) { return st + i; }
 
   /* Modifies param in Base */
-  String fn3(String st) { st.toUpperCase(); return st; }
+  String fn3(String st) { st.toUpperCase(Locale.ROOT); return st; }
 
   /* Pure in Base */
   int fn4(int i, int j) { return i+ j; }
   String fn5(String st, int i) { return st + i; }
 
   /* Modifies param in Base */
-  String fn6(String st) { st.toUpperCase(); return st; }
+  String fn6(String st) { st.toUpperCase(Locale.ROOT); return st; }
 }
 
 class SubOne extends Base {
@@ -33,12 +34,12 @@ class SubOne extends Base {
   final String fn2(String st, int i) { return st + i; }
 
   /* Modifies param */
-  String fn3 (String st) { st.toUpperCase(); return st; }
+  String fn3 (String st) { st.toUpperCase(Locale.ROOT); return st; }
 
   /* Not Pure */
   int fn4(int i, int j) { f = 1; return i+ j; }
   String fn5(String st, int i) { f = -1; return st + i; }
-  String fn6(String st) { f = 2; st.toUpperCase(); return st; }
+  String fn6(String st) { f = 2; st.toUpperCase(Locale.ROOT); return st; }
 }
 
 class SubTwo extends Base {
@@ -48,11 +49,11 @@ class SubTwo extends Base {
   final String fn2(String st, int i) { return st + i; }
 
   /* Modifies param */
-  String fn3(String st) { st.toUpperCase(); return st; }
+  String fn3(String st) { st.toUpperCase(Locale.ROOT); return st; }
 
   /* Pure */
   int fn4(int i, int j) { return i+ j; }
   String fn5(String st, int i) { return st + i; }
   /* Modifies param */
-  String fn6(String st) { st.toUpperCase(); return st; }
+  String fn6(String st) { st.toUpperCase(Locale.ROOT); return st; }
 }

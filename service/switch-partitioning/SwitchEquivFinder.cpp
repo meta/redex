@@ -187,6 +187,32 @@ class key_creating_visitor
     return SwitchEquivFinder::DefaultCase{};
   }
 };
+
+bool is_precise_branch(
+    constant_propagation::intraprocedural::FixpointIterator& fixpoint,
+    cfg::Block* block,
+    reg_t switching_reg) {
+  auto last = block->get_last_insn();
+  always_assert_log(last != block->end(), "Expected branch in B%zu",
+                    block->id());
+  auto* insn = last->insn;
+  always_assert_log(opcode::is_branch(insn->opcode()) &&
+                        has_src(insn, switching_reg),
+                    "Expected branch on v%u in B%zu, got %s", switching_reg,
+                    block->id(), SHOW(insn));
+  if (insn->srcs_size() == 1) {
+    return insn->src(0) == switching_reg;
+  }
+  if (insn->srcs_size() != 2 || insn->src(0) == insn->src(1)) {
+    return false;
+  }
+  const auto other =
+      insn->src(0) == switching_reg ? insn->src(1) : insn->src(0);
+  const auto& env = fixpoint.get_exit_state_at(block);
+  const auto key =
+      ConstantValue::apply_visitor(key_creating_visitor(), env.get(other));
+  return !SwitchEquivFinder::is_default_case(key);
+}
 } // namespace
 
 std::ostream& operator<<(std::ostream& os,
@@ -222,8 +248,11 @@ SwitchEquivFinder::SwitchEquivFinder(
     // make sure the input is well-formed
     auto* insn = m_root_branch->insn;
     auto op = insn->opcode();
-    always_assert(opcode::is_branch(op));
-    always_assert(has_src(insn, m_switching_reg));
+    always_assert_log(opcode::is_branch(op), "Expected branch, got %s",
+                      SHOW(insn));
+    always_assert_log(has_src(insn, m_switching_reg),
+                      "Branch %s does not test switching register v%u",
+                      SHOW(insn), m_switching_reg);
   }
 
   const auto& leaves = find_leaves();
@@ -257,6 +286,30 @@ std::vector<cfg::Edge*> SwitchEquivFinder::find_leaves() {
     block_to_is_leaf[b] = ret;
     return ret;
   };
+
+  // Validate every incorporated branch before duplicating or retargeting
+  // leaves.
+  UnorderedSet<cfg::Block*> checked_blocks;
+  std::vector<cfg::Block*> pending_blocks{m_root_branch.block()};
+  auto& fixpoint = get_analyzed_cfg();
+  while (!pending_blocks.empty()) {
+    auto* block = pending_blocks.back();
+    pending_blocks.pop_back();
+    if (!checked_blocks.insert(block).second) {
+      continue;
+    }
+    if (!is_precise_branch(fixpoint, block, m_switching_reg)) {
+      TRACE(SWITCH_EQUIV, 2, "Failure Reason: Imprecise comparison in B%zu",
+            block->id());
+      return leaves;
+    }
+    for (auto* edge : block->succs()) {
+      if (!block_is_leaf(edge->target())) {
+        pending_blocks.push_back(edge->target());
+      }
+    }
+  }
+
   std::function<bool(cfg::Block*, InstructionSet,
                      const std::vector<SourceBlock*>&)>
       recurse;

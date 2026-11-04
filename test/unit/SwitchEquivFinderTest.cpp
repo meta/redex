@@ -81,7 +81,182 @@ cfg::InstructionIterator get_first_occurrence(cfg::ControlFlowGraph& cfg,
 }
 } // namespace
 
-class SwitchEquivFinderTest : public RedexTest {};
+class SwitchEquivFinderTest : public RedexTest {
+ protected:
+  void expect_nonconstant_comparison_rejected(const std::string& ir,
+                                              bool instrument_mode = false) {
+    const auto original_instrument_mode = g_redex->instrument_mode;
+    g_redex->instrument_mode = instrument_mode;
+    ScopeGuard restore_instrument_mode{[original_instrument_mode]() {
+      g_redex->instrument_mode = original_instrument_mode;
+    }};
+    for (auto strategy :
+         {SwitchEquivFinder::NOT_ALLOWED, SwitchEquivFinder::EXECUTION_ORDER}) {
+      for (uint32_t threshold : {0u, 50u}) {
+        auto code = assembler::ircode_from_string(ir);
+        code->build_cfg();
+        auto& cfg = code->cfg();
+        const auto before = show(cfg);
+        auto root = get_first_branch(cfg);
+        SwitchEquivFinder finder(&cfg, root, 0, threshold, nullptr, strategy,
+                                 {});
+        EXPECT_FALSE(finder.success());
+        EXPECT_TRUE(finder.key_to_case().empty());
+        EXPECT_TRUE(finder.extra_loads().empty());
+        EXPECT_EQ(before, show(cfg));
+      }
+    }
+  }
+};
+
+TEST_F(SwitchEquivFinderTest, nonconstant_comparison_shared_default) {
+  expect_nonconstant_comparison_rejected(R"(
+    (
+      (load-param v0)
+      (load-param v1)
+      (const v2 1)
+      (if-eq v0 v2 :one)
+      (if-eq v0 v1 :default)
+      (if-eqz v0 :zero)
+      (:default)
+      (const v3 0)
+      (return v3)
+      (:one)
+      (const v3 10)
+      (return v3)
+      (:zero)
+      (const v3 20)
+      (return v3)
+    )
+  )");
+}
+
+TEST_F(SwitchEquivFinderTest, nonconstant_comparison_duplicate_key) {
+  expect_nonconstant_comparison_rejected(R"(
+    (
+      (load-param v0)
+      (load-param v1)
+      (const v2 7)
+      (if-ne v0 v2 :default)
+      (if-eq v0 v1 :equal)
+      (const v3 40)
+      (return v3)
+      (:equal)
+      (const v3 20)
+      (return v3)
+      (:default)
+      (const v3 0)
+      (return v3)
+    )
+  )");
+}
+
+TEST_F(SwitchEquivFinderTest, nonconstant_comparison_root) {
+  expect_nonconstant_comparison_rejected(R"(
+    (
+      (load-param v0)
+      (load-param v1)
+      (if-eq v1 v0 :default)
+      (if-eqz v0 :zero)
+      (:default)
+      (const v2 0)
+      (return v2)
+      (:zero)
+      (const v2 20)
+      (return v2)
+    )
+  )");
+}
+
+TEST_F(SwitchEquivFinderTest, nonconstant_comparison_class) {
+  setup();
+  expect_nonconstant_comparison_rejected(R"(
+    (
+      (load-param-object v0)
+      (load-param-object v1)
+      (const-class "LBar;")
+      (move-result-pseudo-object v2)
+      (if-eq v0 v2 :bar)
+      (if-eq v0 v1 :default)
+      (const-class "LBaz;")
+      (move-result-pseudo-object v2)
+      (if-eq v0 v2 :baz)
+      (:default)
+      (const v3 0)
+      (return v3)
+      (:bar)
+      (const v3 1)
+      (return v3)
+      (:baz)
+      (const v3 3)
+      (return v3)
+    )
+  )");
+}
+
+TEST_F(SwitchEquivFinderTest, nonconstant_comparison_divergent_loads) {
+  expect_nonconstant_comparison_rejected(R"(
+    (
+      (load-param v0)
+      (load-param v1)
+      (const v2 1)
+      (if-eq v0 v2 :one)
+      (const v2 2)
+      (if-eq v0 v1 :default)
+      (const v2 3)
+      (if-eqz v0 :zero)
+      (:default)
+      (return v2)
+      (:one)
+      (const v3 10)
+      (return v3)
+      (:zero)
+      (return v2)
+    )
+  )");
+}
+
+TEST_F(SwitchEquivFinderTest, nonconstant_comparison_source_blocks) {
+  expect_nonconstant_comparison_rejected(R"(
+    (
+      (load-param v0)
+      (load-param v1)
+      (const v2 1)
+      (if-eq v0 v2 :one)
+      (.src_block "LNonConstant;.f:(II)I" 0 (1.0 1.0))
+      (if-eq v0 v1 :default)
+      (.src_block "LNonConstant;.f:(II)I" 1 (1.0 1.0))
+      (if-eqz v0 :zero)
+      (:default)
+      (const v3 0)
+      (return v3)
+      (:one)
+      (const v3 10)
+      (return v3)
+      (:zero)
+      (const v3 20)
+      (return v3)
+    )
+  )",
+                                         true);
+}
+
+TEST_F(SwitchEquivFinderTest, nonconstant_comparison_same_register) {
+  expect_nonconstant_comparison_rejected(R"(
+    (
+      (load-param v0)
+      (const v1 7)
+      (if-ne v0 v1 :default)
+      (if-eq v0 v0 :equal)
+      (:default)
+      (const v2 0)
+      (return v2)
+      (:equal)
+      (const v2 20)
+      (return v2)
+    )
+  )");
+}
 
 // A sled -- a block holding only SourceBlocks -- is replaced by a copy of its
 // successor, so the successor's count ends up in two places. Total execution

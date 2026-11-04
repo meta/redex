@@ -78,8 +78,11 @@ abstract class Base {
 
 @ModelIdentity(typeTag = 0x1)
 class A extends Base implements Interface1, Interface3, StringsGetter {
-  int a1;
+  volatile int a1;
   String a2;
+  volatile long wide;
+  volatile double mixed;
+  final float immutable = 1.0f;
 
   A() { super(1); }
   void init(int a1, String a2) {
@@ -152,6 +155,9 @@ class A extends Base implements Interface1, Interface3, StringsGetter {
 class B extends Base implements Interface1, Interface3, StringsGetter {
   String b1;
   int b2;
+  volatile long wide;
+  final double mixed = 2.0;
+  final float immutable = 2.0f;
 
   B() { super(2); }
   void init(String b1, int b2) {
@@ -322,6 +328,9 @@ class D extends Base implements Interface2, Interface3, StringsGetter {
 class E extends Base implements Interface1, Interface3, StringsGetter {
   String e1;
   int e2;
+  volatile long wide;
+  final double mixed = 3.0;
+  final float immutable = 3.0f;
 
   E() { super(5); }
   void init(String e1, int e2) {

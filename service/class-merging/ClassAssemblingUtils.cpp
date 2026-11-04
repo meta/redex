@@ -103,9 +103,31 @@ DexClass* create_class(const DexType* type,
 
 std::vector<DexField*> create_merger_fields(const DexType* owner,
                                             const FieldsMap& fields_map) {
-  std::vector<DexField*> res;
+  always_assert_log(!fields_map.empty(), "No field map for merger %s",
+                    SHOW(owner));
   const std::vector<DexField*>& mergeable_fields =
       unordered_any(fields_map)->second;
+  std::vector<DexAccessFlags> access_flags(mergeable_fields.size(),
+                                           ACC_PUBLIC | ACC_FINAL);
+  for (const auto& [type, fields] : UnorderedIterable(fields_map)) {
+    always_assert_log(fields.size() == mergeable_fields.size(),
+                      "Mismatched field map for %s in merger %s", SHOW(type),
+                      SHOW(owner));
+    for (size_t i = 0; i < fields.size(); ++i) {
+      const auto* field = fields[i];
+      always_assert_log(field != nullptr && field->is_def(),
+                        "Invalid field at slot %zu for %s in merger %s", i,
+                        SHOW(type), SHOW(owner));
+      if (is_volatile(field)) {
+        access_flags.at(i) |= ACC_VOLATILE;
+      }
+      if (!is_final(field) || is_volatile(field)) {
+        access_flags.at(i) = access_flags.at(i) & ~ACC_FINAL;
+      }
+    }
+  }
+
+  std::vector<DexField*> res;
   size_t cnt = 0;
   for (const DexField* f : mergeable_fields) {
     const auto* type = f->get_type();
@@ -143,28 +165,9 @@ std::vector<DexField*> create_merger_fields(const DexType* owner,
     name += std::to_string(cnt);
     auto* field =
         DexField::make_field(owner, DexString::make_string(name), type)
-            ->make_concrete(ACC_PUBLIC);
+            ->make_concrete(access_flags.at(cnt));
     res.push_back(field);
     cnt++;
-  }
-
-  std::vector<bool> acc_final_map(mergeable_fields.size(), true);
-  for (const auto& fmap : UnorderedIterable(fields_map)) {
-    const auto& fields = fmap.second;
-    for (size_t i = 0; i < fields.size(); i++) {
-      redex_assert(acc_final_map.size() > i);
-      acc_final_map[i] = acc_final_map.at(i) && is_final(fields[i]);
-    }
-  }
-
-  always_assert(res.size() == mergeable_fields.size());
-  for (size_t i = 0; i < res.size(); i++) {
-    if (acc_final_map.at(i)) {
-      DexField* f = res.at(i);
-      always_assert(f != nullptr && f->is_def());
-      set_final(f);
-      TRACE(CLMG, 5, "marking merger field final %s", SHOW(f));
-    }
   }
 
   TRACE(CLMG, 8, "  created merger fields %zu ", res.size());

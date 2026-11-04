@@ -135,7 +135,10 @@ TEST_F(KotlinStatsTest, MethodHasNoEqDefined) {
   // + LCompanionWithKeptBridge;
   // + LCompanionWithKeptBridge$Companion;
   // + LKeptBridgeCaller;
-  EXPECT_EQ(stats.kotlin_class, 56);
+  // + LInterfaceOuter;
+  // + LInterfaceOuter$Companion;
+  // + LInterfaceOuterCaller;
+  EXPECT_EQ(stats.kotlin_class, 59);
 
   // LCompanionClass$Companion;
   // LCompanionWithMethodCollision$Companion;
@@ -149,7 +152,8 @@ TEST_F(KotlinStatsTest, MethodHasNoEqDefined) {
   // + LCompanionWithSynchronized$Companion;
   // + LCompanionWithNativeMethod$Companion;
   // + LCompanionWithKeptBridge$Companion;
-  EXPECT_EQ(stats.kotlin_companion_class, 13);
+  // + LInterfaceOuter$Companion;
+  EXPECT_EQ(stats.kotlin_companion_class, 14);
 
   // LKotlinLambdaInline$foo$1;
   // LKotlinLambdaInline$bar$1;

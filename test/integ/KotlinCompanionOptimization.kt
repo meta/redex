@@ -180,6 +180,21 @@ class AbstractOuterCaller {
   }
 }
 
+// Interface outer class with a companion object: the pass relocates the
+// companion's final helperFunc() to the interface, where methods must not be
+// final.
+interface InterfaceOuter {
+  companion object {
+    fun helperFunc(): String = "interface_helper"
+  }
+}
+
+class InterfaceOuterCaller {
+  fun main() {
+    print(InterfaceOuter.helperFunc())
+  }
+}
+
 // Companion with a const val property: the companion has a <clinit> that
 // initializes $$INSTANCE, and the standard clinit pattern includes
 // sget-object $$INSTANCE followed by sput-object OuterClass.Companion.

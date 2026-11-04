@@ -479,6 +479,34 @@ TEST_F(KotlinCompanionOptimizationTest, AbstractOuterClassCompanion) {
   ASSERT_TRUE(is_static(helperFunc->as_def()));
 }
 
+// Test interface outer class: interface methods must not be final, so the pass
+// drops ACC_FINAL from the companion methods it relocates into an interface.
+//
+// Input: InterfaceOuter is an interface whose companion has the final method
+// helperFunc().
+//
+// After optimization:
+//   - helperFunc is relocated to InterfaceOuter as a static, non-final method
+TEST_F(KotlinCompanionOptimizationTest, InterfaceOuterClassCompanion) {
+  auto scope = build_class_scope(stores);
+  set_root_method(
+      "Lcom/facebook/redextest/objtest/InterfaceOuterCaller;.main:()V");
+
+  auto klr = std::make_unique<KotlinCompanionOptimizationPass>();
+  auto dce = std::make_unique<LocalDcePass>();
+  std::vector<Pass*> passes{klr.get(), dce.get()};
+  run_passes(passes);
+
+  auto* helperFunc = DexMethod::get_method(
+      "Lcom/facebook/redextest/objtest/InterfaceOuter;"
+      ".helperFunc:()Ljava/lang/String;");
+  ASSERT_NE(nullptr, helperFunc);
+  ASSERT_TRUE(helperFunc->is_def());
+  ASSERT_TRUE(is_interface(type_class(helperFunc->get_class())));
+  ASSERT_TRUE(is_static(helperFunc->as_def()));
+  ASSERT_FALSE(is_final(helperFunc->as_def()));
+}
+
 // Test companion with const val: the companion has a <clinit> that initializes
 // $$INSTANCE, producing the sget-object/sput-object pattern that
 // is_def_trackable must allowlist.

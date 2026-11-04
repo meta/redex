@@ -161,6 +161,11 @@ void make_static_and_relocate_method(DexMethod* method, DexType* to_type) {
   if (!is_static(method)) {
     mutators::make_static(method, mutators::KeepThis::No);
   }
+  // Kotlin marks companion methods final, but interface methods must not be
+  // final (JVMS 4.6).
+  if (is_interface(type_class(to_type))) {
+    method->set_access(method->get_access() & ~ACC_FINAL);
+  }
   change_visibility(method, to_type);
 
   // @JvmStatic generates a static bridge on the outer class with the same

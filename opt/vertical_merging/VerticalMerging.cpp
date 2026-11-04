@@ -650,7 +650,8 @@ void update_references(const Scope& scope,
                             SHOW(insn));
           auto* merger_type = find_mergeable->second;
           if (type::is_array(ref_type)) {
-            auto* array_merger_type = type::make_array_type(merger_type);
+            auto* array_merger_type = type::make_array_type(
+                merger_type, type::get_array_level(ref_type));
             insn->set_type(array_merger_type);
           } else {
             insn->set_type(const_cast<DexType*>(merger_type));

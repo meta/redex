@@ -417,6 +417,9 @@ public class EnumTransformTest {
     PURE_SCORE five = PURE_SCORE.FIVE;
     PURE_SCORE five_2 = PURE_SCORE.FIVE;
     assertThat(five.ordinal()).isEqualTo(five_2.ordinal());
+    // FIVE's ordinal is above max_enum_size, so it has no $EnumUtils field.
+    assertThat(PURE_SCORE.valueOf("FIVE").ordinal()).isEqualTo(4);
+    assertThat(PURE_SCORE.valueOf("TWO").ordinal()).isEqualTo(1);
     switch (five) {
       case FIVE:
         break;

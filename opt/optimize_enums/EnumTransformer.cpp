@@ -1384,11 +1384,21 @@ class EnumTransformer final {
                              dasm(OPCODE_MOVE_RESULT, {3_v})});
 
       auto* equal_block = cfg.create_block();
-      {
-        auto* obj_field = m_enum_util->m_fields[pair.first];
+      if (pair.first < m_enum_util->m_config.max_enum_size) {
+        auto* obj_field = m_enum_util->m_fields.at(pair.first);
         equal_block->push_back({dasm(OPCODE_SGET_OBJECT, obj_field),
                                 dasm(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT, {2_v}),
                                 dasm(OPCODE_RETURN_OBJECT, {2_v})});
+      } else {
+        // Ordinals at or above `max_enum_size` (allowlisted enums only) have
+        // no `$EnumUtils` field; box them as `update_sget_object` does.
+        equal_block->push_back(
+            {dasm(OPCODE_CONST,
+                  {2_v, {LITERAL, static_cast<int64_t>(pair.first)}}),
+             dasm(OPCODE_INVOKE_STATIC, m_enum_util->INTEGER_VALUEOF_METHOD,
+                  {2_v}),
+             dasm(OPCODE_MOVE_RESULT_OBJECT, {2_v}),
+             dasm(OPCODE_RETURN_OBJECT, {2_v})});
       }
       auto* ne_block = cfg.create_block();
       cfg.create_branch(prev_block, dasm(OPCODE_IF_EQZ, {3_v}), equal_block,

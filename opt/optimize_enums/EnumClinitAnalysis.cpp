@@ -214,7 +214,7 @@ bool validate_result(const DexClass* cls,
         return false;
       }
       uint32_t ordinal = it->second.ordinal;
-      if (ordinal > ordinals.size()) {
+      if (ordinal >= ordinals.size()) {
         TRACE(ENUM, 2, "\tUnexpected ordinal %u on %s", ordinal,
               SHOW(enum_sfield));
         return false;
@@ -311,7 +311,10 @@ EnumAttributes analyze_enum_clinit(const DexClass* cls,
     if (!ordinal_value) {
       continue;
     }
-    always_assert(*ordinal_value >= 0);
+    if (*ordinal_value < 0) {
+      TRACE(ENUM, 2, "\tNegative ordinal on %s", SHOW(enum_sfield));
+      return EnumAttributes();
+    }
 
     auto name = ptr.get<StringDomain>(enum_name_field);
     auto name_value = name.get_constant();

@@ -9,11 +9,13 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <boost/algorithm/string/replace.hpp>
 #include <mutex>
 #include <set>
 
 #include "ControlFlow.h"
 #include "Creators.h"
+#include "EnumClinitAnalysis.h"
 #include "EnumConfig.h"
 #include "EnumUpcastAnalysis.h"
 #include "IRAssembler.h"
@@ -406,4 +408,97 @@ TEST_F(OptimizeEnumsTest, rejectionReasonsAreComplete) {
     EXPECT_EQ(config.candidate_enums.count_unsafe(bar_type), 0u)
         << "iteration " << iteration;
   }
+}
+
+/* Create an enum with constants A and B whose <clinit> passes the given
+ordinals to the constructor, like this hand-written Java-like code:
+
+enum E {
+  A("A", 0), B("B", ordinal_b);  // javac would pass ordinal 1 for B
+}
+*/
+DexClass* create_two_constant_enum(const std::string& name, int ordinal_b) {
+  auto with_names = [&](std::string s_expr) {
+    boost::replace_all(s_expr, "LE;", name);
+    boost::replace_all(s_expr, "ORDINAL_B", std::to_string(ordinal_b));
+    return s_expr;
+  };
+  ClassCreator cc(DexType::make_type(name));
+  cc.set_super(type::java_lang_Enum());
+  cc.set_access(ACC_PUBLIC | ACC_FINAL | ACC_ENUM);
+  for (const char* constant : {"A", "B"}) {
+    cc.add_field(DexField::make_field(
+                     with_names("LE;." + std::string(constant) + ":LE;"))
+                     ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_ENUM));
+  }
+  cc.add_method(assembler::method_from_string(with_names(R"(
+    (method (private constructor) "LE;.<init>:(Ljava/lang/String;I)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (load-param v2)
+        (invoke-direct (v0 v1 v2) "Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V")
+        (return-void)
+      )
+    )
+  )")));
+  cc.add_method(assembler::method_from_string(with_names(R"(
+    (method (public static) "LE;.<clinit>:()V"
+      (
+        (const-string "A")
+        (move-result-pseudo-object v0)
+        (const v1 0)
+        (new-instance "LE;")
+        (move-result-pseudo-object v2)
+        (invoke-direct (v2 v0 v1) "LE;.<init>:(Ljava/lang/String;I)V")
+        (sput-object v2 "LE;.A:LE;")
+        (const-string "B")
+        (move-result-pseudo-object v0)
+        (const v1 ORDINAL_B)
+        (new-instance "LE;")
+        (move-result-pseudo-object v2)
+        (invoke-direct (v2 v0 v1) "LE;.<init>:(Ljava/lang/String;I)V")
+        (sput-object v2 "LE;.B:LE;")
+        (return-void)
+      )
+    )
+  )")));
+  auto* cls = cc.create();
+  for (auto* m : cls->get_all_methods()) {
+    m->get_code()->build_cfg();
+  }
+  return cls;
+}
+
+// Ordinals of an enum with N constants must be exactly 0..N-1. An ordinal of
+// N is out of range and must reject the enum.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsOrdinalEqualToConstantCount) {
+  auto store = create_enum_store();
+  auto* cls = create_two_constant_enum("LOrdinalTooLarge;", 2);
+  auto attributes =
+      optimize_enums::analyze_enum_clinit(cls, /*support_kt_19_enum_entries*/
+                                          false);
+  EXPECT_TRUE(attributes.m_constants_map.empty());
+}
+
+// A negative ordinal is out of range too and must reject the enum rather than
+// abort Redex.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsNegativeOrdinal) {
+  auto store = create_enum_store();
+  auto* cls = create_two_constant_enum("LNegativeOrdinal;", -1);
+  auto attributes =
+      optimize_enums::analyze_enum_clinit(cls, /*support_kt_19_enum_entries*/
+                                          false);
+  EXPECT_TRUE(attributes.m_constants_map.empty());
+}
+
+// The same clinit with in-range ordinals is accepted, so the rejections above
+// come from the ordinals alone.
+TEST_F(OptimizeEnumsTest, clinitAnalysisAcceptsConsecutiveOrdinals) {
+  auto store = create_enum_store();
+  auto* cls = create_two_constant_enum("LConsecutiveOrdinals;", 1);
+  auto attributes =
+      optimize_enums::analyze_enum_clinit(cls, /*support_kt_19_enum_entries*/
+                                          false);
+  EXPECT_EQ(attributes.m_constants_map.size(), 2);
 }

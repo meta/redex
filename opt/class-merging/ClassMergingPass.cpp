@@ -284,6 +284,8 @@ void ClassMergingPass::bind_config() {
 void ClassMergingPass::run_pass(DexStoresVector& stores,
                                 ConfigFiles& conf,
                                 PassManager& mgr) {
+  mgr.set_metric("num_merged_volatile_fields", 0);
+  mgr.set_metric("num_merged_final_fields", 0);
   if (m_model_specs.empty()) {
     return;
   }

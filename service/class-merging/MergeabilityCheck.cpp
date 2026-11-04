@@ -136,7 +136,10 @@ TypeSet MergeabilityChecker::exclude_unsupported_bytecode_refs_for(
     // For mergeables with type tags, it is not safe to merge those
     // referenced by CONST_CLASS, since we will lose granularity as we can't map
     // to the old type anymore.
-    if (has_type_tag && !opcode::is_const_class(insn->opcode())) {
+    // Type tags distinguish merger instances, not array element classes.
+    if (has_type_tag && !opcode::is_const_class(insn->opcode()) &&
+        !(opcode::is_instance_of(insn->opcode()) &&
+          type::is_array(insn->get_type()))) {
       continue;
     }
 

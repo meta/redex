@@ -21,6 +21,22 @@ TEST_F(PostVerify, MergeablesRemoval) {
   verify_class_merged(cls_d);
 }
 
+TEST_F(PostVerify, ArrayInstanceOfKeepsElementClasses) {
+  auto* cls_a = find_class_named(classes, "Lcom/facebook/redextest/ArrayA;");
+  auto* cls_b = find_class_named(classes, "Lcom/facebook/redextest/ArrayB;");
+  ASSERT_NE(cls_a, nullptr);
+  ASSERT_NE(cls_b, nullptr);
+  EXPECT_NE(find_method_named(*cls_a, "<init>"), nullptr);
+  EXPECT_NE(find_method_named(*cls_b, "<init>"), nullptr);
+}
+
+TEST_F(PostVerify, PlainInstanceOfStillMerges) {
+  verify_class_merged(
+      find_class_named(classes, "Lcom/facebook/redextest/ArrayC;"));
+  verify_class_merged(
+      find_class_named(classes, "Lcom/facebook/redextest/ArrayD;"));
+}
+
 TEST_F(PostVerify, SinkCommonCtorInvocation) {
   boost::regex shape_name_pattern(
       "^Lcom/facebook/redextest/SimpleBaseShape_S0000000_\\w+;$");

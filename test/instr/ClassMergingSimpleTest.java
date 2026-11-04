@@ -186,7 +186,43 @@ class ThirdC extends ThirdMid {
   int getC() { return 3; }
 }
 
+class ArrayBase {}
+class ArrayA extends ArrayBase {}
+class ArrayB extends ArrayBase {}
+class ArrayC extends ArrayBase {}
+class ArrayD extends ArrayBase {}
+
 public class ClassMergingSimpleTest {
+
+  static boolean isArrayA(Object o) { return o instanceof ArrayA[]; }
+  static boolean isArrayB(Object o) { return o instanceof ArrayB[][]; }
+  static boolean isArrayC(Object o) { return o instanceof ArrayC; }
+
+  @Test
+  public void testArrayInstanceOf() {
+    assertThat(isArrayA(new ArrayA[1])).isTrue();
+    assertThat(isArrayA(new ArrayA[0])).isTrue();
+    assertThat(isArrayA(new ArrayB[1])).isFalse();
+    assertThat(isArrayA(new ArrayA())).isFalse();
+    assertThat(isArrayA(null)).isFalse();
+  }
+
+  @Test
+  public void testMultiDimensionalArrayInstanceOf() {
+    assertThat(isArrayB(new ArrayB[1][])).isTrue();
+    assertThat(isArrayB(new ArrayB[0][])).isTrue();
+    assertThat(isArrayB(new ArrayA[1][])).isFalse();
+    assertThat(isArrayB(new ArrayB[1])).isFalse();
+    assertThat(isArrayB(new ArrayB())).isFalse();
+    assertThat(isArrayB(null)).isFalse();
+  }
+
+  @Test
+  public void testPlainInstanceOfStillMerges() {
+    assertThat(isArrayC(new ArrayC())).isTrue();
+    assertThat(isArrayC(new ArrayD())).isFalse();
+    assertThat(isArrayC(null)).isFalse();
+  }
 
   @Test
   public void testMergingNonVirts() {

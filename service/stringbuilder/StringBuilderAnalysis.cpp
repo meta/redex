@@ -77,9 +77,19 @@ void FixpointIterator::analyze_instruction(const IRInstruction* insn,
     auto* method = insn->get_method();
     if (method == m_stringbuilder_init_with_string ||
         is_eligible_append(method)) {
+      // When the receiver register may hold any of several builders, the
+      // operation modifies only one of them, and the analysis cannot tell which
+      // one. Therefore, set the state of each of these builders to top.
+      const auto& receivers = env->get_pointers(insn->src(0));
+      bool is_single_receiver =
+          receivers.is_value() && receivers.elements().size() == 1;
       env->update_store(
           insn->src(0),
           [&](const IRInstruction* ptr, BuilderStore::Domain* store) {
+            if (!is_single_receiver) {
+              store->set(ptr, BuilderDomain::top());
+              return;
+            }
             store->update(ptr, [&](const BuilderDomain& builder) {
               auto copy = builder;
               copy.add_operation(insn);

@@ -562,6 +562,56 @@ TEST_F(StringBuilderOutlinerTest, mutableCharSequence) {
 }
 
 /*
+ * Check that we do not outline `x.toString()` when an `append` call may target
+ * either `x` or another StringBuilder `y`. Depending on `c`, `sb.append("b")`
+ * appends to `y` or `x`, so `x` contains "a" on one branch and "ab" on the
+ * other and cannot be replaced with a fixed `concat()` call.
+ *
+ *   static String f(boolean c) {
+ *     StringBuilder x = new StringBuilder();
+ *     StringBuilder y = new StringBuilder();
+ *     StringBuilder sb = x;
+ *     sb = sb.append("a");
+ *     if (c) {
+ *       sb = y;
+ *     }
+ *     sb.append("b");
+ *     return x.toString();      // "a" if c, else "ab"
+ *   }
+ */
+TEST_F(StringBuilderOutlinerTest, appendToEitherOfTwoBuildersNotOutlined) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param v5)
+      (new-instance "Ljava/lang/StringBuilder;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "Ljava/lang/StringBuilder;.<init>:()V")
+      (new-instance "Ljava/lang/StringBuilder;")
+      (move-result-pseudo-object v2)
+      (invoke-direct (v2) "Ljava/lang/StringBuilder;.<init>:()V")
+      (move-object v3 v0)
+      (const-string "a")
+      (move-result-pseudo-object v1)
+      (invoke-virtual (v0 v1) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
+      (move-result-object v0)
+      (if-eqz v5 :join)
+      (move-object v0 v2)
+      (:join)
+      (const-string "b")
+      (move-result-pseudo-object v1)
+      (invoke-virtual (v0 v1) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
+      (invoke-virtual (v3) "Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;")
+      (move-result-object v4)
+      (return-object v4)
+    )
+  )");
+
+  auto expected = assembler::to_s_expr(code.get());
+  run_outliner(code.get());
+  EXPECT_EQ(expected, assembler::to_s_expr(code.get()));
+}
+
+/*
  * Check that we do not create invalid code if the builder is live-out. We will
  * will still outline the code but we won't remove the append instructions. This
  * does indeed cause code bloat instead of code reduction, but it's a pretty

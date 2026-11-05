@@ -338,6 +338,18 @@ inline std::vector<SourceBlock*> gather_source_blocks(cfg::Block* b) {
   return ret;
 }
 
+// Whether `a` and `b` carry the same number of source blocks, so that
+// `add_source_blocks_pairwise` can pair them up.
+bool have_same_source_block_counts(const cfg::Block* a, const cfg::Block* b);
+
+/**
+ * Adds each source block of `from` to the source block at the same position in
+ * `into` (see `SourceBlock::add`), as when `into` takes over the executions of
+ * an identical block. Returns false, changing nothing, when the two blocks
+ * carry different numbers of source blocks.
+ */
+bool add_source_blocks_pairwise(cfg::Block* into, const cfg::Block* from);
+
 template <typename Fn>
 inline void foreach_source_block(cfg::Block* b, const Fn& fn) {
   for (const auto& mie : *b) {

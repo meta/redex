@@ -1335,6 +1335,22 @@ void insert_synthetic_source_blocks_in_method(
   block->insert_before(it, std::move(new_sb));
 }
 
+bool have_same_source_block_counts(const cfg::Block* a, const cfg::Block* b) {
+  return gather_source_blocks(a).size() == gather_source_blocks(b).size();
+}
+
+bool add_source_blocks_pairwise(cfg::Block* into, const cfg::Block* from) {
+  auto into_sbs = gather_source_blocks(into);
+  auto from_sbs = gather_source_blocks(from);
+  if (into_sbs.size() != from_sbs.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < into_sbs.size(); i++) {
+    into_sbs.at(i)->add(*from_sbs.at(i));
+  }
+  return true;
+}
+
 std::unique_ptr<SourceBlock> clone_as_synthetic(SourceBlock* sb,
                                                 const DexMethod* ref,
                                                 const SourceBlock::Val& val) {

@@ -2602,3 +2602,40 @@ TEST_F(SourceBlocksTest, targeted_tracking_ignores_out_of_scope_methods) {
   EXPECT_EQ(resolved_methods(stores, gone_name), 0);
   EXPECT_EQ(resolved_methods(stores, gone_name + "@0"), 0);
 }
+
+TEST_F(SourceBlocksTest, add_source_blocks_pairwise) {
+  auto into = assembler::ircode_from_string(R"((
+    (.src_block "LFoo;.bar:()V" 0 (1 10))
+    (const v0 0)
+    (.src_block "LFoo;.bar:()V" 1 (2 20))
+    (return-void)
+  ))");
+  auto from = assembler::ircode_from_string(R"((
+    (.src_block "LFoo;.bar:()V" 0 (3 30))
+    (const v0 0)
+    (.src_block "LFoo;.bar:()V" 1 (4 5))
+    (return-void)
+  ))");
+  auto other = assembler::ircode_from_string(R"((
+    (.src_block "LFoo;.bar:()V" 0 (100 100))
+    (return-void)
+  ))");
+  into->build_cfg();
+  from->build_cfg();
+  other->build_cfg();
+  auto* block = into->cfg().entry_block();
+
+  EXPECT_TRUE(add_source_blocks_pairwise(block, from->cfg().entry_block()));
+  auto sbs = gather_source_blocks(block);
+  ASSERT_EQ(sbs.size(), 2);
+  EXPECT_FLOAT_EQ(sbs[0]->get_val(0).value(), 4);
+  EXPECT_FLOAT_EQ(sbs[0]->get_appear100(0).value(), 30);
+  EXPECT_FLOAT_EQ(sbs[1]->get_val(0).value(), 6);
+  EXPECT_FLOAT_EQ(sbs[1]->get_appear100(0).value(), 20);
+
+  EXPECT_TRUE(have_same_source_block_counts(block, from->cfg().entry_block()));
+  EXPECT_FALSE(
+      have_same_source_block_counts(block, other->cfg().entry_block()));
+  EXPECT_FALSE(add_source_blocks_pairwise(block, other->cfg().entry_block()));
+  EXPECT_FLOAT_EQ(sbs[0]->get_val(0).value(), 4);
+}

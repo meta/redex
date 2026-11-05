@@ -684,16 +684,11 @@ class DedupBlocksImpl {
           // canon is now reached by the union of predecessors, so the counts
           // accumulate (SUM). `add` also maxes `appear100` (a probability,
           // never summed).
-          std::vector<SourceBlock*> source_blocks =
-              source_blocks::gather_source_blocks(block);
-          auto num_sb = source_blocks.size();
-          if (num_sb == num_canon_sb) {
-            for (size_t source_blk_idx = 0; source_blk_idx < num_sb;
-                 source_blk_idx++) {
-              canon_source_blocks[source_blk_idx]->add(
-                  *source_blocks[source_blk_idx]);
-            }
-          } else if (num_sb >= 1 && num_canon_sb >= 1) {
+          if (source_blocks::add_source_blocks_pairwise(canon, block)) {
+            continue;
+          }
+          auto num_sb = source_blocks::gather_source_blocks(block).size();
+          if (num_sb >= 1 && num_canon_sb >= 1) {
             // Rare defensive fallback for a structural mismatch: identical
             // blocks normally carry the same NUMBER of source blocks (identical
             // instruction sequences get identical SB structure), so the paired

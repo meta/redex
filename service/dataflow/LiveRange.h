@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 
 #include <boost/functional/hash.hpp>
 
@@ -110,5 +111,26 @@ struct LazyLiveRanges {
  * wide register. In general, callers should use the default (true) value.
  */
 void renumber_registers(IRCode*, bool width_aware = true);
+
+/*
+ * The type that `use` requires of the register it reads, given the return type
+ * of the method the instruction is in. Returns nullptr when the demand cannot
+ * be determined.
+ */
+const DexType* get_type_demand(DexType* method_rtype, const Use& use);
+
+/*
+ * The types that the uses of the receiver of non-static `method` require, or
+ * nullopt when one of them cannot be determined.
+ */
+std::optional<UnorderedSet<const DexType*>> get_receiver_type_demands(
+    const DexMethod* method);
+
+/*
+ * The one type among `type_demands` that satisfies all of them, or nullptr when
+ * there is none.
+ */
+const DexType* reduce_type_demands(
+    const UnorderedSet<const DexType*>& type_demands);
 
 } // namespace live_range

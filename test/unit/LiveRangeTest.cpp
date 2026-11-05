@@ -10,10 +10,12 @@
 
 #include "CheckCast.h"
 #include "ControlFlow.h"
+#include "Creators.h"
 #include "IRAssembler.h"
 #include "LiveRange.h"
 #include "RedexTest.h"
 #include "ScopedCFG.h"
+#include "TypeUtil.h"
 
 class LiveRangeTest : public RedexTest {};
 
@@ -349,4 +351,44 @@ TEST_F(LiveRangeTest, testDefUseChainMultiDefinition) {
               ::testing::UnorderedElementsAre(Use{move, 0}));
   EXPECT_THAT(unordered_unsafe_unwrap(du_chains[const_v1_2]),
               ::testing::UnorderedElementsAre(Use{move, 0}));
+}
+
+TEST_F(LiveRangeTest, ReceiverTypeDemands) {
+  ClassCreator foo(DexType::make_type("LFoo;"));
+  foo.set_super(type::java_lang_Object());
+  foo.create();
+  auto* method = assembler::method_from_string(R"(
+    (method (public) "LFoo;.baz:()V"
+      (
+        (load-param-object v0)
+        (move-object v1 v0)
+        (invoke-virtual (v1) "LFoo;.bar:()V")
+        (monitor-enter v0)
+        (monitor-exit v0)
+        (return-void)
+      )
+    )
+  )");
+  method->get_code()->build_cfg();
+  auto demands = live_range::get_receiver_type_demands(method);
+  ASSERT_TRUE(demands);
+  EXPECT_EQ(demands->size(), 2);
+  EXPECT_EQ(live_range::reduce_type_demands(*demands),
+            DexType::get_type("LFoo;"));
+
+  auto* unknown = assembler::method_from_string(R"(
+    (method (public) "LFoo;.qux:()V"
+      (
+        (load-param-object v0)
+        (const v1 1)
+        (new-array v1 "[Ljava/lang/Object;")
+        (move-result-pseudo-object v2)
+        (const v3 0)
+        (aput-object v0 v2 v3)
+        (return-void)
+      )
+    )
+  )");
+  unknown->get_code()->build_cfg();
+  EXPECT_FALSE(live_range::get_receiver_type_demands(unknown));
 }

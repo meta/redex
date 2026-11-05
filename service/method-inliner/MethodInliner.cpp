@@ -40,68 +40,6 @@ namespace mog = method_override_graph;
 
 namespace {
 
-const DexType* get_receiver_type_demand(DexType* callee_rtype,
-                                        const live_range::Use& use) {
-  switch (use.insn->opcode()) {
-  case OPCODE_RETURN_OBJECT:
-    always_assert(use.src_index == 0);
-    return callee_rtype;
-  case OPCODE_MONITOR_ENTER:
-  case OPCODE_MONITOR_EXIT:
-  case OPCODE_CHECK_CAST:
-  case OPCODE_INSTANCE_OF:
-    always_assert(use.src_index == 0);
-    return type::java_lang_Object();
-  case OPCODE_THROW:
-    always_assert(use.src_index == 0);
-    return type::java_lang_Throwable();
-  case OPCODE_FILLED_NEW_ARRAY:
-    return type::get_array_component_type(use.insn->get_type());
-  case OPCODE_INVOKE_VIRTUAL:
-  case OPCODE_INVOKE_DIRECT:
-  case OPCODE_INVOKE_STATIC:
-  case OPCODE_INVOKE_INTERFACE: {
-    DexMethodRef* dex_method = use.insn->get_method();
-    auto src_index = use.src_index;
-    if (use.insn->opcode() != OPCODE_INVOKE_STATIC) {
-      // The first argument is a reference to the object instance on which the
-      // method is invoked.
-      if (src_index-- == 0) {
-        return dex_method->get_class();
-      }
-    }
-    const auto* arg_types = dex_method->get_proto()->get_args();
-    return arg_types->at(src_index);
-  }
-  default:
-    if (opcode::is_a_conditional_branch(use.insn->opcode())) {
-      return type::java_lang_Object();
-    }
-    if (opcode::is_an_iget(use.insn->opcode())) {
-      always_assert(use.src_index == 0);
-      return use.insn->get_field()->get_class();
-    }
-    if (opcode::is_an_iput(use.insn->opcode()) ||
-        opcode::is_an_sput(use.insn->opcode())) {
-      if (use.src_index == 0) {
-        return use.insn->get_field()->get_type();
-      } else {
-        always_assert(use.src_index == 1);
-        return use.insn->get_field()->get_class();
-      }
-    }
-    if (opcode::is_an_aput(use.insn->opcode())) {
-      always_assert(use.src_index == 0);
-      // TODO: Use type inference to figure out required array (component) type.
-      // For now, we just play it save and give up.
-      return nullptr;
-    }
-    not_reached_log(
-        "Unsupported instruction {%s} in get_receiver_type_demand\n",
-        SHOW(use.insn));
-  }
-}
-
 static bool has_bridgelike_access(DexMethod* m) {
   return m->is_virtual() &&
          (is_bridge(m) || (is_synthetic(m) && !method::is_constructor(m)));
@@ -390,20 +328,6 @@ SameImplementationMap get_same_implementation_map(
   return method_to_implementations;
 }
 
-const DexType* reduce_type_demands(
-    std::unique_ptr<UnorderedSet<const DexType*>>& type_demands) {
-  if (!type_demands) {
-    return nullptr;
-  }
-  // remove less specific object types
-  unordered_erase_if(*type_demands, [&type_demands](auto u) {
-    return unordered_any_of(*type_demands, [u](const DexType* t) {
-      return t != u && type::check_cast(t, u);
-    });
-  });
-  return type_demands->size() == 1 ? *unordered_any(*type_demands) : nullptr;
-}
-
 bool can_have_unknown_implementations(const mog::Graph& method_override_graph,
                                       const DexMethod* method) {
   if (method->is_external()) {
@@ -637,20 +561,6 @@ void gather_true_virtual_methods(
           }
           return;
         }
-        // Figure out if candidates use the receiver in a way that does require
-        // a cast.
-        live_range::Uses first_load_param_uses;
-        {
-          auto ii = InstructionIterable(code->cfg().get_param_instructions());
-          auto* first_load_param = ii.begin()->insn;
-          live_range::MoveAwareChains chains(code->cfg(),
-                                             /* ignore_unreachable */ false,
-                                             [first_load_param](auto* insn) {
-                                               return insn == first_load_param;
-                                             });
-          first_load_param_uses =
-              std::move(chains.get_def_use_chains()[first_load_param]);
-        }
         UnorderedSet<DexType*> formal_callee_types;
         bool any_same_implementation_invokes{false};
         for (auto& p : UnorderedIterable(caller_to_invocations.caller_insns)) {
@@ -661,38 +571,33 @@ void gather_true_virtual_methods(
             }
           }
         }
-        auto type_demands = std::make_unique<UnorderedSet<const DexType*>>();
-        // Note that the callee-rtype is the same for all methods in a
+        // Figure out if candidates use the receiver in a way that does require
+        // a cast. Note that the callee-rtype is the same for all methods in a
         // same-implementations cluster.
-        auto* callee_rtype = callee->get_proto()->get_rtype();
-        for (auto use : UnorderedIterable(first_load_param_uses)) {
-          if (opcode::is_a_move(use.insn->opcode())) {
-            continue;
-          }
-          const auto* type_demand = get_receiver_type_demand(callee_rtype, use);
-          if (type_demand == nullptr) {
-            formal_callee_types.clear();
-            type_demands = nullptr;
-            break;
-          }
-          always_assert_log(type::check_cast(callee->get_class(), type_demand),
-                            "For the incoming code to be type correct, %s must "
-                            "be castable to %s.",
-                            SHOW(callee->get_class()), SHOW(type_demand));
-          if (type_demands->insert(type_demand).second) {
+        auto type_demands = live_range::get_receiver_type_demands(callee);
+        if (!type_demands) {
+          formal_callee_types.clear();
+        } else {
+          for (const auto* type_demand : UnorderedIterable(*type_demands)) {
+            always_assert_log(
+                type::check_cast(callee->get_class(), type_demand),
+                "For the incoming code to be type correct, %s must "
+                "be castable to %s.",
+                SHOW(callee->get_class()), SHOW(type_demand));
             unordered_erase_if(formal_callee_types, [&](auto* t) {
               return !type::check_cast(t, type_demand);
             });
           }
         }
+        const auto* combined_type_demand =
+            type_demands ? live_range::reduce_type_demands(*type_demands)
+                         : nullptr;
         for (auto& p : UnorderedIterable(caller_to_invocations.caller_insns)) {
           unordered_erase_if(p.second, [&](auto* insn) {
             if (!formal_callee_types.count(insn->get_method()->get_class())) {
               auto it2 = same_implementation_invokes.find(insn);
               if (it2 != same_implementation_invokes.end()) {
                 always_assert(any_same_implementation_invokes);
-                const auto* combined_type_demand =
-                    reduce_type_demands(type_demands);
                 if (combined_type_demand) {
                   for (auto same_implementation_callee : it2->second->methods) {
                     always_assert_log(

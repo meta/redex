@@ -55,6 +55,9 @@ class RefChecker {
 
   bool check_method(const DexMethod* method) const;
 
+  // Checks the return and argument types of `proto`.
+  bool check_proto(const DexProto* proto) const;
+
   bool check_field(const DexField* field) const;
 
   /**

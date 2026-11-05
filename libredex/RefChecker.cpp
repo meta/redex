@@ -7,6 +7,8 @@
 
 #include "RefChecker.h"
 
+#include <algorithm>
+
 #include "ControlFlow.h"
 #include "Debug.h"
 #include "DeterministicContainers.h"
@@ -209,16 +211,14 @@ bool RefChecker::check_method_internal(const DexMethod* method) const {
   if (cls->is_external()) {
     return (m_min_sdk_api != nullptr) && m_min_sdk_api->has_method(method);
   }
-  if (!check_type(method->get_class())) {
-    return false;
-  }
-  auto* args = method->get_proto()->get_args();
-  for (auto* t : *args) {
-    if (!check_type(t)) {
-      return false;
-    }
-  }
-  return check_type(method->get_proto()->get_rtype());
+  return check_type(method->get_class()) && check_proto(method->get_proto());
+}
+
+bool RefChecker::check_proto(const DexProto* proto) const {
+  const auto* args = proto->get_args();
+  return std::all_of(args->begin(), args->end(),
+                     [this](const DexType* t) { return check_type(t); }) &&
+         check_type(proto->get_rtype());
 }
 
 bool RefChecker::check_field_internal(const DexField* field) const {

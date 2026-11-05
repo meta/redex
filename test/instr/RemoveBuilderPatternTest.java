@@ -32,7 +32,96 @@ class Model {
   }
 }
 
+class LoopModel {
+  public static class Builder {
+    int field;
+    long wide;
+    Object reference;
+  }
+}
+
+class PreviousModel {
+  public static class Builder {
+    int field;
+  }
+}
+
 public class RemoveBuilderPatternTest {
+
+  @Test
+  public void testLoopBuilderStartsWithDefaultInt() {
+    int sum = 0;
+    for (int i = 0; i < 2; i++) {
+      LoopModel.Builder builder = new LoopModel.Builder();
+      if (i == 0) {
+        builder.field = 5;
+      }
+      sum += builder.field;
+    }
+    assertThat(sum).isEqualTo(5);
+  }
+
+  @Test
+  public void testLoopBuilderStartsWithDefaultWide() {
+    long sum = 0;
+    for (int i = 0; i < 2; i++) {
+      LoopModel.Builder builder = new LoopModel.Builder();
+      if (i == 0) {
+        builder.wide = 7L;
+      }
+      sum += builder.wide;
+    }
+    assertThat(sum).isEqualTo(7L);
+  }
+
+  @Test
+  public void testLoopBuilderStartsWithDefaultReference() {
+    int nonNull = 0;
+    for (int i = 0; i < 2; i++) {
+      LoopModel.Builder builder = new LoopModel.Builder();
+      if (i == 0) {
+        builder.reference = new Object();
+      }
+      if (builder.reference != null) {
+        nonNull++;
+      }
+    }
+    assertThat(nonNull).isEqualTo(1);
+  }
+
+  @Test
+  public void testConditionalLoopBuilderStartsWithDefaultFields() {
+    int sum = 0;
+    for (int i = 0; i < 3; i++) {
+      LoopModel.Builder builder = null;
+      if (i != 1) {
+        builder = new LoopModel.Builder();
+        if (i == 0) {
+          builder.field = 5;
+        }
+      }
+      if (builder != null) {
+        sum += builder.field;
+      }
+    }
+    assertThat(sum).isEqualTo(5);
+  }
+
+  @Test
+  public void testPreviousLoopBuilderKeepsItsFields() {
+    PreviousModel.Builder previous = null;
+    int sum = 0;
+    for (int i = 0; i < 2; i++) {
+      PreviousModel.Builder builder = new PreviousModel.Builder();
+      builder.field = i + 1;
+      if (previous != null) {
+        sum += previous.field * 10;
+      }
+      sum += builder.field;
+      previous = builder;
+    }
+    assertThat(sum).isEqualTo(13);
+  }
 
   @Test
   public void testRemoveSimpleBuilder() {

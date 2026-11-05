@@ -10,6 +10,7 @@
 
 #include <utility>
 
+#include "CFGMutation.h"
 #include "Debug.h"
 #include "DexClass.h"
 #include "InitClassesWithSideEffects.h"
@@ -156,10 +157,9 @@ void BuilderTransform::update_virtual_calls(
 
 namespace {
 
-void initialize_regs(
-    const std::map<DexField*, size_t, dexfields_comparator>& field_to_reg,
-    cfg::ControlFlowGraph& cfg) {
-
+std::vector<IRInstruction*> make_initializations(
+    const std::map<DexField*, size_t, dexfields_comparator>& field_to_reg) {
+  std::vector<IRInstruction*> initializations;
   for (const auto& pair : field_to_reg) {
     auto* field = pair.first;
     auto reg = pair.second;
@@ -172,12 +172,9 @@ void initialize_regs(
     }
     initialization_insn->set_dest(static_cast<reg_t>(reg));
     initialization_insn->set_literal(0);
-    cfg::Block* first_block_with_insns = cfg.get_first_block_with_insns();
-    auto insert_it = first_block_with_insns->get_first_non_param_loading_insn();
-    cfg.insert_before(
-        first_block_with_insns->to_cfg_instruction_iterator(insert_it),
-        initialization_insn);
+    initializations.push_back(initialization_insn);
   }
+  return initializations;
 }
 
 } // namespace
@@ -186,10 +183,14 @@ void BuilderTransform::replace_fields(const InstantiationToUsage& usage,
                                       DexMethod* method) {
   auto* code = method->get_code();
 
-  std::vector<std::pair<cfg::InstructionIterator, IRInstruction*>> to_replace;
-
-  always_assert(code->cfg_built());
+  always_assert_log(code->cfg_built(), "Missing CFG for %s", SHOW(method));
   auto& cfg = code->cfg();
+  cfg::CFGMutation mutation(cfg);
+  std::vector<IRInstruction*> instantiations;
+  std::vector<IRInstruction*> entry_initializations;
+  auto* first_block = cfg.get_first_block_with_insns();
+  auto entry = first_block->to_cfg_instruction_iterator(
+      first_block->get_first_non_param_loading_insn());
 
   for (const auto& mie : InstructionIterable(cfg)) {
     auto* instantiation_insn = mie.insn;
@@ -202,9 +203,12 @@ void BuilderTransform::replace_fields(const InstantiationToUsage& usage,
                       "initializations, but got %s\n",
                       SHOW(instantiation_insn));
 
-    // Replace builder instance creation with Object creation.
-    // This value should be only used for comparison with NULL.
-    instantiation_insn->set_type(type::java_lang_Object());
+    auto allocation = cfg.find_insn(instantiation_insn);
+    auto allocation_result = cfg.move_result_of(allocation);
+    always_assert_log(!allocation_result.is_end(),
+                      "Missing allocation result for %s in %s",
+                      SHOW(instantiation_insn), SHOW(method));
+    instantiations.push_back(instantiation_insn);
 
     std::map<DexField*, size_t, dexfields_comparator> field_to_reg;
     for (const auto& it : usage.at(instantiation_insn)) {
@@ -213,7 +217,7 @@ void BuilderTransform::replace_fields(const InstantiationToUsage& usage,
       if (opcode::is_an_iput(insn->opcode()) ||
           opcode::is_an_iget(insn->opcode())) {
         auto* field = resolve_field(insn->get_field(), FieldSearch::Instance);
-        always_assert(field);
+        always_assert_log(field, "Unresolved builder field in %s", SHOW(insn));
 
         if (field_to_reg.count(field) == 0) {
           field_to_reg[field] = type::is_wide_type(field->get_type())
@@ -236,11 +240,13 @@ void BuilderTransform::replace_fields(const InstantiationToUsage& usage,
           new_insn->set_src(0, insn->src(0));
         } else {
           auto move_result = cfg.move_result_of(it);
-          always_assert(!move_result.is_end());
+          always_assert_log(!move_result.is_end(),
+                            "Missing result for %s in %s", SHOW(insn),
+                            SHOW(method));
           new_insn->set_dest(move_result->insn->dest());
           new_insn->set_src(0, static_cast<reg_t>(field_to_reg[field]));
         }
-        to_replace.emplace_back(it, new_insn);
+        mutation.replace(it, {new_insn});
       } else if (insn->opcode() == OPCODE_MOVE_OBJECT ||
                  insn->opcode() == IOPCODE_MOVE_RESULT_PSEUDO_OBJECT ||
                  opcode::is_a_conditional_branch(insn->opcode())) {
@@ -260,26 +266,43 @@ void BuilderTransform::replace_fields(const InstantiationToUsage& usage,
           // any further. Keep Object.<init> in place to avoid confusing
           // dex2oat.
 
-          always_assert(invoked->get_class() == type::java_lang_Object() &&
-                        method::is_init(invoked));
+          always_assert_log(
+              invoked && invoked->get_class() == type::java_lang_Object() &&
+                  method::is_init(invoked),
+              "Unexpected builder invoke %s in %s", SHOW(insn), SHOW(method));
         } else {
           // Replace check-cast with move.
           IRInstruction* new_move = new IRInstruction(OPCODE_MOVE_OBJECT);
           new_move->set_src(0, insn->src(0));
           auto move_result = cfg.move_result_of(it);
-          always_assert(!move_result.is_end());
+          always_assert_log(!move_result.is_end(),
+                            "Missing result for %s in %s", SHOW(insn),
+                            SHOW(method));
           new_move->set_dest(move_result->insn->dest());
-          to_replace.emplace_back(it, new_move);
+          mutation.replace(it, {new_move});
         }
       }
     }
 
-    initialize_regs(field_to_reg, code->cfg());
+    // Entry definitions cover paths that join an allocation with NULL.
+    auto initializations = make_initializations(field_to_reg);
+    entry_initializations.insert(entry_initializations.end(),
+                                 initializations.begin(),
+                                 initializations.end());
+    // Only a successful allocation starts a new field-register lifetime.
+    mutation.insert_after(allocation_result,
+                          make_initializations(field_to_reg));
   }
 
-  for (const auto& pair : to_replace) {
-    cfg.replace_insn(pair.first, pair.second);
+  // All rewrite inputs have been checked before changing the method.
+  for (auto* insn : instantiations) {
+    // Replace builder instance creation with Object creation.
+    // Retain an object value for NULL comparisons and Object.<init>().
+    insn->set_type(type::java_lang_Object());
   }
+  // The entry block can contain only parameters, so its anchor can be end().
+  cfg.insert_before(entry, entry_initializations);
+  mutation.flush();
 }
 
 void BuilderTransform::cleanup() {

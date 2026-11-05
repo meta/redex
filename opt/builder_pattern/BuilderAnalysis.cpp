@@ -589,6 +589,30 @@ ConstTypeHashSet BuilderAnalysis::escape_types() {
     }
   }
 
+  // One allocation site owns one set of field registers. Another execution
+  // cannot reuse them while an earlier instance from that site is still live.
+  for (cfg::Block* block : cfg.blocks()) {
+    auto live = liveness_iter.get_live_out_vars_at(block);
+    auto instructions = InstructionIterable(block);
+    for (auto it = instructions.end(); it != instructions.begin();) {
+      auto* insn = (--it)->insn;
+      if (insn->opcode() == OPCODE_NEW_INSTANCE && m_usage.count(insn) != 0u) {
+        const auto& env = m_insn_to_env->at(insn);
+        for (reg_t reg : live.elements()) {
+          auto val = env.get(reg).get_constant();
+          if (val && *val == insn) {
+            TRACE(BLD_PATTERN, 2,
+                  "Excluding type %s since an older instance is live at %s",
+                  SHOW(insn->get_type()), SHOW(insn));
+            escape_types.emplace(insn->get_type());
+            break;
+          }
+        }
+      }
+      liveness_iter.analyze_instruction(insn, &live);
+    }
+  }
+
   return escape_types;
 }
 

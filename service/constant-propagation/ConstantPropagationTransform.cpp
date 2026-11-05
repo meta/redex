@@ -1197,14 +1197,7 @@ void Transform::apply_changes(cfg::ControlFlowGraph& cfg) {
     // Insert after last load-param (and not before first non-load-param
     // instructions, as that may suggest that the added instructions are to be
     // associated with the position of the non-load-param instruction).
-    auto* block = cfg.entry_block();
-    auto last_load_params_it = block->get_last_param_loading_insn();
-    if (last_load_params_it == block->end()) {
-      block->push_front(m_added_param_values);
-    } else {
-      cfg.insert_after(block->to_cfg_instruction_iterator(last_load_params_it),
-                       m_added_param_values);
-    }
+    cfg.insert_after_param_loads(m_added_param_values);
     m_added_param_values.clear();
   }
 }

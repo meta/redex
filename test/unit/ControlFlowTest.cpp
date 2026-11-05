@@ -3352,3 +3352,51 @@ B9 -> B10 [label="gh"];
 }
 )DOT");
 }
+
+TEST_F(ControlFlowTest, insert_after_param_loads) {
+  auto with_params = assembler::ircode_from_string(R"(
+    (
+      (load-param v0)
+      (load-param v1)
+      (return v0)
+    )
+  )");
+  with_params->build_cfg();
+  auto& with_params_cfg = with_params->cfg();
+  with_params_cfg.insert_after_param_loads(
+      {(new IRInstruction(OPCODE_CONST))
+           ->set_dest(with_params_cfg.allocate_temp())
+           ->set_literal(7)});
+  with_params->clear_cfg();
+  auto expected_with_params = assembler::ircode_from_string(R"(
+    (
+      (load-param v0)
+      (load-param v1)
+      (const v2 7)
+      (return v0)
+    )
+  )");
+  EXPECT_CODE_EQ(with_params.get(), expected_with_params.get());
+
+  auto without_params = assembler::ircode_from_string(R"(
+    (
+      (const v0 1)
+      (return v0)
+    )
+  )");
+  without_params->build_cfg();
+  auto& without_params_cfg = without_params->cfg();
+  without_params_cfg.insert_after_param_loads(
+      {(new IRInstruction(OPCODE_CONST))
+           ->set_dest(without_params_cfg.allocate_temp())
+           ->set_literal(7)});
+  without_params->clear_cfg();
+  auto expected_without_params = assembler::ircode_from_string(R"(
+    (
+      (const v1 7)
+      (const v0 1)
+      (return v0)
+    )
+  )");
+  EXPECT_CODE_EQ(without_params.get(), expected_without_params.get());
+}

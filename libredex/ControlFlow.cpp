@@ -3004,6 +3004,18 @@ bool ControlFlowGraph::insert_after(const InstructionIterator& position,
   return insert_after(position, insns.begin(), insns.end());
 }
 
+void ControlFlowGraph::insert_after_param_loads(
+    const std::vector<IRInstruction*>& insns) {
+  auto* block = entry_block();
+  auto last_param_loading_it = block->get_last_param_loading_insn();
+  if (last_param_loading_it == block->end()) {
+    block->push_front(insns);
+  } else {
+    insert_after(block->to_cfg_instruction_iterator(last_param_loading_it),
+                 insns);
+  }
+}
+
 bool ControlFlowGraph::push_front(Block* b,
                                   const std::vector<IRInstruction*>& insns) {
   return push_front(b, insns.begin(), insns.end());

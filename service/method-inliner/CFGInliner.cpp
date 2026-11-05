@@ -122,15 +122,7 @@ void CFGInliner::inline_cfg(ControlFlowGraph* caller,
           (new IRInstruction(IOPCODE_INIT_CLASS))->set_type(needs_init_class);
       new_insns.push_back(init_class_insn);
     }
-    auto* entry_block = callee.entry_block();
-    auto last_param_insn_it = entry_block->get_last_param_loading_insn();
-    if (last_param_insn_it == entry_block->end()) {
-      entry_block->push_front(new_insns);
-    } else {
-      callee.insert_after(
-          entry_block->to_cfg_instruction_iterator(last_param_insn_it),
-          new_insns);
-    }
+    callee.insert_after_param_loads(new_insns);
   }
 
   TRACE(CFG, 3, "caller %s", SHOW(*caller));

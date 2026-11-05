@@ -839,6 +839,9 @@ class ControlFlowGraph {
     return insert(position, begin, end, /* before */ false);
   }
 
+  // insert insns into the entry block, after its load-param instructions
+  void insert_after_param_loads(const std::vector<IRInstruction*>& insns);
+
   // insert insns at the beginning of block b
   bool push_front(Block* b, const std::vector<IRInstruction*>& insns);
 

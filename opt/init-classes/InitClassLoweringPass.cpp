@@ -280,14 +280,7 @@ void log_in_clinits(const LogCreator& log_creator,
     }
     cfg::ScopedCFG cfg(clinit->get_code());
     auto insns = log_creator.get_insns(*cfg, tag_str, show_deobfuscated(type));
-    auto* block = cfg->entry_block();
-    auto last_load_params_it = block->get_last_param_loading_insn();
-    if (last_load_params_it == block->end()) {
-      block->push_front(insns);
-    } else {
-      cfg->insert_after(block->to_cfg_instruction_iterator(last_load_params_it),
-                        insns);
-    }
+    cfg->insert_after_param_loads(insns);
     TRACE(ICL,
           6,
           "[InitClassLowering] added logging to %s:\n%s",

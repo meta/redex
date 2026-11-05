@@ -11,6 +11,8 @@
 #include "CheckCast.h"
 #include "ControlFlow.h"
 #include "Creators.h"
+#include "DexCallSite.h"
+#include "DexMethodHandle.h"
 #include "IRAssembler.h"
 #include "LiveRange.h"
 #include "RedexTest.h"
@@ -391,4 +393,70 @@ TEST_F(LiveRangeTest, ReceiverTypeDemands) {
   )");
   unknown->get_code()->build_cfg();
   EXPECT_FALSE(live_range::get_receiver_type_demands(unknown));
+}
+
+TEST_F(LiveRangeTest, TypeDemandOfInvokes) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (load-param-object v1)
+      (invoke-super (v0 v1) "LBase;.take:(LArg;)V")
+      (invoke-polymorphic (v1 v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;")
+      (return-void)
+    )
+  )");
+  cfg::ScopedCFG cfg(code.get());
+  auto it = InstructionIterable(*cfg).begin();
+  std::advance(it, 2);
+  auto* invoke_super = (*it++).insn;
+  auto* invoke_polymorphic = (*it++).insn;
+
+  using live_range::get_type_demand;
+  EXPECT_EQ(get_type_demand(nullptr, {invoke_super, 0}),
+            DexType::get_type("LBase;"));
+  EXPECT_EQ(get_type_demand(nullptr, {invoke_super, 1}),
+            DexType::get_type("LArg;"));
+  // The call site's prototype, which Redex does not keep, decides what the
+  // arguments must be.
+  EXPECT_EQ(get_type_demand(nullptr, {invoke_polymorphic, 1}), nullptr);
+
+  auto* call_site = new DexCallSite(
+      new DexMethodHandle(
+          METHOD_HANDLE_TYPE_INVOKE_STATIC,
+          DexMethod::make_method(
+              "LBootstrap;.bootstrap:(Ljava/lang/invoke/MethodHandles$Lookup;"
+              "Ljava/lang/String;Ljava/lang/invoke/MethodType;)"
+              "Ljava/lang/invoke/CallSite;")),
+      DexString::make_string("run"),
+      DexProto::make_proto(
+          type::_void(),
+          DexTypeList::make_type_list({DexType::make_type("LArg;")})),
+      {});
+  IRInstruction invoke_custom(OPCODE_INVOKE_CUSTOM);
+  invoke_custom.set_callsite(call_site)->set_srcs_size(1)->set_src(0, 0);
+  EXPECT_EQ(get_type_demand(nullptr, {&invoke_custom, 0}),
+            DexType::get_type("LArg;"));
+}
+
+TEST_F(LiveRangeTest, ReceiverTypeDemandsIgnoreUnreachableCode) {
+  ClassCreator bar(DexType::make_type("LBar;"));
+  bar.set_super(type::java_lang_Object());
+  bar.create();
+  auto* method = assembler::method_from_string(R"(
+    (method (public) "LBar;.baz:()V"
+      (
+        (load-param-object v0)
+        (return-void)
+      )
+    )
+  )");
+  method->get_code()->build_cfg();
+  auto& cfg = method->get_code()->cfg();
+  auto* unreachable = cfg.create_block();
+  unreachable->push_back(
+      (new IRInstruction(OPCODE_MONITOR_ENTER))->set_src(0, 0));
+  unreachable->push_back(new IRInstruction(OPCODE_RETURN_VOID));
+  auto demands = live_range::get_receiver_type_demands(method);
+  ASSERT_TRUE(demands);
+  EXPECT_TRUE(demands->empty());
 }

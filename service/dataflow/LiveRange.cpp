@@ -12,6 +12,7 @@
 
 #include "ControlFlow.h"
 #include "Debug.h"
+#include "DexCallSite.h"
 #include "DexClass.h"
 #include "IRCode.h"
 #include "ScopedCFG.h"
@@ -236,7 +237,18 @@ const DexType* get_type_demand(DexType* method_rtype, const Use& use) {
     return type::java_lang_Throwable();
   case OPCODE_FILLED_NEW_ARRAY:
     return type::get_array_component_type(use.insn->get_type());
+  case OPCODE_INVOKE_POLYMORPHIC:
+    // The call site's prototype decides what the arguments must be, and Redex
+    // does not keep it for invoke-polymorphic.
+    return nullptr;
+  case OPCODE_INVOKE_CUSTOM: {
+    // The verifier requires one argument per source; anything else is not
+    // understood.
+    const auto* args = use.insn->get_callsite()->method_type()->get_args();
+    return use.src_index < args->size() ? args->at(use.src_index) : nullptr;
+  }
   case OPCODE_INVOKE_VIRTUAL:
+  case OPCODE_INVOKE_SUPER:
   case OPCODE_INVOKE_DIRECT:
   case OPCODE_INVOKE_STATIC:
   case OPCODE_INVOKE_INTERFACE: {
@@ -287,7 +299,7 @@ std::optional<UnorderedSet<const DexType*>> get_receiver_type_demands(
   auto* first_load_param =
       InstructionIterable(cfg.get_param_instructions()).begin()->insn;
   MoveAwareChains chains(
-      cfg, /* ignore_unreachable */ false,
+      cfg, /* ignore_unreachable */ true,
       [first_load_param](auto* insn) { return insn == first_load_param; });
   auto def_use_chains = chains.get_def_use_chains();
   UnorderedSet<const DexType*> type_demands;

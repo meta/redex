@@ -422,6 +422,61 @@ TEST_F(StringBuilderAppendChainTest, dereferencedParamsReduced) {
 
   EXPECT_EQ(run(method), 1);
 }
+
+/*
+ * Checks that toString() is not reduced to String.concat when an append's
+ * receiver may be a different StringBuilder. Here, the second append writes to
+ * `y` if `c` is true and to `x` otherwise, so `x` holds either "a" or "ab" at
+ * the toString(); reducing it to "a".concat("b") would always return "ab":
+ *
+ *   static String f(boolean c) {
+ *     StringBuilder x = new StringBuilder();
+ *     StringBuilder y = new StringBuilder();
+ *     StringBuilder sb = x;
+ *     sb = sb.append("a");
+ *     if (c) {
+ *       sb = y;
+ *     }
+ *     sb = sb.append("b");
+ *     return x.toString();      // "a" if c, else "ab"
+ *   }
+ */
+TEST_F(StringBuilderAppendChainTest, appendToEitherOfTwoBuildersNotReduced) {
+  const std::string body = R"(
+    (
+      (load-param v5)
+      (new-instance "Ljava/lang/StringBuilder;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "Ljava/lang/StringBuilder;.<init>:()V")
+      (new-instance "Ljava/lang/StringBuilder;")
+      (move-result-pseudo-object v2)
+      (invoke-direct (v2) "Ljava/lang/StringBuilder;.<init>:()V")
+      (move-object v3 v0)
+      (const-string "a")
+      (move-result-pseudo-object v1)
+      (invoke-virtual (v0 v1) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
+      (move-result-object v0)
+      (if-eqz v5 :join)
+      (move-object v0 v2)
+      (:join)
+      (const-string "b")
+      (move-result-pseudo-object v1)
+      (invoke-virtual (v0 v1) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
+      (move-result-object v0)
+      (invoke-virtual (v3) "Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;")
+      (move-result-object v4)
+      (return-object v4)
+    )
+  )";
+  auto* method = assembler::method_from_string(
+      "(method (public static) \"LTest;.f:(Z)Ljava/lang/String;\" " + body +
+      ")");
+  auto expected = assembler::ircode_from_string(body);
+
+  EXPECT_EQ(run(method), 0);
+  EXPECT_CODE_EQ(expected.get(), method->get_code());
+}
+
 /*
  * Two adjacent constant-String appends in a mixed builder merge into one append
  * of the concatenation; the leading non-constant append is left in place.

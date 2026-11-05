@@ -89,3 +89,33 @@ TEST_F(DedupVirtualMethodsTest, dedup_with_call) {
 
   EXPECT_EQ(after_stats.annotated, 0);
 }
+
+namespace {
+
+DexMethodRef* get_method(const char* cls) {
+  return DexMethod::get_method(std::string("Lcom/facebook/redextest/") + cls +
+                               ";.method:()I");
+}
+
+} // namespace
+
+TEST_F(DedupVirtualMethodsTest, keeps_no_optimizations_copy) {
+  auto scope = build_class_scope(stores);
+  walk::parallel::code(scope, [&](auto*, auto& code) { code.build_cfg(); });
+  auto* c11 = get_method("C11")->as_def();
+  c11->rstate.set_no_optimizations();
+  dedup_vmethods::dedup(stores);
+  EXPECT_EQ(get_method("C11"), c11);
+  EXPECT_TRUE(c11->is_def());
+  EXPECT_EQ(get_method("C2"), nullptr);
+}
+
+TEST_F(DedupVirtualMethodsTest, keeps_copies_of_no_optimizations_method) {
+  auto scope = build_class_scope(stores);
+  walk::parallel::code(scope, [&](auto*, auto& code) { code.build_cfg(); });
+  get_method("P")->as_def()->rstate.set_no_optimizations();
+  dedup_vmethods::dedup(stores);
+  // P's code at runtime may differ from the identical code Redex sees.
+  EXPECT_NE(get_method("C11"), nullptr);
+  EXPECT_NE(get_method("C2"), nullptr);
+}

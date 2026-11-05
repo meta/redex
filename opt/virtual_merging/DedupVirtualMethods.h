@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <vector>
 
+class DexMethod;
 class DexStore;
 using DexStoresVector = std::vector<DexStore>;
 
@@ -28,4 +29,9 @@ using DexStoresVector = std::vector<DexStore>;
  */
 namespace dedup_vmethods {
 uint32_t dedup(const DexStoresVector& stores);
+
+// Whether `method` may be removed in favor of an identical implementation in
+// a superclass: small code without invoke-super, renamable, not a root, and
+// not excluded from optimizations.
+bool is_removable_copy(const DexMethod* method);
 } // namespace dedup_vmethods

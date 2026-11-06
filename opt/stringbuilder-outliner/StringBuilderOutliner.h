@@ -12,6 +12,7 @@
 
 #include "AtomicStatCounter.h"
 #include "DeterministicContainers.h"
+#include "IRList.h"
 #include "Pass.h"
 #include "StringBuilderAnalysis.h"
 
@@ -48,9 +49,6 @@ class Outliner {
   void transform(const DexMethod* source_method, IRCode* code);
 
   void set_hot_method_from_callsite();
-
-  std::vector<SourceBlock*> get_hot_source_blocks(
-      const std::vector<DexMethod*>& sources) const;
 
   using OutlinedMethods = ConcurrentMap<DexMethod*, std::vector<DexMethod*>>;
 
@@ -93,6 +91,10 @@ class Outliner {
   // Maps each outlined target method to it's sources to derive method profile
   // stats
   OutlinedMethods m_target_to_source_map;
+
+  // Own snapshots: caller CFGs may change before helper profiles are inserted.
+  ConcurrentMap<DexMethod*, std::vector<std::unique_ptr<SourceBlock>>>
+      m_target_to_callsite_source_blocks;
 };
 
 class StringBuilderOutlinerPass : public Pass {

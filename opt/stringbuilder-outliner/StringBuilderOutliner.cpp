@@ -245,10 +245,21 @@ void Outliner::transform(const DexMethod* source_method, IRCode* code) {
     if (m_outline_helpers.count(typelist) == 0) {
       continue;
     }
-    if (source_blocks::is_hot(cfg.find_insn(tostring_insn).block())) {
+    auto tostring_it = cfg.find_insn(tostring_insn);
+    if (source_blocks::is_hot(tostring_it.block())) {
       ++m_stats.tostring_outlined_hot;
     }
     auto* outline_helper = m_outline_helpers.at(typelist);
+    auto* callsite_sb = source_blocks::get_last_source_block_before(
+        tostring_it.block(), tostring_it.unwrap());
+    if (callsite_sb != nullptr) {
+      auto snapshot =
+          source_blocks::clone_as_synthetic(callsite_sb, nullptr, std::nullopt);
+      m_target_to_callsite_source_blocks.update(
+          outline_helper, [&snapshot](auto*, auto& sources, bool) {
+            sources.push_back(std::move(snapshot));
+          });
+    }
     auto* invoke_outlined =
         new IRInstruction(invoke_for_method(outline_helper));
     invoke_outlined->set_method(outline_helper);
@@ -329,18 +340,20 @@ void Outliner::apply_changes(
 }
 
 void Outliner::set_hot_method_from_callsite() {
-  for (const auto& pair : UnorderedIterable(m_target_to_source_map)) {
-    DexMethod* target = pair.first;
-    const std::vector<DexMethod*>& sources = pair.second;
-    std::vector<SourceBlock*> source_blocks_callsites =
-        get_hot_source_blocks(sources);
+  for (const auto& [target, snapshots] :
+       UnorderedIterable(m_target_to_callsite_source_blocks)) {
+    std::vector<SourceBlock*> source_blocks_callsites;
+    source_blocks_callsites.reserve(snapshots.size());
+    for (const auto& snapshot : snapshots) {
+      source_blocks_callsites.push_back(snapshot.get());
+    }
 
     if (!source_blocks_callsites.empty()) {
       always_assert(target->get_code());
       auto* template_sb = source_blocks_callsites[0];
       source_blocks::insert_synthetic_source_blocks_in_method(
           target, [target, template_sb, &source_blocks_callsites]() {
-            // The outlined `target` is reached from every (hot) call site, so
+            // The outlined `target` is reached from every call site, so
             // its synthetic count is the SUM of those sites' counts, not the
             // max.
             return source_blocks::clone_as_synthetic_summing(
@@ -348,19 +361,6 @@ void Outliner::set_hot_method_from_callsite() {
           });
     }
   }
-}
-
-std::vector<SourceBlock*> Outliner::get_hot_source_blocks(
-    const std::vector<DexMethod*>& sources) const {
-  std::vector<SourceBlock*> source_blocks_callsites;
-  for (const auto& source : sources) {
-    always_assert(source->get_code());
-    if (source_blocks::method_is_hot(source)) {
-      source_blocks_callsites.push_back(source_blocks::get_first_source_block(
-          source->get_code()->cfg().entry_block()));
-    }
-  }
-  return source_blocks_callsites;
 }
 
 size_t derive_method_profiles_stats(

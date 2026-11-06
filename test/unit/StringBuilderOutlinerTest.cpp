@@ -9,9 +9,11 @@
 
 #include <gtest/gtest.h>
 
+#include "Creators.h"
 #include "IRAssembler.h"
 #include "JarLoader.h"
 #include "RedexTest.h"
+#include "SourceBlocks.h"
 #include "UsedVarsAnalysis.h"
 
 using namespace stringbuilder_outliner;
@@ -72,6 +74,106 @@ class StringBuilderOutlinerTest : public RedexTest {
   }
 
  protected:
+  using Profile = std::vector<SourceBlock::Val>;
+
+  DexMethod* make_profiled_caller(
+      const char* name,
+      const Profile& entry,
+      const std::vector<std::optional<Profile>>& sites) {
+    auto* caller_type = DexType::make_type("LStrings;");
+    auto* cls = type_class(caller_type);
+    if (cls == nullptr) {
+      ClassCreator creator(caller_type);
+      creator.set_super(type::java_lang_Object());
+      cls = creator.create();
+      m_stores.front().get_dexen().front().push_back(cls);
+    }
+    auto* method =
+        DexMethod::make_method(std::string("LStrings;.") + name +
+                               ":(ILjava/lang/String;)Ljava/lang/String;")
+            ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+    std::string body = R"((
+      (load-param v2)
+      (load-param-object v1)
+      (if-eqz v2 :concat)
+      (return-object v1)
+      (:concat)
+    )";
+    for (size_t i = 0; i < sites.size(); ++i) {
+      body += R"(
+        (new-instance "Ljava/lang/StringBuilder;")
+        (move-result-pseudo-object v0)
+        (invoke-direct (v0) "Ljava/lang/StringBuilder;.<init>:()V")
+        (invoke-virtual (v0 v1) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
+        (invoke-virtual (v0 v1) "Ljava/lang/StringBuilder;.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;")
+        (invoke-virtual (v0) "Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;")
+        (move-result-object v1)
+      )";
+    }
+    body += "(return-object v1))";
+    method->set_code(assembler::ircode_from_string(body));
+    method->set_deobfuscated_name(show(method));
+    cls->add_method(method);
+    method->get_code()->build_cfg();
+    auto& cfg = method->get_code()->cfg();
+    const auto* src = method->get_deobfuscated_name_or_null();
+    source_blocks::impl::BlockAccessor::push_source_block(
+        cfg.entry_block(), std::make_unique<SourceBlock>(src, 0, entry));
+    size_t i = 0;
+    for (auto& mie : InstructionIterable(cfg)) {
+      if (mie.insn->opcode() != OPCODE_NEW_INSTANCE) {
+        continue;
+      }
+      auto it = cfg.find_insn(mie.insn);
+      if (sites.at(i)) {
+        it.block()->insert_before(
+            it.unwrap(), std::make_unique<SourceBlock>(src, i + 1, *sites[i]));
+      }
+      ++i;
+    }
+    EXPECT_EQ(i, sites.size());
+    return method;
+  }
+
+  std::unique_ptr<Outliner> outline_callers(
+      const std::vector<DexMethod*>& callers) {
+    auto outliner = std::make_unique<Outliner>(m_config);
+    for (auto* method : callers) {
+      outliner->analyze(*method->get_code());
+    }
+    outliner->create_outline_helpers(&m_stores);
+    for (auto* method : callers) {
+      outliner->transform(method, method->get_code());
+    }
+    return outliner;
+  }
+
+  DexMethod* profile_helper() {
+    auto* ref = DexMethod::get_method(
+        "Lcom/redex/OutlinedStringBuilders;.concat:(Ljava/lang/String;Ljava/"
+        "lang/String;)Ljava/lang/String;");
+    return ref == nullptr ? nullptr : ref->as_def();
+  }
+
+  void expect_helper_profile(const Profile& expected) {
+    auto* helper = profile_helper();
+    ASSERT_NE(helper, nullptr);
+    size_t blocks = 0;
+    for (auto* block : helper->get_code()->cfg().blocks()) {
+      auto* sb = source_blocks::get_first_source_block(block);
+      ASSERT_NE(sb, nullptr);
+      EXPECT_EQ(sb->src, helper->get_deobfuscated_name_or_null());
+      EXPECT_EQ(sb->id, SourceBlock::kSyntheticId);
+      EXPECT_EQ(sb->next, nullptr);
+      ASSERT_EQ(sb->vals_size, expected.size());
+      for (size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(sb->get_at(i), expected[i]);
+      }
+      ++blocks;
+    }
+    EXPECT_GT(blocks, 0u);
+  }
+
   Stats run_outliner(IRCode* code) {
     code->build_cfg();
     Outliner outliner(m_config);
@@ -136,6 +238,160 @@ class StringBuilderOutlinerTest : public RedexTest {
   std::unordered_map<const DexMethodRef*, side_effects::Summary>
       m_effect_summary_map;
 };
+
+TEST_F(StringBuilderOutlinerTest, ColdCallSitesDoNotInheritHotMethodEntries) {
+  m_config.min_outline_count = Config{}.min_outline_count;
+  std::vector<std::optional<Profile>> sites(5, Profile{{0, 0}});
+  auto* a = make_profiled_caller("a", {{1, 100}}, sites);
+  auto* b = make_profiled_caller("b", {{1, 100}}, sites);
+  ASSERT_TRUE(source_blocks::method_is_hot(a));
+  ASSERT_TRUE(source_blocks::method_is_hot(b));
+  auto outliner = outline_callers({a, b});
+  ASSERT_EQ(outliner->get_stats().helper_methods_created, 1u);
+  ASSERT_EQ(outliner->get_stats().stringbuilders_removed, 10u);
+  ASSERT_EQ(outliner->get_outlined_methods().size(), 1u);
+  for (const auto& [helper, sources] :
+       UnorderedIterable(outliner->get_outlined_methods())) {
+    ASSERT_EQ(sources.size(), 10u);
+    size_t invokes = 0;
+    for (auto* caller : {a, b}) {
+      for (const auto& mie : InstructionIterable(caller->get_code()->cfg())) {
+        if (mie.insn->has_method() && mie.insn->get_method() == helper) {
+          ++invokes;
+          auto it = caller->get_code()->cfg().find_insn(mie.insn);
+          auto* sb = source_blocks::get_last_source_block_before(it.block(),
+                                                                 it.unwrap());
+          ASSERT_NE(sb, nullptr);
+          EXPECT_EQ(sb->get_at(0), (SourceBlock::Val{0, 0}));
+        }
+      }
+    }
+    ASSERT_EQ(invokes, 10u);
+  }
+  outliner->set_hot_method_from_callsite();
+  expect_helper_profile({{0, 0}});
+  EXPECT_FALSE(source_blocks::method_is_hot(profile_helper()));
+}
+
+TEST_F(StringBuilderOutlinerTest, HotCallSiteDoesNotRequireHotMethodEntry) {
+  auto* caller = make_profiled_caller("a", {{0, 0}}, {Profile{{3, 40}}});
+  ASSERT_FALSE(source_blocks::method_is_hot(caller));
+  auto outliner = outline_callers({caller});
+  outliner->set_hot_method_from_callsite();
+  expect_helper_profile({{3, 40}});
+}
+
+TEST_F(StringBuilderOutlinerTest, RepeatedSitesSumCountsAndMaxAppearances) {
+  auto* a = make_profiled_caller(
+      "a", {{100, 100}, {100, 100}},
+      {Profile{{2, 30}, SourceBlock::Val::none()}, Profile{{5, 60}, {4, 25}}});
+  auto* b = make_profiled_caller("b", {{100, 100}, {100, 100}},
+                                 {Profile{{0, 80}, {3, 50}}});
+  auto outliner = outline_callers({a, b});
+  ASSERT_EQ(outliner->get_outlined_methods().size(), 1u);
+  for (const auto& [helper, sources] :
+       UnorderedIterable(outliner->get_outlined_methods())) {
+    EXPECT_EQ(sources.size(), 3u);
+  }
+  outliner->set_hot_method_from_callsite();
+  expect_helper_profile({{7, 80}, {7, 50}});
+}
+
+TEST_F(StringBuilderOutlinerTest, NearestSourceBlockSurvivesCallerChanges) {
+  auto* caller = make_profiled_caller("a", {{100, 100}}, {Profile{{9, 90}}});
+  auto& cfg = caller->get_code()->cfg();
+  for (auto& mie : InstructionIterable(cfg)) {
+    if (!mie.insn->has_method() ||
+        mie.insn->get_method() !=
+            DexMethod::get_method(
+                "Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;")) {
+      continue;
+    }
+    auto it = cfg.find_insn(mie.insn);
+    auto* before =
+        source_blocks::get_last_source_block_before(it.block(), it.unwrap());
+    ASSERT_NE(before, nullptr);
+    before->next = std::make_unique<SourceBlock>(
+        caller->get_deobfuscated_name_or_null(), 2, Profile{{2, 20}});
+    it.block()->insert_after(
+        it.unwrap(),
+        std::make_unique<SourceBlock>(caller->get_deobfuscated_name_or_null(),
+                                      3, Profile{{99, 99}}));
+  }
+  auto outliner = outline_callers({caller});
+  for (auto* block : cfg.blocks()) {
+    source_blocks::foreach_source_block(
+        block, [](auto* sb) { sb->fill({1000, 100}); });
+  }
+  caller->get_code()->clear_cfg();
+  outliner->set_hot_method_from_callsite();
+  expect_helper_profile({{2, 20}});
+}
+
+TEST_F(StringBuilderOutlinerTest, MissingSiteDoesNotFallBackToMethodEntry) {
+  auto* caller = make_profiled_caller("a", {{100, 100}}, {std::nullopt});
+  auto outliner = outline_callers({caller});
+  ASSERT_EQ(outliner->get_stats().helper_methods_created, 1u);
+  outliner->set_hot_method_from_callsite();
+  ASSERT_NE(profile_helper(), nullptr);
+  EXPECT_EQ(source_blocks::get_first_source_block(
+                profile_helper()->get_code()->cfg().entry_block()),
+            nullptr);
+}
+
+TEST_F(StringBuilderOutlinerTest, UnknownSiteValuesRemainUnknown) {
+  auto* caller =
+      make_profiled_caller("a", {{100, 100}, {100, 100}},
+                           {Profile{SourceBlock::Val::none(), {0, 0}}});
+  auto outliner = outline_callers({caller});
+  outliner->set_hot_method_from_callsite();
+  expect_helper_profile({SourceBlock::Val::none(), {0, 0}});
+}
+
+TEST_F(StringBuilderOutlinerTest, UnselectedHotSitesDoNotContribute) {
+  m_config.max_outline_length = 1;
+  auto* caller = make_profiled_caller("a", {{100, 100}}, {Profile{{3, 40}}});
+  auto outliner = outline_callers({caller});
+  outliner->set_hot_method_from_callsite();
+  EXPECT_EQ(outliner->get_stats().helper_methods_created, 0u);
+  EXPECT_TRUE(outliner->get_outlined_methods().empty());
+  EXPECT_EQ(profile_helper(), nullptr);
+}
+
+TEST_F(StringBuilderOutlinerTest, DistinctHelpersUseOnlyTheirOwnSites) {
+  auto* a = make_profiled_caller("a", {{100, 100}}, {Profile{{2, 20}}});
+  auto* b = make_profiled_caller("b", {{100, 100}}, {Profile{{7, 70}}});
+  auto& cfg = b->get_code()->cfg();
+  IRInstruction* second_append = nullptr;
+  size_t appends = 0;
+  for (auto& mie : InstructionIterable(cfg)) {
+    if (mie.insn->has_method() &&
+        mie.insn->get_method() ==
+            DexMethod::get_method("Ljava/lang/StringBuilder;.append:(Ljava/"
+                                  "lang/String;)Ljava/lang/StringBuilder;")) {
+      if (++appends == 2) {
+        second_append = mie.insn;
+      }
+    }
+  }
+  ASSERT_NE(second_append, nullptr);
+  cfg.remove_insn(cfg.find_insn(second_append));
+  auto outliner = outline_callers({a, b});
+  ASSERT_EQ(outliner->get_stats().helper_methods_created, 2u);
+  ASSERT_EQ(outliner->get_outlined_methods().size(), 2u);
+  outliner->set_hot_method_from_callsite();
+  for (const auto& [helper, sources] :
+       UnorderedIterable(outliner->get_outlined_methods())) {
+    ASSERT_EQ(sources.size(), 1u);
+    const bool two_args = helper->get_proto()->get_args()->size() == 2;
+    EXPECT_EQ(sources.front(), two_args ? a : b);
+    auto* sb = source_blocks::get_first_source_block(
+        helper->get_code()->cfg().entry_block());
+    ASSERT_NE(sb, nullptr);
+    EXPECT_EQ(sb->get_at(0),
+              two_args ? (SourceBlock::Val{2, 20}) : (SourceBlock::Val{7, 70}));
+  }
+}
 
 TEST_F(StringBuilderOutlinerTest, outlineTwo) {
   auto code = assembler::ircode_from_string(R"(

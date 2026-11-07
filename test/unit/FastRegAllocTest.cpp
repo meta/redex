@@ -5,6 +5,10 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <string>
+
+#include <boost/thread/thread.hpp>
+
 #include "IRAssembler.h"
 #include "LinearScan.h"
 #include "RedexTest.h"
@@ -478,4 +482,37 @@ TEST_F(FastRegAllocTest, CheckCast2) {
     )
 )");
   EXPECT_CODE_EQ(method->get_code(), expected_code.get());
+}
+
+/*
+ * Ordering the blocks must not take native stack space per block: a long chain
+ * of blocks would overflow a small stack, such as the 512 KiB that macOS gives
+ * secondary threads.
+ */
+TEST_F(FastRegAllocTest, LongBlockChainOnSmallStack) {
+  std::string code = "((load-param v0)\n";
+  for (int i = 0; i < 5000; ++i) {
+    auto label = ":L" + std::to_string(i);
+    code += "(if-eqz v0 " + label + ")\n(const v1 " + std::to_string(i) +
+            ")\n(" + label + ")\n";
+  }
+  code += "(return-void))";
+  auto* method = assembler::method_from_string(
+      R"((method (public static) "LFoo;.bar:(I)V" )" + code + ")");
+  auto* reference = assembler::method_from_string(
+      R"((method (public static) "LFoo;.baz:(I)V" )" + code + ")");
+
+  boost::thread::attributes attributes;
+  attributes.set_stack_size(size_t{512} * 1024);
+  boost::thread thread(attributes, [method] {
+    fastregalloc::LinearScanAllocator allocator(method);
+    allocator.allocate();
+  });
+  thread.join();
+
+  {
+    fastregalloc::LinearScanAllocator allocator(reference);
+    allocator.allocate();
+  }
+  EXPECT_CODE_EQ(method->get_code(), reference->get_code());
 }

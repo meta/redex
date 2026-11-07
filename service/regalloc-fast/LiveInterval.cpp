@@ -216,13 +216,9 @@ std::vector<cfg::Block*> get_ordered_blocks(
 
   // Collect blocks by doing a post-order traversal, processing predecessors in
   // their live-in-def-depths order, smallest depths goes last
-  UnorderedSet<cfg::Block*> visited;
-  std::vector<cfg::Block*> ordered_blocks;
-  std::function<void(cfg::Block*)> visit;
-  visit = [&](cfg::Block* block) {
-    if (!visited.insert(block).second) {
-      return;
-    }
+  // The traversal keeps its own stack, as its depth is bounded only by the
+  // number of blocks.
+  auto sorted_preds = [&live_in_def_depths](cfg::Block* block) {
     std::vector<cfg::Block*> pred_blocks;
     for (auto* e : block->preds()) {
       pred_blocks.push_back(e->src());
@@ -238,12 +234,34 @@ std::vector<cfg::Block*> get_ordered_blocks(
                 }
                 return a->id() < b->id();
               });
-    for (auto* pred_block : pred_blocks) {
-      visit(pred_block);
-    }
-    ordered_blocks.push_back(block);
+    return pred_blocks;
   };
-  visit(cfg.exit_block());
+
+  struct Frame {
+    cfg::Block* block;
+    std::vector<cfg::Block*> preds;
+    size_t next_pred{0};
+  };
+  UnorderedSet<cfg::Block*> visited;
+  std::vector<cfg::Block*> ordered_blocks;
+  std::vector<Frame> stack;
+  auto start_visit = [&](cfg::Block* block) {
+    if (visited.insert(block).second) {
+      stack.push_back(Frame{block, sorted_preds(block)});
+    }
+  };
+  start_visit(cfg.exit_block());
+  while (!stack.empty()) {
+    auto& frame = stack.back();
+    if (frame.next_pred < frame.preds.size()) {
+      // Copied out, since `start_visit` may reallocate `stack`.
+      auto* pred = frame.preds[frame.next_pred++];
+      start_visit(pred);
+    } else {
+      ordered_blocks.push_back(frame.block);
+      stack.pop_back();
+    }
+  }
   always_assert(ordered_blocks.size() == cfg.num_blocks());
   return ordered_blocks;
 }

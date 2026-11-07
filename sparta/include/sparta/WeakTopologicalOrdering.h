@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstddef>
+#include <deque>
 #include <functional>
 #include <future>
 #include <iterator>
@@ -15,6 +16,7 @@
 #include <ostream>
 #include <stack>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <sparta/Exceptions.h>
@@ -253,6 +255,13 @@ class WeakTopologicalOrdering final {
 
 namespace wto_impl {
 
+/*
+ * Bourdoncle's algorithm is two mutually recursive procedures, visit and
+ * component, whose recursion gets as deep as the longest path the depth-first
+ * search follows. The builder keeps the calls in progress on an explicit stack
+ * of frames instead, so that a long chain of nodes cannot overflow the native
+ * stack, and resumes them in the same order as the recursive procedures.
+ */
 template <typename NodeId, typename NodeHash, typename SuccFn>
 class WtoBuilder final {
  public:
@@ -264,58 +273,137 @@ class WtoBuilder final {
 
   void build(const NodeId& root) {
     int32_t partition = -1;
-    visit(root, &partition);
+    start_visit(root, &partition);
+    while (!m_frames.empty()) {
+      Frame& frame = m_frames.top();
+      if (frame.succ_it == frame.succ_end) {
+        if (frame.kind == Frame::Kind::Visit) {
+          finish_visit(frame);
+        } else {
+          finish_component();
+        }
+        continue;
+      }
+      NodeId succ = *frame.succ_it;
+      ++frame.succ_it;
+      uint32_t succ_dfn = get_dfn(succ);
+      if (succ_dfn == 0) {
+        // The frame resumes once this visit returns.
+        start_visit(succ, frame.partition);
+      } else if (frame.kind == Frame::Kind::Visit) {
+        update_head(frame, succ_dfn);
+      }
+    }
   }
 
+ private:
   // We keep the notations used by Bourdoncle in the paper to describe the
   // algorithm.
 
-  uint32_t visit(const NodeId& vertex, int32_t* partition) {
+  // What the successor function returns: a container, or a reference to one.
+  using Successors =
+      decltype(std::declval<SuccFn&>()(std::declval<const NodeId&>()));
+  using SuccessorIterator = decltype(std::begin(std::declval<Successors&>()));
+  using SuccessorSentinel = decltype(std::end(std::declval<Successors&>()));
+
+  // A call to visit(vertex, partition) or component(vertex) in progress.
+  struct Frame {
+    enum class Kind { Visit, Component };
+
+    // A visit adds to the caller's partition. A component starts from a copy
+    // of it and builds its own.
+    Frame(Kind kind,
+          const NodeId& vertex,
+          int32_t* partition,
+          uint32_t head,
+          SuccFn& successors)
+        : kind(kind),
+          vertex(vertex),
+          partition(kind == Kind::Visit ? partition : &own_partition),
+          own_partition(kind == Kind::Visit ? -1 : *partition),
+          head(head),
+          succs(successors(vertex)),
+          succ_it(std::begin(succs)),
+          succ_end(std::end(succs)) {}
+
+    // Frames stay in place: `succ_it` points into `succs`, and the frames
+    // above a component point to its `own_partition`.
+    Frame(const Frame&) = delete;
+    Frame& operator=(const Frame&) = delete;
+    Frame(Frame&&) = delete;
+    Frame& operator=(Frame&&) = delete;
+    ~Frame() = default;
+
+    Kind kind;
+    NodeId vertex;
+    int32_t* partition;
+    int32_t own_partition;
+    uint32_t head;
+    bool loop{false};
+    Successors succs;
+    SuccessorIterator succ_it;
+    SuccessorSentinel succ_end;
+  };
+
+  void start_visit(const NodeId& vertex, int32_t* partition) {
     m_stack.push(vertex);
     uint32_t head = set_dfn(vertex, ++m_num);
-    bool loop = false;
-    for (const NodeId& succ : m_successors(vertex)) {
-      uint32_t succ_dfn = get_dfn(succ);
-      uint32_t min;
-      if (succ_dfn == 0) {
-        min = visit(succ, partition);
-      } else {
-        min = succ_dfn;
-      };
-      if (min <= head) {
-        head = min;
-        loop = true;
-      }
+    m_frames.emplace(Frame::Kind::Visit, vertex, partition, head, m_successors);
+  }
+
+  void update_head(Frame& frame, uint32_t min) {
+    if (min <= frame.head) {
+      frame.head = min;
+      frame.loop = true;
     }
-    if (head == get_dfn(vertex)) {
+  }
+
+  // The end of visit, once all successors have been explored.
+  void finish_visit(Frame& frame) {
+    if (frame.head == get_dfn(frame.vertex)) {
       // We encode the special value +oo used in the paper with UINT32_MAX.
-      set_dfn(vertex, std::numeric_limits<uint32_t>::max());
+      set_dfn(frame.vertex, std::numeric_limits<uint32_t>::max());
       NodeId element = m_stack.top();
       m_stack.pop();
-      if (loop) {
+      if (frame.loop) {
         // Nodes are required to be comparable using `operator==()`. We don't
         // assume `operator!=()` to be defined on nodes.
-        while (!(element == vertex)) {
+        while (!(element == frame.vertex)) {
           set_dfn(element, 0);
           element = m_stack.top();
           m_stack.pop();
         }
-        push_component(vertex, *partition);
+        // `finish_component` adds the SCC once component(vertex) is done.
+        m_frames.emplace(Frame::Kind::Component, frame.vertex, frame.partition,
+                         /* head */ 0, m_successors);
+        return;
       }
-      auto kind = loop ? WtoComponent<NodeId>::Kind::Scc
-                       : WtoComponent<NodeId>::Kind::Vertex;
-      m_wto_space->emplace_back(vertex, kind, m_free_position, *partition);
-      *partition = m_free_position++;
+      add_component(frame, WtoComponent<NodeId>::Kind::Vertex);
     }
-    return head;
+    return_from_visit();
   }
 
-  void push_component(const NodeId& vertex, int32_t partition) {
-    for (const NodeId& succ : m_successors(vertex)) {
-      if (get_dfn(succ) == 0) {
-        visit(succ, &partition);
-      }
+  // The end of component, once all successors have been explored.
+  void finish_component() {
+    m_frames.pop();
+    // The caller of component(vertex) is visit(vertex, partition).
+    add_component(m_frames.top(), WtoComponent<NodeId>::Kind::Scc);
+    return_from_visit();
+  }
+
+  // Pops the visit on top of the stack and hands its result to the caller.
+  void return_from_visit() {
+    uint32_t head = m_frames.top().head;
+    m_frames.pop();
+    if (!m_frames.empty() && m_frames.top().kind == Frame::Kind::Visit) {
+      update_head(m_frames.top(), head);
     }
+  }
+
+  void add_component(Frame& frame, typename WtoComponent<NodeId>::Kind kind) {
+    m_wto_space->emplace_back(frame.vertex, kind, m_free_position,
+                              *frame.partition);
+    *frame.partition = m_free_position++;
   }
 
   uint32_t get_dfn(const NodeId& node) {
@@ -343,6 +431,8 @@ class WtoBuilder final {
   std::unordered_map<NodeId, uint32_t, NodeHash> m_dfn;
   std::stack<NodeId> m_stack;
   uint32_t m_num;
+  // The calls in progress, innermost last. A deque never moves its elements.
+  std::stack<Frame, std::deque<Frame>> m_frames;
 };
 
 } // namespace wto_impl

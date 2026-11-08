@@ -11,6 +11,7 @@
 
 #include "MethodClosures.h"
 #include "MethodSplitter.h"
+#include "SplittableClosures.h"
 
 #include "Creators.h"
 #include "DeterministicContainers.h"
@@ -1451,4 +1452,44 @@ TEST_F(MethodSplitterTest, RemainingFloorOfASwitchGroupAtItsBoundary) {
   EXPECT_EQ(split_count("(I)V", switchGroupCode(), config), 1u);
   config.min_hot_split_size = kGroupRemaining + 1;
   EXPECT_EQ(split_count("(I)V", switchGroupCode(), config), 0u);
+}
+
+// The cases of a top-level switch, selected and split the way a
+// switch-outlining pass does it. Those closures carry no split kind. Emission
+// reads the kind only to set the values of a synthetic source block, and this
+// host has no source blocks.
+TEST_F(MethodSplitterTest, TopLevelSwitchCasesSplitWithoutAKind) {
+  auto [cls, method] = create("(I)V", R"(
+    (
+      (load-param v0)
+      (switch v0 (:a :b))
+      (return-void)
+      (:a 0)
+      (sput v0 "LFoo;.a0:I")
+      (sput v0 "LFoo;.a1:I")
+      (sput v0 "LFoo;.a2:I")
+      (return-void)
+      (:b 1)
+      (sput v0 "LFoo;.b0:I")
+      (sput v0 "LFoo;.b1:I")
+      (sput v0 "LFoo;.b2:I")
+      (return-void)
+    )
+  )");
+  method->get_code()->build_cfg();
+  auto selected = method_splitting_impl::
+      select_splittable_closures_from_top_level_switch_cases(
+          {method}, /*max_live_in=*/32);
+  const auto* closures = selected.get(method);
+  ASSERT_NE(closures, nullptr);
+  ASSERT_FALSE(closures->empty());
+  size_t index = 0;
+  for (const auto& sc : *closures) {
+    EXPECT_FALSE(sc.hot_split_kind.has_value());
+    auto split = method_splitting_impl::SplitMethod::create(
+        sc, cls->get_type(),
+        DexString::make_string("outlined$" + std::to_string(index++)),
+        sc.get_arg_types());
+    split.apply_code_changes();
+  }
 }

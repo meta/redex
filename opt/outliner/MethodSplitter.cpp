@@ -11,6 +11,7 @@
 #include "ControlFlow.h"
 #include "Debug.h"
 #include "DexLimits.h"
+#include "DexPosition.h"
 #include "DexStore.h"
 #include "DexUtil.h"
 #include "InitClassesWithSideEffects.h"
@@ -297,31 +298,13 @@ ConcurrentSet<DexMethod*> split_splittable_closures(
 
 namespace method_splitting_impl {
 
-SplitMethod SplitMethod::create(const SplittableClosure& splittable_closure,
-                                DexType* target_type,
-                                const DexString* split_name,
-                                std::vector<const DexType*> arg_types) {
-  auto* method = splittable_closure.method_closures->method;
-  auto* code = method->get_code();
-  auto& cfg = code->cfg();
+namespace {
 
-  auto split_code =
-      std::make_unique<IRCode>(std::make_unique<cfg::ControlFlowGraph>());
-  auto& split_cfg = split_code->cfg();
-  split_code->set_debug_item(std::make_unique<DexDebugItem>());
-  // NOTE for callers building non-suffix splits (e.g. cold mid-method
-  // regions): `deep_copy` preserves ALL edges of the original cfg --
-  // including those crossing what the caller may consider a region
-  // boundary. The split body will continue to execute past that
-  // boundary unless the caller explicitly truncates it. For suffix
-  // splits the boundary IS the original method's return so no
-  // truncation is needed. For region splits, the caller must walk
-  // the region's exit edges in `split_cfg`, delete them, and append
-  // a `return-*` instruction -- otherwise the split body double-
-  // executes the rejoin code AND the launchpad's `goto rejoin`
-  // executes it again. See `apply_code_changes` below for the canonical
-  // truncation pattern.
-  cfg.deep_copy(&split_cfg);
+// Entry block for a split method: load-param for each arg with a type, then
+// const-def synthesis for the args without one.
+cfg::Block* create_split_entry_block(
+    cfg::ControlFlowGraph& split_cfg,
+    const SplittableClosure& splittable_closure) {
   auto* split_entry_block = split_cfg.create_block();
   for (const auto& arg : splittable_closure.args) {
     if (arg.type != nullptr) {
@@ -344,47 +327,38 @@ SplitMethod SplitMethod::create(const SplittableClosure& splittable_closure,
     }
   }
   split_cfg.set_entry_block(split_entry_block);
-  cfg::Block* launchpad_template;
-  cfg::Block* split_landingpad;
-  if (splittable_closure.closures.size() == 1) {
-    always_assert(!splittable_closure.switch_block);
-    const auto* closure = splittable_closure.closures.front();
-    launchpad_template = closure->target;
-    split_landingpad = split_cfg.get_block(closure->target->id());
-  } else {
-    always_assert(splittable_closure.switch_block);
-    split_landingpad =
-        split_cfg.get_block(splittable_closure.switch_block->id());
-    auto switch_it = split_landingpad->get_last_insn();
-    always_assert(opcode::is_switch(switch_it->insn->opcode()));
-    for (auto it = split_landingpad->begin(); it != switch_it;) {
-      // Positions might be needed for parent references, we need to keep them
-      if (it->type != MFLOW_POSITION) {
-        it = split_landingpad->remove_mie(it);
-      } else {
-        it++;
-      }
-    }
-    UnorderedSet<cfg::BlockId> split_target_ids;
-    always_assert(!splittable_closure.closures.empty());
-    launchpad_template = splittable_closure.closures.front()->target;
-    for (const auto* closure : splittable_closure.closures) {
-      split_target_ids.insert(closure->target->id());
-    }
-    split_cfg.delete_succ_edge_if(split_landingpad, [&](auto* e) {
-      return !split_target_ids.contains(e->target()->id());
-    });
-    cfg.delete_succ_edge_if(splittable_closure.switch_block, [&](auto* e) {
-      return e->type() != cfg::EDGE_THROW &&
-             host_switch_edge_edit(HostSwitchEdit::DeleteGrouped,
-                                   split_target_ids.contains(e->target()->id()),
-                                   e->type() == cfg::EDGE_GOTO) ==
-                 SwitchEdgeEdit::Delete;
-    });
-  }
-  split_cfg.add_edge(split_entry_block, split_landingpad, cfg::EDGE_GOTO);
+  return split_entry_block;
+}
 
-  auto* proto = method->get_proto();
+// The host method's CFG copied whole: positions, source blocks and try markers
+// come across with their parent chains, and block ids are kept. The caller
+// trims the copy down to the split's body.
+std::unique_ptr<IRCode> clone_host_cfg(DexMethod* method) {
+  auto split_code =
+      std::make_unique<IRCode>(std::make_unique<cfg::ControlFlowGraph>());
+  split_code->set_debug_item(std::make_unique<DexDebugItem>());
+  // NOTE for callers building non-suffix splits (e.g. cold mid-method
+  // regions): `deep_copy` preserves ALL edges of the original cfg --
+  // including those crossing what the caller may consider a region
+  // boundary. The split body will continue to execute past that
+  // boundary unless the caller explicitly truncates it. For suffix
+  // splits the boundary IS the original method's return so no
+  // truncation is needed. For region splits, the caller must walk
+  // the region's exit edges in `split_cfg`, delete them, and append
+  // a `return-*` instruction -- otherwise the split body double-
+  // executes the rejoin code AND the launchpad's `goto rejoin`
+  // executes it again. See `apply_code_changes` below for the canonical
+  // truncation pattern.
+  method->get_code()->cfg().deep_copy(&split_code->cfg());
+  return split_code;
+}
+
+// The private static split method with body `split_code`, made concrete.
+DexMethod* make_split_method(DexType* target_type,
+                             const DexString* split_name,
+                             DexType* rtype,
+                             std::vector<const DexType*> arg_types,
+                             std::unique_ptr<IRCode> split_code) {
   auto* split_type_list = DexTypeList::make_type_list(
       // TODO: Remove overhead.
       [&]() {
@@ -395,47 +369,208 @@ SplitMethod SplitMethod::create(const SplittableClosure& splittable_closure,
                        [](const auto* t) { return const_cast<DexType*>(t); });
         return non_const_args;
       }());
-  auto* split_proto = DexProto::make_proto(proto->get_rtype(), split_type_list);
+  auto* split_proto = DexProto::make_proto(rtype, split_type_list);
   auto* split_method_ref =
       DexMethod::make_method(target_type, split_name, split_proto);
   DexAccessFlags split_access_flags =
       DexAccessFlags::ACC_PRIVATE | DexAccessFlags::ACC_STATIC;
   auto* split_method = split_method_ref->make_concrete(
       split_access_flags, std::move(split_code), /* is_virtual */ false);
-
   split_method->set_deobfuscated_name(show_deobfuscated(split_method));
+  return split_method;
+}
 
-  auto make_new_sb = [&](auto* method, auto& template_sb) {
-    std::optional<SourceBlock::Val> opt_val;
-    // TODO: For the hot case, compute "maximum" val over all closures.
-    // A closure selected from top-level switch cases carries no kind, so it is
-    // not known to be cold and keeps the donor's values.
-    if (splittable_closure.hot_split_kind.has_value() &&
-        *splittable_closure.hot_split_kind != HotSplitKind::Hot) {
-      opt_val = SourceBlock::Val{0, 0};
+// A synthetic SourceBlock for `method`, modeled on `donor`'s, or null when the
+// donor has none. A split of any kind other than Hot is cold, so its synthetic
+// block gets the value 0. A Hot split keeps the donor's values, and so does a
+// top-level switch case that a switch-outlining pass splits, which has no kind.
+std::unique_ptr<SourceBlock> make_synthetic_sb(
+    cfg::Block* donor,
+    DexMethod* method,
+    const std::optional<HotSplitKind>& kind) {
+  auto* template_sb = source_blocks::get_first_source_block(donor);
+  if (template_sb == nullptr) {
+    return nullptr;
+  }
+  std::optional<SourceBlock::Val> opt_val;
+  // TODO: For the hot case, compute "maximum" val over all closures.
+  if (kind.has_value() && *kind != HotSplitKind::Hot) {
+    opt_val = SourceBlock::Val{0, 0};
+  }
+  return source_blocks::clone_as_synthetic(template_sb, method, opt_val);
+}
+
+// A new host block that invokes `split` with the typed arguments, carrying
+// `sb` and a generated position. The caller appends what follows the invoke.
+cfg::Block* make_launchpad(cfg::ControlFlowGraph& cfg,
+                           DexMethod* host,
+                           DexMethod* split,
+                           const std::vector<ClosureArgument>& args,
+                           std::unique_ptr<SourceBlock> sb) {
+  auto* launchpad = cfg.create_block();
+  auto* invoke = (new IRInstruction(OPCODE_INVOKE_STATIC))
+                     ->set_method(split)
+                     ->set_srcs_size(split->get_proto()->get_args()->size());
+  src_index_t i = 0;
+  for (const auto& arg : args) {
+    if (arg.type != nullptr) {
+      invoke->set_src(i++, arg.reg);
     }
-    return source_blocks::clone_as_synthetic(template_sb, method, opt_val);
+  }
+  // srcs_size is the proto arg count, and get_arg_types() builds the proto
+  // from the SAME `type != nullptr` filter this loop uses -- so the two counts
+  // agree and every source register is initialized.
+  always_assert(i == invoke->srcs_size());
+  launchpad->push_back(invoke);
+  // Add source-block and position to otherwise naked launchpad
+  auto it = launchpad->get_first_insn();
+  if (sb) {
+    launchpad->insert_before(it, std::move(sb));
+  }
+  auto pos = std::make_unique<DexPosition>(
+      DexString::make_string("RedexGenerated"), 0);
+  pos->bind(DexString::make_string(show_deobfuscated(host)));
+  cfg.insert_before(launchpad, it, std::move(pos));
+  return launchpad;
+}
+
+// Turns the split's copy of the host switch `sw` into its dispatcher: strips
+// everything before the switch instruction except positions (a later position
+// may name one as its parent), and deletes every throw edge and every case
+// edge to a block outside `keep`. Returns the default edge when its target is
+// outside `keep` too, for the caller to dispose of.
+//
+// Unlike `ControlFlowGraph::remove_insn`, `Block::remove_mie` does not delete
+// the throw edges that the stripped instructions justified. A `switch` cannot
+// throw, so without this a dispatcher that sat in a `try` would keep throw
+// successors although it has no throwing instruction.
+cfg::Edge* strip_dispatcher(cfg::ControlFlowGraph& split_cfg,
+                            cfg::Block* sw,
+                            const UnorderedSet<cfg::BlockId>& keep) {
+  auto switch_it = sw->get_last_insn();
+  always_assert(switch_it != sw->end());
+  always_assert(opcode::is_switch(switch_it->insn->opcode()));
+  for (auto it = sw->begin(); it != switch_it;) {
+    // Positions might be needed for parent references, we need to keep them
+    if (it->type != MFLOW_POSITION) {
+      it = sw->remove_mie(it);
+    } else {
+      it++;
+    }
+  }
+  split_cfg.delete_succ_edge_if(sw, [&](const cfg::Edge* e) {
+    return e->type() == cfg::EDGE_THROW ||
+           (e->type() == cfg::EDGE_BRANCH && !keep.contains(e->target()->id()));
+  });
+  auto* default_edge = split_cfg.get_succ_edge_of_type(sw, cfg::EDGE_GOTO);
+  return default_edge != nullptr && !keep.contains(default_edge->target()->id())
+             ? default_edge
+             : nullptr;
+}
+
+// The split's copy of a host switch, turned into the dispatcher over the case
+// heads the split takes.
+struct SplitDispatcher {
+  cfg::Block* block;
+  // The default edge when its target is not a taken head, for the caller to
+  // dispose of; null otherwise.
+  cfg::Edge* ungrouped_default;
+
+  // Re-seeds the dispatcher's SourceBlock, which the strip removed, from the
+  // host switch's, once the split method exists.
+  void seed_source_block(const SplittableClosure& sc, DexMethod* split) const {
+    if (auto sb =
+            make_synthetic_sb(sc.switch_block, split, sc.hot_split_kind)) {
+      block->insert_before(block->get_first_insn(), std::move(sb));
+    }
+  }
+};
+
+// Builds the dispatcher for `sc`, a split that takes several cases of the
+// switch `sc.switch_block`. `split_cfg` is a clone of the host's cfg.
+SplitDispatcher make_split_dispatcher(cfg::ControlFlowGraph& split_cfg,
+                                      const SplittableClosure& sc) {
+  auto* block = split_cfg.get_block(sc.switch_block->id());
+  auto* ungrouped_default =
+      strip_dispatcher(split_cfg, block, sc.grouped_heads);
+  return SplitDispatcher{.block = block,
+                         .ungrouped_default = ungrouped_default};
+}
+
+// Applies `edit` to the host switch `sw`; the split takes the switch's edges
+// into `taken_heads`. Each edge gets the edit that `host_switch_edge_edit`
+// gives it. An edge sent to a launchpad goes to the launchpad `launchpad_for`
+// returns, and `launchpad_for` is called once per such edge.
+void edit_host_switch(
+    cfg::ControlFlowGraph& cfg,
+    cfg::Block* sw,
+    HostSwitchEdit edit,
+    const UnorderedSet<cfg::BlockId>& taken_heads,
+    const std::function<cfg::Block*(const cfg::Edge*)>& launchpad_for) {
+  const auto edge_edit = [&](const cfg::Edge* e) {
+    return host_switch_edge_edit(edit, taken_heads.contains(e->target()->id()),
+                                 e->type() == cfg::EDGE_GOTO);
   };
+  switch (edit) {
+  case HostSwitchEdit::None:
+    not_reached();
+  case HostSwitchEdit::DeleteGrouped: {
+    cfg.delete_succ_edge_if(sw, [&](const cfg::Edge* e) {
+      return e->type() != cfg::EDGE_THROW &&
+             edge_edit(e) == SwitchEdgeEdit::Delete;
+    });
+    auto* default_edge = cfg.get_succ_edge_of_type(sw, cfg::EDGE_GOTO);
+    if (default_edge != nullptr &&
+        edge_edit(default_edge) == SwitchEdgeEdit::ToLaunchpad) {
+      cfg.set_edge_target(default_edge, launchpad_for(default_edge));
+    }
+    return;
+  }
+  }
+}
+
+} // namespace
+
+SplitMethod SplitMethod::create(const SplittableClosure& splittable_closure,
+                                DexType* target_type,
+                                const DexString* split_name,
+                                std::vector<const DexType*> arg_types) {
+  auto* method = splittable_closure.method_closures->method;
+  auto split_code = clone_host_cfg(method);
+  auto& split_cfg = split_code->cfg();
+  auto* split_entry_block =
+      create_split_entry_block(split_cfg, splittable_closure);
+  always_assert(!splittable_closure.closures.empty());
+  cfg::Block* launchpad_template = splittable_closure.closures.front()->target;
+  cfg::Block* split_landingpad;
+  std::optional<SplitDispatcher> dispatcher;
+  if (splittable_closure.closures.size() == 1) {
+    always_assert(!splittable_closure.switch_block);
+    split_landingpad = split_cfg.get_block(launchpad_template->id());
+  } else {
+    always_assert(splittable_closure.switch_block);
+    dispatcher = make_split_dispatcher(split_cfg, splittable_closure);
+    if (dispatcher->ungrouped_default != nullptr) {
+      split_cfg.delete_edge(dispatcher->ungrouped_default);
+    }
+    split_landingpad = dispatcher->block;
+  }
+  split_cfg.add_edge(split_entry_block, split_landingpad, cfg::EDGE_GOTO);
+
+  auto* split_method = make_split_method(
+      target_type, split_name, method->get_proto()->get_rtype(),
+      std::move(arg_types), std::move(split_code));
+
   // When splitting many cases out of a switch, we keep the positions of the
   // switch block, but not the source-block, so we insert a synthetic one here.
-  if (splittable_closure.switch_block != nullptr) {
-    if (auto* template_sb = source_blocks::get_first_source_block(
-            splittable_closure.switch_block)) {
-      auto split_landingpad_it = split_landingpad->get_first_insn();
-      split_landingpad->insert_before(split_landingpad_it,
-                                      make_new_sb(split_method, template_sb));
-    }
+  if (dispatcher) {
+    dispatcher->seed_source_block(splittable_closure, split_method);
   }
   // TODO: (Un)scale all source blocks in split method
 
-  std::unique_ptr<SourceBlock> launchpad_sb;
-  if (auto* template_sb =
-          source_blocks::get_first_source_block(launchpad_template)) {
-    launchpad_sb = make_new_sb(method, template_sb);
-  }
-
   return SplitMethod{splittable_closure, split_method, launchpad_template,
-                     std::move(launchpad_sb)};
+                     make_synthetic_sb(launchpad_template, method,
+                                       splittable_closure.hot_split_kind)};
 }
 
 void SplitMethod::add_to_target() {
@@ -447,29 +582,25 @@ void SplitMethod::apply_code_changes() {
   auto* proto = method->get_proto();
   auto* code = method->get_code();
   auto& cfg = code->cfg();
-  auto* launchpad = cfg.create_block();
-  auto copy = m_launchpad_template->preds();
-  for (auto* e : copy) {
-    if ((m_splittable_closure.switch_block == nullptr) ||
-        (e->src() == m_splittable_closure.switch_block &&
-         host_switch_edge_edit(HostSwitchEdit::DeleteGrouped,
-                               /*into_taken_head=*/true,
-                               e->type() == cfg::EDGE_GOTO) ==
-             SwitchEdgeEdit::ToLaunchpad)) {
+  auto* launchpad =
+      make_launchpad(cfg, method, m_new_method, m_splittable_closure.args,
+                     std::move(m_launchpad_sb));
+  // A split taking several cases of a switch gets the switch's edges into its
+  // case heads; one taking a single block gets every predecessor of that
+  // block.
+  const auto edit = m_splittable_closure.switch_block != nullptr
+                        ? HostSwitchEdit::DeleteGrouped
+                        : HostSwitchEdit::None;
+  if (edit != HostSwitchEdit::None) {
+    edit_host_switch(cfg, m_splittable_closure.switch_block, edit,
+                     m_splittable_closure.grouped_heads,
+                     [&](const cfg::Edge*) { return launchpad; });
+  } else {
+    auto copy = m_launchpad_template->preds();
+    for (auto* e : copy) {
       cfg.set_edge_target(e, launchpad);
     }
   }
-  auto* invoke_insn =
-      (new IRInstruction(OPCODE_INVOKE_STATIC))
-          ->set_method(m_new_method)
-          ->set_srcs_size(m_new_method->get_proto()->get_args()->size());
-  src_index_t i = 0;
-  for (const auto& arg : m_splittable_closure.args) {
-    if (arg.type != nullptr) {
-      invoke_insn->set_src(i++, arg.reg);
-    }
-  }
-  launchpad->push_back(invoke_insn);
   if (proto->is_void()) {
     launchpad->push_back(new IRInstruction(OPCODE_RETURN_VOID));
   } else {
@@ -483,16 +614,6 @@ void SplitMethod::apply_code_changes() {
     launchpad->push_back(
         (new IRInstruction(opcode::return_opcode(rtype)))->set_src(0, 0));
   }
-
-  // Add source-block and position to otherwise naked launchpad
-  auto launchpad_it = launchpad->get_first_insn();
-  if (m_launchpad_sb) {
-    launchpad->insert_before(launchpad_it, std::move(m_launchpad_sb));
-  }
-  auto new_pos = std::make_unique<DexPosition>(
-      DexString::make_string("RedexGenerated"), 0);
-  new_pos->bind(DexString::make_string(show_deobfuscated(method)));
-  cfg.insert_before(launchpad, launchpad_it, std::move(new_pos));
 }
 
 void split_methods_in_stores(

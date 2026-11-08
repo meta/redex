@@ -921,6 +921,7 @@ std::vector<SplittableClosure> to_splittable_closures(
         .method_closures = mcs,
         .switch_block = sc.switch_block,
         .closures = std::move(sc.closures),
+        .grouped_heads = std::move(sc.grouped_heads),
         .args = std::move(sc.args),
         .rank = rank,
         .added_code_size = added_code_size,

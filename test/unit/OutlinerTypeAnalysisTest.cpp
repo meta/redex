@@ -56,6 +56,15 @@ struct Candidate {
 
 } // namespace
 
+// The type of `reg` on entry to `candidate`, declared as a parameter or, when
+// `as_result`, as a result.
+static const DexType* get_inferred_type(const Candidate& candidate,
+                                        reg_t reg,
+                                        bool as_result = false) {
+  auto value = candidate.ota.value_at(candidate.pc.root.insns.front(), reg);
+  return as_result ? art::declare_result(value) : value.upper();
+}
+
 // The parameter type the outliner declares for `reg` in `candidate`.
 static const DexType* get_type_demand(const Candidate& candidate, reg_t reg) {
   return art::declare_parameter(
@@ -216,6 +225,45 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_bitwise) {
   EXPECT_EQ(result_type(OPCODE_AND_INT, 2), type::_int());
   // (`boolean` | `boolean`) | (`boolean` ^ 1)
   EXPECT_EQ(result_type(OPCODE_OR_INT, 3), type::_boolean());
+}
+
+// ART types a constant by its value, however the constant is used, and merges
+// it with the register's typed definitions.
+TEST_F(OutlinerTypeAnalysisTest, get_result_type_types_constants_by_value) {
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(ZC)V" (
+        (load-param v0)
+        (load-param v1)
+        (const v2 65)
+        (const v3 74)
+        (const v4 1)
+        (const v8 40000)
+        (invoke-static (v2) "LFoo;.takeChar:(C)V")
+        (add-int v5 v3 v3)
+        (and-int v6 v0 v4)
+        (and-int v7 v1 v4)
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+  auto type = [&](std::initializer_list<std::pair<IROpcode, size_t>> defs) {
+    UnorderedSet<const IRInstruction*> set;
+    for (const auto& [op, occurrence] : defs) {
+      set.insert(find_insn(foo_method, op, occurrence));
+    }
+    return get_result_type(ota, set, nullptr);
+  };
+  // 65 is used as a `char`, 74 as an `int`; `char` holds both.
+  EXPECT_EQ(type({{OPCODE_CONST, 1}, {IOPCODE_LOAD_PARAM, 2}}), type::_char());
+  EXPECT_EQ(type({{OPCODE_CONST, 2}, {IOPCODE_LOAD_PARAM, 2}}), type::_char());
+  EXPECT_EQ(type({{OPCODE_CONST, 3}, {IOPCODE_LOAD_PARAM, 1}}),
+            type::_boolean());
+  // A constant outside the type of the register's other definitions is not
+  // typed.
+  EXPECT_EQ(type({{OPCODE_CONST, 1}, {IOPCODE_LOAD_PARAM, 1}}), nullptr);
+  // `boolean` & 1 is boolean, `char` & 1 is int.
+  EXPECT_EQ(type({{OPCODE_AND_INT, 1}}), type::_boolean());
+  EXPECT_EQ(type({{OPCODE_AND_INT, 2}}), type::_int());
 }
 
 TEST_F(OutlinerTypeAnalysisTest, integral_type_join_and_order) {
@@ -744,6 +792,148 @@ TEST_F(OutlinerTypeAnalysisTest,
   };
   each(0);
   EXPECT_EQ(multisets, 2379u);
+}
+
+namespace {
+
+// A method that defines a parameter of each integral type and a constant for
+// each of the oracle's constant leaves, with the ART register each definition
+// stands for. `for_each` visits every set of up to four of those definitions
+// that includes at least one parameter.
+struct TypedDefsCorpus {
+  DexMethod* method{nullptr};
+  std::vector<art_oracle::Reg> leaves;
+  std::vector<const IRInstruction*> defs;
+
+  TypedDefsCorpus() {
+    using art_oracle::Reg;
+    std::string body =
+        "(load-param v0)\n(load-param v1)\n(load-param v2)\n"
+        "(load-param v3)\n(load-param v4)\n";
+    leaves = {
+        {Reg::Boolean}, {Reg::Byte}, {Reg::Short}, {Reg::Char}, {Reg::Integer}};
+    const std::vector<int64_t> constants{-40000, -129, -1,    0,     1,
+                                         65,     200,  32767, 40000, 65536};
+    for (size_t i = 0; i < constants.size(); ++i) {
+      body += "(const v" + std::to_string(5 + i) + " " +
+              std::to_string(constants[i]) + ")\n";
+      leaves.push_back({Reg::Constant, constants[i]});
+    }
+    body += "(return-void)\n";
+    method = assembler::method_from_string(
+        R"((method (public static) "LCorpus;.foo:(ZBSCI)V" ()" + body + "))");
+    method->get_code()->build_cfg();
+    for (const auto& mie : InstructionIterable(method->get_code()->cfg())) {
+      if (mie.insn->has_dest()) {
+        defs.push_back(mie.insn);
+      }
+    }
+    always_assert(defs.size() == leaves.size());
+  }
+
+  // Calls `f(values, defs)` for every set.
+  void for_each(
+      const std::function<void(const std::vector<art_oracle::Reg>&,
+                               const UnorderedSet<const IRInstruction*>&)>& f)
+      const {
+    std::vector<size_t> chosen;
+    std::function<void(size_t)> each;
+    each = [&](size_t from) {
+      if (!chosen.empty() && chosen.front() < 5) {
+        std::vector<art_oracle::Reg> values;
+        UnorderedSet<const IRInstruction*> set;
+        for (auto i : chosen) {
+          values.push_back(leaves[i]);
+          set.insert(defs[i]);
+        }
+        f(values, set);
+      }
+      if (chosen.size() == 4) {
+        return;
+      }
+      for (size_t i = from; i < leaves.size(); ++i) {
+        chosen.push_back(i);
+        each(i + 1);
+        chosen.pop_back();
+      }
+    };
+    each(0);
+  }
+};
+
+// The type every order and grouping of ART's merge of `values` ends at, or
+// nullptr when they end at different types.
+const DexType* type_of_every_merge(const std::vector<art_oracle::Reg>& values) {
+  std::optional<const DexType*> type;
+  for (const auto& r : art_oracle::every_merge(values)) {
+    const auto* t = art_oracle::to_integral_type(r).type();
+    if (type && *type != t) {
+      return nullptr;
+    }
+    type = t;
+  }
+  return *type;
+}
+
+// Whether the join of the typed values in `values` holds every constant.
+bool constants_held_by_types(const std::vector<art_oracle::Reg>& values) {
+  std::optional<outliner_impl::IntegralType> types;
+  std::optional<outliner_impl::IntegralType> constants;
+  for (const auto& v : values) {
+    auto& part = v.is_constant() ? constants : types;
+    part = outliner_impl::IntegralType::join(part,
+                                             art_oracle::to_integral_type(v));
+  }
+  return !constants || constants->held_by(types->type());
+}
+
+} // namespace
+
+// Checks `get_result_type` against ART's merge. The definitions are every set
+// of up to four drawn from a parameter of each integral type and the oracle's
+// constants, with at least one parameter. The answer is the type that every
+// order and grouping of ART's merge ends at. There is none when the order
+// decides the type, and none yet when a constant lies outside the join of the
+// typed definitions.
+TEST_F(OutlinerTypeAnalysisTest, get_result_type_is_never_narrower_than_art) {
+  TypedDefsCorpus corpus;
+  outliner_impl::OutlinerTypeAnalysis ota(corpus.method);
+  size_t sets = 0;
+  size_t typed = 0;
+  corpus.for_each([&](const auto& values, const auto& defs) {
+    ++sets;
+    const auto* t = get_result_type(ota, defs, nullptr);
+    const auto* art = type_of_every_merge(values);
+    if (art != nullptr && constants_held_by_types(values)) {
+      ++typed;
+      EXPECT_EQ(t, art) << SHOW(t);
+    } else {
+      EXPECT_EQ(t, nullptr) << SHOW(t);
+    }
+  });
+  EXPECT_EQ(sets, 1555u);
+  EXPECT_EQ(typed, 825u);
+}
+
+// A `boolean` and a constant in [2, 32767] can merge first into `byte` or
+// `short`, which a `char` then takes to `int`. In the other orders they end at
+// `char`. So the set cannot be declared as a result: the code after the call
+// was verified against whichever of `char` and `int` ART computed.
+TEST_F(OutlinerTypeAnalysisTest, get_result_type_of_boolean_char_and_constant) {
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(ZC)V" (
+        (load-param v0)
+        (load-param v1)
+        (const v2 2)
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+  const auto* z = find_insn(foo_method, IOPCODE_LOAD_PARAM, 1);
+  const auto* c = find_insn(foo_method, IOPCODE_LOAD_PARAM, 2);
+  const auto* two = find_insn(foo_method, OPCODE_CONST);
+  EXPECT_EQ(get_result_type(ota, {z, c, two}, nullptr), nullptr);
+  EXPECT_EQ(get_result_type(ota, {z, two}, type::_char()), nullptr);
 }
 
 // A long chain of `and-int`s, each reading the previous result twice. A walk
@@ -1636,4 +1826,36 @@ TEST_F(OutlinerTypeAnalysisTest, narrow_demand_through_bitwise_is_boolean) {
                                    }),
                 [&]() { return ota.value_at(first_insn, reg); }),
             type::_boolean());
+}
+
+// The same register as in `get_result_type_of_boolean_char_and_constant`,
+// here as a value that reaches the outlined code. Declared as a parameter, it
+// is `int`. Passed through as the result, it has no type.
+TEST_F(OutlinerTypeAnalysisTest,
+       get_inferred_type_of_boolean_char_and_constant) {
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(ZCI)V" (
+        (load-param v0)
+        (load-param v1)
+        (load-param v4)
+        (const v2 2)
+        (move v3 v0)
+        (if-eqz v4 :char)
+        (move v3 v1)
+        (:char)
+        (if-nez v4 :two)
+        (move v3 v2)
+        (:two)
+        (sput v3 "LFoo;.i:I")
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+  auto* sput = find_insn(foo_method, OPCODE_SPUT);
+  auto root = create_node({sput});
+  auto candidate = create_candidate(ota, root);
+  EXPECT_EQ(get_inferred_type(candidate, sput->src(0)), type::_int());
+  EXPECT_EQ(get_inferred_type(candidate, sput->src(0),
+                              /* as_result */ true),
+            nullptr);
 }

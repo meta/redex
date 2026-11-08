@@ -127,6 +127,9 @@ class Value {
   // a contribution is unknown, no type holds them all, or only constants
   // contribute.
   const DexType* upper() const;
+  // `upper()` when every order in which ART may merge the contributions ends
+  // at that type, else nullptr (`IntegralType::exact_type`).
+  const DexType* exact() const;
 
  private:
   bool m_unknown{false};
@@ -178,7 +181,9 @@ class Demand {
 const DexType* declare_parameter(const Demand& uses,
                                  const std::function<Value()>& supply);
 
-// The type of a value outlined code gives back.
+// The type of a value outlined code gives back. The caller's code after the
+// call was verified against the one type ART gave the register, so only a
+// type that every merge order ends at may be declared.
 const DexType* declare_result(const Value& returned);
 
 } // namespace art

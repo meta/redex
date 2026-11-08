@@ -379,7 +379,8 @@ const DexType* Value::upper() const {
     if (m_constants && !m_constants->leq(*m_integral)) {
       return nullptr;
     }
-    return m_integral->type();
+    auto value = integral();
+    return value ? value->type() : nullptr;
   }
   if (m_primitives != 0) {
     return primitive_dex_type(m_primitives);
@@ -393,6 +394,11 @@ const DexType* Value::upper() const {
     return compute_joined_type(types);
   }
   return types.empty() ? nullptr : *unordered_any(types);
+}
+
+const DexType* Value::exact() const {
+  const auto* t = upper();
+  return t != nullptr && m_integral ? integral()->exact_type() : t;
 }
 
 Demand Demand::unknown() {
@@ -479,7 +485,7 @@ const DexType* declare_parameter(const Demand& uses,
 }
 
 const DexType* declare_result(const Value& returned) {
-  return returned.upper();
+  return returned.exact();
 }
 
 } // namespace art

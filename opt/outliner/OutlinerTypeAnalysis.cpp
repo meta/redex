@@ -331,6 +331,7 @@ Value Value::constant(const IRInstruction* insn) {
                 insn->opcode() == OPCODE_CONST_WIDE);
   Value v;
   v.m_constants = IntegralType::constant(insn->get_literal());
+  v.m_wide_constant = insn->opcode() == OPCODE_CONST_WIDE;
   return v;
 }
 
@@ -344,6 +345,18 @@ void Value::join_with(const Value& other) {
   if (other.m_constants) {
     m_constants = IntegralType::join(m_constants, *other.m_constants);
   }
+  m_wide_constant |= other.m_wide_constant;
+}
+
+std::optional<IntegralType> Value::integral() const {
+  if (m_unknown || m_wide_constant || m_primitives != 0 ||
+      !m_references.empty() || (!m_integral && !m_constants)) {
+    return std::nullopt;
+  }
+  if (!m_constants) {
+    return m_integral;
+  }
+  return IntegralType::join(m_integral, *m_constants);
 }
 
 bool Value::is_constant() const {
@@ -402,6 +415,15 @@ void Demand::meet_with(const Demand& other) {
   m_integral |= other.m_integral;
   m_primitives |= other.m_primitives;
   insert_unordered_iterable(m_references, other.m_references);
+}
+
+Demand Demand::through_bitwise() const {
+  constexpr uint8_t kNarrow = (1u << Z) | (1u << B) | (1u << S) | (1u << C);
+  Demand d = *this;
+  if ((d.m_integral & kNarrow) != 0) {
+    d.m_integral = (d.m_integral & ~kNarrow) | (1u << Z);
+  }
+  return d;
 }
 
 bool Demand::is_none() const {
@@ -634,7 +656,7 @@ art::Demand OutlinerTypeAnalysis::demand_in_candidate(
     }
   };
   walk(pc.root, {reg}, {});
-  demand.meet_with(followed_demand);
+  demand.meet_with(followed_demand.through_bitwise());
   return demand;
 }
 
@@ -679,7 +701,7 @@ art::Demand OutlinerTypeAnalysis::demand_of_uses(
       }
     }
   }
-  demand.meet_with(followed_demand);
+  demand.meet_with(followed_demand.through_bitwise());
   return demand;
 }
 
@@ -1446,65 +1468,6 @@ const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
   return narrowed_type_demand;
 }
 
-art::Value OutlinerTypeAnalysis::value_of_defs(
-    const UnorderedSet<const IRInstruction*>& defs,
-    art::Value value,
-    const Membership& candidate) {
-  UnorderedSet<const IRInstruction*> const_insns;
-  for (const auto* def : UnorderedIterable(defs)) {
-    always_assert(!opcode::is_a_move(def->opcode()) &&
-                  !opcode::is_move_result_any(def->opcode()));
-    UnorderedSet<const IRInstruction*> visited;
-    // Joins the value of `def` into `value`, expanding the bitwise operations
-    // that can keep a boolean into their operands. Returns true when the
-    // register is known to be `int`.
-    std::function<bool(const IRInstruction*)> expand;
-    expand = [&](const IRInstruction* def) {
-      if (!visited.insert(def).second) {
-        return false;
-      }
-      if (is_bitwise(def->opcode())) {
-        if (!keeps_booleanness(def)) {
-          // Overall result cannot be a boolean (as far as the Android type
-          // checker is concerned), so it must be an int.
-          return true;
-        }
-        for (auto src : def->srcs()) {
-          auto inner_defs = m_reaching_defs_environments->at(def).get(src);
-          for (auto* inner_def : inner_defs.elements()) {
-            if (expand(inner_def)) {
-              return true;
-            }
-          }
-        }
-        return false;
-      }
-      switch (def->opcode()) {
-      case IOPCODE_UNREACHABLE:
-        // A synthetic undefined value contributes nothing.
-        return false;
-      case OPCODE_CONST:
-      case OPCODE_CONST_WIDE:
-        const_insns.insert(def);
-        value.join_with(art::Value::constant(def));
-        return false;
-      default:
-        value.join_with(art::Value::of_type(get_result_type_helper(def)));
-        return false;
-      }
-    };
-    if (expand(def)) {
-      return art::Value::of_type(type::_int());
-    }
-  }
-  if (value.is_constant()) {
-    // Constants alone give a register no type; their uses do.
-    return art::Value::of_type(
-        get_const_insns_type_demand(candidate, const_insns));
-  }
-  return value;
-}
-
 bool OutlinerTypeAnalysis::is_null_to_art(const IRInstruction* insn,
                                           reg_t reg) {
   // ART types a `const 0` as null, and an `aget-object` from a null array too
@@ -1536,6 +1499,138 @@ bool OutlinerTypeAnalysis::is_null_to_art(const IRInstruction* insn,
     }
   }
   return defined;
+}
+
+art::Value OutlinerTypeAnalysis::value_of_defs(
+    const UnorderedSet<const IRInstruction*>& defs,
+    art::Value value,
+    const Membership& candidate) {
+  UnorderedSet<const IRInstruction*> const_insns;
+  for (const auto* def : UnorderedIterable(defs)) {
+    if (def->opcode() == OPCODE_CONST || def->opcode() == OPCODE_CONST_WIDE) {
+      const_insns.insert(def);
+    }
+    value.join_with(value_of_def(def));
+  }
+  if (value.is_constant()) {
+    // Constants alone give a register no type; their uses do.
+    return art::Value::of_type(
+        get_const_insns_type_demand(candidate, const_insns));
+  }
+  return value;
+}
+
+art::Value OutlinerTypeAnalysis::value_of_def(const IRInstruction* def) {
+  always_assert(!opcode::is_a_move(def->opcode()) &&
+                !opcode::is_move_result_any(def->opcode()));
+  switch (def->opcode()) {
+  case IOPCODE_UNREACHABLE:
+    // A synthetic undefined value contributes nothing.
+    return art::Value();
+  case OPCODE_CONST:
+  case OPCODE_CONST_WIDE:
+    return art::Value::constant(def);
+  default:
+    if (is_bitwise(def->opcode())) {
+      auto boolean = get_bitwise_booleanness(def);
+      if (!boolean) {
+        return art::Value::unknown();
+      }
+      return art::Value::of_type(*boolean ? type::_boolean() : type::_int());
+    }
+    return art::Value::of_type(get_result_type_helper(def));
+  }
+}
+
+std::optional<bool> OutlinerTypeAnalysis::get_bitwise_booleanness(
+    const IRInstruction* bitwise) {
+  if (auto it = m_bitwise_booleanness.find(bitwise);
+      it != m_bitwise_booleanness.end()) {
+    return it->second;
+  }
+  // ART types the result boolean when every operand is boolean, and int
+  // otherwise. An operand can itself be a bitwise operation, and such
+  // operations can share operands and form cycles. A recursion would visit a
+  // shared operand once per path to it, so the answer is a fixpoint over the
+  // graph of bitwise operations reachable from `bitwise`. Each operation
+  // starts out boolean. A literal or an operand can make it int or unknown,
+  // and that change propagates to the operations that use it. A cycle that
+  // nothing else feeds stays boolean, as in ART.
+  enum class State : uint8_t { Boolean, Int, Unknown };
+  UnorderedMap<const IRInstruction*, State> state;
+  UnorderedMap<const IRInstruction*, std::vector<const IRInstruction*>> users;
+  std::vector<const IRInstruction*> order;
+  std::vector<const IRInstruction*> stack{bitwise};
+  state.emplace(bitwise, State::Boolean);
+  while (!stack.empty()) {
+    const auto* op = stack.back();
+    stack.pop_back();
+    order.push_back(op);
+    if (auto it = m_bitwise_booleanness.find(op);
+        it != m_bitwise_booleanness.end()) {
+      state.at(op) = !it->second   ? State::Unknown
+                     : *it->second ? State::Boolean
+                                   : State::Int;
+      continue;
+    }
+    // Not a reference into `state`: the loop below inserts into it.
+    auto s = keeps_booleanness(op) ? State::Boolean : State::Int;
+    for (auto src : op->srcs()) {
+      const auto& defs = m_reaching_defs_environments->at(op).get(src);
+      if (defs.is_bottom() || defs.is_top()) {
+        s = State::Unknown;
+        continue;
+      }
+      for (const auto* def : defs.elements()) {
+        if (def->opcode() == IOPCODE_UNREACHABLE) {
+          continue;
+        }
+        if (is_bitwise(def->opcode())) {
+          users[def].push_back(op);
+          if (state.emplace(def, State::Boolean).second) {
+            stack.push_back(def);
+          }
+          continue;
+        }
+        auto v = value_of_def(def).integral();
+        if (!v) {
+          s = State::Unknown;
+        } else if (s == State::Boolean && !v->held_by(type::_boolean())) {
+          s = State::Int;
+        }
+      }
+    }
+    state.at(op) = s;
+  }
+  std::vector<const IRInstruction*> worklist;
+  for (const auto* op : order) {
+    if (state.at(op) != State::Boolean) {
+      worklist.push_back(op);
+    }
+  }
+  while (!worklist.empty()) {
+    const auto* op = worklist.back();
+    worklist.pop_back();
+    auto it = users.find(op);
+    if (it == users.end()) {
+      continue;
+    }
+    const auto s = state.at(op);
+    for (const auto* user : it->second) {
+      auto& u = state.at(user);
+      if (u < s) {
+        u = s;
+        worklist.push_back(user);
+      }
+    }
+  }
+  for (const auto* op : order) {
+    const auto s = state.at(op);
+    m_bitwise_booleanness.emplace(
+        op, s == State::Unknown ? std::nullopt
+                                : std::optional<bool>(s == State::Boolean));
+  }
+  return m_bitwise_booleanness.at(bitwise);
 }
 
 } // namespace outliner_impl

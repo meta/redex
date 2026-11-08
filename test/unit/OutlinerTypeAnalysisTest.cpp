@@ -11,6 +11,7 @@
 #include <bit>
 #include <functional>
 #include <set>
+#include <string>
 #include <vector>
 
 #include "Creators.h"
@@ -166,6 +167,55 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_primitive) {
         get_result_type(ota, {insn}, /* optional_extra_type */ type::_int());
     EXPECT_EQ(result_type, type::_int());
   }
+}
+
+// ART's verifier types `and`, `or` and `xor` as boolean only when every operand
+// is boolean, that is, a boolean value or the literal 0 or 1. Otherwise it
+// types them as int. Any other answer for a mixed bitwise operation is a type
+// that no consumer of the result can rely on. For example, claiming `char` for
+// an `and-int` of a `char` and a `boolean` makes an outlined method return, or
+// pass on, a value that ART types as int where `char` is declared.
+TEST_F(OutlinerTypeAnalysisTest, get_result_type_bitwise) {
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(CZ)V" (
+        (load-param v0)
+        (load-param v1)
+        (and-int v2 v0 v1)
+        (or-int v3 v1 v1)
+        (and-int/lit v4 v0 1)
+        (xor-int/lit v5 v1 1)
+        (const v6 5)
+        (const v7 1)
+        (xor-int v8 v1 v6)
+        (or-int v9 v1 v7)
+        (and-int v10 v2 v1)
+        (or-int v11 v3 v5)
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+
+  auto result_type = [&](IROpcode op, size_t occurrence) {
+    auto* insn = find_insn(foo_method, op, occurrence);
+    return get_result_type(ota, {insn},
+                           /* optional_extra_type */ nullptr);
+  };
+  // `char` & `boolean`
+  EXPECT_EQ(result_type(OPCODE_AND_INT, 1), type::_int());
+  // `boolean` | `boolean`
+  EXPECT_EQ(result_type(OPCODE_OR_INT, 1), type::_boolean());
+  // `char` & 1
+  EXPECT_EQ(result_type(OPCODE_AND_INT_LIT, 1), type::_int());
+  // `boolean` ^ 1
+  EXPECT_EQ(result_type(OPCODE_XOR_INT_LIT, 1), type::_boolean());
+  // `boolean` ^ 5
+  EXPECT_EQ(result_type(OPCODE_XOR_INT, 1), type::_int());
+  // `boolean` | 1
+  EXPECT_EQ(result_type(OPCODE_OR_INT, 2), type::_boolean());
+  // (`char` & `boolean`) & `boolean`
+  EXPECT_EQ(result_type(OPCODE_AND_INT, 2), type::_int());
+  // (`boolean` | `boolean`) | (`boolean` ^ 1)
+  EXPECT_EQ(result_type(OPCODE_OR_INT, 3), type::_boolean());
 }
 
 TEST_F(OutlinerTypeAnalysisTest, integral_type_join_and_order) {
@@ -696,6 +746,59 @@ TEST_F(OutlinerTypeAnalysisTest,
   EXPECT_EQ(multisets, 2379u);
 }
 
+// A long chain of `and-int`s, each reading the previous result twice. A walk
+// that re-visits a shared operand once per path to it takes 2^64 steps; the
+// fixpoint takes one per operation.
+TEST_F(OutlinerTypeAnalysisTest,
+       integral_value_of_shared_bitwise_dag_is_linear) {
+  std::string body = "(load-param v0)\n(load-param v1)\n";
+  for (int i = 0; i < 64; ++i) {
+    body += "(and-int v0 v0 v0)\n(xor-int v1 v1 v1)\n(or-int v1 v1 v0)\n";
+  }
+  body += "(return-void)\n";
+  auto* foo_method = assembler::method_from_string(
+      R"((method (public static) "LFoo;.foo:(ZC)V" ()" + body + "))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+  auto last = [&](IROpcode op) {
+    const IRInstruction* found = nullptr;
+    for (const auto& mie : InstructionIterable(foo_method->get_code()->cfg())) {
+      if (mie.insn->opcode() == op) {
+        found = mie.insn;
+      }
+    }
+    return found;
+  };
+  EXPECT_EQ(get_result_type(ota, {last(OPCODE_AND_INT)}, nullptr),
+            type::_boolean());
+  EXPECT_EQ(get_result_type(ota, {last(OPCODE_OR_INT)}, nullptr), type::_int());
+}
+
+// A bitwise operation in a loop reads its own result. It stays boolean while
+// nothing else feeding it is wider, as in ART.
+TEST_F(OutlinerTypeAnalysisTest, integral_value_of_bitwise_cycle) {
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(ZZC)V" (
+        (load-param v0)
+        (load-param v1)
+        (load-param v2)
+        (move v3 v2)
+        (:loop)
+        (and-int v0 v0 v1)
+        (or-int v3 v3 v0)
+        (if-nez v1 :loop)
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+  EXPECT_EQ(
+      get_result_type(ota, {find_insn(foo_method, OPCODE_AND_INT)}, nullptr),
+      type::_boolean());
+  EXPECT_EQ(
+      get_result_type(ota, {find_insn(foo_method, OPCODE_OR_INT)}, nullptr),
+      type::_int());
+}
+
 TEST_F(OutlinerTypeAnalysisTest, get_result_type_unreachable) {
   // Regression: a def fed by IOPCODE_UNREACHABLE (a synthetic undefined value
   // that the type analysis groups with consts) must not crash
@@ -1223,6 +1326,68 @@ TEST_F(OutlinerTypeAnalysisTest, get_type_demand_byte_and_char_have_no_meet) {
   }
 }
 
+// ART types `and-int`, `or-int` and `xor-int` as boolean only when every
+// operand is boolean, and as int otherwise, and of the integral types only a
+// boolean is assignable to a `boolean`, `byte`, `short` or `char` demand. So a
+// narrow demand on the result of a bitwise operation demands `boolean` of its
+// operands; an `int` demand on the result demands `int`.
+TEST_F(OutlinerTypeAnalysisTest, get_type_demand_through_bitwise) {
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(CZ)V" (
+        (load-param v0)
+        (load-param v1)
+        (and-int v2 v0 v1)
+        (invoke-static (v2) "LFoo;.takeChar:(C)V")
+        (or-int v3 v0 v1)
+        (invoke-static (v3) "LFoo;.takeByte:(B)V")
+        (xor-int/lit v4 v0 1)
+        (invoke-static (v4) "LFoo;.takeShort:(S)V")
+        (and-int v5 v0 v1)
+        (invoke-static (v5) "LFoo;.takeBoolean:(Z)V")
+        (and-int v6 v0 v1)
+        (invoke-static (v6) "LFoo;.takeInt:(I)V")
+        (invoke-static (v0) "LFoo;.takeChar:(C)V")
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+
+  auto demand_through = [&](size_t occurrence,
+                            std::vector<IRInstruction*> extra = {}) {
+    auto* bitwise = find_insn(
+        foo_method,
+        [](IRInstruction* insn) {
+          switch (insn->opcode()) {
+          case OPCODE_AND_INT:
+          case OPCODE_OR_INT:
+          case OPCODE_XOR_INT_LIT:
+            return true;
+          default:
+            return false;
+          }
+        },
+        occurrence);
+    auto* use = find_insn(foo_method, OPCODE_INVOKE_STATIC, occurrence);
+    std::vector<IRInstruction*> insns{bitwise, use};
+    insns.insert(insns.end(), extra.begin(), extra.end());
+    auto root = create_node(insns);
+    auto candidate = create_candidate(ota, root);
+    return get_type_demand(candidate, bitwise->src(0));
+  };
+
+  EXPECT_EQ(demand_through(1), type::_boolean()) << "char demand on the result";
+  EXPECT_EQ(demand_through(2), type::_boolean()) << "byte demand on the result";
+  EXPECT_EQ(demand_through(3), type::_boolean())
+      << "short demand on the result of a literal form";
+  EXPECT_EQ(demand_through(4), type::_boolean())
+      << "boolean demand on the result";
+  EXPECT_EQ(demand_through(5), type::_int()) << "int demand on the result";
+  // A direct `char` use beside a bitwise operation whose result is demanded
+  // as `int` still demands `char`.
+  EXPECT_EQ(demand_through(5, {find_insn(foo_method, OPCODE_INVOKE_STATIC, 6)}),
+            type::_char());
+}
+
 TEST_F(OutlinerTypeAnalysisTest, get_type_demand_aput_object) {
   std::string src = R"(
       (
@@ -1417,4 +1582,58 @@ TEST_F(OutlinerTypeAnalysisTest, in_cover_seed_defs_do_not_narrow_live_in) {
     seeds.filter([&](IRInstruction* def) { return !in_cover(def); });
     EXPECT_EQ(parameter_type(seeds), a_type);
   }
+}
+
+// A narrow demand on the result of a bitwise operation is met only by boolean
+// operands, because ART types `and-int` as int as soon as one operand is not
+// boolean. So the demand found through the `and-int` must not count as a
+// demand on the operand itself. Here the boolean `v0` also has a direct `char`
+// use. Counting both as `v0`'s own demands would type `v0` `char`, and the
+// `and-int` inside the closure would then hand an int to `takeChar`.
+TEST_F(OutlinerTypeAnalysisTest, narrow_demand_through_bitwise_is_boolean) {
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(ZZ)V" (
+        (load-param v0)
+        (load-param v1)
+        (invoke-static (v0) "LFoo;.takeChar:(C)V")
+        (and-int v2 v0 v1)
+        (invoke-static (v2) "LFoo;.takeChar:(C)V")
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  auto& cfg = foo_method->get_code()->cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+  ReducedControlFlowGraph rcfg(cfg);
+
+  Lazy<UnorderedMap<IRInstruction*, const ReducedBlock*>> insns([&rcfg] {
+    auto res =
+        std::make_unique<UnorderedMap<IRInstruction*, const ReducedBlock*>>();
+    for (const auto* reduced_block : rcfg.blocks()) {
+      for (const auto* block : UnorderedIterable(reduced_block->blocks)) {
+        for (const auto& mie : InstructionIterable(block)) {
+          res->emplace(mie.insn, reduced_block);
+        }
+      }
+    }
+    return res;
+  });
+
+  IRInstruction* and_insn = nullptr;
+  for (const auto& mie : InstructionIterable(cfg)) {
+    if (mie.insn->opcode() == OPCODE_AND_INT) {
+      and_insn = mie.insn;
+    }
+  }
+  ASSERT_NE(and_insn, nullptr);
+  UnorderedSet<const ReducedBlock*> cover{
+      rcfg.get_reduced_block(block_of(cfg, and_insn))};
+  auto* first_insn = find_invoke_of(foo_method, "takeChar");
+  auto reg = and_insn->src(0);
+  EXPECT_EQ(art::declare_parameter(
+                ota.demand_of_uses(ota.immediate_defs_at(first_insn, reg),
+                                   [&](IRInstruction* insn) {
+                                     return cover.count(insns->at(insn)) != 0u;
+                                   }),
+                [&]() { return ota.value_at(first_insn, reg); }),
+            type::_boolean());
 }

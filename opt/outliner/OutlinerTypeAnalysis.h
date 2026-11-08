@@ -116,6 +116,10 @@ class Value {
 
   void join_with(const Value& other);
 
+  // The integral types and constants that contribute, when nothing else does:
+  // no unknown, wide, reference or floating-point value.
+  std::optional<IntegralType> integral() const;
+
   // Whether constants contribute and nothing else does: no producer gives
   // the register a type.
   bool is_constant() const;
@@ -133,6 +137,7 @@ class Value {
   // The other types contributing: classes and arrays.
   UnorderedSet<const DexType*> m_references;
   std::optional<IntegralType> m_constants;
+  bool m_wide_constant{false};
 };
 
 // What the uses of a register require of it: the type each use demands.
@@ -146,6 +151,13 @@ class Demand {
   static Demand of_use(const DexType* t);
 
   void meet_with(const Demand& other);
+  // Given this demand on the result of an `and`, `or` or `xor`, the demand it
+  // places on each operand. ART types such an operation as boolean when every
+  // operand is boolean, and as int otherwise. Of those two types, only
+  // boolean is assignable to a `boolean`, `byte`, `short` or `char` demand.
+  // So a narrow demand on the result is met only by boolean operands, while
+  // an `int` demand is met by any integral operand.
+  Demand through_bitwise() const;
 
   bool is_none() const;
   // The widest type every use accepts; nullptr when a demand is unknown, there
@@ -223,6 +235,9 @@ class OutlinerTypeAnalysis {
   Lazy<live_range::DefUseChains> m_immediate_def_uses;
   Lazy<TypeEnvironments> m_type_environments;
   Lazy<constant_uses::ConstantUses> m_constant_uses;
+  // Whether each `and`, `or` and `xor` analysed so far is boolean (true) or
+  // int (false); nullopt when the type of an operand is unknown.
+  UnorderedMap<const IRInstruction*, std::optional<bool>> m_bitwise_booleanness;
 
   art::Demand demand_of_use(IRInstruction* use, src_index_t src_index);
 
@@ -244,6 +259,13 @@ class OutlinerTypeAnalysis {
   const DexType* get_const_insns_type_demand(
       const Membership& candidate,
       const UnorderedSet<const IRInstruction*>& const_insns);
+
+  // The value of the producer `def`, after moves and move-results have been
+  // traced back to it. A constant gives its own value, an `and`, `or` or `xor`
+  // the type `get_bitwise_booleanness` gives it, and any other producer its
+  // result type.
+  art::Value value_of_def(const IRInstruction* def);
+  std::optional<bool> get_bitwise_booleanness(const IRInstruction* bitwise);
 
   art::Value value_of_defs(const UnorderedSet<const IRInstruction*>& defs,
                            art::Value value,

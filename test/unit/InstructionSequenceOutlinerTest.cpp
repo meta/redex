@@ -24,6 +24,7 @@
 #include "RedexTest.h"
 #include "ScopeHelper.h"
 #include "ScopedCFG.h"
+#include "Show.h"
 #include "SourceBlocks.h"
 #include "TypeUtil.h"
 
@@ -438,4 +439,69 @@ TEST_F(InstructionSequenceOutlinerTest, OutlinedParamNarrowedByResultType) {
       << "the outlined parameter widened to the bare use-demand meet; "
          "the result demand is what narrows it";
   EXPECT_STREQ(proto->get_rtype()->get_name()->c_str(), "LPFSub;");
+}
+
+// ART types an `and-int` of two `char`s as `int`. When that value enters the
+// outlined code as an argument and leaves it as the result, both are `int`: a
+// `(C)C` method would receive an `int` argument, which ART rejects
+// (`VerifyRegisterType` in `method_verifier.cc`).
+TEST_F(InstructionSequenceOutlinerTest, BitwiseOfCharsPassesThroughAsInt) {
+  std::vector<DexType*> no_interfaces;
+  DexType* holder = DexType::make_type("LIF;");
+  DexClass* holder_cls =
+      create_class(holder, type::java_lang_Object(), no_interfaces, ACC_PUBLIC);
+  m_classes.push_back(holder_cls);
+  // Two fields, so the halves either side of the move are not themselves a
+  // repeating sequence.
+  holder_cls->add_field(DexField::make_field("LIF;.si1:I")
+                            ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  holder_cls->add_field(DexField::make_field("LIF;.si2:I")
+                            ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+
+  std::vector<DexMethod*> methods;
+  for (size_t i = 0; i < 4; i++) {
+    auto* proto = DexProto::make_proto(
+        type::_void(),
+        DexTypeList::make_type_list({type::_char(), type::_char()}));
+    auto* m =
+        DexMethod::make_method(
+            holder, DexString::make_string("m" + std::to_string(i)), proto)
+            ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+    holder_cls->add_method(m);
+    // A distinct call after the `and-int` keeps it out of the shared
+    // sequence, and a distinct call at the end keeps `v3` live-out of it.
+    std::ostringstream oss;
+    oss << "(\n(load-param v0)\n(load-param v1)\n(and-int v2 v0 v1)\n"
+        << "(invoke-static () \"LIF;.mark" << i << ":()V\")\n";
+    for (int j = 0; j < 7; j++) {
+      oss << R"((sput v2 "LIF;.si1:I"))" << "\n";
+    }
+    oss << "(move v3 v2)\n";
+    for (int j = 0; j < 7; j++) {
+      oss << R"((sput v3 "LIF;.si2:I"))" << "\n";
+    }
+    oss << "(invoke-static (v3) \"LIF;.consume" << i << ":(I)V\")\n"
+        << "(return-void)\n)";
+    m->set_code(assembler::ircode_from_string(oss.str()));
+    methods.push_back(m);
+  }
+
+  run();
+
+  DexMethod* outlined = nullptr;
+  {
+    cfg::ScopedCFG cfg(methods[0]->get_code());
+    for (auto& mie : cfg::InstructionIterable(*cfg)) {
+      auto* insn = mie.insn;
+      if (insn->has_method() && insn->get_method()->get_name()->str().find(
+                                    "$outlined") != std::string::npos) {
+        outlined = insn->get_method()->as_def();
+      }
+    }
+  }
+  ASSERT_NE(outlined, nullptr) << "nothing was outlined";
+  const auto* proto = outlined->get_proto();
+  ASSERT_EQ(proto->get_args()->size(), 1u) << SHOW(proto);
+  EXPECT_EQ(proto->get_args()->at(0), type::_int()) << SHOW(proto);
+  EXPECT_EQ(proto->get_rtype(), type::_int()) << SHOW(proto);
 }

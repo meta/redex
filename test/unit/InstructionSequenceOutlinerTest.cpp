@@ -8,6 +8,8 @@
 #include "InstructionSequenceOutliner.h"
 
 #include <gtest/gtest.h>
+#include <sstream>
+#include <string>
 #include <utility>
 
 #include "BigBlocks.h"
@@ -21,6 +23,7 @@
 #include "PassManager.h"
 #include "RedexTest.h"
 #include "ScopeHelper.h"
+#include "ScopedCFG.h"
 #include "SourceBlocks.h"
 #include "TypeUtil.h"
 
@@ -76,6 +79,49 @@ struct InstructionSequenceOutlinerTest : public RedexTest {
     auto* field = DexField::make_field("LC;.f:Ljava/lang/Object;")
                       ->make_concrete(ACC_PUBLIC);
     c_cls->add_field(field);
+  }
+
+  // `n` static methods that will share one outlinable instruction sequence.
+  // Each takes an `LPFSub;` parameter. Two occurrences do not clear the
+  // outliner's benefit threshold, so callers need several.
+  std::vector<DexMethod*> create_param_flow(size_t n) {
+    std::vector<DexType*> no_interfaces;
+
+    DexType* holder = DexType::make_type("LPF;");
+    DexClass* holder_cls = create_class(holder, type::java_lang_Object(),
+                                        no_interfaces, ACC_PUBLIC);
+    m_classes.push_back(holder_cls);
+
+    DexType* sub = DexType::make_type("LPFSub;");
+    m_classes.push_back(
+        create_class(sub, type::java_lang_Object(), no_interfaces, ACC_PUBLIC));
+
+    // The broad demand comes from an `Object`-typed static field. `sput-object`
+    // demands exactly the field's type, so the parameter's uses demand only
+    // `java.lang.Object`. Only the result type, which `demand_in_candidate`
+    // adds as a demand, can narrow it. The halves on either side of the move
+    // store to two distinct fields, so neither half is a repeating sequence
+    // that the outliner would rather outline on its own.
+    holder_cls->add_field(DexField::make_field("LPF;.sf1:Ljava/lang/Object;")
+                              ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+    holder_cls->add_field(DexField::make_field("LPF;.sf2:Ljava/lang/Object;")
+                              ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+
+    auto make = [&](const char* name) {
+      auto* proto = DexProto::make_proto(type::_void(),
+                                         DexTypeList::make_type_list({sub}));
+      auto* m =
+          DexMethod::make_method(holder, DexString::make_string(name), proto)
+              ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+      holder_cls->add_method(m);
+      return m;
+    };
+    std::vector<DexMethod*> methods;
+    methods.reserve(n);
+    for (size_t i = 0; i < n; i++) {
+      methods.push_back(make(("m" + std::to_string(i)).c_str()));
+    }
+    return methods;
   }
 
   void run() {
@@ -301,4 +347,95 @@ TEST_F(InstructionSequenceOutlinerTest,
   big_blocks::BigBlock big_block({entry});
   EXPECT_EQ(outlineability.can_outline_from_big_block(method, big_block),
             OutlineabilityContext::Result::WarmLoopExceedsThresholds);
+}
+
+// An outlined method's parameter keeps the narrower type of the result it is
+// copied into. A wrong parameter type in an outlined method's proto is a
+// verifier error, not just a lost narrowing.
+//
+// The outlined sequence's only out-reg, `v1`, is a `move-object` of the object
+// parameter `v0`, so its result type is the parameter's declared type,
+// `LPFSub;`. The only other use of `v0` in the sequence accepts any
+// `java.lang.Object`, so its uses alone would type the outlined method's
+// parameter `Object`. `demand_in_candidate` takes the result register and its
+// type, and adds that type as a demand on the register that still holds the
+// out-value at the end of the sequence. So `Demand::widest` keeps `LPFSub;`.
+//
+// The `Object` demand is needed. Without it, no use records a demand, because
+// the walk follows a move instead of recording it. `declare_parameter` would
+// then fall back to the supplied value and return `LPFSub;` with or without
+// the result demand.
+//
+// Without the result demand, the outliner emits
+// `LPF;.$outlined$0$...:(Ljava/lang/Object;)LPFSub;`, whose `RETURN_OBJECT v0`
+// returns an `Object` where `LPFSub;` is declared. `IRTypeChecker` rejects that
+// method during the pass, so `run()` throws a `RedexError` before the
+// assertions below run; the assertions document the expected proto. A wrong
+// proto that only an `OPCODE_RETURN` would expose is not caught, because that
+// opcode never reads the proto. That case cannot be built with object types,
+// so it is not covered here.
+TEST_F(InstructionSequenceOutlinerTest, OutlinedParamNarrowedByResultType) {
+  auto methods = create_param_flow(4);
+
+  // The two bodies differ only in the trailing call, so the common sequence
+  // ends before it and `v1` is live-out of the sequence rather than inside it.
+  auto make_body = [](const char* tail) {
+    std::ostringstream oss;
+    oss << "(\n(load-param-object v0)\n";
+    // Shared code on BOTH sides of the move. Without the trailing half, the
+    // prefix that stops before the move would be a valid candidate too. That
+    // prefix returns nothing, so it would win on `cost_invoke_with_result`.
+    for (int i = 0; i < 7; i++) {
+      oss << R"((sput-object v0 "LPF;.sf1:Ljava/lang/Object;"))" << "\n";
+    }
+    oss << "(move-object v1 v0)\n";
+    for (int i = 0; i < 7; i++) {
+      oss << R"((sput-object v1 "LPF;.sf2:Ljava/lang/Object;"))" << "\n";
+    }
+    oss << "(invoke-static (v1) \"" << tail << "\")\n"
+        << "(return-void)\n)";
+    return oss.str();
+  };
+
+  // Distinct tails so the shared prefix ends at the last `sput`, leaving `v1`
+  // defined inside the sequence and live-out of it.
+  for (size_t i = 0; i < methods.size(); i++) {
+    auto tail = "LPF;.consume" + std::to_string(i) + ":(LPFSub;)V";
+    methods[i]->set_code(
+        assembler::ircode_from_string(make_body(tail.c_str())));
+  }
+
+  run();
+
+  DexMethod* outlined = nullptr;
+  {
+    cfg::ScopedCFG cfg(methods[0]->get_code());
+    for (auto& mie : cfg::InstructionIterable(*cfg)) {
+      auto* insn = mie.insn;
+      if (insn->has_method() && insn->get_method()->get_name()->str().find(
+                                    "$outlined") != std::string::npos) {
+        outlined = insn->get_method()->as_def();
+      }
+    }
+  }
+  ASSERT_NE(outlined, nullptr)
+      << "nothing was outlined; the fixture no longer presents an outlinable "
+         "sequence, so this test is not exercising what it claims";
+
+  // These check preconditions, not the property under test. The outliner
+  // chooses among competing candidates by a cost model. If it ever prefers the
+  // void prefix that stops before the `move-object`, there is no out-reg and
+  // the result demand never applies. A failure here then means the fixture no
+  // longer builds the intended case, not that the result demand is broken.
+  const auto* proto = outlined->get_proto();
+  ASSERT_STRNE(proto->get_rtype()->get_name()->c_str(), "V")
+      << "ISO outlined a void candidate, so no out-reg was formed and this "
+         "test is no longer exercising the result demand";
+  ASSERT_EQ(proto->get_args()->size(), 1u)
+      << "expected exactly the one parameter this fixture supplies";
+
+  EXPECT_STREQ(proto->get_args()->at(0)->get_name()->c_str(), "LPFSub;")
+      << "the outlined parameter widened to the bare use-demand meet; "
+         "the result demand is what narrows it";
+  EXPECT_STREQ(proto->get_rtype()->get_name()->c_str(), "LPFSub;");
 }

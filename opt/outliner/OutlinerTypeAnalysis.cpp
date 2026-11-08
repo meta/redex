@@ -374,11 +374,6 @@ const DexType* Value::upper() const {
     return nullptr;
   }
   if (m_integral) {
-    // A register that a constant reaches gets no type when the producers' type
-    // does not hold that constant.
-    if (m_constants && !m_constants->leq(*m_integral)) {
-      return nullptr;
-    }
     auto value = integral();
     return value ? value->type() : nullptr;
   }

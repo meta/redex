@@ -258,9 +258,8 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_types_constants_by_value) {
   EXPECT_EQ(type({{OPCODE_CONST, 2}, {IOPCODE_LOAD_PARAM, 2}}), type::_char());
   EXPECT_EQ(type({{OPCODE_CONST, 3}, {IOPCODE_LOAD_PARAM, 1}}),
             type::_boolean());
-  // A constant outside the type of the register's other definitions is not
-  // typed.
-  EXPECT_EQ(type({{OPCODE_CONST, 1}, {IOPCODE_LOAD_PARAM, 1}}), nullptr);
+  // A `boolean` and 65 merge into `byte`.
+  EXPECT_EQ(type({{OPCODE_CONST, 1}, {IOPCODE_LOAD_PARAM, 1}}), type::_byte());
   // `boolean` & 1 is boolean, `char` & 1 is int.
   EXPECT_EQ(type({{OPCODE_AND_INT, 1}}), type::_boolean());
   EXPECT_EQ(type({{OPCODE_AND_INT, 2}}), type::_int());
@@ -875,26 +874,13 @@ const DexType* type_of_every_merge(const std::vector<art_oracle::Reg>& values) {
   return *type;
 }
 
-// Whether the join of the typed values in `values` holds every constant.
-bool constants_held_by_types(const std::vector<art_oracle::Reg>& values) {
-  std::optional<outliner_impl::IntegralType> types;
-  std::optional<outliner_impl::IntegralType> constants;
-  for (const auto& v : values) {
-    auto& part = v.is_constant() ? constants : types;
-    part = outliner_impl::IntegralType::join(part,
-                                             art_oracle::to_integral_type(v));
-  }
-  return !constants || constants->held_by(types->type());
-}
-
 } // namespace
 
 // Checks `get_result_type` against ART's merge. The definitions are every set
 // of up to four drawn from a parameter of each integral type and the oracle's
 // constants, with at least one parameter. The answer is the type that every
-// order and grouping of ART's merge ends at. There is none when the order
-// decides the type, and none yet when a constant lies outside the join of the
-// typed definitions.
+// order and grouping of ART's merge ends at, and there is none when the order
+// decides the type.
 TEST_F(OutlinerTypeAnalysisTest, get_result_type_is_never_narrower_than_art) {
   TypedDefsCorpus corpus;
   outliner_impl::OutlinerTypeAnalysis ota(corpus.method);
@@ -904,7 +890,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_is_never_narrower_than_art) {
     ++sets;
     const auto* t = get_result_type(ota, defs, nullptr);
     const auto* art = type_of_every_merge(values);
-    if (art != nullptr && constants_held_by_types(values)) {
+    if (art != nullptr) {
       ++typed;
       EXPECT_EQ(t, art) << SHOW(t);
     } else {
@@ -912,7 +898,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_is_never_narrower_than_art) {
     }
   });
   EXPECT_EQ(sets, 1555u);
-  EXPECT_EQ(typed, 825u);
+  EXPECT_EQ(typed, 1528u);
 }
 
 // A `boolean` and a constant in [2, 32767] can merge first into `byte` or
@@ -987,6 +973,86 @@ TEST_F(OutlinerTypeAnalysisTest, integral_value_of_bitwise_cycle) {
   EXPECT_EQ(
       get_result_type(ota, {find_insn(foo_method, OPCODE_OR_INT)}, nullptr),
       type::_int());
+}
+
+// A register that a typed definition and constants outside its type define
+// has the type ART merges them into, not none.
+TEST_F(OutlinerTypeAnalysisTest, get_result_type_merges_constants_by_value) {
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(ZBSCI)V" (
+        (load-param v0)
+        (load-param v1)
+        (load-param v2)
+        (load-param v3)
+        (load-param v4)
+        (const v5 200)
+        (const v6 -1)
+        (const v7 40000)
+        (const v8 65)
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+  auto type_of = [&](size_t param, int64_t literal) {
+    UnorderedSet<const IRInstruction*> defs{
+        find_insn(foo_method, IOPCODE_LOAD_PARAM, param),
+        find_insn(foo_method, [literal](IRInstruction* insn) {
+          return insn->opcode() == OPCODE_CONST &&
+                 insn->get_literal() == literal;
+        })};
+    return get_result_type(ota, defs, nullptr);
+  };
+  EXPECT_EQ(type_of(2, 200), type::_short());
+  EXPECT_EQ(type_of(4, -1), type::_int());
+  EXPECT_EQ(type_of(3, 40000), type::_int());
+  EXPECT_EQ(type_of(1, 65), type::_byte());
+  EXPECT_EQ(type_of(1, 200), type::_short());
+  EXPECT_EQ(type_of(4, 65), type::_char());
+}
+
+// A register whose only definitions are undefined values, or that has none,
+// takes its incoming type.
+TEST_F(OutlinerTypeAnalysisTest, get_result_type_of_incoming_type_alone) {
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:()V" (
+        (unreachable v0)
+        (throw v0)
+      )))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+  EXPECT_EQ(get_result_type(ota, {}, type::_char()), type::_char());
+  EXPECT_EQ(get_result_type(ota, {find_insn(foo_method, IOPCODE_UNREACHABLE)},
+                            type::_char()),
+            type::_char());
+}
+
+// The same chain as `integral_value_of_shared_bitwise_dag_is_linear`, typed
+// through `get_result_type`.
+TEST_F(OutlinerTypeAnalysisTest,
+       get_result_type_of_shared_bitwise_dag_is_linear) {
+  std::string body = "(load-param v0)\n(load-param v1)\n";
+  for (int i = 0; i < 64; ++i) {
+    body += "(and-int v0 v0 v0)\n(xor-int v1 v1 v1)\n(or-int v1 v1 v0)\n";
+  }
+  body += "(const v2 7)\n(return-void)\n";
+  auto* foo_method = assembler::method_from_string(
+      R"((method (public static) "LFoo;.foo:(ZC)V" ()" + body + "))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+  UnorderedSet<const IRInstruction*> ands;
+  const IRInstruction* last_or = nullptr;
+  for (const auto& mie : InstructionIterable(foo_method->get_code()->cfg())) {
+    if (mie.insn->opcode() == OPCODE_AND_INT) {
+      ands.insert(mie.insn);
+    } else if (mie.insn->opcode() == OPCODE_OR_INT) {
+      last_or = mie.insn;
+    }
+  }
+  EXPECT_EQ(get_result_type(ota, ands, nullptr), type::_boolean());
+  EXPECT_EQ(get_result_type(ota, {last_or}, nullptr), type::_int());
+  EXPECT_EQ(get_result_type(ota, ands, type::_char()), type::_char());
+  ands.insert(find_insn(foo_method, OPCODE_CONST));
+  EXPECT_EQ(get_result_type(ota, ands, nullptr), type::_byte());
 }
 
 TEST_F(OutlinerTypeAnalysisTest, get_result_type_unreachable) {

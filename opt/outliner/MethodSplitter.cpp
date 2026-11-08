@@ -372,8 +372,11 @@ SplitMethod SplitMethod::create(const SplittableClosure& splittable_closure,
       return !split_target_ids.contains(e->target()->id());
     });
     cfg.delete_succ_edge_if(splittable_closure.switch_block, [&](auto* e) {
-      return e->type() == cfg::EDGE_BRANCH &&
-             split_target_ids.contains(e->target()->id());
+      return e->type() != cfg::EDGE_THROW &&
+             host_switch_edge_edit(HostSwitchEdit::DeleteGrouped,
+                                   split_target_ids.contains(e->target()->id()),
+                                   e->type() == cfg::EDGE_GOTO) ==
+                 SwitchEdgeEdit::Delete;
     });
   }
   split_cfg.add_edge(split_entry_block, split_landingpad, cfg::EDGE_GOTO);
@@ -445,7 +448,11 @@ void SplitMethod::apply_code_changes() {
   auto copy = m_launchpad_template->preds();
   for (auto* e : copy) {
     if ((m_splittable_closure.switch_block == nullptr) ||
-        e->src() == m_splittable_closure.switch_block) {
+        (e->src() == m_splittable_closure.switch_block &&
+         host_switch_edge_edit(HostSwitchEdit::DeleteGrouped,
+                               /*into_taken_head=*/true,
+                               e->type() == cfg::EDGE_GOTO) ==
+             SwitchEdgeEdit::ToLaunchpad)) {
       cfg.set_edge_target(e, launchpad);
     }
   }

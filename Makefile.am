@@ -544,6 +544,7 @@ libopt_la_SOURCES = \
 	opt/outliner/MethodSplittingPass.cpp \
 	opt/outliner/OutlinerTypeAnalysis.cpp \
 	opt/outliner/ReducedControlFlow.cpp \
+	opt/outliner/SplitNetSaving.cpp \
 	opt/outliner/SplittableClosures.cpp \
 	opt/singleimpl/SingleImpl.cpp \
 	opt/singleimpl/SingleImplAnalyze.cpp \

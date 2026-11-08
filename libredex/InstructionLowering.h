@@ -20,6 +20,8 @@ class IRInstruction;
 struct MethodItemEntry;
 
 enum DexOpcode : uint16_t;
+enum IROpcode : uint16_t;
+using bit_width_t = uint8_t;
 
 using DexStoresVector = std::vector<DexStore>;
 
@@ -88,6 +90,12 @@ namespace impl {
 
 DexOpcode select_move_opcode(const IRInstruction* insn);
 
+// The narrowest form of an `OPCODE_CONST` or `OPCODE_CONST_WIDE` that holds
+// `literal` in a destination register `dest_width` bits wide.
+DexOpcode select_const_opcode(IROpcode op,
+                              int64_t literal,
+                              bit_width_t dest_width);
+
 DexOpcode select_const_opcode(const IRInstruction* insn);
 
 DexOpcode select_binop_lit_opcode(const IRInstruction* insn);
@@ -95,6 +103,11 @@ DexOpcode select_binop_lit_opcode(const IRInstruction* insn);
 bool try_2addr_conversion(MethodItemEntry*);
 
 } // namespace impl
+
+// The code units of the form lowering picks for an `OPCODE_CONST` or
+// `OPCODE_CONST_WIDE` of `literal` whose destination register is narrow enough
+// for `const/4`.
+size_t const_code_units(IROpcode op, int64_t literal);
 
 struct CaseKeysExtent {
   int32_t first_key{0};
@@ -121,6 +134,9 @@ class CaseKeysExtentBuilder {
 
  public:
   void insert(int32_t case_key);
+  bool empty() const { return !m_info; }
+  // The number of keys inserted.
+  size_t size() const { return m_info ? m_info->size : 0; }
   const CaseKeysExtent& operator*() const;
   const CaseKeysExtent* operator->() const;
 };

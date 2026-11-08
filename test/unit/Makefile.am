@@ -191,6 +191,7 @@ check_PROGRAMS = \
     compact_pointer_vector_test \
     source_blocks_test \
     source_debug_extension_test \
+    split_net_saving_test \
     synthetic_block_counts_test \
     split_huge_switch_test \
     static_field_dependency_graph_test \
@@ -595,6 +596,8 @@ compact_pointer_vector_test_SOURCES = CompactPointerVectorTest.cpp
 source_blocks_test_SOURCES = SourceBlocksTest.cpp
 
 source_debug_extension_test_SOURCES = SourceDebugExtensionTest.cpp
+
+split_net_saving_test_SOURCES = SplitNetSavingTest.cpp
 
 synthetic_block_counts_test_SOURCES = SyntheticBlockCountsTest.cpp
 

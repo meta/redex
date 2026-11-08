@@ -156,6 +156,25 @@ class MethodSplitterTest : public RedexTest {
     return ::testing::AssertionSuccess();
   }
 
+  // How many split methods splitting `code_str` creates.
+  static size_t split_count(const std::string& sig,
+                            const std::string& code_str,
+                            const method_splitting_impl::Config& config) {
+    auto [cls, m] = create(sig, code_str);
+    m->get_code()->build_cfg();
+    DexStoresVector stores;
+    stores.emplace_back("test_store");
+    stores.front().get_dexen().push_back({cls});
+    method_splitting_impl::StoreRefCheckers store_ref_checkers(
+        stores, /* normal_primary_dex */ true, /* min_sdk_api */ nullptr);
+    method_splitting_impl::Stats stats;
+    method_splitting_impl::split_methods_in_stores(
+        stores, /* min_sdk */ 0, config, store_ref_checkers,
+        /* create_init_class_insns */ false,
+        /* reserved_mrefs */ 0, /* reserved_trefs */ 0, &stats);
+    return stats.added_methods.size();
+  }
+
  private:
   static std::atomic<size_t> s_counter;
 };
@@ -1238,4 +1257,61 @@ TEST_F(MethodSplitterTest, TopLevelSwitchCasesWithSourceBlocksKeepTheirValues) {
     }
   }
   EXPECT_GT(source_blocks, 0u);
+}
+
+// A candidate that needs more live-in registers than `max_live_in` allows is
+// refused; one that needs exactly that many is split.
+TEST_F(MethodSplitterTest, RefuseMoreLiveInsThanMaxLiveIn) {
+  const auto* code = R"(
+    (
+      (load-param v0)
+      (load-param v1)
+      (add-int v0 v0 v1)
+      (add-int v0 v0 v1)
+      (add-int v0 v0 v1)
+      (add-int v0 v0 v1)
+      (add-int v0 v0 v1)
+      (return v0)
+    ))";
+  auto config = defaultConfig();
+  config.max_live_in = 2;
+  EXPECT_EQ(split_count("(II)I", code, config), 1u);
+  config.max_live_in = 1;
+  EXPECT_EQ(split_count("(II)I", code, config), 0u);
+}
+
+// A live-in whose type neither its uses nor its definitions determine cannot
+// become a parameter of the split, so the candidate is refused. Here `v1` is an
+// int on one path and a string on the other, and every candidate only copies
+// it into a register nothing reads.
+TEST_F(MethodSplitterTest, RefuseLiveInWithoutType) {
+  auto code = [](const std::string& use) {
+    return R"(
+    (
+      (load-param v0)
+      (if-eqz v0 :str)
+      (add-int v1 v0 v0)
+      (goto :join)
+    (:str)
+      (const-string "s")
+      (move-result-pseudo-object v1)
+    (:join)
+      (move v2 v1)
+      (add-int v0 v0 v0)
+      (move v2 v1)
+      (add-int v0 v0 v0)
+      (move v2 v1)
+      (add-int v0 v0 v0)
+      (move v2 v1)
+      (add-int v0 v0 v0)
+      (move v2 v1)
+      )" + use +
+           R"(
+      (return v0)
+    ))";
+  };
+  // The same shape with the copy read as an int: typed by its use, and split.
+  EXPECT_GT(split_count("(I)I", code("(add-int v0 v0 v2)"), defaultConfig()),
+            0u);
+  EXPECT_EQ(split_count("(I)I", code(""), defaultConfig()), 0u);
 }

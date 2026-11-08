@@ -434,6 +434,96 @@ std::vector<ScoredClosure> get_scored_closures(const Config& config,
   return scored_closures;
 };
 
+// The inputs of `evaluate_candidate`: the per-method Lazy analyses, built once
+// in `to_splittable_closures`, and that function's other per-method inputs.
+// They are bundled so that the `std::erase_if` predicate that calls
+// `evaluate_candidate` captures one reference.
+struct CandidateEvalContext {
+  Lazy<OutlinerTypeAnalysis>& ota;
+  Lazy<LivenessFixpointIterator>& liveness_fp_iter;
+  Lazy<UninitializedObjectEnvironments>& uninitialized_objects;
+  Lazy<UnorderedMap<IRInstruction*, const ReducedBlock*>>& insns;
+  const RefChecker* ref_checker;
+  std::atomic<size_t>* arg_type_illegal;
+  size_t max_live_in;
+};
+
+// Evaluates one candidate on its own: resolves its live-in arguments into
+// `sc.args` and checks every rule a candidate must pass by itself. Returns true
+// when the candidate must be dropped (the `std::erase_if` predicate). Overlap
+// between candidates is resolved by the caller, not here.
+bool evaluate_candidate(ScoredClosure& sc, CandidateEvalContext& ctx) {
+  sparta::PatriciaTreeSet<reg_t> live_in;
+  for (const auto* c : sc.closures) {
+    live_in.union_with(
+        ctx.liveness_fp_iter->get_live_in_vars_at(c->target).elements());
+  }
+  IRInstruction* first_insn;
+  if (sc.switch_block != nullptr) {
+    always_assert(sc.closures.size() > 1);
+    first_insn = sc.switch_block->get_last_insn()->insn;
+    live_in.insert(first_insn->src(0));
+  } else {
+    always_assert(sc.closures.size() == 1);
+    const auto* c = sc.closures.front();
+    auto it = c->target->get_first_insn();
+    if (it == c->target->end()) {
+      return true;
+    }
+    first_insn = it->insn;
+  }
+  std::vector<reg_t> ordered_live_in(live_in.begin(), live_in.end());
+  if (ordered_live_in.size() > ctx.max_live_in) {
+    return true;
+  }
+  std::sort(ordered_live_in.begin(), ordered_live_in.end());
+
+  auto in_cover = [&ctx, &sc](IRInstruction* insn) {
+    return sc.reduced_components.count(ctx.insns->at(insn)) != 0u;
+  };
+  // A suffix whose head is a loop is entered at the loop header, so a
+  // definition of a live-in inside the loop reaches the entry too, through the
+  // back edge. The launchpad passes only the definitions from outside the
+  // closure. Typing the parameter by the uses of an in-loop definition could
+  // declare it narrower than the value the host passes.
+  auto passed_defs = [&](reg_t reg) {
+    auto defs = ctx.ota->immediate_defs_at(first_insn, reg);
+    defs.filter([&](IRInstruction* def) { return !in_cover(def); });
+    return defs;
+  };
+  for (auto reg : ordered_live_in) {
+    auto defs = ctx.ota->defs_at(first_insn, reg);
+    if (defs.size() == 1 && opcode::is_a_const((*defs.begin())->opcode())) {
+      sc.args.push_back((ClosureArgument){reg, nullptr, *defs.begin()});
+      continue;
+    }
+    const auto* type = art::declare_parameter(
+        ctx.ota->demand_of_uses(passed_defs(reg), in_cover),
+        [&]() { return ctx.ota->value_at(first_insn, reg); });
+    if (type == nullptr) {
+      return true;
+    }
+    // The type demand is a meet over the uses, so it can name a type that no
+    // individual use named -- possibly an external one above the min-sdk
+    // floor, which type-checks at build time and fails to resolve on an old
+    // device.
+    if (ctx.ref_checker != nullptr && !ctx.ref_checker->check_type(type)) {
+      ++*ctx.arg_type_illegal;
+      return true;
+    }
+    sc.args.push_back((ClosureArgument){reg, type, nullptr});
+    if (type::is_object(type)) {
+      const auto& uninitialized_env = ctx.uninitialized_objects->at(first_insn);
+      auto opt_uninitialized = uninitialized_env.get(reg).get_constant();
+      if (!opt_uninitialized || *opt_uninitialized) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 // Filter out overlapping closures, unsplittable closures (when we cannot
 // determine what type we can use as parameter type of a split method), and
 // filter out closures which don't meet the configured liveness threshold.
@@ -486,9 +576,11 @@ std::vector<SplittableClosure> to_splittable_closures(
     return res;
   });
   UnorderedSet<const ReducedBlock*> covered;
-  std::erase_if(scored_closures, [&covered, &ota, &liveness_fp_iter,
-                                  &uninitialized_objects, &insns, max_live_in,
-                                  ref_checker, arg_type_illegal](auto& sc) {
+
+  CandidateEvalContext ctx{ota,        liveness_fp_iter, uninitialized_objects,
+                           insns,      ref_checker,      arg_type_illegal,
+                           max_live_in};
+  std::erase_if(scored_closures, [&covered, &ctx](auto& sc) {
     for (auto* c : sc.closures) {
       if (covered.count(c->reduced_block)) {
         // We already have this contained closure covered by a valid
@@ -496,75 +588,9 @@ std::vector<SplittableClosure> to_splittable_closures(
         return true;
       }
     }
-
-    sparta::PatriciaTreeSet<reg_t> live_in;
-    for (auto* c : sc.closures) {
-      live_in.union_with(
-          liveness_fp_iter->get_live_in_vars_at(c->target).elements());
-    }
-    IRInstruction* first_insn;
-    if (sc.switch_block) {
-      always_assert(sc.closures.size() > 1);
-      first_insn = sc.switch_block->get_last_insn()->insn;
-      live_in.insert(first_insn->src(0));
-    } else {
-      always_assert(sc.closures.size() == 1);
-      auto* c = sc.closures.front();
-      auto it = c->target->get_first_insn();
-      if (it == c->target->end()) {
-        return true;
-      }
-      first_insn = it->insn;
-    }
-    std::vector<reg_t> ordered_live_in(live_in.begin(), live_in.end());
-    if (ordered_live_in.size() > max_live_in) {
+    if (evaluate_candidate(sc, ctx)) {
       return true;
     }
-    std::sort(ordered_live_in.begin(), ordered_live_in.end());
-
-    auto in_cover = [&insns, &sc](IRInstruction* insn) {
-      return sc.reduced_components.count(insns->at(insn)) != 0u;
-    };
-    // A suffix whose head is a loop is entered at the loop header, so a
-    // definition of a live-in inside the loop reaches the entry too, through
-    // the back edge. The launchpad passes only the definitions from outside
-    // the closure. Typing the parameter by the uses of an in-loop definition
-    // could declare it narrower than the value the host passes.
-    auto passed_defs = [&](reg_t reg) {
-      auto defs = ota->immediate_defs_at(first_insn, reg);
-      defs.filter([&](IRInstruction* def) { return !in_cover(def); });
-      return defs;
-    };
-    for (auto reg : ordered_live_in) {
-      auto defs = ota->defs_at(first_insn, reg);
-      if (defs.size() == 1 && opcode::is_a_const((*defs.begin())->opcode())) {
-        sc.args.push_back((ClosureArgument){reg, nullptr, *defs.begin()});
-        continue;
-      }
-      const auto* type = art::declare_parameter(
-          ota->demand_of_uses(passed_defs(reg), in_cover),
-          [&]() { return ota->value_at(first_insn, reg); });
-      if (!type) {
-        return true;
-      }
-      // The type demand is a meet over the uses, so it can name a type that no
-      // individual use named -- possibly an external one above the min-sdk
-      // floor, which type-checks at build time and fails to resolve on an old
-      // device.
-      if (ref_checker != nullptr && !ref_checker->check_type(type)) {
-        ++*arg_type_illegal;
-        return true;
-      }
-      sc.args.push_back((ClosureArgument){reg, type, nullptr});
-      if (type::is_object(type)) {
-        const auto& uninitialized_env = uninitialized_objects->at(first_insn);
-        auto opt_uninitialized = uninitialized_env.get(reg).get_constant();
-        if (!opt_uninitialized || *opt_uninitialized) {
-          return true;
-        }
-      }
-    }
-
     insert_unordered_iterable(covered, sc.reduced_components);
     return false;
   });

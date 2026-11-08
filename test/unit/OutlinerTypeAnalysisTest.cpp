@@ -20,6 +20,7 @@
 #include "OutlinerTypeAnalysis.h"
 #include "RedexTest.h"
 #include "ReducedControlFlow.h"
+#include "Show.h"
 
 class OutlinerTypeAnalysisTest : public RedexTest {};
 
@@ -1033,15 +1034,146 @@ TEST_F(OutlinerTypeAnalysisTest, get_type_demand_primitive_narrow) {
   outliner_impl::OutlinerTypeAnalysis ota(foo_method);
 
   {
-    // the narrowed type demand on the value across all the iputs is byte
+    // a primitive put accepts any integral value, whatever the field's type,
+    // so the narrowed type demand on the value across all the iputs is int
     auto* insn1 = find_insn(foo_method, OPCODE_IPUT_SHORT);
     auto* insn2 = find_insn(foo_method, OPCODE_IPUT_BYTE);
     auto* insn3 = find_insn(foo_method, OPCODE_IPUT);
     auto root = create_node({insn1, insn2, insn3});
     auto candidate = create_candidate(ota, root);
     const auto* result_type = get_type_demand(candidate, insn1->src(0));
-    EXPECT_EQ(result_type, type::_byte());
+    EXPECT_EQ(result_type, type::_int());
   }
+}
+
+// ART checks a primitive field or array put by category only, so a value that
+// only reaches narrow puts is demanded as `int`. Taking the slot type as the
+// demand would type an outlined parameter `boolean` (say) while the caller
+// passes an `int`, which ART rejects for an invocation argument.
+TEST_F(OutlinerTypeAnalysisTest, get_type_demand_narrow_puts_demand_int) {
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(I[C[I[Z[B[SLFoo;)V" (
+        (load-param v0)
+        (load-param-object v1)
+        (load-param-object v2)
+        (load-param-object v5)
+        (load-param-object v6)
+        (load-param-object v7)
+        (load-param-object v8)
+        (add-int v3 v0 v0)
+        (sput-boolean v3 "LFoo;.z:Z")
+        (sput-byte v3 "LFoo;.b:B")
+        (sput-char v3 "LFoo;.c:C")
+        (sput-short v3 "LFoo;.s:S")
+        (aput-boolean v3 v5 v0)
+        (aput-byte v3 v6 v0)
+        (aput-char v3 v1 v0)
+        (aput-short v3 v7 v0)
+        (aput v3 v2 v0)
+        (iput-boolean v3 v8 "LFoo;.iz:Z")
+        (iput-byte v3 v8 "LFoo;.ib:B")
+        (iput-char v3 v8 "LFoo;.ic:C")
+        (iput-short v3 v8 "LFoo;.is:S")
+        (int-to-float v4 v0)
+        (sput v4 "LFoo;.f:F")
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+
+  for (auto op :
+       {OPCODE_SPUT_BOOLEAN, OPCODE_SPUT_BYTE, OPCODE_SPUT_CHAR,
+        OPCODE_SPUT_SHORT, OPCODE_APUT_BOOLEAN, OPCODE_APUT_BYTE,
+        OPCODE_APUT_CHAR, OPCODE_APUT_SHORT, OPCODE_APUT, OPCODE_IPUT_BOOLEAN,
+        OPCODE_IPUT_BYTE, OPCODE_IPUT_CHAR, OPCODE_IPUT_SHORT}) {
+    auto* insn = find_insn(foo_method, op);
+    auto root = create_node({insn});
+    auto candidate = create_candidate(ota, root);
+    EXPECT_EQ(get_type_demand(candidate, insn->src(0)), type::_int())
+        << SHOW(insn);
+  }
+
+  {
+    // a non-integral slot still demands its own type
+    auto* insn = find_insn(foo_method, OPCODE_SPUT);
+    auto root = create_node({insn});
+    auto candidate = create_candidate(ota, root);
+    EXPECT_EQ(get_type_demand(candidate, insn->src(0)), type::_float());
+  }
+}
+
+// ART checks the value of a narrow array put by category only when it types
+// the array operand as an array. A null array is a register that only a
+// `const 0` defines. Through a null array, ART 6.0 and later check the value
+// strictly against the instruction's own type (`VerifyAPut` in
+// `method_verifier.cc`), so that type is the demand. A null merged with an
+// array is the array to ART.
+TEST_F(OutlinerTypeAnalysisTest, get_type_demand_narrow_aput_into_null_array) {
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(I[C)V" (
+        (load-param v0)
+        (load-param-object v5)
+        (add-int v3 v0 v0)
+        (const v1 0)
+        (aput-boolean v3 v1 v0)
+        (aput-byte v3 v1 v0)
+        (aput-char v3 v1 v0)
+        (aput-short v3 v1 v0)
+        (if-eqz v0 :merged)
+        (move-object v5 v1)
+        (:merged)
+        (aput-char v3 v5 v0)
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+
+  auto demand = [&](IROpcode op, size_t occurrence = 1) {
+    auto* insn = find_insn(foo_method, op, occurrence);
+    auto root = create_node({insn});
+    auto candidate = create_candidate(ota, root);
+    return get_type_demand(candidate, insn->src(0));
+  };
+  EXPECT_EQ(demand(OPCODE_APUT_BOOLEAN), type::_boolean());
+  EXPECT_EQ(demand(OPCODE_APUT_BYTE), type::_byte());
+  EXPECT_EQ(demand(OPCODE_APUT_CHAR), type::_char());
+  EXPECT_EQ(demand(OPCODE_APUT_SHORT), type::_short());
+  EXPECT_EQ(demand(OPCODE_APUT_CHAR, 2), type::_int());
+}
+
+// ART types an `aget-object` from a null array as null too, so a put into it
+// is checked strictly. An array that only ART knows, after an `instance-of`
+// test, is checked by category: the put places no demand of its own, and the
+// value keeps its inferred `int`.
+TEST_F(OutlinerTypeAnalysisTest,
+       get_type_demand_narrow_aput_beyond_const_null) {
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(ILjava/lang/Object;)V" (
+        (load-param v0)
+        (load-param-object v1)
+        (add-int v3 v0 v0)
+        (const v4 0)
+        (aget-object v4 v0)
+        (move-result-pseudo-object v5)
+        (aput-byte v3 v5 v0)
+        (instance-of v1 "[C")
+        (move-result-pseudo v6)
+        (if-eqz v6 :end)
+        (aput-char v3 v1 v0)
+        (:end)
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+
+  auto demand = [&](IROpcode op) {
+    auto* insn = find_insn(foo_method, op);
+    auto root = create_node({insn});
+    auto candidate = create_candidate(ota, root);
+    return get_type_demand(candidate, insn->src(0));
+  };
+  EXPECT_EQ(demand(OPCODE_APUT_BYTE), type::_byte());
+  EXPECT_EQ(demand(OPCODE_APUT_CHAR), type::_int());
 }
 
 TEST_F(OutlinerTypeAnalysisTest, get_type_demand_aput_object) {

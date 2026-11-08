@@ -388,7 +388,10 @@ SplitMethod SplitMethod::create(const SplittableClosure& splittable_closure,
   auto make_new_sb = [&](auto* method, auto& template_sb) {
     std::optional<SourceBlock::Val> opt_val;
     // TODO: For the hot case, compute "maximum" val over all closures.
-    if (splittable_closure.hot_split_kind.value() != HotSplitKind::Hot) {
+    // A closure selected from top-level switch cases carries no kind, so it is
+    // not known to be cold and keeps the donor's values.
+    if (splittable_closure.hot_split_kind.has_value() &&
+        *splittable_closure.hot_split_kind != HotSplitKind::Hot) {
       opt_val = SourceBlock::Val{0, 0};
     }
     return source_blocks::clone_as_synthetic(template_sb, method, opt_val);

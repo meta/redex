@@ -1186,3 +1186,56 @@ TEST_F(MethodSplitterTest, UndupReturns) {
             std::make_pair<std::string, std::string>("split$cold2", split2b)});
   ASSERT_TRUE(res);
 }
+
+// Selects and splits the cases of a top-level switch the way a
+// switch-outlining pass would. The switch and its cases carry source blocks,
+// as such a pass would see them if it ran after source blocks are inserted.
+// Those closures carry no split kind, so a split is not known to be cold, and
+// its synthetic source blocks keep the values of the blocks they are modeled
+// on.
+TEST_F(MethodSplitterTest, TopLevelSwitchCasesWithSourceBlocksKeepTheirValues) {
+  auto [cls, method] = create("(I)V", R"(
+    (
+      (load-param v0)
+      (.src_block "LFoo;.bar:(I)V" 0 (1.0 1.0))
+      (switch v0 (:a :b))
+      (return-void)
+      (:a 0)
+      (.src_block "LFoo;.bar:(I)V" 1 (1.0 1.0))
+      (sput v0 "LFoo;.a0:I")
+      (sput v0 "LFoo;.a1:I")
+      (sput v0 "LFoo;.a2:I")
+      (return-void)
+      (:b 1)
+      (.src_block "LFoo;.bar:(I)V" 2 (1.0 1.0))
+      (sput v0 "LFoo;.b0:I")
+      (sput v0 "LFoo;.b1:I")
+      (sput v0 "LFoo;.b2:I")
+      (return-void)
+    )
+  )");
+  method->get_code()->build_cfg();
+  auto selected = method_splitting_impl::
+      select_splittable_closures_from_top_level_switch_cases(
+          {method}, /*max_live_in=*/32);
+  const auto* closures = selected.get(method);
+  ASSERT_NE(closures, nullptr);
+  ASSERT_FALSE(closures->empty());
+  size_t index = 0;
+  for (const auto& sc : *closures) {
+    auto split = method_splitting_impl::SplitMethod::create(
+        sc, cls->get_type(),
+        DexString::make_string("outlined$" + std::to_string(index++)),
+        sc.get_arg_types());
+    split.apply_code_changes();
+  }
+  size_t source_blocks = 0;
+  for (auto* b : method->get_code()->cfg().blocks()) {
+    for (auto* sb : source_blocks::gather_source_blocks(b)) {
+      source_blocks++;
+      ASSERT_TRUE(sb->get_val(0).has_value());
+      EXPECT_EQ(*sb->get_val(0), 1.0f);
+    }
+  }
+  EXPECT_GT(source_blocks, 0u);
+}

@@ -11,6 +11,7 @@
 #include <cstdint>
 
 class DexMethod;
+class IRCode;
 class IRInstruction;
 
 // The shape-only part of "is this method a sensible `@NeverInline` target":
@@ -34,6 +35,10 @@ namespace never_inline_analysis {
 // the default `nullptr`.
 bool is_simple(DexMethod* method, IRInstruction** invoke_insn = nullptr);
 
+// `is_simple` of a body, which need not belong to a method: one a pass builds
+// to ask about a method it has yet to create.
+bool is_simple(IRCode& code, IRInstruction** invoke_insn = nullptr);
+
 enum class Ineligibility {
   kEligible,
   kAlwaysThrows, // No return block: every path through the method throws.
@@ -47,11 +52,32 @@ enum class Ineligibility {
 inline constexpr uint32_t kDefaultMaxCalleeCodeUnits = 40;
 inline constexpr size_t kDefaultMinCalleeInstructions = 4;
 
+// What `never_inline_eligibility` reads of a method's body: whether a path
+// returns, its estimated code units (`IRCode::estimate_code_units`) and
+// instructions (`IRCode::count_opcodes`), and whether it is a trivial
+// forwarder (`is_simple`). Lets a pass ask about a method it has yet to
+// create.
+struct CalleeShape {
+  bool returns;
+  uint32_t code_units;
+  size_t instructions;
+  bool simple;
+};
+
+Ineligibility never_inline_eligibility(const CalleeShape& shape,
+                                       uint32_t max_callee_code_units,
+                                       size_t min_callee_instructions);
+
 // `method`'s code must already have its CFG built (the Redex pass-entry
 // invariant). Recomputes `estimate_code_units()`/`count_opcodes()` internally
 // rather than taking precomputed values, since this is only ever called for
 // a small, already-filtered candidate set in either caller.
 Ineligibility never_inline_eligibility(DexMethod* method,
+                                       uint32_t max_callee_code_units,
+                                       size_t min_callee_instructions);
+
+// `never_inline_eligibility` of a body, which need not belong to a method.
+Ineligibility never_inline_eligibility(IRCode& code,
                                        uint32_t max_callee_code_units,
                                        size_t min_callee_instructions);
 

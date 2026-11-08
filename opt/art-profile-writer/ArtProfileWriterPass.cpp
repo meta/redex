@@ -14,8 +14,6 @@
 #include "ArtProfileWriterPass.h"
 
 #include <boost/algorithm/string/replace.hpp>
-#include <boost/regex.hpp> // NOLINT
-#include <climits>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -30,9 +28,8 @@
 #include "DexStructure.h"
 #include "HotCallsites.h"
 #include "IRCode.h"
-#include "InstructionLowering.h"
-#include "LoopInfo.h"
 #include "MethodProfiles.h"
+#include "NeverCompileSelection.h"
 #include "NeverInlineEligibility.h"
 #include "PassManager.h"
 #include "Show.h"
@@ -44,32 +41,6 @@
 namespace {
 const std::string BASELINE_PROFILES_FILE = "additional-baseline-profiles.list";
 const std::string STORE_FENCE_HELPER_NAME = "Lredex/$StoreFenceHelper;";
-
-// Helper function that checks if a block is not hit in any interaction.
-bool is_cold(cfg::Block* b) {
-  const auto* sb = source_blocks::get_first_source_block(b);
-  if (sb == nullptr) {
-    return true;
-  }
-
-  bool may_be_hot = false;
-  sb->foreach_val_early([&may_be_hot](const auto& val) {
-    may_be_hot = (!val || val->val > 0.0f);
-    return may_be_hot;
-  });
-
-  return !may_be_hot;
-}
-
-bool is_sparse(cfg::Block* switch_block) {
-  instruction_lowering::CaseKeysExtentBuilder ckeb;
-  for (auto* e : switch_block->succs()) {
-    if (e->type() == cfg::EDGE_BRANCH) {
-      ckeb.insert(*e->case_key());
-    }
-  }
-  return ckeb->sufficiently_sparse();
-}
 
 // An entry that trips any of these is pure profile weight: it costs bytes in
 // the shipped app package and in the profile installed on every device, and
@@ -157,47 +128,50 @@ void never_inline(bool attach_annotations,
   std::atomic<size_t> callees_annotated = 0;
   size_t callees_min_hot_callsites = 0;
   UnorderedMap<DexMethod*, size_t> min_hot_callsites_callees;
+  const never_inline_analysis::NeverInlineCriteria criteria{
+      .max_callee_code_units = thresholds.max_callee_code_units,
+      .min_callee_instructions = thresholds.min_callee_instructions,
+      .min_hot_callsites = min_hot_callsites_thresholds.min_hot_callsites,
+      .min_hot_callsites_min_code_units =
+          min_hot_callsites_thresholds.min_code_units,
+  };
   walk::code(scope, [&](DexMethod* method, IRCode& code) {
-    if (has_anno(method, type::dalvik_annotation_optimization_NeverInline())) {
+    const auto verdict = never_inline_analysis::decide_never_inline(
+        code,
+        has_anno(method, type::dalvik_annotation_optimization_NeverInline()),
+        hot_cold_callees.count_unsafe(method) != 0u,
+        hot_callsite_counts.load(method), criteria);
+    switch (verdict.decision) {
+    case never_inline_analysis::NeverInlineDecision::kAlreadyNeverInline:
       callees_already_never_inline.fetch_add(1);
       return;
-    }
-
-    bool min_hot_callsites_rule_met =
-        hot_callsite_counts.load(method) >=
-            min_hot_callsites_thresholds.min_hot_callsites &&
-        code.estimate_code_units() >=
-            min_hot_callsites_thresholds.min_code_units;
-
-    if (hot_cold_callees.count_unsafe(method) == 0u &&
-        !min_hot_callsites_rule_met) {
+    case never_inline_analysis::NeverInlineDecision::kNoCandidate:
       return;
-    }
-
-    if (hot_callsite_counts.count(method) != 0u &&
-        !min_hot_callsites_rule_met) {
+    case never_inline_analysis::NeverInlineDecision::kTooHot:
       callees_too_hot.fetch_add(1);
       return;
-    }
-
-    switch (never_inline_analysis::never_inline_eligibility(
-        method, thresholds.max_callee_code_units,
-        thresholds.min_callee_instructions)) {
-    case never_inline_analysis::Ineligibility::kAlwaysThrows:
-      callees_always_throw.fetch_add(1);
+    case never_inline_analysis::NeverInlineDecision::kIneligible:
+      switch (verdict.ineligibility) {
+      case never_inline_analysis::Ineligibility::kAlwaysThrows:
+        callees_always_throw.fetch_add(1);
+        return;
+      case never_inline_analysis::Ineligibility::kTooLarge:
+        callees_too_large.fetch_add(1);
+        return;
+      case never_inline_analysis::Ineligibility::kTooSmall:
+        callees_too_small.fetch_add(1);
+        return;
+      case never_inline_analysis::Ineligibility::kSimple:
+        callees_simple.fetch_add(1);
+        return;
+      case never_inline_analysis::Ineligibility::kEligible:
+        not_reached();
+      }
       return;
-    case never_inline_analysis::Ineligibility::kTooLarge:
-      callees_too_large.fetch_add(1);
-      return;
-    case never_inline_analysis::Ineligibility::kTooSmall:
-      callees_too_small.fetch_add(1);
-      return;
-    case never_inline_analysis::Ineligibility::kSimple:
-      callees_simple.fetch_add(1);
-      return;
-    case never_inline_analysis::Ineligibility::kEligible:
+    case never_inline_analysis::NeverInlineDecision::kAnnotate:
       break;
     }
+    const bool min_hot_callsites_rule_met = verdict.min_hot_callsites_rule_met;
 
     // Counts callees that PASSED every gate, whether or not an annotation is
     // then attached -- deliberately, because it is what makes an estimate-mode
@@ -256,126 +230,6 @@ void never_inline(bool attach_annotations,
   }
 }
 
-bool never_compile_callcount_threshold_met(
-    double call_count, int64_t never_compile_callcount_threshold) {
-  return never_compile_callcount_threshold > -1 &&
-         call_count <= static_cast<double>(never_compile_callcount_threshold);
-}
-
-bool never_compile_perf_threshold_met(DexMethod* method,
-                                      int64_t never_compile_perf_threshold) {
-  if (never_compile_perf_threshold <= -1) {
-    return false;
-  }
-
-  int64_t sparse_switch_cases = 0;
-  int64_t interpretation_cost = 20; // overhead of going into/out of interpreter
-  for (auto* block : method->get_code()->cfg().blocks()) {
-    if (is_cold(block)) {
-      continue;
-    }
-    for (auto& mie : InstructionIterable(block)) {
-      auto* insn = mie.insn;
-      if (opcode::is_an_internal(insn->opcode())) {
-        continue;
-      }
-      // The interpreter uses expensive helper routines for a number of
-      // instructions, which lead to an update of the hotness for JIT
-      // purposes:
-      // https://android.googlesource.com/platform/art/+/refs/heads/main/runtime/interpreter/mterp/nterp.cc
-      // We assume that those instructions are more expensive than others
-      // by an order of magnitude.
-      interpretation_cost +=
-          (insn->has_field() || insn->has_method() || insn->has_type() ||
-           insn->has_string() || opcode::is_a_new(insn->opcode()))
-              ? 10
-              : 1;
-      if (opcode::is_switch(insn->opcode()) && is_sparse(block)) {
-        sparse_switch_cases += static_cast<int64_t>(block->succs().size());
-      }
-    }
-  }
-
-  if (sparse_switch_cases == 0) {
-    return false;
-  }
-
-  // We want to compare
-  //    interpretation_cost / sparse_switch_cases
-  //                            (the average cost of code per switch case)
-  // with
-  //    never_compile_perf_threshold * sparse_switch_cases
-  //                                     (cost of executing sparse switch)
-  // to find a case where the cost of the executing sparse switch
-  // excessively dominates the cost of code per switch case, which the
-  // following achieves.
-  if ((static_cast<double>(interpretation_cost) /
-       std::pow(sparse_switch_cases, 2)) *
-          100 >
-      static_cast<double>(never_compile_perf_threshold)) {
-    return false;
-  }
-
-  TRACE(APW, 5, "[%s] is within perf threshold: (%d / sqr(%d)) * 100 > %d\n%s",
-        method->get_fully_deobfuscated_name().c_str(),
-        (int32_t)interpretation_cost, (int32_t)sparse_switch_cases,
-        (int32_t)never_compile_perf_threshold, SHOW(method->get_code()->cfg()));
-  return true;
-}
-
-bool never_compile_called_coverage_threshold_met(
-    DexMethod* method,
-    double call_count,
-    int64_t never_compile_called_coverage_threshold) {
-  if (never_compile_called_coverage_threshold <= -1) {
-    return false;
-  }
-
-  uint32_t covered_code_units = 0;
-  uint32_t total_code_units = 0;
-  for (auto* block : method->get_code()->cfg().blocks()) {
-    auto ecu = block->estimate_code_units();
-    total_code_units += ecu;
-    if (!is_cold(block)) {
-      covered_code_units += ecu;
-    }
-  }
-  always_assert(total_code_units > 0);
-  if (total_code_units < 24) {
-    // Don't bother with small methods; adding annotation also creates
-    // overhead. The chosen value is a bit larger than the 14-code units
-    // inlining threshold of the AOT compiler.
-    return false;
-  }
-  auto effective_call_count = std::max(1.0, call_count);
-  if (effective_call_count * covered_code_units * 100 / total_code_units >=
-      static_cast<double>(never_compile_called_coverage_threshold)) {
-    return false;
-  }
-  TRACE(APW, 5,
-        "[%s] is within coverage threshold: %f %u / %u > %d percent\n%s",
-        method->get_fully_deobfuscated_name().c_str(), effective_call_count,
-        covered_code_units, total_code_units,
-        (int32_t)never_compile_called_coverage_threshold,
-        SHOW(method->get_code()->cfg()));
-  return true;
-}
-
-bool never_compile_string_lookup_method_matches(
-    DexMethod* method, bool never_compile_strings_lookup_methods) {
-  if (!never_compile_strings_lookup_methods) {
-    return false;
-  }
-  auto* cls = type_class(method->get_class());
-  if ((cls == nullptr) || !cls->rstate.is_generated() ||
-      cls->get_perf_sensitive() != PerfSensitiveGroup::STRINGS_LOOKUP) {
-    return false;
-  }
-  TRACE(APW, 5, "[%s] matches string-lookup method",
-        method->get_fully_deobfuscated_name().c_str());
-  return true;
-}
-
 void never_compile_impl(
     const Scope& scope,
     const std::string& baseline_profile_name,
@@ -384,17 +238,8 @@ void never_compile_impl(
     PassManager& mgr,
     baseline_profiles::BaselineProfile* baseline_profile,
     UnorderedSet<const DexMethod*>* never_compiled) {
-  UnorderedSet<std::string> excluded_interaction_ids;
-  const auto& harvest_config = baseline_profile_config.harvest_config;
-  if (!harvest_config.never_compile_excluded_interaction_pattern.empty()) {
-    boost::regex rx(harvest_config.never_compile_excluded_interaction_pattern);
-    for (auto&& [interaction_id, interaction_name] :
-         baseline_profile_config.interactions) {
-      if (boost::regex_match(interaction_name, rx)) {
-        excluded_interaction_ids.insert(interaction_id);
-      }
-    }
-  }
+  const auto excluded_interaction_ids =
+      never_compile_analysis::excluded_interaction_ids(baseline_profile_config);
 
   InsertOnlyConcurrentMap<DexMethod*, uint32_t> never_compile_methods;
   std::atomic<size_t> methods_already_never_compile = 0;
@@ -405,70 +250,25 @@ void never_compile_impl(
   std::atomic<size_t> never_compile_called_coverage_threshold_mets{0};
   std::atomic<size_t> never_compile_strings_lookup_methods_matches{0};
   walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {
-    if (method::is_clinit(method)) {
+    auto rules = never_compile_analysis::select_never_compile(
+        method, code, *baseline_profile, baseline_profile_config,
+        excluded_interaction_ids, method_profiles);
+    if (!rules) {
       return;
     }
-    auto it = baseline_profile->methods.find(method);
-    if (!harvest_config.never_compile_ignore_hot) {
-      if (it == baseline_profile->methods.end()) {
-        return;
-      }
-      auto& mf = it->second;
-      if (!mf.hot) {
-        return;
-      }
-    }
-    double call_count = 0;
-    for (auto&& [interaction_id, _] : baseline_profile_config.interactions) {
-      auto method_stats =
-          method_profiles.get_method_stat(interaction_id, method);
-      if (!method_stats) {
-        continue;
-      }
-      if ((excluded_interaction_ids.count(interaction_id) != 0u) &&
-          method_stats->appear_percent >
-              static_cast<double>(
-                  harvest_config.never_compile_excluded_appear100_threshold) &&
-          method_stats->call_count >
-              static_cast<double>(
-                  harvest_config.never_compile_excluded_call_count_threshold)) {
-        return;
-      }
-      call_count = std::max(call_count, method_stats->call_count);
-    }
-
-    loop_impl::LoopInfo loop_info(code.cfg());
-    if (loop_info.num_loops() > 0) {
-      return;
-    }
-
-    bool selected = false;
-    if (never_compile_callcount_threshold_met(
-            call_count, harvest_config.never_compile_callcount_threshold)) {
+    if (rules->callcount) {
       never_compile_callcount_threshold_mets.fetch_add(1);
-      selected = true;
     }
-
-    if (never_compile_perf_threshold_met(
-            method, harvest_config.never_compile_perf_threshold)) {
+    if (rules->perf) {
       never_compile_perf_threshold_mets.fetch_add(1);
-      selected = true;
     }
-
-    if (never_compile_called_coverage_threshold_met(
-            method, call_count,
-            harvest_config.never_compile_called_coverage_threshold)) {
+    if (rules->called_coverage) {
       never_compile_called_coverage_threshold_mets.fetch_add(1);
-      selected = true;
     }
-
-    if (never_compile_string_lookup_method_matches(
-            method, harvest_config.never_compile_strings_lookup_methods)) {
+    if (rules->strings_lookup) {
       never_compile_strings_lookup_methods_matches.fetch_add(1);
-      selected = true;
     }
-
-    if (!selected) {
+    if (!rules->any()) {
       return;
     }
 
@@ -729,7 +529,8 @@ void ArtProfileWriterPass::bind_config() {
        "Do not annotate a callee with fewer estimated instructions than this: "
        "ART inlines trivial bodies whatever the annotation says, so the "
        "annotation would be dead DEX weight.");
-  bind("never_inline_min_hot_callsites", INT_MAX,
+  bind("never_inline_min_hot_callsites",
+       never_inline_analysis::kDefaultMinHotCallsites,
        m_never_inline_min_hot_callsites,
        "Annotate a callee with `@NeverInline` if at least this many of its "
        "call sites are hot, with hotness defined by "

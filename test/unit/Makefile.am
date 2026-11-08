@@ -107,6 +107,7 @@ check_PROGRAMS = \
     global_type_analysis_test \
     graph_util_test \
     hierarchy_util_test \
+    hot_callsites_test \
     init_class_test \
     init_class_pruner_test \
     init_class_lowering_pass_test \
@@ -144,6 +145,7 @@ check_PROGRAMS = \
     leb_test \
     native_test \
     native_names_test \
+    never_compile_selection_test \
     never_inline_eligibility_test \
     null_propagation_test \
     object_inliner_test \
@@ -387,6 +389,8 @@ global_type_analysis_test_SOURCES = type-analysis/GlobalTypeAnalysisTest.cpp
 graph_util_test_SOURCES = GraphUtilTest.cpp
 
 hierarchy_util_test_SOURCES = HierarchyUtilTest.cpp
+
+hot_callsites_test_SOURCES = HotCallsitesTest.cpp
 hierarchy_util_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 hot_cold_method_specializing_test_SOURCES = HotColdMethodSpecializingTest.cpp
@@ -485,6 +489,8 @@ EXTRA_native_test_DEPENDENCIES = native_test.env
 $(eval $(call make_env,native_test,native_jni_output_path=$(srcdir)))
 
 native_names_test_SOURCES = NativeNamesTest.cpp
+
+never_compile_selection_test_SOURCES = NeverCompileSelectionTest.cpp
 
 never_inline_eligibility_test_SOURCES = NeverInlineEligibilityTest.cpp
 

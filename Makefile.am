@@ -199,6 +199,7 @@ libredex_la_SOURCES = \
 	libredex/Mutators.cpp \
 	libredex/Native.cpp \
 	libredex/NativeNames.cpp \
+	libredex/NeverCompileSelection.cpp \
 	libredex/NeverInlineEligibility.cpp \
 	libredex/NoOptimizationsMatcher.cpp \
 	libredex/NullnessDomain.cpp \

@@ -72,6 +72,8 @@ struct ScoredClosure {
   size_t evicted_hot_size{0};
   // The duplicated members' dex code units (`dex_code_units`).
   size_t duplicated_dex_code_units{0};
+  // Whether only a net gate's lowered size floors admit the candidate.
+  bool below_legacy_floors{false};
   std::optional<HotSplitKind> hot_split_kind{std::nullopt};
   bool is_large_packed_switch{false};
   bool creates_large_sparse_switch{false};
@@ -264,7 +266,9 @@ std::optional<ScoredClosure> score(
   // A net gate applies to the suffixes of its kind on a compiled host, the
   // only host whose evicted cold code leaves compiled code.
   const bool gate =
-      host_compiled && kind == HotSplitKind::HotCold && config.suffix_net_gate;
+      host_compiled &&
+      ((kind == HotSplitKind::HotCold && config.suffix_net_gate) ||
+       (kind == HotSplitKind::Cold && config.suffix_net_gate_cold));
   const auto floors = floors_for(config, kind, gate);
   if (sc.split_size < floors.split) {
     return std::nullopt;
@@ -274,10 +278,6 @@ std::optional<ScoredClosure> score(
       closures.size() > 1
           ? config.cost_split_switch_case * (closures.size() - 1)
           : 0;
-  // The candidate's net saving decides it (`evaluate_candidate`).
-  if (gate) {
-    sc.net_saving_use = NetSavingUse::Gate;
-  }
 
   UnorderedSet<int32_t> except_case_keys;
   get_except_preds(switch_block, closures, sc.reduced_components,
@@ -329,6 +329,20 @@ std::optional<ScoredClosure> score(
   // copies that the host still reaches.
   if (sc.remaining_size < floors.remaining) {
     return std::nullopt;
+  }
+  if (gate) {
+    const auto legacy = floors_for(config, kind, /*gate=*/false);
+    sc.below_legacy_floors =
+        sc.split_size < legacy.split || sc.remaining_size < legacy.remaining;
+  }
+  // The net saving decides whether a suffix is split where its net gate
+  // applies, on a compiled host: every hot-cold suffix under `suffix_net_gate`,
+  // and a cold tail that only the cold gate's lowered floors admit. On an
+  // uncompiled host no suffix split saves compiled code, so none is evaluated.
+  if (sc.below_legacy_floors ||
+      (host_compiled && kind == HotSplitKind::HotCold &&
+       config.suffix_net_gate)) {
+    sc.net_saving_use = NetSavingUse::Gate;
   }
   if (switch_block != nullptr) {
     sc.dispatch = partition_switch(switch_block, sc.grouped_heads);
@@ -753,7 +767,9 @@ std::optional<CandidateFate> evaluate_candidate(ScoredClosure& sc,
   // overhead ratio alone. A candidate its gate covers (see `score()`) is kept
   // only when its net saving (`split_net_saving`, weighted by
   // `net_oat_weight`) is positive, so a tail that only the gate's lowered
-  // floors admit is split only when it pays.
+  // floors admit is split only when it pays. The cold gate is additive: a Cold
+  // split the legacy floors admit is not evaluated, because
+  // `min_cold_split_size` guards constraints the net saving does not model.
   if (sc.net_saving_use == NetSavingUse::None) {
     return std::nullopt;
   }
@@ -913,7 +929,8 @@ std::vector<SplittableClosure> to_splittable_closures(
         .creates_large_sparse_switch = sc.creates_large_sparse_switch,
         .destroys_large_packed_switch = sc.destroys_large_packed_switch,
         .net_terms = sc.net_terms,
-        .covered_code_units = sc.covered_code_units});
+        .covered_code_units = sc.covered_code_units,
+        .below_legacy_floors = sc.below_legacy_floors});
   }
   return splittable_closures;
 };

@@ -162,6 +162,7 @@ struct StatsSnapshot {
   size_t excluded_methods;
   size_t iterations;
   FateSnapshot suffix_fates;
+  size_t suffix_sub_floor_emitted;
 };
 
 struct Stats {
@@ -187,6 +188,8 @@ struct Stats {
   size_t iterations{0};
 
   FateCounters suffix_fates{SplitKind::Suffix};
+  // Emitted suffixes only a net gate's lowered size floors admit.
+  AtomicStatCounter<size_t> suffix_sub_floor_emitted{0};
 
   // Test-only sink; null in production. A record for every candidate that
   // reached scoring.
@@ -235,6 +238,7 @@ struct Stats {
         .excluded_methods = excluded_methods.load(),
         .iterations = iterations,
         .suffix_fates = suffix_fates.snapshot(),
+        .suffix_sub_floor_emitted = suffix_sub_floor_emitted.load(),
     };
   }
 };

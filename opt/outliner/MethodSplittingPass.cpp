@@ -104,6 +104,12 @@ void MethodSplittingPass::bind_config() {
        "and refuse those that do not pay; without the gate, size floors and an "
        "overhead ratio alone decide them. The gate also lowers both their size "
        "floors to min_suffix_sub_floor_split_size.");
+  bind("suffix_net_gate_cold", m_config.suffix_net_gate_cold,
+       m_config.suffix_net_gate_cold,
+       "On a compiled host, lower both size floors of cold suffix splits to "
+       "min_suffix_sub_floor_split_size. A cold tail that only these lower "
+       "floors admit is kept only when the net cost model says it pays. Cold "
+       "splits the legacy floors admit are untouched.");
 
   after_configuration([this] { m_config.validate(); });
 }
@@ -144,6 +150,7 @@ void Stats::export_metrics(PassManager& mgr) const {
   mgr.set_metric("excluded_methods", excluded_methods.load());
   mgr.set_metric("iterations", iterations);
   suffix_fates.export_metrics(mgr);
+  mgr.set_metric("suffix_sub_floor_emitted", suffix_sub_floor_emitted.load());
 }
 
 } // namespace method_splitting_impl

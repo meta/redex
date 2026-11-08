@@ -283,6 +283,9 @@ ConcurrentSet<DexMethod*> split_splittable_closures(
       affected_methods.insert(new_method);
       concurrent_added_methods->insert(new_method);
       record(*splittable_closure, CandidateFate::Emitted, new_method);
+      if (splittable_closure->below_legacy_floors) {
+        stats->suffix_sub_floor_emitted++;
+      }
     }
     insert_unordered_iterable(concurrent_affected_methods, affected_methods);
   };

@@ -10,9 +10,9 @@
 // ratio alone. With it, the floor drops to `min_suffix_sub_floor_split_size`
 // (80), and each hot-cold suffix split must have a positive net saving
 // (`split_net_saving`). So a cold tail of 80 to 99 code units that pays is
-// split, and a tail that does not pay is refused. The tests also check how
-// suffix splits are costed (switch-group dispatch, duplicated tails, recreated
-// constants).
+// split, and a tail that does not pay is refused. The tests also check
+// `suffix_net_gate_cold` for the cold kind, and how suffix splits are costed
+// (switch-group dispatch, duplicated tails, recreated constants).
 
 #include <gtest/gtest.h>
 
@@ -91,6 +91,48 @@ method_splitting_impl::Config baseConfig() {
 method_splitting_impl::Config netBlindSubFloorConfig() {
   auto c = baseConfig();
   c.min_hot_cold_split_size = c.min_suffix_sub_floor_split_size;
+  return c;
+}
+
+// A method that is cold throughout: a cold entry branches to a cold tail that
+// returns or a cold block that returns. The tail's predecessor is cold, so it
+// is a Cold suffix (`!any_src_hot`). The fixture marks the host compiled, so
+// this is the case `suffix_net_gate_cold` is for.
+std::string coldOnlyTailCfg(size_t sputs) {
+  std::ostringstream oss;
+  oss << "(\n  (load-param v0)\n"
+      << "  (.src_block \"LFoo;.bar:(I)V\" 0 (0.0 0.0))\n"
+      // Cold filler in the ENTRY block (not a suffix candidate) so the
+      // post-split remainder clears the estimated-remaining floor.
+      << mt::sputChain(30, "") << "  (if-eqz v0 :ret2)\n"
+      << "  (.src_block \"LFoo;.bar:(I)V\" 1 (0.0 0.0))\n"
+      << mt::sputChain(sputs, "") << "  (return-void)\n"
+      << "  (:ret2)\n"
+      << "  (.src_block \"LFoo;.bar:(I)V\" 2 (0.0 0.0))\n"
+      << "  (return-void)\n)\n";
+  return oss.str();
+}
+
+// The gate for the cold kind.
+method_splitting_impl::Config coldGateConfig() {
+  auto c = mt::splitterTestConfig();
+  c.suffix_net_gate_cold = true;
+  c.min_cold_split_size = 100; // real legacy cold floor (fixture lowers to 4)
+  c.min_hot_split_size = 1;
+  return c;
+}
+
+// The control for the cold kind: the cold gate off.
+method_splitting_impl::Config coldBaseConfig() {
+  auto c = coldGateConfig();
+  c.suffix_net_gate_cold = false;
+  return c;
+}
+
+// The cold floor lowered to the sub-floor by configuration, with no gate.
+method_splitting_impl::Config coldNetBlindSubFloorConfig() {
+  auto c = coldBaseConfig();
+  c.min_cold_split_size = c.min_suffix_sub_floor_split_size;
   return c;
 }
 
@@ -281,21 +323,96 @@ TEST_F(MethodSplitterSuffixNetGateTest, NetGateKeepsSubFloorTailThatPays) {
       << "a net-positive sub-floor tail must survive the gate";
 }
 
+// A 50-code-unit cold tail below the cold floor (100) is not split with the
+// cold gate off; with it on, the floor drops and the tail's positive net saving
+// on a compiled host admits it.
+TEST_F(MethodSplitterSuffixNetGateTest, ColdGateAdmitsNetPositiveSubFloorTail) {
+  auto off = mt::runSplitter("(I)V", coldOnlyTailCfg(25), coldBaseConfig());
+  auto on = mt::runSplitter("(I)V", coldOnlyTailCfg(25), coldGateConfig());
+  EXPECT_EQ(on.suffix_splits.size(), off.suffix_splits.size() + 1);
+  // The one split the gate adds is the one only its lowered floors admit.
+  EXPECT_EQ(on.stats.suffix_sub_floor_emitted, 1u);
+  EXPECT_EQ(off.stats.suffix_sub_floor_emitted, 0u);
+}
+
+// The Cold counterpart of `SubFloorAdmitsWhatTheNetGateRejects`: a
+// 4-code-unit cold tail has a negative net saving, so the cold gate refuses
+// what the lowered cold floor alone admits. This matters most for the cold
+// kind: `min_cold_split_size` guards inlining and compilability constraints
+// the net saving does not model, which is why the gate lowers it only for the
+// tails it evaluates.
+TEST_F(MethodSplitterSuffixNetGateTest, ColdSubFloorAdmitsWhatTheGateRejects) {
+  auto off = mt::runSplitter("(I)V", coldOnlyTailCfg(2), coldBaseConfig());
+  auto floor_only =
+      mt::runSplitter("(I)V", coldOnlyTailCfg(2), coldNetBlindSubFloorConfig());
+  auto floor_and_gate =
+      mt::runSplitter("(I)V", coldOnlyTailCfg(2), coldGateConfig());
+
+  EXPECT_EQ(floor_only.suffix_splits.size(), off.suffix_splits.size() + 1)
+      << "the lowered cold floor alone must admit the sub-floor tail";
+  EXPECT_EQ(floor_and_gate.suffix_splits.size(), off.suffix_splits.size())
+      << "the cold net gate must reject the same tail, which does not pay";
+}
+
+// `suffix_net_gate_cold` lowers the remaining-size floor too, and evaluates
+// every tail only the lowered floors admit. Here the tail is above
+// `min_cold_split_size` but the remainder sits below it: the legacy floors
+// refuse the tail, and the gate keeps it because it pays.
+TEST_F(MethodSplitterSuffixNetGateTest,
+       ColdGateEvaluatesATailOnlyItsLoweredRemainingFloorAdmits) {
+  auto off = mt::runSplitter("(I)V", coldOnlyTailCfg(60), coldBaseConfig());
+  ASSERT_EQ(off.suffix_splits.size(), 0u)
+      << "precondition: the remainder is below `min_cold_split_size`";
+  auto on = mt::runSplitter("(I)V", coldOnlyTailCfg(60), coldGateConfig());
+  EXPECT_EQ(on.suffix_splits.size(), 1u);
+  // The net saving decides: a prohibitive split cost turns it down.
+  auto expensive = coldGateConfig();
+  expensive.net_cu_method_metadata = 100000;
+  auto refused = mt::runSplitter("(I)V", coldOnlyTailCfg(60), expensive);
+  EXPECT_EQ(refused.suffix_splits.size(), 0u);
+  EXPECT_EQ(
+      refused.stats.suffix_fates[msi::CandidateFate::Evaluation_NetNotPositive],
+      1u);
+}
+
+// The sibling above pins the OUTCOME for a tail that pays. This test pins the
+// REASON for one that does not: the net model evaluated the sub-floor tail and
+// refused it.
+TEST_F(MethodSplitterSuffixNetGateTest, ColdGateRejectsATailThatDoesNotPay) {
+  auto on = mt::runSplitter("(I)V", coldOnlyTailCfg(2), coldGateConfig());
+  EXPECT_EQ(
+      on.stats.suffix_fates[msi::CandidateFate::Evaluation_NetNotPositive], 1u)
+      << "the sub-floor cold tail must reach the net model and be refused";
+}
+
+// The same for the cold gate: it neither lowers the floors nor evaluates a tail
+// on an uncompiled host.
+TEST_F(MethodSplitterSuffixNetGateTest,
+       ColdGateLeavesAnUncompiledHostToTheLegacyFloors) {
+  const auto code = coldOnlyTailCfg(25);
+  auto off = mt::runSplitterOnUncompiledHost("(I)V", code, coldBaseConfig());
+  auto on = mt::runSplitterOnUncompiledHost("(I)V", code, coldGateConfig());
+  EXPECT_EQ(mt::splitSignature(on), mt::splitSignature(off));
+  EXPECT_EQ(
+      on.stats.suffix_fates[msi::CandidateFate::Evaluation_NetNotPositive], 0u);
+}
+
 namespace {
 
 // The remaining floor's fixture: a hot entry (`kEntrySputs` writes) branches to
 // a head block (`kHeadSputs` writes) or to a hot block (`kOtherSputs`), and
 // both jump to a hot join (`kJoinSputs` writes, then `return-void`). The suffix
 // at the head takes the head and the join, and the host keeps the join too: it
-// still reaches it through the hot block. The head is cold.
+// still reaches it through the hot block. The head is cold, and with
+// `cold_entry` every block is.
 constexpr size_t kEntrySputs = 100;
 constexpr size_t kHeadSputs = 150;
 constexpr size_t kOtherSputs = 5;
 constexpr size_t kJoinSputs = 5;
 
-std::string sharedJoinCfg() {
-  const auto entry = mt::kHotWeights;
-  const auto hot = mt::kHotWeights;
+std::string sharedJoinCfg(bool cold_entry = false) {
+  const auto entry = cold_entry ? mt::kColdWeights : mt::kHotWeights;
+  const auto hot = cold_entry ? mt::kColdWeights : mt::kHotWeights;
   const auto head = mt::kColdWeights;
   std::ostringstream oss;
   oss << "(\n  (load-param v0)\n"
@@ -326,6 +443,20 @@ bool headSplit(const std::string& code, const msi::Config& cfg) {
 }
 
 } // namespace
+
+// Under the cold net gate both floors drop to
+// `min_suffix_sub_floor_split_size`; the remaining one reads what the host
+// keeps, the join the split copies included.
+TEST_F(MethodSplitterSuffixNetGateTest, RemainingFloor_GatedColdAtItsBoundary) {
+  auto cfg = mt::splitterTestConfig();
+  cfg.suffix_net_gate_cold = true;
+  cfg.min_cold_split_size = std::numeric_limits<size_t>::max();
+  cfg.min_suffix_sub_floor_split_size = kKeptCodeUnits;
+  const auto code = sharedJoinCfg(/*cold_entry=*/true);
+  EXPECT_TRUE(headSplit(code, cfg));
+  cfg.min_suffix_sub_floor_split_size = kKeptCodeUnits + 1;
+  EXPECT_FALSE(headSplit(code, cfg));
+}
 
 // Under the hot-cold net gate the remaining floor drops to
 // `min_suffix_sub_floor_split_size`, and it reads what the host keeps, the join
@@ -532,6 +663,22 @@ TEST_F(MethodSplitterSuffixNetGateTest, DefaultSubFloorIsEightyCodeUnits) {
   auto lower = cfg;
   lower.min_suffix_sub_floor_split_size = 79;
   EXPECT_TRUE(sizedTailSplit(79, 79, lower, hot))
+      << "the tail must pay, so that only the floors refuse it";
+}
+
+// The cold gate drops both Cold floors to the same default, 80 code units.
+TEST_F(MethodSplitterSuffixNetGateTest,
+       ColdGateDefaultSubFloorIsEightyCodeUnits) {
+  auto cfg = coldGateConfig();
+  cfg.min_suffix_sub_floor_split_size =
+      msi::Config{}.min_suffix_sub_floor_split_size;
+  const auto cold = mt::kColdWeights;
+  EXPECT_TRUE(sizedTailSplit(80, 80, cfg, cold));
+  EXPECT_FALSE(sizedTailSplit(79, 80, cfg, cold));
+  EXPECT_FALSE(sizedTailSplit(120, 79, cfg, cold));
+  auto lower = cfg;
+  lower.min_suffix_sub_floor_split_size = 79;
+  EXPECT_TRUE(sizedTailSplit(79, 79, lower, cold))
       << "the tail must pay, so that only the floors refuse it";
 }
 

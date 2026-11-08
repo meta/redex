@@ -80,6 +80,14 @@ struct Config {
   // `split_net_saving`.
   bool suffix_net_gate{false};
 
+  // suffix_net_gate_cold: the gate for Cold suffix splits, those with no hot
+  // predecessor. It is additive. A Cold split that `min_cold_split_size`
+  // already admits is decided as without the gate, because that floor guards
+  // inlining and compilability constraints the net saving does not model. A
+  // cold tail that only the lowered floors admit is kept when its net saving
+  // (`split_net_saving`) is positive.
+  bool suffix_net_gate_cold{false};
+
   // ---- Net cost-model aggregates (tunable) ----------------------------------
   // Code-unit costs of the net cost model (`split_net_saving`,
   // SplitNetSaving.cpp) that no single instruction's size determines; a single

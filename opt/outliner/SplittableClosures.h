@@ -75,6 +75,8 @@ struct SplittableClosure {
   // The code units of the closures' blocks. The candidate's fate counts these
   // code units.
   size_t covered_code_units{0};
+  // Whether only a net gate's lowered size floors admit the candidate.
+  bool below_legacy_floors{false};
 
   int is_switch() const { return switch_block != nullptr ? 1 : 0; }
 

@@ -943,10 +943,11 @@ const DexType* OutlinerTypeAnalysis::get_result_type_helper(
   case OPCODE_INVOKE_POLYMORPHIC:
   case OPCODE_CONST_METHOD_HANDLE:
   case OPCODE_CONST_METHOD_TYPE:
-    not_reached_log(
-        "Unsupported instruction {%s} in "
-        "get_result_type_helper\n",
-        SHOW(insn));
+    // These opcodes are legal input dex that the analysis does not model.
+    // `value_of_def` types every definition that is neither a constant nor a
+    // bitwise operation here, so they reach this switch. `nullptr` means
+    // "undeterminable", and every caller then drops the candidate.
+    return nullptr;
 
   case OPCODE_DIV_INT:
   case OPCODE_REM_INT:
@@ -1314,6 +1315,12 @@ const DexType* OutlinerTypeAnalysis::get_type_demand(IRInstruction* insn,
   }
   case OPCODE_INVOKE_CUSTOM:
   case OPCODE_INVOKE_POLYMORPHIC:
+    // The argument demand of a call site or a polymorphic signature is not
+    // modelled. Like the producers in `get_result_type_helper`, these come from
+    // the input dex, so the answer is "undeterminable" rather than an abort:
+    // the use's demand is then unknown, and each caller falls back to the
+    // value's type or refuses the candidate.
+    return nullptr;
   case OPCODE_CONST_METHOD_HANDLE:
   case OPCODE_CONST_METHOD_TYPE:
     not_reached_log(

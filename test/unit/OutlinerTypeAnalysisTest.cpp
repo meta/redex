@@ -1079,6 +1079,48 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_unreachable) {
   EXPECT_EQ(result_type, nullptr);
 }
 
+TEST_F(OutlinerTypeAnalysisTest, get_result_type_unsupported_dest_bearing) {
+  // `const-method-type` and `const-method-handle` write a result the type
+  // analysis does not model. They are legal input dex. `value_of_def` hands
+  // every definition that is neither a constant nor a bitwise operation to
+  // `get_result_type_helper`, so it must type such a definition as nullptr
+  // and must not throw. nullptr means "undeterminable", and every caller then
+  // drops the candidate.
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:()V" (
+        (const v0 0)
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  auto& cfg = foo_method->get_code()->cfg();
+
+  // `const-method-type` carries no dest of its own: like the other
+  // result-producing opcodes it writes through a following
+  // `move-result-pseudo-object`. Setting a dest on it directly trips
+  // `has_dest()`.
+  auto* const_method_type = new IRInstruction(OPCODE_CONST_METHOD_TYPE);
+  const_method_type->set_proto(
+      DexProto::make_proto(type::_void(), DexTypeList::make_type_list({})));
+  auto* move_result = new IRInstruction(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT);
+  move_result->set_dest(0);
+  auto ii = InstructionIterable(cfg);
+  cfg.insert_before(ii.begin(), {const_method_type, move_result});
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+
+  // The test hands the analysis the dest-bearing `move-result-pseudo-object`,
+  // because that is what a reaching-defs query yields. `get_defs` resolves it
+  // to the PRIMARY instruction, where `get_result_type_helper` meets the
+  // unsupported opcode. Passing the primary directly would trip an unrelated
+  // `has_dest()` assertion in `get_defs` instead, and would not exercise the
+  // refusal path.
+  const DexType* result_type = nullptr;
+  EXPECT_NO_THROW({
+    result_type = get_result_type(ota, {move_result},
+                                  /* optional_extra_type */ nullptr);
+  });
+  EXPECT_EQ(result_type, nullptr);
+}
+
 TEST_F(OutlinerTypeAnalysisTest, get_result_type_object) {
   ClassCreator object_creator(type::java_lang_Object());
   ClassCreator foo_creator(DexType::make_type("LFoo;"));
@@ -1276,6 +1318,40 @@ TEST_F(OutlinerTypeAnalysisTest, get_type_demand_primitive) {
     const auto* result_type = get_type_demand(candidate, insn1->src(0));
     EXPECT_EQ(result_type, type::_int());
   }
+}
+
+TEST_F(OutlinerTypeAnalysisTest, get_type_demand_unsupported_invoke) {
+  // `invoke-polymorphic` and `invoke-custom` are legal input dex, and a
+  // candidate can read a register through one. Their argument demand is not
+  // modelled, so it must come back undeterminable (nullptr), and
+  // `get_type_demand` then falls back to the inferred type instead of aborting
+  // the build.
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(Ljava/lang/invoke/MethodHandle;I)V" (
+        (load-param-object v0)
+        (load-param v1)
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  auto& cfg = foo_method->get_code()->cfg();
+
+  auto* invoke = new IRInstruction(OPCODE_INVOKE_POLYMORPHIC);
+  invoke->set_method(DexMethod::make_method(
+      "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)"
+      "Ljava/lang/Object;"));
+  invoke->set_srcs_size(2);
+  invoke->set_src(0, 0);
+  invoke->set_src(1, 1);
+  auto* ret = find_insn(foo_method, OPCODE_RETURN_VOID);
+  cfg.insert_before(cfg.find_insn(ret), invoke);
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+
+  auto root = create_node({invoke});
+  auto candidate = create_candidate(ota, root);
+  const DexType* result_type = nullptr;
+  EXPECT_NO_THROW(
+      { result_type = get_type_demand(candidate, invoke->src(1)); });
+  EXPECT_EQ(result_type, type::_int());
 }
 
 TEST_F(OutlinerTypeAnalysisTest, get_type_demand_sputs_of_zero) {

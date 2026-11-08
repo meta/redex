@@ -7,6 +7,9 @@
 
 #include "SplittableClosures.h"
 
+#include <cinttypes>
+#include <deque>
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -20,6 +23,7 @@
 #include "Liveness.h"
 #include "OutlinerTypeAnalysis.h"
 #include "Show.h"
+#include "SplitNetSaving.h"
 #include "Timer.h"
 #include "Trace.h"
 #include "UninitializedObjects.h"
@@ -31,20 +35,55 @@ using namespace method_splitting_impl;
 using namespace outliner_impl;
 using namespace uninitialized_objects;
 
+// The ids of `closures`' head blocks.
+UnorderedSet<cfg::BlockId> collect_head_ids(
+    const std::vector<const Closure*>& closures) {
+  UnorderedSet<cfg::BlockId> ids;
+  for (const auto* c : closures) {
+    ids.insert(c->target->id());
+  }
+  return ids;
+}
+
+// What a candidate's net saving is read for: nothing, or deciding whether it is
+// split.
+enum class NetSavingUse : uint8_t { None, Gate };
+
 struct ScoredClosure {
   cfg::Block* switch_block{nullptr};
   std::vector<const Closure*> closures;
+  // The heads of `closures` (`collect_head_ids`). A split that takes several
+  // cases of `switch_block` takes the switch's edges into these heads.
+  UnorderedSet<cfg::BlockId> grouped_heads;
   UnorderedSet<const ReducedBlock*> reduced_components;
   size_t split_size{};
   size_t remaining_size{};
   // The code units of the closures' blocks. The split copies these blocks, and
   // the candidate's fate counts these code units.
   size_t covered_code_units{0};
+  // The code units the split takes out of the host: its blocks the host no
+  // longer reaches once the split's edit is applied. A block the host can
+  // still enter stays there too, so the split duplicates it rather than taking
+  // it out. Set in `score()`; read by `net_saving_input`.
+  size_t evicted_size{};
+  // The part of `evicted_size` in hot blocks. This hot code leaves compiled
+  // code too, but a split that is not hot is not compiled, so the hot code then
+  // runs interpreted. The net saving therefore counts only cold code as saved.
+  size_t evicted_hot_size{0};
+  // The duplicated members' dex code units (`dex_code_units`).
+  size_t duplicated_dex_code_units{0};
   std::optional<HotSplitKind> hot_split_kind{std::nullopt};
   bool is_large_packed_switch{false};
   bool creates_large_sparse_switch{false};
   bool destroys_large_packed_switch{false};
   std::vector<ClosureArgument> args;
+  // Whether the net saving is read, and what for; decided in `score`.
+  NetSavingUse net_saving_use{NetSavingUse::None};
+  // The net saving of a candidate its net gate reads (`split_net_saving`).
+  std::optional<ClosureNetTerms> net_terms{std::nullopt};
+  // The partition of `switch_block`'s edges by `grouped_heads`; set for a
+  // candidate taking several cases of a switch.
+  std::optional<SwitchPartition> dispatch{std::nullopt};
 
   int is_switch() const { return switch_block != nullptr ? 1 : 0; }
 
@@ -101,6 +140,29 @@ UnorderedSet<const ReducedEdge*> get_except_preds(
   return except_preds;
 }
 
+// The blocks reachable from `roots` along the edges `cut` keeps.
+UnorderedSet<cfg::Block*> reachable_blocks(
+    const std::vector<cfg::Block*>& roots,
+    const std::function<bool(const cfg::Edge*)>& cut) {
+  UnorderedSet<cfg::Block*> reached;
+  std::deque<cfg::Block*> work;
+  for (auto* r : roots) {
+    if (reached.insert(r).second) {
+      work.push_back(r);
+    }
+  }
+  while (!work.empty()) {
+    auto* b = work.front();
+    work.pop_front();
+    for (const auto* e : b->succs()) {
+      if (!cut(e) && reached.insert(e->target()).second) {
+        work.push_back(e->target());
+      }
+    }
+  }
+  return reached;
+}
+
 bool is_large(const Config& config,
               cfg::Block* switch_block,
               const UnorderedSet<int32_t>* except_case_keys = nullptr) {
@@ -127,9 +189,45 @@ bool is_packed(cfg::Block* switch_block,
   return !ckeb->sufficiently_sparse();
 }
 
+// The two size floors of a candidate: what it must take and what the host
+// must keep.
+struct SizeFloors {
+  uint64_t split;
+  uint64_t remaining;
+};
+
+// The size floors of a candidate of `kind`. They are the floors of its kind,
+// except that the host of a hot-cold suffix must keep the hot floor. A net gate
+// that applies to the candidate (`gate`) lowers both floors to
+// `min_suffix_sub_floor_split_size` where that is lower, so that its net saving
+// can admit a candidate below its kind's floors.
+SizeFloors floors_for(const Config& config, HotSplitKind kind, bool gate) {
+  SizeFloors floors{};
+  switch (kind) {
+  case HotSplitKind::Hot:
+    floors = {config.min_hot_split_size, config.min_hot_split_size};
+    break;
+  case HotSplitKind::HotCold:
+    floors = {config.min_hot_cold_split_size, config.min_hot_split_size};
+    break;
+  case HotSplitKind::Cold:
+    floors = {config.min_cold_split_size, config.min_cold_split_size};
+    break;
+  }
+  if (gate) {
+    always_assert(kind != HotSplitKind::Hot);
+    floors.split =
+        std::min(floors.split, config.min_suffix_sub_floor_split_size);
+    floors.remaining =
+        std::min(floors.remaining, config.min_suffix_sub_floor_split_size);
+  }
+  return floors;
+}
+
 std::optional<ScoredClosure> score(
     const Config& config,
     const MethodClosures& mcs,
+    bool host_compiled,
     float max_overhead_ratio,
     cfg::Block* switch_block,
     bool is_large_packed_switch,
@@ -137,6 +235,7 @@ std::optional<ScoredClosure> score(
   ScoredClosure sc{
       .switch_block = switch_block,
       .closures = closures,
+      .grouped_heads = collect_head_ids(closures),
       .reduced_components = {},
       .args = {},
   };
@@ -158,33 +257,31 @@ std::optional<ScoredClosure> score(
     }
     any_target_hot |= c->reduced_block->is_hot;
   }
-  if (any_src_hot) {
-    if (any_target_hot) {
-      if (sc.split_size < config.min_hot_split_size) {
-        return std::nullopt;
-      }
-      sc.hot_split_kind = HotSplitKind::Hot;
-    } else {
-      if (sc.split_size < config.min_hot_cold_split_size) {
-        return std::nullopt;
-      }
-      sc.hot_split_kind = HotSplitKind::HotCold;
-    }
-  } else {
-    if (sc.split_size < config.min_cold_split_size) {
-      return std::nullopt;
-    }
-    sc.hot_split_kind = HotSplitKind::Cold;
+  const auto kind = !any_src_hot     ? HotSplitKind::Cold
+                    : any_target_hot ? HotSplitKind::Hot
+                                     : HotSplitKind::HotCold;
+  sc.hot_split_kind = kind;
+  // A net gate applies to the suffixes of its kind on a compiled host, the
+  // only host whose evicted cold code leaves compiled code.
+  const bool gate =
+      host_compiled && kind == HotSplitKind::HotCold && config.suffix_net_gate;
+  const auto floors = floors_for(config, kind, gate);
+  if (sc.split_size < floors.split) {
+    return std::nullopt;
   }
   always_assert(reduced_components_code_size <= mcs.original_size);
   auto remaining_size_reduction =
       closures.size() > 1
           ? config.cost_split_switch_case * (closures.size() - 1)
           : 0;
+  // The candidate's net saving decides it (`evaluate_candidate`).
+  if (gate) {
+    sc.net_saving_use = NetSavingUse::Gate;
+  }
 
   UnorderedSet<int32_t> except_case_keys;
-  auto except_preds = get_except_preds(
-      switch_block, closures, sc.reduced_components, &except_case_keys);
+  get_except_preds(switch_block, closures, sc.reduced_components,
+                   &except_case_keys);
   if (is_large_packed_switch) {
     sc.is_large_packed_switch = true;
     sc.destroys_large_packed_switch =
@@ -199,20 +296,58 @@ std::optional<ScoredClosure> score(
     }
   }
 
-  const auto& rcfg = *mcs.rcfg;
-  auto remaining_blocks = rcfg.reachable(rcfg.entry_block(), except_preds);
-  sc.remaining_size = code_size(remaining_blocks);
-  sc.remaining_size = sc.remaining_size < remaining_size_reduction
+  // What the host keeps, block by block. Emission sends to the launchpad the
+  // switch's edges into the grouped heads (for a group), or every edge into
+  // the head (for one closure). It leaves every other edge in place. That
+  // includes an edge from a closure block the host still reaches, so the block
+  // that edge enters stays in the host too.
+  auto& cfg = mcs.method->get_code()->cfg();
+  const auto* head = closures.front()->target;
+  const auto remaining_cfg_blocks =
+      reachable_blocks({cfg.entry_block()}, [&](const cfg::Edge* e) {
+        return switch_block != nullptr
+                   ? e->src() == switch_block &&
+                         sc.grouped_heads.contains(e->target()->id())
+                   : e->target() == head;
+      });
+  size_t raw_remaining = 0;
+  for (const auto* b : UnorderedIterable(remaining_cfg_blocks)) {
+    raw_remaining += b->estimate_code_units();
+  }
+  // `always_assert`, not `redex_assert`: what stays reachable must be part of
+  // the input method, which this function does not establish, so the check
+  // must survive an opt build, like the one on `reduced_components_code_size`
+  // above. Without it, a violation would wrap the subtraction below into a
+  // huge `evicted_size`, which the net saving would count as saved.
+  always_assert_log(raw_remaining <= mcs.original_size,
+                    "remaining %zu exceeds original %zu in %s", raw_remaining,
+                    mcs.original_size, SHOW(mcs.method));
+  sc.remaining_size = raw_remaining < remaining_size_reduction
                           ? 0
-                          : sc.remaining_size - remaining_size_reduction;
+                          : raw_remaining - remaining_size_reduction;
   // The host's floor counts what the host keeps, including a block the split
   // copies that the host still reaches.
-  const auto min_remaining = sc.hot_split_kind == HotSplitKind::Cold
-                                 ? config.min_cold_split_size
-                                 : config.min_hot_split_size;
-  if (sc.remaining_size < min_remaining) {
+  if (sc.remaining_size < floors.remaining) {
     return std::nullopt;
   }
+  if (switch_block != nullptr) {
+    sc.dispatch = partition_switch(switch_block, sc.grouped_heads);
+  }
+  // A block of the split that the host still reaches exists in both methods;
+  // every other block leaves the host.
+  size_t duplicated_size = 0;
+  for (const auto* rb : UnorderedIterable(sc.reduced_components)) {
+    for (const auto* b : UnorderedIterable(rb->blocks)) {
+      const auto units = b->estimate_code_units();
+      if (remaining_cfg_blocks.contains(const_cast<cfg::Block*>(b))) {
+        duplicated_size += units;
+        sc.duplicated_dex_code_units += dex_code_units(b);
+      } else if (is_hot(b)) {
+        sc.evicted_hot_size += units;
+      }
+    }
+  }
+  sc.evicted_size = reduced_components_code_size - duplicated_size;
   auto overhead_ratio = static_cast<double>(sc.split_size + sc.remaining_size) /
                             static_cast<double>(mcs.original_size) -
                         1.0;
@@ -247,13 +382,14 @@ UnorderedSet<const ReducedBlock*> get_critical_components(
 std::optional<ScoredClosure> select_prefix(
     const Config& config,
     const MethodClosures& mcs,
+    bool host_compiled,
     float max_overhead_ratio,
     cfg::Block* switch_block,
     bool is_large_packed_switch,
     std::vector<const Closure*> aggregated) {
   while (aggregated.size() > 1) {
-    auto opt_sc = score(config, mcs, max_overhead_ratio, switch_block,
-                        is_large_packed_switch, aggregated);
+    auto opt_sc = score(config, mcs, host_compiled, max_overhead_ratio,
+                        switch_block, is_large_packed_switch, aggregated);
     if (opt_sc) {
       return opt_sc;
     }
@@ -303,6 +439,7 @@ std::vector<const Closure*> aggregate_half_sparse(
 std::optional<ScoredClosure> aggregate(
     const Config& config,
     const MethodClosures& mcs,
+    bool host_compiled,
     float max_overhead_ratio,
     cfg::Block* switch_block,
     bool is_large_packed_switch,
@@ -344,8 +481,9 @@ std::optional<ScoredClosure> aggregate(
     auto aggregate_half_packed_and_select_prefix = [&]() {
       auto aggregated =
           aggregate_half_packed(fallthrough, keyed, switched.size());
-      return select_prefix(config, mcs, max_overhead_ratio, switch_block,
-                           is_large_packed_switch, std::move(aggregated));
+      return select_prefix(config, mcs, host_compiled, max_overhead_ratio,
+                           switch_block, is_large_packed_switch,
+                           std::move(aggregated));
     };
 
     // First, consider suffix. Note that smallest keys are already last.
@@ -368,13 +506,15 @@ std::optional<ScoredClosure> aggregate(
   }
 
   auto aggregated = aggregate_half_sparse(fallthrough, keyed, switched.size());
-  return select_prefix(config, mcs, max_overhead_ratio, switch_block,
-                       is_large_packed_switch, std::move(aggregated));
+  return select_prefix(config, mcs, host_compiled, max_overhead_ratio,
+                       switch_block, is_large_packed_switch,
+                       std::move(aggregated));
 };
 
 // Select closures that meet the configured size thresholds, and score them.
 std::vector<ScoredClosure> get_scored_closures(const Config& config,
                                                const MethodClosures& mcs,
+                                               bool host_compiled,
                                                float max_overhead_ratio) {
   // For all possible closures, do some quick filtering, and score the
   // surviving ones
@@ -382,7 +522,7 @@ std::vector<ScoredClosure> get_scored_closures(const Config& config,
   UnorderedMap<cfg::Block*, std::vector<const Closure*>>
       remaining_switch_case_closures;
   for (const auto& c : mcs.closures) {
-    auto opt_sc = score(config, mcs, max_overhead_ratio,
+    auto opt_sc = score(config, mcs, host_compiled, max_overhead_ratio,
                         /* switch_block */ nullptr,
                         /* is_large_packed_switch */ false, {&c});
     if (opt_sc) {
@@ -413,8 +553,9 @@ std::vector<ScoredClosure> get_scored_closures(const Config& config,
     auto is_large_packed_switch =
         is_large(config, switch_block) && is_packed(switch_block);
     for (const auto& predicate : predicates) {
-      auto opt_sc = aggregate(config, mcs, max_overhead_ratio, switch_block,
-                              is_large_packed_switch, switched, predicate);
+      auto opt_sc =
+          aggregate(config, mcs, host_compiled, max_overhead_ratio,
+                    switch_block, is_large_packed_switch, switched, predicate);
       if (opt_sc) {
         scored_closures.push_back(std::move(*opt_sc));
         break;
@@ -423,6 +564,102 @@ std::vector<ScoredClosure> get_scored_closures(const Config& config,
   }
   return scored_closures;
 };
+
+// What `split_net_saving` needs to know about `sc`, once `evaluate_candidate`
+// has resolved its arguments.
+//
+// A split takes its blocks out of the host except those the host still
+// reaches, which it duplicates (`score()`): emission redirects only the edges
+// into the heads and copies every block, so a block the host can still enter
+// exists in both methods. Hot code taken out earns nothing: the saving is in
+// compiled cold code, and a net-gated split is never hot, so it is not compiled
+// and the hot code it takes runs interpreted.
+NetSavingInput net_saving_input(const ScoredClosure& sc,
+                                const DexMethod* method,
+                                const LivenessFixpointIterator& liveness) {
+  // The launchpad passes the typed arguments; the split recreates each
+  // constant argument at its entry.
+  size_t passed_args = 0;
+  size_t passed_arg_registers = 0;
+  size_t recreated_defs = 0;
+  for (const auto& a : sc.args) {
+    if (a.type != nullptr) {
+      passed_args++;
+      passed_arg_registers += type::is_wide_type(a.type) ? 2 : 1;
+    } else {
+      recreated_defs += dex_code_units(a.def);
+    }
+  }
+  std::optional<NetSavingInput::Dispatch> dispatch;
+  if (sc.dispatch) {
+    // In the split, the copied switch leads only to the members.
+    std::vector<cfg::Block*> heads;
+    heads.reserve(sc.closures.size());
+    for (const auto* c : sc.closures) {
+      heads.push_back(c->target);
+    }
+    UnorderedSet<const cfg::Block*> blocks;
+    for (const auto* rb : UnorderedIterable(sc.reduced_components)) {
+      insert_unordered_iterable(blocks, rb->blocks);
+    }
+    const auto selector = sc.switch_block->get_last_insn()->insn->src(0);
+    // In the host, the edited switch keeps its edges into blocks the split
+    // does not take. When the split takes the default edge, the switch sends
+    // it to the launchpad, which reads the selector if it passes it.
+    std::vector<cfg::Block*> targets;
+    std::vector<cfg::Block*> kept_targets;
+    bool to_launchpad = false;
+    for (const auto* e : sc.switch_block->succs()) {
+      if (e->type() == cfg::EDGE_THROW) {
+        continue;
+      }
+      targets.push_back(e->target());
+      switch (
+          host_switch_edge_edit(HostSwitchEdit::DeleteGrouped,
+                                sc.grouped_heads.contains(e->target()->id()),
+                                e->type() == cfg::EDGE_GOTO)) {
+      case SwitchEdgeEdit::Keep:
+        kept_targets.push_back(e->target());
+        break;
+      case SwitchEdgeEdit::ToLaunchpad:
+        to_launchpad = true;
+        break;
+      case SwitchEdgeEdit::Delete:
+        break;
+      }
+    }
+    const bool passes_selector =
+        std::any_of(sc.args.begin(), sc.args.end(), [&](const auto& a) {
+          return a.reg == selector && a.type != nullptr;
+        });
+    const auto live_at_any = [&liveness,
+                              selector](const std::vector<cfg::Block*>& bs) {
+      return std::any_of(bs.begin(), bs.end(), [&](cfg::Block* b) {
+        return liveness.get_live_in_vars_at(b).contains(selector);
+      });
+    };
+    const bool live_before = live_at_any(targets);
+    const bool live_after =
+        (to_launchpad && passes_selector) || live_at_any(kept_targets);
+    // Asked of the host's liveness, which is exact for a suffix's split: a
+    // suffix takes everything its heads reach.
+    dispatch.emplace(
+        NetSavingInput::Dispatch{.partition = *sc.dispatch,
+                                 .selector_live_in_split = live_at_any(heads),
+                                 .selector_live_in_host_before = live_before,
+                                 .selector_live_in_host_after = live_after});
+  }
+  return NetSavingInput{
+      .split = NetSavingInput::Suffix{.returns_value = !type::is_void(
+                                          method->get_proto()->get_rtype())},
+      .dispatch = dispatch,
+      .evicted = sc.evicted_size - sc.evicted_hot_size,
+      .duplicated = sc.duplicated_dex_code_units,
+      .passed_args = passed_args,
+      .passed_arg_registers = passed_arg_registers,
+      .recreated_defs = recreated_defs,
+  };
+}
 
 // The inputs of `evaluate_candidate`: the per-method Lazy analyses, built once
 // in `to_splittable_closures`, and that function's other per-method inputs.
@@ -434,7 +671,9 @@ struct CandidateEvalContext {
   Lazy<UninitializedObjectEnvironments>& uninitialized_objects;
   Lazy<UnorderedMap<IRInstruction*, const ReducedBlock*>>& insns;
   const RefChecker* ref_checker;
-  size_t max_live_in;
+  const Config& config;
+  bool host_compiled;
+  DexMethod* method;
 };
 
 // Evaluates one candidate on its own: resolves its live-in arguments into
@@ -463,7 +702,7 @@ std::optional<CandidateFate> evaluate_candidate(ScoredClosure& sc,
     first_insn = it->insn;
   }
   std::vector<reg_t> ordered_live_in(live_in.begin(), live_in.end());
-  if (ordered_live_in.size() > ctx.max_live_in) {
+  if (ordered_live_in.size() > static_cast<size_t>(ctx.config.max_live_in)) {
     return CandidateFate::Evaluation_TooManyLiveIns;
   }
   std::sort(ordered_live_in.begin(), ordered_live_in.end());
@@ -510,6 +749,28 @@ std::optional<CandidateFate> evaluate_candidate(ScoredClosure& sc,
     }
   }
 
+  // Without a net gate, a suffix is decided by the size floors and the
+  // overhead ratio alone. A candidate its gate covers (see `score()`) is kept
+  // only when its net saving (`split_net_saving`, weighted by
+  // `net_oat_weight`) is positive, so a tail that only the gate's lowered
+  // floors admit is split only when it pays.
+  if (sc.net_saving_use == NetSavingUse::None) {
+    return std::nullopt;
+  }
+  // `score` evaluates no candidate on an uncompiled host: every suffix net
+  // saving it reads needs a compiled host.
+  redex_assert(ctx.host_compiled);
+  const auto& terms = sc.net_terms.emplace(
+      split_net_saving(net_saving_input(sc, ctx.method, *ctx.liveness_fp_iter),
+                       ctx.config, ctx.host_compiled));
+  if (terms.net <= 0) {
+    TRACE(MS, 3,
+          "net refused suffix %s at B%zu: saved %" PRId64 " added_ccuc %" PRId64
+          " dex_added %" PRId64 " net %f",
+          SHOW(ctx.method), (size_t)sc.closures.front()->target->id(),
+          terms.saved, terms.added_ccuc, terms.dex_added, terms.net);
+    return CandidateFate::Evaluation_NetNotPositive;
+  }
   return std::nullopt;
 }
 
@@ -517,10 +778,11 @@ std::optional<CandidateFate> evaluate_candidate(ScoredClosure& sc,
 // determine what type we can use as parameter type of a split method), and
 // filter out closures which don't meet the configured liveness threshold.
 std::vector<SplittableClosure> to_splittable_closures(
-    size_t max_live_in,
     const std::shared_ptr<MethodClosures>& mcs,
     std::vector<ScoredClosure> scored_closures,
+    const Config& config,
     Stats& stats,
+    bool host_compiled,
     // Null on the top-level-switch path, which has no store context.
     const RefChecker* ref_checker) {
   std::vector<SplittableClosure> splittable_closures;
@@ -571,12 +833,13 @@ std::vector<SplittableClosure> to_splittable_closures(
   auto record = [&stats](const ScoredClosure& sc, CandidateFate fate) {
     stats.record(
         SplitKind::Suffix,
-        [&sc] { return SplittableClosure::head_ids(sc.closures); }, fate,
-        sc.covered_code_units);
+        [&sc] { return SplittableClosure::head_ids(sc.closures); },
+        sc.net_terms, fate, sc.covered_code_units);
   };
 
-  CandidateEvalContext ctx{ota,   liveness_fp_iter, uninitialized_objects,
-                           insns, ref_checker,      max_live_in};
+  CandidateEvalContext ctx{
+      ota,         liveness_fp_iter, uninitialized_objects, insns,
+      ref_checker, config,           host_compiled,         method};
   std::erase_if(scored_closures, [&covered, &ctx, &record](auto& sc) {
     for (auto* c : sc.closures) {
       if (covered.count(c->reduced_block)) {
@@ -649,6 +912,7 @@ std::vector<SplittableClosure> to_splittable_closures(
         .is_large_packed_switch = sc.is_large_packed_switch,
         .creates_large_sparse_switch = sc.creates_large_sparse_switch,
         .destroys_large_packed_switch = sc.destroys_large_packed_switch,
+        .net_terms = sc.net_terms,
         .covered_code_units = sc.covered_code_units});
   }
   return splittable_closures;
@@ -696,12 +960,15 @@ select_splittable_closures_based_on_costs(
     }
     normalize_cfg_for_splitting(method, config.split_block_size);
     auto rcfg = reduce_cfg(method);
+    // One probe of the shared hot set per method: nothing inserts into it
+    // during selection, so all three uses below see the same answer.
+    const bool baseline_hot = (concurrent_hot_methods != nullptr) &&
+                              (concurrent_hot_methods->count(method) != 0u);
     auto is_sufficiently_large = [&]() {
       if (rcfg->code_size() >= config.min_original_size) {
         return true;
       }
-      if ((concurrent_hot_methods != nullptr) &&
-          (concurrent_hot_methods->count(method) != 0u) &&
+      if (baseline_hot &&
           rcfg->code_size() >= config.min_original_size_hot_method) {
         return true;
       }
@@ -725,8 +992,7 @@ select_splittable_closures_based_on_costs(
     std::vector<ScoredClosure> scored_closures;
     auto adjustment = cfg.get_size_adjustment(
         /* assume_no_unreachable_blocks */ true);
-    bool is_hot = (concurrent_hot_methods != nullptr) &&
-                  (concurrent_hot_methods->count(method) != 0u) &&
+    bool is_hot = baseline_hot &&
                   mcs->original_size >= config.min_original_size_hot_method;
     bool is_huge =
         mcs->original_size + adjustment > config.huge_threshold ||
@@ -737,7 +1003,7 @@ select_splittable_closures_based_on_costs(
                : is_hot ? config.max_hot_overhead_ratio
                         : config.max_overhead_ratio;
     for (auto r = begin; scored_closures.empty() && r <= end; r *= 2) {
-      scored_closures = get_scored_closures(config, *mcs, r);
+      scored_closures = get_scored_closures(config, *mcs, baseline_hot, r);
     }
     if (scored_closures.empty()) {
       return;
@@ -749,9 +1015,13 @@ select_splittable_closures_based_on_costs(
       }
       return;
     }
-    auto splittable_closures = to_splittable_closures(
-        config.max_live_in, mcs, std::move(scored_closures), stats,
-        &store_ref_checkers.get(method->get_class()));
+    // A host compiled from the baseline profile is the only one whose cold
+    // code a split takes out of compiled code: only there does the net saving
+    // count anything as saved.
+    auto splittable_closures =
+        to_splittable_closures(mcs, std::move(scored_closures), config, stats,
+                               /*host_compiled=*/baseline_hot,
+                               &store_ref_checkers.get(method->get_class()));
     concurrent_splittable_closures.update(
         method->get_class(), [&](auto, auto& v, bool) {
           v.insert(v.end(),
@@ -769,6 +1039,9 @@ select_splittable_closures_from_top_level_switch_cases(
   Timer t("select_splittable_closures_from_top_level_switch_cases");
   InsertOnlyConcurrentMap<DexMethod*, std::vector<SplittableClosure>>
       concurrent_splittable_closures;
+  // Unscored suffix candidates: no size floor, no net saving, no region.
+  Config config;
+  config.max_live_in = static_cast<int64_t>(max_live_in);
   // The fates of these unscored candidates are not reported.
   Stats stats;
   auto concurrent_process_method = [&](DexMethod* method) {
@@ -810,6 +1083,7 @@ select_splittable_closures_from_top_level_switch_cases(
       ScoredClosure sc{
           .switch_block = nullptr,
           .closures = {&c},
+          .grouped_heads = collect_head_ids({&c}),
           .reduced_components = {},
           .args = {},
       };
@@ -817,8 +1091,9 @@ select_splittable_closures_from_top_level_switch_cases(
       scored_closures.emplace_back(std::move(sc));
     }
     auto splittable_closures =
-        to_splittable_closures(max_live_in, mcs, std::move(scored_closures),
-                               stats, /* ref_checker */ nullptr);
+        to_splittable_closures(mcs, std::move(scored_closures), config, stats,
+                               /*host_compiled=*/false,
+                               /*ref_checker=*/nullptr);
     if (!splittable_closures.empty()) {
       concurrent_splittable_closures.emplace(method,
                                              std::move(splittable_closures));

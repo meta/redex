@@ -37,6 +37,7 @@ enum class CandidateFate : uint8_t {
   // of an api model rather than on a real min-sdk violation.
   Evaluation_ArgTypeIllegal,
   Evaluation_LiveInUninitialized,
+  Evaluation_NetNotPositive,
   // Selection, emission.
   Selection_Displaced, // an overlapping candidate ranked ahead claimed it
   Emission_DexLimit,
@@ -63,6 +64,8 @@ inline constexpr std::array<CandidateFateName, kCandidateFateCount>
          "evaluation_arg_type_illegal"},
         {CandidateFate::Evaluation_LiveInUninitialized,
          "evaluation_live_in_uninitialized"},
+        {CandidateFate::Evaluation_NetNotPositive,
+         "evaluation_net_not_positive"},
         {CandidateFate::Selection_Displaced, "selection_displaced"},
         {CandidateFate::Emission_DexLimit, "emission_dex_limit"},
         {CandidateFate::Emitted, "emitted"},

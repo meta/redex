@@ -29,6 +29,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -122,10 +123,19 @@ struct SplitResult {
   std::vector<DexMethod*> region_splits;
   std::vector<DexMethod*> suffix_splits;
   method_splitting_impl::StatsSnapshot stats;
+  // The host method (`bar`) after splitting, modified in place, so tests can
+  // check the launchpad emitted into it.
+  DexMethod* main_method{nullptr};
   // One record per candidate, over every iteration, in the order the fates
-  // were decided: its kind, heads, fate and iteration.
+  // were decided: its kind, heads, net saving, fate and iteration.
   std::vector<method_splitting_impl::CandidateEvaluation> evaluations;
 };
+
+// The evaluation records of `res` of kind `kind`, at `fate` if given.
+std::vector<method_splitting_impl::CandidateEvaluation> evaluationsOf(
+    const SplitResult& res,
+    method_splitting_impl::SplitKind kind,
+    std::optional<method_splitting_impl::CandidateFate> fate = std::nullopt);
 
 // The partition invariant, asserted after every run. Throws when any part of
 // it fails:
@@ -140,6 +150,14 @@ void expectEveryCandidateHasOneFate(
     const std::vector<method_splitting_impl::CandidateEvaluation>& records,
     bool one_host);
 
+// Which methods of a run `countFieldRefsIn` looks at.
+enum class Where { RegionSplits, SuffixSplits, AllSplits };
+
+// `countFieldRefs` summed over the `where` methods of `res`.
+size_t countFieldRefsIn(const SplitResult& res,
+                        std::string_view marker,
+                        Where where);
+
 // Construct a class with a single method `bar` from the given IR
 // S-expression and signature, run `split_methods_in_stores` on it,
 // and return the result by value.
@@ -148,6 +166,16 @@ SplitResult runSplitter(
     std::string_view code_sexpr,
     const method_splitting_impl::Config& cfg = splitterTestConfig(),
     std::string_view class_prefix = "LFoo");
+
+// The fates of a run's candidates, for failure messages.
+std::string describeSelection(const SplitResult& res);
+
+// `runSplitter` on a host the baseline profile does not compile, where the net
+// saving counts nothing as saved.
+SplitResult runSplitterOnUncompiledHost(
+    std::string_view sig,
+    std::string_view code_sexpr,
+    const method_splitting_impl::Config& cfg);
 
 // The field markers a split can reach, sorted. This is the part of
 // `splitSignature` that discriminates WHERE a split landed.

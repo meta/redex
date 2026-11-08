@@ -78,6 +78,34 @@ void MethodSplittingPass::bind_config() {
   bind("enable_region_splitting", m_config.enable_region_splitting,
        m_config.enable_region_splitting,
        "Master switch for cold-region outlining (off by default).");
+  // Net cost-model aggregates (see MethodSplittingConfig). The knobs exist so
+  // the defaults can be swept without a recompile.
+  auto bind_cu = [&](const char* name, size_t& field) {
+    bind(name, field, field,
+         "Net cost-model code-unit cost (see MethodSplittingConfig).");
+  };
+  bind_cu("net_cu_load_param", m_config.net_cu_load_param);
+  bind_cu("net_cu_method_metadata", m_config.net_cu_method_metadata);
+  bind_cu("net_cu_range_spill_per_reg", m_config.net_cu_range_spill_per_reg);
+  bind("net_oat_weight", m_config.net_oat_weight, m_config.net_oat_weight,
+       "Weight W in net saving = W * (compiled code moved out - compiled code "
+       "the launchpad adds back) - DEX code added. W is the number of DEX code "
+       "units a split may spend per compiled code unit it moves out. The "
+       "default is about 5.5, because ART emits about 11 OAT bytes per "
+       "compiled code unit and a DEX code unit is 2 bytes.");
+  bind(
+      "min_suffix_sub_floor_split_size",
+      m_config.min_suffix_sub_floor_split_size,
+      m_config.min_suffix_sub_floor_split_size,
+      "Size floor for sub-floor suffix candidates: each suffix net gate lowers "
+      "both size floors of its kind to this value where it is lower.");
+  bind("suffix_net_gate", m_config.suffix_net_gate, m_config.suffix_net_gate,
+       "On a compiled host, decide hot-cold suffix splits by their net saving "
+       "and refuse those that do not pay; without the gate, size floors and an "
+       "overhead ratio alone decide them. The gate also lowers both their size "
+       "floors to min_suffix_sub_floor_split_size.");
+
+  after_configuration([this] { m_config.validate(); });
 }
 
 namespace method_splitting_impl {

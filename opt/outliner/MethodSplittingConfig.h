@@ -7,10 +7,13 @@
 
 #pragma once
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
+
+#include "Debug.h"
 
 namespace method_splitting_impl {
 
@@ -56,6 +59,27 @@ struct Config {
   // MethodSplittingPass runs suffix splitting only.
   bool enable_region_splitting{false};
 
+  // Size floor for sub-floor suffix candidates: each suffix net gate lowers
+  // both size floors of its kind to this value where it is lower.
+  uint64_t min_suffix_sub_floor_split_size{80};
+
+  // The suffix net gates apply on a compiled host only, because only there
+  // does a split save compiled code; on an uncompiled host the gate does not
+  // apply and a suffix keeps the size floors and the other checks. A gate that
+  // applies lowers both size floors of its kind (what the split takes, what the
+  // host keeps) to `min_suffix_sub_floor_split_size` where that is lower, so
+  // that a candidate below its kind's floors can be split when its net saving
+  // is positive.
+  //
+  // suffix_net_gate: the gate for hot-cold suffix splits, which the size
+  // floors and the overhead ratio alone decide otherwise. Every hot-cold
+  // suffix on a compiled host must have a positive net saving, so a split
+  // whose arguments, launchpad and method cost more than it saves is refused.
+  // A suffix split ends the host (its launchpad is `invoke; [move-result;]
+  // return`), so the launchpad never jumps back into the host; see
+  // `split_net_saving`.
+  bool suffix_net_gate{false};
+
   // ---- Net cost-model aggregates (tunable) ----------------------------------
   // Code-unit costs of the net cost model (`split_net_saving`,
   // SplitNetSaving.cpp) that no single instruction's size determines; a single
@@ -79,8 +103,19 @@ struct Config {
   // growth a split may spend per code unit of compiled cold code it takes out.
   //
   // A DEX code unit is 2 bytes, so weighing OAT and DEX bytes equally breaks
-  // even at W = (OAT bytes per compiled cold code unit) / 2.
-  float net_oat_weight{4.0f};
+  // even at W = (OAT bytes per compiled cold code unit) / 2. ART emits about
+  // 11 OAT bytes per compiled code unit, hence about 5.5.
+  float net_oat_weight{5.5f};
+
+  // Refuses a configuration no run may use. Config is untrusted input, so the
+  // checks run in opt builds too.
+  void validate() const {
+    // The weight multiplies every net saving: an infinite one makes them NaN or
+    // infinite and breaks the ranking.
+    always_assert_log(std::isfinite(net_oat_weight) && net_oat_weight > 0,
+                      "net_oat_weight must be finite and positive, got %f",
+                      static_cast<double>(net_oat_weight));
+  }
 };
 
 } // namespace method_splitting_impl

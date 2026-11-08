@@ -25,6 +25,7 @@
 #include "IRInstruction.h"
 #include "MethodSplitter.h"
 #include "Show.h"
+#include "SplitNetSaving.h"
 
 namespace method_splitting_test {
 
@@ -154,6 +155,7 @@ method_splitting_impl::Config splitterTestConfig() {
   c.min_hot_cold_split_size = 4;
   c.min_hot_split_size = 4;
   c.min_cold_split_size = 4;
+  c.min_suffix_sub_floor_split_size = 4;
   c.split_block_size = 100000;
   c.max_overhead_ratio = 0.5;
   c.max_hot_overhead_ratio = 0.5;
@@ -169,10 +171,14 @@ method_splitting_impl::Config regionTestConfig() {
   return c;
 }
 
-SplitResult runSplitter(std::string_view sig,
-                        std::string_view code_sexpr,
-                        const method_splitting_impl::Config& cfg,
-                        std::string_view class_prefix) {
+namespace {
+
+SplitResult run_splitter(std::string_view sig,
+                         std::string_view code_sexpr,
+                         const method_splitting_impl::Config& cfg,
+                         std::string_view class_prefix,
+                         bool host_compiled) {
+  cfg.validate();
   auto [cls, m] = make_test_class(sig, code_sexpr, class_prefix);
   DexStoresVector stores;
   stores.emplace_back("test_store");
@@ -180,6 +186,15 @@ SplitResult runSplitter(std::string_view sig,
   method_splitting_impl::Stats stats;
   method_splitting_impl::EvaluationLog evaluations;
   stats.evaluations = &evaluations;
+  // Mark the host as compiled from the baseline profile (production reads
+  // this from the profile), so that the net saving counts the cold code a
+  // split takes out of it. Splitting shrinks the OAT only by taking cold code
+  // out of an ahead-of-time-compiled method, and on an uncompiled host no
+  // suffix is net-evaluated. A test can ask for an uncompiled host instead.
+  InsertOnlyConcurrentSet<const DexMethod*> hot_methods;
+  if (host_compiled) {
+    hot_methods.insert(m);
+  }
   // A null `min_sdk_api` leaves every EXTERNAL type failing the loadability
   // check, which is the conservative default the harness wants.
   method_splitting_impl::StoreRefCheckers store_ref_checkers(
@@ -187,8 +202,10 @@ SplitResult runSplitter(std::string_view sig,
   method_splitting_impl::split_methods_in_stores(
       stores, /* min_sdk */ 0, cfg, store_ref_checkers,
       /* create_init_class_insns */ false,
-      /* reserved_mrefs */ 0, /* reserved_trefs */ 0, &stats);
+      /* reserved_mrefs */ 0, /* reserved_trefs */ 0, &stats,
+      /* name_infix */ "", &hot_methods);
   SplitResult res;
+  res.main_method = m;
   for (const auto& [out, kind] : stats.added_methods) {
     if (kind == method_splitting_impl::SplitKind::Region) {
       res.region_splits.push_back(out);
@@ -201,6 +218,54 @@ SplitResult runSplitter(std::string_view sig,
   expectEveryCandidateHasOneFate(res.stats, res.evaluations,
                                  /* one_host */ true);
   return res;
+}
+
+} // namespace
+
+SplitResult runSplitter(std::string_view sig,
+                        std::string_view code_sexpr,
+                        const method_splitting_impl::Config& cfg,
+                        std::string_view class_prefix) {
+  return run_splitter(sig, code_sexpr, cfg, class_prefix,
+                      /*host_compiled=*/true);
+}
+
+SplitResult runSplitterOnUncompiledHost(
+    std::string_view sig,
+    std::string_view code_sexpr,
+    const method_splitting_impl::Config& cfg) {
+  return run_splitter(sig, code_sexpr, cfg, "LFoo", /*host_compiled=*/false);
+}
+
+std::string describeSelection(const SplitResult& res) {
+  std::ostringstream oss;
+  auto fates = [&](std::string_view kind,
+                   const method_splitting_impl::FateSnapshot& f) {
+    oss << "\n" << kind << " candidates=" << f.candidates << ":";
+    for (size_t i = 0; i < method_splitting_impl::kCandidateFateCount; ++i) {
+      if (f.n[i] != 0) {
+        oss << " " << method_splitting_impl::kCandidateFateNames[i].name << "="
+            << f.n[i];
+      }
+    }
+  };
+  fates("suffix", res.stats.suffix_fates);
+  oss << "\nall_splits=" << res.stats.split_count
+      << " dex_limits_hit=" << res.stats.dex_limits_hit;
+  return oss.str();
+}
+
+std::vector<method_splitting_impl::CandidateEvaluation> evaluationsOf(
+    const SplitResult& res,
+    method_splitting_impl::SplitKind kind,
+    std::optional<method_splitting_impl::CandidateFate> fate) {
+  std::vector<method_splitting_impl::CandidateEvaluation> out;
+  for (const auto& e : res.evaluations) {
+    if (e.kind == kind && (!fate || e.fate == *fate)) {
+      out.push_back(e);
+    }
+  }
+  return out;
 }
 
 void expectEveryCandidateHasOneFate(
@@ -271,6 +336,23 @@ std::vector<std::string> reachableFieldNames(DexMethod* m) {
     }
   }
   return names;
+}
+
+size_t countFieldRefsIn(const SplitResult& res,
+                        std::string_view marker,
+                        Where where) {
+  size_t n = 0;
+  if (where != Where::SuffixSplits) {
+    for (auto* m : res.region_splits) {
+      n += countFieldRefs(m, marker);
+    }
+  }
+  if (where != Where::RegionSplits) {
+    for (auto* m : res.suffix_splits) {
+      n += countFieldRefs(m, marker);
+    }
+  }
+  return n;
 }
 
 // A structural fingerprint of the outcome: which markers ended up in which

@@ -189,8 +189,8 @@ ConcurrentSet<DexMethod*> split_splittable_closures(
     auto record = [stats](const SplittableClosure& sc, CandidateFate fate,
                           const DexMethod* split = nullptr) {
       stats->record(
-          SplitKind::Suffix, [&sc] { return sc.head_ids(); }, fate,
-          sc.covered_code_units, split);
+          SplitKind::Suffix, [&sc] { return sc.head_ids(); }, sc.net_terms,
+          fate, sc.covered_code_units, split);
     };
     for (auto it = ranked_splittable_closures.begin();
          it != ranked_splittable_closures.end();

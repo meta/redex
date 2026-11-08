@@ -28,6 +28,7 @@
 #include "DexAssessments.h"
 #include "DexStore.h"
 #include "DexStructure.h"
+#include "HotCallsites.h"
 #include "IRCode.h"
 #include "InstructionLowering.h"
 #include "LoopInfo.h"
@@ -37,7 +38,7 @@
 #include "Show.h"
 #include "SourceBlocks.h"
 #include "Trace.h"
-#include "TypeInference.h"
+#include "TypeUtil.h"
 #include "Walkers.h"
 
 namespace {
@@ -89,7 +90,7 @@ std::string hrf_descriptor(const DexMethod* method) {
 }
 
 // NOTE: `baseline_profiles::is_compiled` is a deliberate under-approximation,
-// kept because the never_inline analysis below has been tuned against it. It
+// kept because the never_inline analysis has been tuned against it. It
 // ignores the startup flag and the no-code / @NeverCompile gates. For
 // profile-health reporting use `uncompilable_reason` and
 // `flags_request_compilation` above, which model dex2oat exactly; the gap
@@ -128,176 +129,20 @@ void never_inline(bool attach_annotations,
       type::dalvik_annotation_optimization_NeverInline(),
       DexAnnotationVisibility::DAV_BUILD));
 
-  auto consider_callee = [&](DexMethod* callee) {
-    if (callee == nullptr || (callee->get_code() == nullptr)) {
-      return false;
-    }
-    auto* cls = type_class(callee->get_class());
-    if ((cls == nullptr) || cls->is_external()) {
-      return false;
-    }
-    if (callee->is_virtual() && (!is_final(callee) && !is_final(cls))) {
-      return false;
-    }
-    return true;
-  };
-
-  using ReceiverMap = UnorderedMap<const IRInstruction*, const DexType*>;
-  InsertOnlyConcurrentMap<DexMethod*, ReceiverMap> receiver_types;
-  auto get_callee = [&](DexMethod* caller,
-                        IRInstruction* invoke_insn) -> DexMethod* {
-    DexMethod* callee;
-    do {
-      callee = nullptr;
-      auto caller_it = receiver_types.find(caller);
-      if (caller_it != receiver_types.end()) {
-        const auto& map = caller_it->second;
-        auto map_it = map.find(invoke_insn);
-        if (map_it != map.end()) {
-          const auto* receiver_type = map_it->second;
-          auto* receiver_cls = type_class(receiver_type);
-          if ((receiver_cls != nullptr) && !is_interface(receiver_cls)) {
-            auto* invoke_method = invoke_insn->get_method();
-            callee = resolve_virtual_deprecated(receiver_cls,
-                                                invoke_method->get_name(),
-                                                invoke_method->get_proto());
-          }
-        }
-      }
-      if (callee == nullptr) {
-        callee = resolve_invoke_method_deprecated(invoke_insn, caller);
-      }
-      if (!consider_callee(callee)) {
-        return nullptr;
-      }
-      caller = callee;
-      invoke_insn = nullptr;
-    } while (never_inline_analysis::is_simple(callee, &invoke_insn) &&
-             invoke_insn != nullptr);
-    return callee;
-  };
-
-  // Analyze caller/callee relationships
-  std::atomic<size_t> callers_too_many_instructions{0};
-  std::atomic<size_t> callers_too_many_registers{0};
-  InsertOnlyConcurrentSet<DexMethod*> hot_cold_callees;
-  AtomicMap<DexMethod*, size_t> hot_callsite_counts;
-  InsertOnlyConcurrentMap<DexMethod*, size_t> estimated_instructions;
-  InsertOnlyConcurrentMap<DexMethod*, bool> has_catches;
-  walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {
-    size_t instructions = code.count_opcodes();
-    estimated_instructions.emplace(method, instructions);
-
-    auto blocks = code.cfg().blocks();
-    bool has_catch =
-        std::any_of(blocks.begin(), blocks.end(),
-                    [](cfg::Block* block) { return block->is_catch(); });
-    has_catches.emplace(method, has_catch);
-
-    type_inference::TypeInference ti(code.cfg());
-    ti.run(method);
-    const auto& type_envs = ti.get_type_environments();
-    ReceiverMap map;
-    for (auto& mie : InstructionIterable(code.cfg())) {
-      auto* insn = mie.insn;
-      auto op = insn->opcode();
-      if (!opcode::is_invoke_virtual(op) && !opcode::is_invoke_interface(op)) {
-        continue;
-      }
-      always_assert(type_envs.count(insn));
-      const auto& env = type_envs.at(insn);
-      auto dex_type = env.get_dex_type(insn->src(0));
-      if (dex_type.has_value()) {
-        map.emplace(insn, *dex_type);
-      }
-    }
-    receiver_types.emplace(method, std::move(map));
-  });
-  auto method_profile_appears = [&](DexMethod* method, float appear_threshold) {
-    for (const auto& p : method_profiles.all_interactions()) {
-      auto it = p.second.find(method);
-      if (it != p.second.end() &&
-          it->second.appear_percent >= appear_threshold) {
-        return true;
-      }
-    }
-    return false;
-  };
-  auto is_sufficiently_hot = [&](cfg::Block* block, DexMethod* callee) {
-    if (!is_compiled(baseline_profile, callee)) {
-      return false;
-    }
-    if (hot_block_appear_threshold >= 0 &&
-        !source_blocks::maybe_hot(block, hot_block_appear_threshold)) {
-      return false;
-    }
-    if (hot_method_appear_threshold >= 0 &&
-        !source_blocks::method_maybe_hot(callee, hot_method_appear_threshold) &&
-        !method_profile_appears(callee, hot_method_appear_threshold)) {
-      return false;
-    }
-    return true;
-  };
-  walk::parallel::code(scope, [&](DexMethod* caller, IRCode& code) {
-    if (!is_compiled(baseline_profile, caller)) {
-      return;
-    }
-    size_t caller_instructions = estimated_instructions.at(caller);
-    if (caller_instructions > thresholds.max_caller_instructions) {
-      callers_too_many_instructions.fetch_add(1);
-      return;
-    }
-    size_t caller_registers = code.cfg().get_registers_size();
-    if (caller_registers > thresholds.max_caller_registers) {
-      callers_too_many_registers.fetch_add(1);
-      return;
-    }
-    for (auto* b : code.cfg().blocks()) {
-      bool callsite_has_catch =
-          code.cfg().get_succ_edge_of_type(b, cfg::EDGE_THROW) != nullptr;
-      bool has_throw = false;
-      bool has_non_init_invoke = false;
-      for (auto& mie : InstructionIterable(b).reversed()) {
-        auto* insn = mie.insn;
-        if (!opcode::is_an_invoke(insn->opcode())) {
-          if (opcode::is_throw(insn->opcode())) {
-            has_throw = true;
-          }
-          continue;
-        }
-        if (has_throw && !has_non_init_invoke) {
-          if (!method::is_init(insn->get_method())) {
-            has_non_init_invoke = true;
-          }
-          continue;
-        }
-
-        DexMethod* callee = get_callee(caller, insn);
-        if (callee == nullptr) {
-          continue;
-        }
-
-        auto it = estimated_instructions.find(callee);
-        if (it == estimated_instructions.end()) {
-          continue;
-        }
-
-        if (callsite_has_catch && has_catches.at(callee)) {
-          continue;
-        }
-
-        if (is_sufficiently_hot(b, callee)) {
-          hot_callsite_counts.fetch_add(callee, 1);
-        } else {
-          hot_cold_callees.insert(callee);
-        }
-      }
-    }
-  });
+  never_inline_analysis::HotCallsites hot_callsites(
+      scope, baseline_profile, method_profiles,
+      never_inline_analysis::HotCallsiteThresholds{
+          .hot_block_appear_threshold = hot_block_appear_threshold,
+          .hot_method_appear_threshold = hot_method_appear_threshold,
+          .max_caller_instructions = thresholds.max_caller_instructions,
+          .max_caller_registers = thresholds.max_caller_registers,
+      });
+  const auto& hot_cold_callees = hot_callsites.hot_cold_callees;
+  const auto& hot_callsite_counts = hot_callsites.hot_callsite_counts;
   mgr.incr_metric("never_inline_callers_too_many_instructions",
-                  callers_too_many_instructions.load());
+                  hot_callsites.callers_too_many_instructions);
   mgr.incr_metric("never_inline_callers_too_many_registers",
-                  callers_too_many_registers.load());
+                  hot_callsites.callers_too_many_registers);
   mgr.incr_metric("never_inline_hot_cold_callees", hot_cold_callees.size());
   mgr.incr_metric("never_inline_hot_hot_callees", hot_callsite_counts.size());
 
@@ -849,11 +694,14 @@ void ArtProfileWriterPass::bind_config() {
   bind("never_inline_estimate", false, m_never_inline_estimate);
   bind("never_inline_attach_annotations", false,
        m_never_inline_attach_annotations);
-  bind("never_inline_hot_block_appear_threshold", -1.0f,
+  bind("never_inline_hot_block_appear_threshold",
+       never_inline_analysis::kDefaultAppearThreshold,
        m_never_inline_hot_block_appear_threshold);
-  bind("never_inline_hot_method_appear_threshold", -1.0f,
+  bind("never_inline_hot_method_appear_threshold",
+       never_inline_analysis::kDefaultAppearThreshold,
        m_never_inline_hot_method_appear_threshold);
-  bind("never_inline_max_caller_instructions", 1100,
+  bind("never_inline_max_caller_instructions",
+       never_inline_analysis::kDefaultMaxCallerInstructions,
        m_never_inline_max_caller_instructions,
        "Skip a caller with more estimated instructions "
        "(`IRCode::count_opcodes`) than this. Shadows ART's 1024-HIR caller "
@@ -861,19 +709,22 @@ void ArtProfileWriterPass::bind_config() {
        "not IR opcodes (measured 1.83-1.99 HIR per distinct dex pc, up to 3.60 "
        "on tiny methods), so this value can land on either side of 1024 HIR "
        "depending on the method.");
-  bind("never_inline_max_caller_registers", 32,
+  bind("never_inline_max_caller_registers",
+       never_inline_analysis::kDefaultMaxCallerRegisters,
        m_never_inline_max_caller_registers,
        "Skip a caller needing more registers than this. Shadows ART's 32-slot "
        "inlining environment budget, with no margin.");
   bind(
-      "never_inline_max_callee_code_units", 40,
+      "never_inline_max_callee_code_units",
+      never_inline_analysis::kDefaultMaxCalleeCodeUnits,
       m_never_inline_max_callee_code_units,
       "Do not annotate a callee larger than this many estimated code units "
       "(`IRCode::estimate_code_units`). Shadows ART's own callee size cliff, "
       "with a large margin: the cliff is cited as 14 code units in this file's "
       "history and as 32 (`NotInlinedCodeItem`) elsewhere, and neither number "
       "has been verified against a measurement.");
-  bind("never_inline_min_callee_instructions", 4,
+  bind("never_inline_min_callee_instructions",
+       never_inline_analysis::kDefaultMinCalleeInstructions,
        m_never_inline_min_callee_instructions,
        "Do not annotate a callee with fewer estimated instructions than this: "
        "ART inlines trivial bodies whatever the annotation says, so the "

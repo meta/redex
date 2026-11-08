@@ -7,6 +7,12 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <bit>
+#include <functional>
+#include <set>
+#include <vector>
+
 #include "Creators.h"
 #include "Debug.h"
 #include "IRAssembler.h"
@@ -159,6 +165,525 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_primitive) {
         get_result_type(ota, {insn}, /* optional_extra_type */ type::_int());
     EXPECT_EQ(result_type, type::_int());
   }
+}
+
+TEST_F(OutlinerTypeAnalysisTest, integral_type_join_and_order) {
+  using IT = outliner_impl::IntegralType;
+  auto k = [](int64_t v) { return IT::constant(v); };
+  auto t = [](const DexType* type) { return IT::of(type); };
+  auto join = [](std::initializer_list<IT> values) {
+    std::optional<IT> joined;
+    for (const auto& v : values) {
+      joined = IT::join(joined, v);
+    }
+    return *joined;
+  };
+  EXPECT_TRUE(join({k(65), k(-3)}).is_constant());
+  EXPECT_EQ(join({k(65), t(type::_char())}).type(), type::_char());
+  EXPECT_EQ(join({k(65), t(type::_byte())}).type(), type::_byte());
+  EXPECT_EQ(join({k(200), t(type::_byte())}).type(), type::_short());
+  EXPECT_EQ(join({k(40000), t(type::_boolean())}).type(), type::_char());
+  EXPECT_EQ(join({k(65), t(type::_boolean())}).type(), type::_byte());
+  EXPECT_EQ(join({k(-1), t(type::_char())}).type(), type::_int());
+  EXPECT_EQ(join({k(40000), t(type::_short())}).type(), type::_int());
+  // ART merges 65 with a `boolean` into `byte`, which a `char` takes to `int`;
+  // in the other orders the result is `char`. Only `int` holds in all.
+  EXPECT_EQ(join({k(65), t(type::_boolean()), t(type::_char())}).type(),
+            type::_int());
+  EXPECT_EQ(join({k(65), t(type::_boolean()), t(type::_char())}).exact_type(),
+            nullptr);
+  EXPECT_EQ(join({k(65), k(40000), t(type::_boolean())}).type(), type::_int());
+  EXPECT_EQ(join({k(65), k(40000), t(type::_boolean())}).exact_type(), nullptr);
+  // Every order merges a `boolean` and 2 into `byte`, and a `byte` and 200
+  // into `short`.
+  EXPECT_EQ(join({k(2), t(type::_boolean())}).exact_type(), type::_byte());
+  EXPECT_EQ(join({k(200), t(type::_byte())}).exact_type(), type::_short());
+  EXPECT_EQ(join({k(65), k(74)}).exact_type(), nullptr);
+  EXPECT_EQ(join({t(type::_short()), t(type::_char())}).type(), type::_int());
+  EXPECT_EQ(join({t(type::_boolean()), t(type::_char())}).type(),
+            type::_char());
+  // The join is a union: grouping does not change the type.
+  EXPECT_EQ(IT::join(join({k(65), t(type::_char())}), t(type::_boolean())),
+            join({k(65), t(type::_char()), t(type::_boolean())}));
+
+  EXPECT_TRUE(join({k(65), k(74)}).held_by(type::_char()));
+  EXPECT_TRUE(join({k(65), k(74)}).held_by(type::_byte()));
+  EXPECT_FALSE(join({k(-1), k(74)}).held_by(type::_char()));
+  EXPECT_FALSE(t(type::_char()).leq(join({k(0), k(65535)})));
+  EXPECT_TRUE(join({k(1), k(2)}).leq(join({k(0), k(65535)})));
+  EXPECT_FALSE(join({k(1), k(40000)}).leq(join({k(0), k(65)})));
+  EXPECT_TRUE(t(type::_byte()).leq(t(type::_short())));
+  EXPECT_FALSE(t(type::_byte()).leq(t(type::_char())));
+}
+
+// Which integral types hold a constant, at every edge of their ranges: `int`
+// holds each value, and `boolean`, `byte`, `short` and `char` exactly those in
+// [0, 1], [-128, 127], [-32768, 32767] and [0, 65535].
+TEST_F(OutlinerTypeAnalysisTest, integral_constant_held_by_type_ranges) {
+  using IT = outliner_impl::IntegralType;
+  struct Row {
+    int64_t value;
+    bool z, b, s, c;
+  };
+  const std::vector<Row> rows = {
+      {-32769, false, false, false, false}, {-32768, false, false, true, false},
+      {-129, false, false, true, false},    {-128, false, true, true, false},
+      {-1, false, true, true, false},       {0, true, true, true, true},
+      {1, true, true, true, true},          {2, false, true, true, true},
+      {127, false, true, true, true},       {128, false, false, true, true},
+      {32767, false, false, true, true},    {32768, false, false, false, true},
+      {65535, false, false, false, true},   {65536, false, false, false, false},
+  };
+  for (const auto& r : rows) {
+    const auto k = IT::constant(r.value);
+    EXPECT_EQ(k.held_by(type::_boolean()), r.z) << r.value;
+    EXPECT_EQ(k.held_by(type::_byte()), r.b) << r.value;
+    EXPECT_EQ(k.held_by(type::_short()), r.s) << r.value;
+    EXPECT_EQ(k.held_by(type::_char()), r.c) << r.value;
+    EXPECT_TRUE(k.held_by(type::_int())) << r.value;
+  }
+}
+
+namespace art_oracle {
+
+// The integral part of ART's `RegType::Merge`
+// (art/runtime/verifier/reg_type.cc), over ART's own representation. A
+// constant is held as one value. Merging two constants of opposite signs gives
+// the least of ART's byte, short and int constants that holds both, and each
+// of those is held as the most negative value of its type.
+struct Reg {
+  enum Kind { Boolean, Byte, Short, Char, Integer, Constant } kind;
+  int64_t value{0};
+
+  bool is_constant() const { return kind == Constant; }
+  bool in(int64_t lo, int64_t hi) const {
+    return is_constant() && value >= lo && value <= hi;
+  }
+  bool constant_boolean() const { return in(0, 1); }
+  bool constant_byte() const { return in(-128, 127); }
+  bool constant_short() const { return in(-32768, 32767); }
+  bool constant_char() const { return in(0, 65535); }
+  bool boolean_types() const { return kind == Boolean || constant_boolean(); }
+  bool byte_types() const {
+    return constant_byte() || kind == Byte || boolean_types();
+  }
+  bool short_types() const {
+    return kind == Short || byte_types() || constant_short();
+  }
+  bool char_types() const {
+    return kind == Char || boolean_types() || constant_char();
+  }
+};
+
+Reg merge(const Reg& a, const Reg& b) {
+  if (a.kind == b.kind && (!a.is_constant() || a.value == b.value)) {
+    return a;
+  }
+  if (a.is_constant() && b.is_constant()) {
+    if (a.value >= 0 && b.value >= 0) {
+      return {Reg::Constant, std::max(a.value, b.value)};
+    }
+    if (a.value < 0 && b.value < 0) {
+      return {Reg::Constant, std::min(a.value, b.value)};
+    }
+    const Reg byte_constant{Reg::Constant, -128};
+    const Reg short_constant{Reg::Constant, -32768};
+    const Reg int_constant{Reg::Constant, std::numeric_limits<int32_t>::min()};
+    if (a.constant_byte()) {
+      return b.constant_byte()    ? byte_constant
+             : b.constant_short() ? short_constant
+                                  : int_constant;
+    }
+    if (a.constant_short()) {
+      return b.constant_short() ? short_constant : int_constant;
+    }
+    return int_constant;
+  }
+  if (a.boolean_types() && b.boolean_types()) {
+    return {Reg::Boolean};
+  }
+  if (a.byte_types() && b.byte_types()) {
+    return {Reg::Byte};
+  }
+  if (a.short_types() && b.short_types()) {
+    return {Reg::Short};
+  }
+  if (a.char_types() && b.char_types()) {
+    return {Reg::Char};
+  }
+  return {Reg::Integer};
+}
+
+outliner_impl::IntegralType to_integral_type(const Reg& r) {
+  using IT = outliner_impl::IntegralType;
+  switch (r.kind) {
+  case Reg::Boolean:
+    return IT::of(type::_boolean());
+  case Reg::Byte:
+    return IT::of(type::_byte());
+  case Reg::Short:
+    return IT::of(type::_short());
+  case Reg::Char:
+    return IT::of(type::_char());
+  case Reg::Integer:
+    return IT::of(type::_int());
+  case Reg::Constant:
+    return IT::constant(r.value);
+  }
+  not_reached();
+}
+
+// Every result ART's merge can reach for `values`, over every order and
+// grouping in which it merges them.
+std::vector<Reg> every_merge(const std::vector<Reg>& values) {
+  if (values.size() == 1) {
+    return values;
+  }
+  std::vector<Reg> out;
+  // Split into two non-empty groups in every way; each group merges first.
+  const size_t n = values.size();
+  for (size_t mask = 1; mask + 1 < (size_t{1} << n); ++mask) {
+    std::vector<Reg> left;
+    std::vector<Reg> right;
+    for (size_t i = 0; i < n; ++i) {
+      ((mask >> i) & 1u) != 0 ? left.push_back(values[i])
+                              : right.push_back(values[i]);
+    }
+    for (const auto& l : every_merge(left)) {
+      for (const auto& r : every_merge(right)) {
+        out.push_back(merge(l, r));
+      }
+    }
+  }
+  return out;
+}
+
+} // namespace art_oracle
+
+// Checks `IntegralType` against ART's merge. The values are every multiset of
+// up to four drawn from the five integral types and ten constants, which cover
+// every way the types hold a constant. The merge runs in every order and
+// grouping. ART never reaches a type above the join, some order reaches the
+// join, and `exact_type()` answers exactly when every order reaches the same
+// type.
+TEST_F(OutlinerTypeAnalysisTest, integral_type_join_covers_every_art_merge) {
+  using art_oracle::Reg;
+  using IT = outliner_impl::IntegralType;
+  std::vector<Reg> leaves{
+      {Reg::Boolean}, {Reg::Byte}, {Reg::Short}, {Reg::Char}, {Reg::Integer}};
+  for (int64_t v : {-40000, -129, -1, 0, 1, 65, 200, 32767, 40000, 65536}) {
+    leaves.push_back({Reg::Constant, v});
+  }
+  size_t multisets = 0;
+  size_t typed = 0;
+  size_t exact = 0;
+  std::function<void(std::vector<Reg>&, size_t)> each;
+  each = [&](std::vector<Reg>& values, size_t from) {
+    if (!values.empty()) {
+      ++multisets;
+      std::optional<IT> accumulated;
+      for (const auto& v : values) {
+        accumulated = IT::join(accumulated, art_oracle::to_integral_type(v));
+      }
+      const auto joined = *accumulated;
+      bool reached = false;
+      std::optional<const DexType*> every_order;
+      bool orders_agree = true;
+      for (const auto& r : art_oracle::every_merge(values)) {
+        const auto art = art_oracle::to_integral_type(r);
+        EXPECT_TRUE(art.leq(joined));
+        reached =
+            reached || (joined.is_constant() ? art.is_constant()
+                                             : art.type() == joined.type());
+        if (!joined.is_constant()) {
+          if (every_order && *every_order != art.type()) {
+            orders_agree = false;
+          }
+          every_order = art.type();
+        }
+      }
+      EXPECT_TRUE(reached);
+      if (joined.is_constant()) {
+        EXPECT_EQ(joined.exact_type(), nullptr);
+      } else {
+        ++typed;
+        if (orders_agree) {
+          ++exact;
+          EXPECT_EQ(joined.exact_type(), *every_order);
+        } else {
+          EXPECT_EQ(joined.exact_type(), nullptr);
+        }
+      }
+    }
+    if (values.size() == 4) {
+      return;
+    }
+    for (size_t i = from; i < leaves.size(); ++i) {
+      values.push_back(leaves[i]);
+      each(values, i);
+      values.pop_back();
+    }
+  };
+  std::vector<Reg> values;
+  each(values, 0);
+  EXPECT_EQ(multisets, 3875u);
+  EXPECT_EQ(typed, 2875u);
+  EXPECT_EQ(exact, 2830u);
+}
+
+namespace art16 {
+
+// The integral register kinds of android-16.0.0_r1
+// `runtime/verifier/reg_type.h`, each group of constants in the enumerator
+// order the merge relies on.
+enum Kind : uint8_t {
+  kBoolean,
+  kByte,
+  kChar,
+  kShort,
+  kInteger,
+  kZero,
+  kBooleanConstant,
+  kPositiveByteConstant,
+  kPositiveShortConstant,
+  kCharConstant,
+  kByteConstant,
+  kShortConstant,
+  kIntegerConstant,
+  kNumKinds,
+};
+
+constexpr bool is_constant(uint8_t k) { return k >= kZero; }
+constexpr bool is_boolean_types(uint8_t k) {
+  return k == kBoolean || k == kZero || k == kBooleanConstant;
+}
+constexpr bool is_byte_types(uint8_t k) {
+  return k == kByte || k == kPositiveByteConstant || k == kByteConstant ||
+         is_boolean_types(k);
+}
+constexpr bool is_short_types(uint8_t k) {
+  return k == kShort || k == kPositiveShortConstant || k == kShortConstant ||
+         is_byte_types(k);
+}
+constexpr bool is_char_types(uint8_t k) {
+  return k == kChar || k == kCharConstant || k == kPositiveShortConstant ||
+         k == kPositiveByteConstant || is_boolean_types(k);
+}
+
+// `RegTypeMergeImpl::MergeKind` (`runtime/verifier/reg_type.cc`) on two
+// integral kinds.
+constexpr uint8_t merge(uint8_t a, uint8_t b) {
+  if (is_constant(a) && is_constant(b)) {
+    auto is_non_negative = [](uint8_t k) {
+      return k == kZero || k == kBooleanConstant ||
+             k == kPositiveByteConstant || k == kPositiveShortConstant ||
+             k == kCharConstant;
+    };
+    if (is_non_negative(a) == is_non_negative(b)) {
+      return a >= b ? a : b;
+    }
+    const uint8_t non_negative = is_non_negative(a) ? a : b;
+    const uint8_t can_be_negative = is_non_negative(a) ? b : a;
+    if (can_be_negative == kByteConstant &&
+        non_negative <= kPositiveByteConstant) {
+      return kByteConstant;
+    }
+    if (can_be_negative <= kShortConstant &&
+        non_negative <= kPositiveShortConstant) {
+      return kShortConstant;
+    }
+    return kIntegerConstant;
+  }
+  if (is_boolean_types(a) && is_boolean_types(b)) {
+    return kBoolean;
+  }
+  if (is_byte_types(a) && is_byte_types(b)) {
+    return kByte;
+  }
+  if (is_short_types(a) && is_short_types(b)) {
+    return kShort;
+  }
+  if (is_char_types(a) && is_char_types(b)) {
+    return kChar;
+  }
+  return kInteger;
+}
+
+outliner_impl::IntegralType to_integral_type(uint8_t k) {
+  using IT = outliner_impl::IntegralType;
+  switch (k) {
+  case kBoolean:
+    return IT::of(type::_boolean());
+  case kByte:
+    return IT::of(type::_byte());
+  case kChar:
+    return IT::of(type::_char());
+  case kShort:
+    return IT::of(type::_short());
+  case kInteger:
+    return IT::of(type::_int());
+  default: {
+    // A value of each constant kind's range.
+    static const int64_t kValues[] = {0, 1, 2, 128, 32768, -1, -129, 65536};
+    return IT::constant(kValues[k - kZero]);
+  }
+  }
+}
+
+const DexType* to_dex_type(uint8_t k) {
+  switch (k) {
+  case kBoolean:
+    return type::_boolean();
+  case kByte:
+    return type::_byte();
+  case kChar:
+    return type::_char();
+  case kShort:
+    return type::_short();
+  default:
+    always_assert(k == kInteger);
+    return type::_int();
+  }
+}
+
+// For every non-empty set of kinds, given as a mask: the kinds at which some
+// merge tree whose leaves are exactly that set ends.
+std::vector<uint16_t> ends_of_every_merge_tree() {
+  constexpr uint16_t kAll = (1u << kNumKinds) - 1;
+  std::vector<uint16_t> ends(kAll + 1, 0);
+  // `with[m][k]`: the merges of each kind in `m` with `k`.
+  std::vector<std::array<uint16_t, kNumKinds>> with(kAll + 1);
+  for (uint32_t m = 1; m <= kAll; ++m) {
+    for (uint8_t k = 0; k < kNumKinds; ++k) {
+      uint16_t r = 0;
+      for (uint8_t j = 0; j < kNumKinds; ++j) {
+        if ((m & (1u << j)) != 0) {
+          r |= 1u << merge(j, k);
+        }
+      }
+      with[m][k] = r;
+    }
+  }
+  // Visit sets in increasing order, so both halves of a split are already
+  // computed.
+  for (uint32_t set = 1; set <= kAll; ++set) {
+    if (std::popcount(set) == 1) {
+      ends[set] = set;
+      continue;
+    }
+    uint16_t r = 0;
+    for (uint32_t left = (set - 1) & set; left != 0; left = (left - 1) & set) {
+      const uint32_t right = set & ~left;
+      if (left < right) {
+        continue;
+      }
+      for (uint8_t k = 0; k < kNumKinds; ++k) {
+        if ((ends[right] & (1u << k)) != 0) {
+          r |= with[ends[left]][k];
+        }
+      }
+    }
+    ends[set] = r;
+  }
+  return ends;
+}
+
+} // namespace art16
+
+// Checks `IntegralType` against android-16's merge of every set of the 13
+// integral register kinds, over every merge tree. `type()` is the least type
+// above every end, and `exact_type()` is the end when all trees agree. A merge
+// tree whose leaves repeat a kind reaches no other end; the test checks that
+// for every multiset of up to four kinds.
+TEST_F(OutlinerTypeAnalysisTest,
+       integral_type_matches_art16_merge_of_every_kind_set) {
+  using IT = outliner_impl::IntegralType;
+  const auto ends = art16::ends_of_every_merge_tree();
+  size_t typed = 0;
+  size_t order_dependent = 0;
+  for (uint32_t set = 1; set < ends.size(); ++set) {
+    std::optional<IT> joined;
+    for (uint8_t k = 0; k < art16::kNumKinds; ++k) {
+      if ((set & (1u << k)) != 0) {
+        joined = IT::join(joined, art16::to_integral_type(k));
+      }
+    }
+    const bool constants_only = (set & ((1u << art16::kZero) - 1)) == 0;
+    EXPECT_EQ(joined->is_constant(), constants_only);
+    if (constants_only) {
+      continue;
+    }
+    ++typed;
+    std::optional<IT> upper;
+    for (uint8_t k = 0; k < art16::kNumKinds; ++k) {
+      if ((ends[set] & (1u << k)) != 0) {
+        ASSERT_FALSE(art16::is_constant(k));
+        upper = IT::join(upper, IT::of(art16::to_dex_type(k)));
+      }
+    }
+    EXPECT_EQ(joined->type(), upper->type()) << "kind set " << set;
+    if (std::popcount(ends[set]) == 1) {
+      EXPECT_EQ(joined->exact_type(),
+                art16::to_dex_type(std::countr_zero(ends[set])))
+          << "kind set " << set;
+    } else {
+      ++order_dependent;
+      EXPECT_EQ(ends[set], (1u << art16::kChar) | (1u << art16::kInteger));
+      EXPECT_EQ(joined->exact_type(), nullptr) << "kind set " << set;
+    }
+  }
+  EXPECT_EQ(typed, 8191u - 255u);
+  EXPECT_EQ(order_dependent, 36u);
+
+  // Every merge tree over a multiset ends where the trees over its distinct
+  // kinds do.
+  std::function<std::set<uint8_t>(const std::vector<uint8_t>&)> every_end;
+  every_end = [&](const std::vector<uint8_t>& leaves) {
+    if (leaves.size() == 1) {
+      return std::set<uint8_t>{leaves[0]};
+    }
+    std::set<uint8_t> result;
+    const uint32_t n = leaves.size();
+    for (uint32_t left = 1; left + 1 < (1u << n); ++left) {
+      std::vector<uint8_t> l;
+      std::vector<uint8_t> r;
+      for (uint32_t i = 0; i < n; ++i) {
+        ((left & (1u << i)) != 0 ? l : r).push_back(leaves[i]);
+      }
+      for (auto a : every_end(l)) {
+        for (auto b : every_end(r)) {
+          result.insert(art16::merge(a, b));
+        }
+      }
+    }
+    return result;
+  };
+  size_t multisets = 0;
+  std::vector<uint8_t> leaves;
+  std::function<void(uint8_t)> each = [&](uint8_t from) {
+    if (!leaves.empty()) {
+      ++multisets;
+      uint16_t set = 0;
+      for (auto k : leaves) {
+        set |= 1u << k;
+      }
+      uint16_t mask = 0;
+      for (auto k : every_end(leaves)) {
+        mask |= 1u << k;
+      }
+      EXPECT_EQ(mask, ends[set]);
+    }
+    if (leaves.size() == 4) {
+      return;
+    }
+    for (uint8_t k = from; k < art16::kNumKinds; ++k) {
+      leaves.push_back(k);
+      each(k);
+      leaves.pop_back();
+    }
+  };
+  each(0);
+  EXPECT_EQ(multisets, 2379u);
 }
 
 TEST_F(OutlinerTypeAnalysisTest, get_result_type_unreachable) {

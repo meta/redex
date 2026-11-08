@@ -96,6 +96,31 @@ uint8_t holding_types(int64_t value) {
   return mask;
 }
 
+// The types among Z, B, S, C that hold every constant in `constants`, a set of
+// holding masks as `IntegralType` keeps them.
+uint8_t holding_every(uint16_t constants) {
+  uint8_t mask = (1u << Z) | (1u << B) | (1u << S) | (1u << C);
+  for (uint8_t h = 0; h < 16; ++h) {
+    if ((constants & (1u << h)) != 0) {
+      mask &= h;
+    }
+  }
+  return mask;
+}
+
+// ART's merge of a value of type `t` with a constant held by exactly the types
+// in `holding` (`RegType::Merge`): the first of Z, B, S, C that is at or above
+// `t` and holds the constant, else I. Note the order: a `boolean` and 65
+// merge into `byte` although `char` holds both too.
+constexpr uint8_t merge_type_with_constant(uint8_t t, uint8_t holding) {
+  for (uint8_t k : {Z, B, S, C}) {
+    if (integral_leq(t, k) && (holding & (1u << k)) != 0) {
+      return k;
+    }
+  }
+  return I;
+}
+
 // `float`, `long` and `double`, in the order of the bits of a mask.
 const DexType* primitive_dex_type(uint8_t mask) {
   switch (mask) {
@@ -123,12 +148,21 @@ uint8_t primitive_bit(const DexType* t) {
 }
 
 // Sorts `t` into the masks and set that `art::Value` and `art::Demand` keep.
+void add_integral(uint8_t* integral, const DexType* t) {
+  *integral |= 1u << integral_index(t);
+}
+
+void add_integral(std::optional<IntegralType>* integral, const DexType* t) {
+  *integral = IntegralType::join(*integral, IntegralType::of(t));
+}
+
+template <class IntegralRep>
 void classify(const DexType* t,
-              uint8_t* integral,
+              IntegralRep* integral,
               uint8_t* primitives,
               UnorderedSet<const DexType*>* references) {
   if (type::is_integral(t)) {
-    *integral |= 1u << integral_index(t);
+    add_integral(integral, t);
   } else if (auto bit = primitive_bit(t); bit != 0) {
     *primitives |= bit;
   } else {
@@ -161,21 +195,6 @@ bool keeps_booleanness(const IRInstruction* bitwise) {
 // Whether a demand walk follows a value through `use` into its result.
 bool follows_boolean(const IRInstruction* use) {
   return is_bitwise(use->opcode()) && keeps_booleanness(use);
-}
-
-bool any_outside_range(const UnorderedSet<const IRInstruction*>& insns,
-                       int64_t min,
-                       int64_t max) {
-  return unordered_any_of(insns, [min, max](const IRInstruction* insn) {
-    const auto literal = insn->get_literal();
-    return literal < min || literal > max;
-  });
-}
-
-template <class T>
-bool any_outside(const UnorderedSet<const IRInstruction*>& insns) {
-  return any_outside_range(insns, std::numeric_limits<T>::min(),
-                           std::numeric_limits<T>::max());
 }
 
 const DexType* compute_joined_type(const UnorderedSet<const DexType*>& types) {
@@ -220,6 +239,76 @@ void erase_redundant_references(UnorderedSet<const DexType*>* types,
 
 } // namespace
 
+IntegralType IntegralType::of(const DexType* t) {
+  return {static_cast<uint8_t>(1u << integral_index(t)), 0};
+}
+
+IntegralType IntegralType::constant(int64_t value) {
+  return {0, static_cast<uint16_t>(1u << holding_types(value))};
+}
+
+IntegralType IntegralType::join(const IntegralType& a, const IntegralType& b) {
+  return {static_cast<uint8_t>(a.m_types | b.m_types),
+          static_cast<uint16_t>(a.m_constants | b.m_constants)};
+}
+
+const DexType* IntegralType::type() const {
+  if (is_constant()) {
+    return nullptr;
+  }
+  // The join of every type and of every merge of a type with one constant.
+  // OutlinerTypeAnalysisTest checks it against ART's merge in every order.
+  uint8_t joined = kNumIntegral;
+  for (uint8_t t = 0; t < kNumIntegral; ++t) {
+    if ((m_types & (1u << t)) == 0) {
+      continue;
+    }
+    joined = joined == kNumIntegral ? t : integral_lub(joined, t);
+    for (uint8_t holding = 0; holding < 16; ++holding) {
+      if ((m_constants & (1u << holding)) != 0) {
+        joined = integral_lub(joined, merge_type_with_constant(t, holding));
+      }
+    }
+  }
+  return integral_dex_type(joined);
+}
+
+const DexType* IntegralType::exact_type() const {
+  if (is_constant()) {
+    return nullptr;
+  }
+  // The lowest type any merge order ends at is the join of the producers'
+  // types merged with all constants at once. The orders agree exactly when
+  // that lowest end is also `type()`, the highest. OutlinerTypeAnalysisTest
+  // checks this against ART's merge in every order.
+  uint8_t types = kNumIntegral;
+  for (uint8_t t = 0; t < kNumIntegral; ++t) {
+    if ((m_types & (1u << t)) != 0) {
+      types = types == kNumIntegral ? t : integral_lub(types, t);
+    }
+  }
+  const auto lowest =
+      merge_type_with_constant(types, holding_every(m_constants));
+  const auto* upper = type();
+  return integral_dex_type(lowest) == upper ? upper : nullptr;
+}
+
+bool IntegralType::leq(const IntegralType& bound) const {
+  if (bound.is_constant()) {
+    if (!is_constant()) {
+      return false;
+    }
+    auto mine = holding_every(m_constants);
+    return (mine & holding_every(bound.m_constants)) ==
+           holding_every(bound.m_constants);
+  }
+  auto b = integral_index(bound.type());
+  if (is_constant()) {
+    return b == I || (holding_every(m_constants) & (1u << b)) != 0;
+  }
+  return integral_leq(integral_index(type()), b);
+}
+
 namespace art {
 
 Value Value::unknown() {
@@ -241,48 +330,43 @@ Value Value::constant(const IRInstruction* insn) {
   always_assert(insn->opcode() == OPCODE_CONST ||
                 insn->opcode() == OPCODE_CONST_WIDE);
   Value v;
-  v.m_has_constants = true;
-  v.m_constants_held_by = holding_types(insn->get_literal());
+  v.m_constants = IntegralType::constant(insn->get_literal());
   return v;
 }
 
 void Value::join_with(const Value& other) {
   m_unknown |= other.m_unknown;
-  m_integral |= other.m_integral;
+  if (other.m_integral) {
+    m_integral = IntegralType::join(m_integral, *other.m_integral);
+  }
   m_primitives |= other.m_primitives;
   insert_unordered_iterable(m_references, other.m_references);
-  m_has_constants |= other.m_has_constants;
-  m_constants_held_by &= other.m_constants_held_by;
+  if (other.m_constants) {
+    m_constants = IntegralType::join(m_constants, *other.m_constants);
+  }
 }
 
 bool Value::is_constant() const {
-  return !m_unknown && m_has_constants && m_integral == 0 &&
-         m_primitives == 0 && m_references.empty();
+  return !m_unknown && m_constants && !m_integral && m_primitives == 0 &&
+         m_references.empty();
 }
 
 const DexType* Value::upper() const {
   if (m_unknown) {
     return nullptr;
   }
-  const int kinds = (m_integral != 0 ? 1 : 0) + std::popcount(m_primitives) +
+  const int kinds = (m_integral ? 1 : 0) + std::popcount(m_primitives) +
                     (m_references.empty() ? 0 : 1);
   if (kinds != 1) {
     return nullptr;
   }
-  if (m_integral != 0) {
-    uint8_t joined = kNumIntegral;
-    for (uint8_t t = 0; t < kNumIntegral; ++t) {
-      if ((m_integral & (1u << t)) != 0) {
-        joined = joined == kNumIntegral ? t : integral_lub(joined, t);
-      }
-    }
-    // A register that a constant reaches gets no type when the joined type
+  if (m_integral) {
+    // A register that a constant reaches gets no type when the producers' type
     // does not hold that constant.
-    if (m_has_constants && joined != I &&
-        (m_constants_held_by & (1u << joined)) == 0) {
+    if (m_constants && !m_constants->leq(*m_integral)) {
       return nullptr;
     }
-    return integral_dex_type(joined);
+    return m_integral->type();
   }
   if (m_primitives != 0) {
     return primitive_dex_type(m_primitives);
@@ -1207,6 +1291,16 @@ const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
   // value) separately and never routes it here: it carries no literal, so both
   // the constant-uses analysis and the literal-range checks below would assert
   // on it. Only real `const`/`const-wide` defs reach this point.
+  // The integral types that hold the value of every constant in `const_insns`.
+  auto constants_value = [&const_insns]() {
+    std::optional<IntegralType> value;
+    for (const auto* insn : UnorderedIterable(const_insns)) {
+      value = IntegralType::join(value,
+                                 IntegralType::constant(insn->get_literal()));
+    }
+    always_assert(value.has_value());
+    return *value;
+  };
   // 1. Let's see if we can get something out of the constant-uses analysis.
   constant_uses::TypeDemand type_demand{constant_uses::TypeDemand::None};
   for (const auto* insn : UnorderedIterable(const_insns)) {
@@ -1230,16 +1324,17 @@ const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
     return type::_double();
   } else {
     always_assert(type_demand == constant_uses::TypeDemand::Int);
-    if (!any_outside_range(const_insns, 0, 1)) {
+    const auto value = constants_value();
+    if (value.held_by(type::_boolean())) {
       return type::_boolean();
     } else {
-      auto not_short = any_outside<int16_t>(const_insns);
-      auto not_char = any_outside<uint16_t>(const_insns);
-      if (not_short && not_char) {
+      const bool short_holds = value.held_by(type::_short());
+      const bool char_holds = value.held_by(type::_char());
+      if (!short_holds && !char_holds) {
         return type::_int();
-      } else if (not_short && !not_char) {
+      } else if (!short_holds) {
         return type::_char();
-      } else if (!not_short && not_char) {
+      } else if (!char_holds) {
         return type::_short();
       }
     }
@@ -1252,27 +1347,26 @@ const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
   // Both scan all of `const_insns`, which does not change in the loop below, so
   // each is worth computing at most once. Lazily, because most opcodes reach
   // neither: an eager pair of scans would charge every caller for work the
-  // switch below usually never asks for.
-  Lazy<bool> any_outside_bit(
-      [&const_insns] { return any_outside_range(const_insns, 0, 1); });
-  Lazy<bool> any_outside_zero(
-      [&const_insns] { return any_outside_range(const_insns, 0, 0); });
+  // switch below usually never asks for. Only a zero is also a null.
+  Lazy<bool> all_boolean(
+      [&] { return constants_value().held_by(type::_boolean()); });
+  Lazy<bool> any_nonzero([&const_insns] {
+    return unordered_any_of(const_insns, [](const IRInstruction* insn) {
+      return insn->get_literal() != 0;
+    });
+  });
   for (const auto* insn : UnorderedIterable(const_insns)) {
     for (const auto& p :
          m_constant_uses->get_constant_uses(const_cast<IRInstruction*>(insn))) {
       if (candidate && candidate(p.first)) {
         continue;
       }
+      if (is_bitwise(p.first->opcode())) {
+        demand.meet_with(art::Demand::of_use(*all_boolean ? type::_boolean()
+                                                          : type::_int()));
+        continue;
+      }
       switch (p.first->opcode()) {
-      case OPCODE_AND_INT:
-      case OPCODE_OR_INT:
-      case OPCODE_XOR_INT:
-      case OPCODE_AND_INT_LIT:
-      case OPCODE_OR_INT_LIT:
-      case OPCODE_XOR_INT_LIT:
-        demand.meet_with(art::Demand::of_use(
-            *any_outside_bit ? type::_int() : type::_boolean()));
-        break;
       case OPCODE_MOVE:
         not_object = true;
         break;
@@ -1290,7 +1384,7 @@ const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
       case OPCODE_IF_GTZ:
       case OPCODE_IF_LEZ:
         // Could be int or object
-        if (*any_outside_zero) {
+        if (*any_nonzero) {
           demand.meet_with(art::Demand::of_use(type::_int()));
           break;
         }

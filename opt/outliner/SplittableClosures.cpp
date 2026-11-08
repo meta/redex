@@ -19,7 +19,6 @@
 #include "Lazy.h"
 #include "Liveness.h"
 #include "OutlinerTypeAnalysis.h"
-#include "ReducedCFGClosureAdapter.h"
 #include "Show.h"
 #include "Timer.h"
 #include "Trace.h"
@@ -486,15 +485,10 @@ std::vector<SplittableClosure> to_splittable_closures(
     }
     return res;
   });
-  Lazy<live_range::DefUseChains> def_uses([&cfg]() {
-    return std::make_unique<live_range::DefUseChains>(
-        live_range::Chains(cfg).get_def_use_chains());
-  });
   UnorderedSet<const ReducedBlock*> covered;
   std::erase_if(scored_closures, [&covered, &ota, &liveness_fp_iter,
-                                  &uninitialized_objects, &insns, &def_uses,
-                                  max_live_in, ref_checker,
-                                  arg_type_illegal](auto& sc) {
+                                  &uninitialized_objects, &insns, max_live_in,
+                                  ref_checker, arg_type_illegal](auto& sc) {
     for (auto* c : sc.closures) {
       if (covered.count(c->reduced_block)) {
         // We already have this contained closure covered by a valid
@@ -528,16 +522,19 @@ std::vector<SplittableClosure> to_splittable_closures(
     }
     std::sort(ordered_live_in.begin(), ordered_live_in.end());
 
-    ReducedCFGClosureAdapter rcfgca(*ota, first_insn, insns,
-                                    sc.reduced_components, def_uses,
-                                    /*exclude_in_cover_seed_defs=*/false);
+    auto in_cover = [&insns, &sc](IRInstruction* insn) {
+      return sc.reduced_components.count(insns->at(insn)) != 0u;
+    };
     for (auto reg : ordered_live_in) {
-      auto defs = rcfgca.get_defs(reg);
+      auto defs = ota->defs_at(first_insn, reg);
       if (defs.size() == 1 && opcode::is_a_const((*defs.begin())->opcode())) {
         sc.args.push_back((ClosureArgument){reg, nullptr, *defs.begin()});
         continue;
       }
-      const auto* type = ota->get_type_demand(rcfgca, reg);
+      const auto* type = art::declare_parameter(
+          ota->demand_of_uses(ota->immediate_defs_at(first_insn, reg),
+                              in_cover),
+          [&]() { return ota->value_at(first_insn, reg); });
       if (!type) {
         return true;
       }

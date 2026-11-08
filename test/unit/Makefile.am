@@ -169,7 +169,6 @@ check_PROGRAMS = \
     reduce_boolean_branches_test \
     reduce_gotos_test \
     reduce_sparse_switches_test \
-    reduced_cfg_closure_adapter_test \
     reflection_analysis_test \
     reg_alloc_test \
     registers_test \
@@ -544,8 +543,6 @@ reduce_boolean_branches_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 reduce_gotos_test_SOURCES = ReduceGotosTest.cpp
 reduce_gotos_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
-
-reduced_cfg_closure_adapter_test_SOURCES = ReducedCFGClosureAdapterTest.cpp
 
 reduce_sparse_switches_test_SOURCES = ReduceSparseSwitchesTest.cpp
 

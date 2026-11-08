@@ -7,6 +7,9 @@
 
 #include "OutlinerTypeAnalysis.h"
 
+#include <bit>
+#include <queue>
+
 #include "Debug.h"
 #include "DexClass.h"
 #include "DexTypeEnvironment.h"
@@ -14,6 +17,364 @@
 #include "Show.h"
 
 namespace outliner_impl {
+
+namespace {
+
+// The five integral types, in the order of the bits of an integral mask.
+enum Integral : uint8_t { Z, B, S, C, I, kNumIntegral };
+
+const DexType* integral_dex_type(uint8_t k) {
+  switch (k) {
+  case Z:
+    return type::_boolean();
+  case B:
+    return type::_byte();
+  case S:
+    return type::_short();
+  case C:
+    return type::_char();
+  default:
+    return type::_int();
+  }
+}
+
+uint8_t integral_index(const DexType* t) {
+  if (t == type::_boolean()) {
+    return Z;
+  }
+  if (t == type::_byte()) {
+    return B;
+  }
+  if (t == type::_short()) {
+    return S;
+  }
+  if (t == type::_char()) {
+    return C;
+  }
+  always_assert_log(t == type::_int(), "%s is not integral", SHOW(t));
+  return I;
+}
+
+// Z < B < S < I and Z < C < I.
+constexpr bool integral_leq(uint8_t a, uint8_t b) {
+  if (a == b || b == I) {
+    return true;
+  }
+  if (a == Z) {
+    return b == B || b == S || b == C;
+  }
+  return a == B && b == S;
+}
+
+constexpr uint8_t integral_lub(uint8_t a, uint8_t b) {
+  if (integral_leq(a, b)) {
+    return b;
+  }
+  if (integral_leq(b, a)) {
+    return a;
+  }
+  return I;
+}
+
+// The types among Z, B, S, C that hold `value`, as a mask.
+uint8_t holding_types(int64_t value) {
+  uint8_t mask = 0;
+  if (value >= 0 && value <= 1) {
+    mask |= 1u << Z;
+  }
+  if (value >= std::numeric_limits<int8_t>::min() &&
+      value <= std::numeric_limits<int8_t>::max()) {
+    mask |= 1u << B;
+  }
+  if (value >= std::numeric_limits<int16_t>::min() &&
+      value <= std::numeric_limits<int16_t>::max()) {
+    mask |= 1u << S;
+  }
+  if (value >= 0 && value <= std::numeric_limits<uint16_t>::max()) {
+    mask |= 1u << C;
+  }
+  return mask;
+}
+
+// `float`, `long` and `double`, in the order of the bits of a mask.
+const DexType* primitive_dex_type(uint8_t mask) {
+  switch (mask) {
+  case 1:
+    return type::_float();
+  case 2:
+    return type::_long();
+  default:
+    always_assert(mask == 4);
+    return type::_double();
+  }
+}
+
+uint8_t primitive_bit(const DexType* t) {
+  if (t == type::_float()) {
+    return 1;
+  }
+  if (t == type::_long()) {
+    return 2;
+  }
+  if (t == type::_double()) {
+    return 4;
+  }
+  return 0;
+}
+
+// Sorts `t` into the masks and set that `art::Value` and `art::Demand` keep.
+void classify(const DexType* t,
+              uint8_t* integral,
+              uint8_t* primitives,
+              UnorderedSet<const DexType*>* references) {
+  if (type::is_integral(t)) {
+    *integral |= 1u << integral_index(t);
+  } else if (auto bit = primitive_bit(t); bit != 0) {
+    *primitives |= bit;
+  } else {
+    references->insert(t);
+  }
+}
+
+// `and`, `or` and `xor`, whose result ART types by their operands.
+bool is_bitwise(IROpcode op) {
+  switch (op) {
+  case OPCODE_AND_INT:
+  case OPCODE_OR_INT:
+  case OPCODE_XOR_INT:
+  case OPCODE_AND_INT_LIT:
+  case OPCODE_OR_INT_LIT:
+  case OPCODE_XOR_INT_LIT:
+    return true;
+  default:
+    return false;
+  }
+}
+
+// Whether ART types `bitwise` as boolean when all its register operands are
+// boolean. A literal operand must also be 0 or 1.
+bool keeps_booleanness(const IRInstruction* bitwise) {
+  return !bitwise->has_literal() || bitwise->get_literal() == 0 ||
+         bitwise->get_literal() == 1;
+}
+
+// Whether a demand walk follows a value through `use` into its result.
+bool follows_boolean(const IRInstruction* use) {
+  return is_bitwise(use->opcode()) && keeps_booleanness(use);
+}
+
+bool any_outside_range(const UnorderedSet<const IRInstruction*>& insns,
+                       int64_t min,
+                       int64_t max) {
+  return unordered_any_of(insns, [min, max](const IRInstruction* insn) {
+    const auto literal = insn->get_literal();
+    return literal < min || literal > max;
+  });
+}
+
+template <class T>
+bool any_outside(const UnorderedSet<const IRInstruction*>& insns) {
+  return any_outside_range(insns, std::numeric_limits<T>::min(),
+                           std::numeric_limits<T>::max());
+}
+
+const DexType* compute_joined_type(const UnorderedSet<const DexType*>& types) {
+  std::optional<dtv_impl::DexTypeValue> joined_type_value;
+  // Fold in a stable type order, because `join_with` is neither associative
+  // nor commutative. When the walk up the superclasses reaches Object,
+  // `find_common_type` falls back to the interfaces both operands implement.
+  // It collects them from the left operand only. When there are several
+  // incomparable ones, it gives up and returns Top, because no DexType can
+  // hold their intersection. Either rule makes the result depend on the
+  // order in which the types are joined.
+  for (const auto* t : unordered_to_ordered(types, compare_dextypes)) {
+    if (!type::is_object(t)) {
+      return nullptr;
+    }
+    auto type_value = dtv_impl::DexTypeValue(t);
+    if (joined_type_value) {
+      if (joined_type_value->join_with(type_value) ==
+          sparta::AbstractValueKind::Top) {
+        return nullptr;
+      }
+      always_assert(joined_type_value->get_dex_type());
+    } else {
+      joined_type_value = type_value;
+    }
+  }
+  return joined_type_value ? joined_type_value->get_dex_type() : nullptr;
+}
+
+// Removes each class or array type `u` from `types` when another class or
+// array type `t` in `types` satisfies `is_redundant(u, t)`.
+template <class Pred>
+void erase_redundant_references(UnorderedSet<const DexType*>* types,
+                                const Pred& is_redundant) {
+  unordered_erase_if(*types, [types, &is_redundant](const DexType* u) {
+    return type::is_object(u) &&
+           unordered_any_of(*types, [u, &is_redundant](const DexType* t) {
+             return t != u && type::is_object(t) && is_redundant(u, t);
+           });
+  });
+}
+
+} // namespace
+
+namespace art {
+
+Value Value::unknown() {
+  Value v;
+  v.m_unknown = true;
+  return v;
+}
+
+Value Value::of_type(const DexType* t) {
+  if (t == nullptr) {
+    return unknown();
+  }
+  Value v;
+  classify(t, &v.m_integral, &v.m_primitives, &v.m_references);
+  return v;
+}
+
+Value Value::constant(const IRInstruction* insn) {
+  always_assert(insn->opcode() == OPCODE_CONST ||
+                insn->opcode() == OPCODE_CONST_WIDE);
+  Value v;
+  v.m_has_constants = true;
+  v.m_constants_held_by = holding_types(insn->get_literal());
+  return v;
+}
+
+void Value::join_with(const Value& other) {
+  m_unknown |= other.m_unknown;
+  m_integral |= other.m_integral;
+  m_primitives |= other.m_primitives;
+  insert_unordered_iterable(m_references, other.m_references);
+  m_has_constants |= other.m_has_constants;
+  m_constants_held_by &= other.m_constants_held_by;
+}
+
+bool Value::is_constant() const {
+  return !m_unknown && m_has_constants && m_integral == 0 &&
+         m_primitives == 0 && m_references.empty();
+}
+
+const DexType* Value::upper() const {
+  if (m_unknown) {
+    return nullptr;
+  }
+  const int kinds = (m_integral != 0 ? 1 : 0) + std::popcount(m_primitives) +
+                    (m_references.empty() ? 0 : 1);
+  if (kinds != 1) {
+    return nullptr;
+  }
+  if (m_integral != 0) {
+    uint8_t joined = kNumIntegral;
+    for (uint8_t t = 0; t < kNumIntegral; ++t) {
+      if ((m_integral & (1u << t)) != 0) {
+        joined = joined == kNumIntegral ? t : integral_lub(joined, t);
+      }
+    }
+    // A register that a constant reaches gets no type when the joined type
+    // does not hold that constant.
+    if (m_has_constants && joined != I &&
+        (m_constants_held_by & (1u << joined)) == 0) {
+      return nullptr;
+    }
+    return integral_dex_type(joined);
+  }
+  if (m_primitives != 0) {
+    return primitive_dex_type(m_primitives);
+  }
+  // The least specific types, joined.
+  auto types = m_references;
+  erase_redundant_references(&types, [](const DexType* u, const DexType* t) {
+    return type::check_cast(u, t);
+  });
+  if (types.size() > 1) {
+    return compute_joined_type(types);
+  }
+  return types.empty() ? nullptr : *unordered_any(types);
+}
+
+Demand Demand::unknown() {
+  Demand d;
+  d.m_unknown = true;
+  return d;
+}
+
+Demand Demand::of_use(const DexType* t) {
+  if (t == nullptr) {
+    return unknown();
+  }
+  Demand d;
+  classify(t, &d.m_integral, &d.m_primitives, &d.m_references);
+  return d;
+}
+
+void Demand::meet_with(const Demand& other) {
+  m_unknown |= other.m_unknown;
+  m_integral |= other.m_integral;
+  m_primitives |= other.m_primitives;
+  insert_unordered_iterable(m_references, other.m_references);
+}
+
+bool Demand::is_none() const {
+  return !m_unknown && m_integral == 0 && m_primitives == 0 &&
+         m_references.empty();
+}
+
+const DexType* Demand::widest() const {
+  if (m_unknown) {
+    return nullptr;
+  }
+  auto has = [this](uint8_t k) { return (m_integral & (1u << k)) != 0; };
+  const DexType* integral = nullptr;
+  if (has(Z)) {
+    integral = type::_boolean();
+  } else if (has(C) && (has(B) || has(S))) {
+    return type::_int();
+  } else {
+    for (uint8_t k : {B, S, C, I}) {
+      if (has(k)) {
+        integral = integral_dex_type(k);
+        break;
+      }
+    }
+  }
+  // The most specific types.
+  auto types = m_references;
+  erase_redundant_references(&types, [](const DexType* u, const DexType* t) {
+    return type::check_cast(t, u);
+  });
+  const size_t kinds = (integral != nullptr ? 1 : 0) +
+                       std::popcount(m_primitives) + types.size();
+  if (kinds != 1) {
+    return nullptr;
+  }
+  if (integral != nullptr) {
+    return integral;
+  }
+  if (m_primitives != 0) {
+    return primitive_dex_type(m_primitives);
+  }
+  return *unordered_any(types);
+}
+
+const DexType* declare_parameter(const Demand& uses,
+                                 const std::function<Value()>& supply) {
+  if (const auto* t = uses.widest()) {
+    return t;
+  }
+  return supply().upper();
+}
+
+const DexType* declare_result(const Value& returned) {
+  return returned.upper();
+}
+
+} // namespace art
 
 OutlinerTypeAnalysis::OutlinerTypeAnalysis(DexMethod* method)
     : m_method(method),
@@ -65,30 +426,20 @@ OutlinerTypeAnalysis::OutlinerTypeAnalysis(DexMethod* method)
         return std::make_unique<constant_uses::ConstantUses>(cfg, method);
       }) {}
 
-const DexType* OutlinerTypeAnalysis::get_result_type(
-    const CandidateAdapter* ca,
-    const UnorderedSet<const IRInstruction*>& insns,
-    const DexType* optional_extra_type) {
-  auto defs = get_defs(insns);
-  return defs ? get_type_of_defs(ca, *defs, optional_extra_type)
-              : optional_extra_type;
-}
-
-const DexType* OutlinerTypeAnalysis::get_type_demand(const CandidateAdapter& ca,
-                                                     reg_t reg) {
-  UnorderedSet<reg_t> regs_to_track{reg};
-  UnorderedSet<const DexType*> type_demands;
-  get_type_demand_helper(ca, std::move(regs_to_track), &type_demands);
-  const auto* type_demand = narrow_type_demands(std::move(type_demands));
-  if (type_demand == nullptr) {
-    type_demand = get_inferred_type(ca, reg);
+art::Value OutlinerTypeAnalysis::value_of_assignments(
+    const UnorderedSet<const IRInstruction*>& assignments,
+    const std::optional<art::Value>& incoming,
+    const Membership& candidate) {
+  auto defs = get_defs(assignments);
+  if (!defs) {
+    return incoming ? *incoming : art::Value::unknown();
   }
-  return type_demand;
+  return value_of_defs(*defs, incoming ? *incoming : art::Value(), candidate);
 }
 
-const DexType* OutlinerTypeAnalysis::get_inferred_type(
-    const CandidateAdapter& ca, reg_t reg) {
-  const auto& env = ca.get_type_env();
+art::Value OutlinerTypeAnalysis::value_at(const IRInstruction* anchor,
+                                          reg_t reg) {
+  const auto& env = m_type_environments->at(anchor);
   switch (env.get_type(reg).element()) {
   case IRType::BOTTOM:
   case IRType::ZERO:
@@ -96,21 +447,27 @@ const DexType* OutlinerTypeAnalysis::get_inferred_type(
   case IRType::CONST1:
   case IRType::SCALAR:
   case IRType::SCALAR1:
-    // Can't figure out exact type via type inference; let's try reaching-defs
-    return get_type_of_reaching_defs(ca, reg);
+  case IRType::INT: {
+    // Type inference tells neither constants nor `boolean`, `byte`, `short`,
+    // `char` and `int` apart; go back to the definitions.
+    auto defs = m_reaching_defs_environments->at(anchor).get(reg);
+    if (defs.is_bottom() || defs.is_top()) {
+      return art::Value::unknown();
+    }
+    return value_of_defs(UnorderedSet<const IRInstruction*>(
+                             defs.elements().begin(), defs.elements().end()),
+                         art::Value(), /* candidate */ {});
+  }
   case IRType::REFERENCE: {
     auto dex_type = env.get_dex_type(reg);
-    return dex_type ? *dex_type : nullptr;
+    return art::Value::of_type(dex_type ? *dex_type : nullptr);
   }
-  case IRType::INT:
-    // Could actually be boolean, byte, short; let's try reaching-defs
-    return get_type_of_reaching_defs(ca, reg);
   case IRType::FLOAT:
-    return type::_float();
+    return art::Value::of_type(type::_float());
   case IRType::LONG1:
-    return type::_long();
+    return art::Value::of_type(type::_long());
   case IRType::DOUBLE1:
-    return type::_double();
+    return art::Value::of_type(type::_double());
   case IRType::CONST2:
   case IRType::DOUBLE2:
   case IRType::LONG2:
@@ -118,71 +475,113 @@ const DexType* OutlinerTypeAnalysis::get_inferred_type(
   case IRType::TOP:
   default:
     // shouldn't happen for any input, but we don't need to fight that here
-    return nullptr;
+    return art::Value::unknown();
   }
 }
 
-const DexType* OutlinerTypeAnalysis::narrow_type_demands(
-    UnorderedSet<const DexType*> type_demands) {
-  if (type_demands.empty() || (type_demands.count(nullptr) != 0u)) {
-    return nullptr;
-  }
+art::Demand OutlinerTypeAnalysis::demand_of_use(IRInstruction* use,
+                                                src_index_t src_index) {
+  return art::Demand::of_use(get_type_demand(use, src_index));
+}
 
-  if (type_demands.size() > 1) {
-    // Less strict primitive type demands can be removed
-    if (type_demands.count(type::_boolean()) != 0u) {
-      type_demands.erase(type::_byte());
-      type_demands.erase(type::_short());
-      type_demands.erase(type::_char());
-      type_demands.erase(type::_int());
-    } else if (type_demands.count(type::_byte()) != 0u) {
-      if (type_demands.count(type::_char()) != 0u) {
-        type_demands = {type::_int()};
-      } else {
-        type_demands.erase(type::_short());
-        type_demands.erase(type::_int());
+art::Demand OutlinerTypeAnalysis::demand_in_candidate(
+    const PartialCandidate& pc,
+    reg_t reg,
+    const std::optional<std::pair<reg_t, const DexType*>>& result) {
+  // The candidate is a tree of instruction sequences, not closed under
+  // control-flow predecessors: a block it covers may also be entered from
+  // outside. So walk it in program order, tracking which registers still hold
+  // the value on each path.
+  art::Demand demand;
+  std::function<void(const PartialCandidateNode&, UnorderedSet<reg_t>)> walk;
+  walk = [&](const PartialCandidateNode& pcn, UnorderedSet<reg_t> tracked) {
+    for (size_t insn_idx = 0; insn_idx < pcn.insns.size() && !tracked.empty();
+         insn_idx++) {
+      bool track_dest{false};
+      auto* insn = pcn.insns.at(insn_idx);
+      for (size_t i = 0; i < insn->srcs_size(); i++) {
+        if (tracked.count(insn->src(i)) == 0u) {
+          continue;
+        }
+        if (opcode::is_a_move(insn->opcode())) {
+          track_dest = true;
+          continue;
+        }
+        demand.meet_with(demand_of_use(insn, i));
+        if (follows_boolean(insn)) {
+          track_dest = true;
+        }
       }
-    } else if (type_demands.count(type::_short()) != 0u) {
-      if (type_demands.count(type::_char()) != 0u) {
-        type_demands = {type::_int()};
-      } else {
-        type_demands.erase(type::_int());
+      always_assert(!track_dest || insn->has_dest());
+      if (insn->has_dest()) {
+        if (track_dest) {
+          tracked.insert(insn->dest());
+        } else {
+          tracked.erase(insn->dest());
+        }
+        if (insn->dest_is_wide()) {
+          tracked.erase(insn->dest() + 1);
+        }
       }
-    } else if (type_demands.count(type::_char()) != 0u) {
-      type_demands.erase(type::_int());
     }
+    if (pcn.succs.empty() && result && tracked.count(result->first) != 0u) {
+      demand.meet_with(art::Demand::of_use(result->second));
+    }
+    for (const auto& p : pcn.succs) {
+      walk(*p.second, tracked);
+    }
+  };
+  walk(pc.root, {reg});
+  return demand;
+}
 
-    // remove less specific object types
-    unordered_erase_if(type_demands, [&type_demands](auto* u) {
-      return type::is_object(u) &&
-             unordered_any_of(type_demands, [u](const DexType* t) {
-               return t != u && type::is_object(t) && type::check_cast(t, u);
-             });
-    });
-
-    // TODO: I saw that most often, when multiple object type demands
-    // remain, they are often even contradictory, and that's because in fact
-    // the value that flows in is a null constant, which is the only
-    // feasible value in those cases. Still, a relatively uncommon
-    // occurrence overall.
+art::Demand OutlinerTypeAnalysis::demand_of_uses(
+    const sparta::PatriciaTreeSet<IRInstruction*>& seeds,
+    const Membership& scope) {
+  art::Demand demand;
+  std::queue<IRInstruction*> workqueue;
+  UnorderedSet<IRInstruction*> visited;
+  for (auto* def : seeds) {
+    workqueue.push(def);
   }
-
-  return type_demands.size() == 1 ? *unordered_any(type_demands) : nullptr;
+  while (!workqueue.empty()) {
+    auto* def = workqueue.front();
+    workqueue.pop();
+    if (!visited.insert(def).second) {
+      continue;
+    }
+    // `find`, not `operator[]`: this is a const query over a def-use map shared
+    // across the whole method, and `operator[]` would default-insert an empty
+    // entry for any def that has no uses.
+    auto uses_it = m_immediate_def_uses->find(def);
+    if (uses_it == m_immediate_def_uses->end()) {
+      continue;
+    }
+    for (const auto& use : UnorderedIterable(uses_it->second)) {
+      if (!scope(use.insn)) {
+        continue;
+      }
+      if (opcode::is_a_move(use.insn->opcode())) {
+        workqueue.push(use.insn);
+        continue;
+      }
+      demand.meet_with(demand_of_use(use.insn, use.src_index));
+      if (follows_boolean(use.insn)) {
+        workqueue.push(use.insn);
+      }
+    }
+  }
+  return demand;
 }
 
-static bool any_outside_range(const UnorderedSet<const IRInstruction*>& insns,
-                              int64_t min,
-                              int64_t max) {
-  return unordered_any_of(insns, [min, max](const IRInstruction* insn) {
-    const auto literal = insn->get_literal();
-    return literal < min || literal > max;
-  });
+sparta::PatriciaTreeSet<IRInstruction*> OutlinerTypeAnalysis::defs_at(
+    const IRInstruction* anchor, reg_t reg) {
+  return m_reaching_defs_environments->at(anchor).get(reg).elements();
 }
 
-template <class T>
-static bool any_outside(const UnorderedSet<const IRInstruction*>& insns) {
-  return any_outside_range(insns, std::numeric_limits<T>::min(),
-                           std::numeric_limits<T>::max());
+sparta::PatriciaTreeSet<IRInstruction*> OutlinerTypeAnalysis::immediate_defs_at(
+    const IRInstruction* anchor, reg_t reg) {
+  return m_immediate_reaching_defs_environments->at(anchor).get(reg).elements();
 }
 
 size_t OutlinerTypeAnalysis::get_load_param_index(
@@ -426,18 +825,6 @@ const DexType* OutlinerTypeAnalysis::get_result_type_helper(
   case OPCODE_REM_LONG:
     return type::_long();
   }
-}
-
-const DexType* OutlinerTypeAnalysis::get_type_of_reaching_defs(
-    const CandidateAdapter& ca, reg_t reg) {
-  auto defs = ca.get_rdef_env().get(reg);
-  if (defs.is_bottom() || defs.is_top()) {
-    return nullptr;
-  }
-  return get_type_of_defs(nullptr,
-                          UnorderedSet<const IRInstruction*>(
-                              defs.elements().begin(), defs.elements().end()),
-                          /* optional_extra_type */ nullptr);
 }
 
 const DexType* OutlinerTypeAnalysis::get_if_insn_type_demand(
@@ -789,35 +1176,11 @@ OutlinerTypeAnalysis::get_defs(
   return res;
 }
 
-// Infer type demand imposed on an incoming register across all instructions
-// in the given instruction sequence.
-// The return value nullptr indicates that the demand could not be determined.
-void OutlinerTypeAnalysis::get_type_demand_helper(
-    const CandidateAdapter& ca,
-    UnorderedSet<reg_t> regs_to_track,
-    UnorderedSet<const DexType*>* type_demands) {
-  auto follow = [](IRInstruction* insn, src_index_t) {
-    switch (insn->opcode()) {
-    case OPCODE_AND_INT:
-    case OPCODE_OR_INT:
-    case OPCODE_XOR_INT:
-    case OPCODE_AND_INT_LIT:
-    case OPCODE_OR_INT_LIT:
-    case OPCODE_XOR_INT_LIT:
-      return !insn->has_literal() || insn->get_literal() == 0 ||
-             insn->get_literal() == 1;
-    default:
-      return false;
-    }
-  };
-  ca.gather_type_demands(std::move(regs_to_track), follow, type_demands);
-}
-
 const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
-    const CandidateAdapter* ca,
+    const Membership& candidate,
     const UnorderedSet<const IRInstruction*>& const_insns) {
   always_assert(!const_insns.empty());
-  // `get_type_of_defs` classifies `IOPCODE_UNREACHABLE` (a synthetic undefined
+  // `value_of_defs` classifies `IOPCODE_UNREACHABLE` (a synthetic undefined
   // value) separately and never routes it here: it carries no literal, so both
   // the constant-uses analysis and the literal-range checks below would assert
   // on it. Only real `const`/`const-wide` defs reach this point.
@@ -861,7 +1224,7 @@ const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
 
   // No, so...
   // 2. Let's go over all constant-uses, and use our own judgement.
-  UnorderedSet<const DexType*> type_demands;
+  art::Demand demand;
   bool not_object{false};
   // Both scan all of `const_insns`, which does not change in the loop below, so
   // each is worth computing at most once. Lazily, because most opcodes reach
@@ -874,7 +1237,7 @@ const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
   for (const auto* insn : UnorderedIterable(const_insns)) {
     for (const auto& p :
          m_constant_uses->get_constant_uses(const_cast<IRInstruction*>(insn))) {
-      if ((ca != nullptr) && ca->contains(p.first)) {
+      if (candidate && candidate(p.first)) {
         continue;
       }
       switch (p.first->opcode()) {
@@ -884,11 +1247,8 @@ const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
       case OPCODE_AND_INT_LIT:
       case OPCODE_OR_INT_LIT:
       case OPCODE_XOR_INT_LIT:
-        if (*any_outside_bit) {
-          type_demands.insert(type::_int());
-        } else {
-          type_demands.insert(type::_boolean());
-        }
+        demand.meet_with(art::Demand::of_use(
+            *any_outside_bit ? type::_int() : type::_boolean()));
         break;
       case OPCODE_MOVE:
         not_object = true;
@@ -896,7 +1256,7 @@ const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
       case OPCODE_MOVE_WIDE:
         break;
       case OPCODE_MOVE_OBJECT:
-        type_demands.insert(type::java_lang_Object());
+        demand.meet_with(art::Demand::of_use(type::java_lang_Object()));
         break;
       case OPCODE_IF_EQ:
       case OPCODE_IF_NE:
@@ -908,22 +1268,22 @@ const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
       case OPCODE_IF_LEZ:
         // Could be int or object
         if (*any_outside_zero) {
-          type_demands.insert(type::_int());
+          demand.meet_with(art::Demand::of_use(type::_int()));
           break;
         }
         [[fallthrough]];
       default:
-        type_demands.insert(get_type_demand(p.first, p.second));
+        demand.meet_with(demand_of_use(p.first, p.second));
         break;
       }
     }
   }
-  if (type_demands.empty()) {
+  if (demand.is_none()) {
     // A constant without (meaningful) use? Oh well. Dead code!
     return (*unordered_any(const_insns))->dest_is_wide() ? type::_long()
                                                          : type::_int();
   }
-  const auto* narrowed_type_demand = narrow_type_demands(type_demands);
+  const auto* narrowed_type_demand = demand.widest();
   if ((narrowed_type_demand != nullptr) &&
       type::is_object(narrowed_type_demand) && not_object) {
     return nullptr;
@@ -931,65 +1291,25 @@ const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
   return narrowed_type_demand;
 }
 
-static const DexType* compute_joined_type(
-    const UnorderedSet<const DexType*>& types) {
-  std::optional<dtv_impl::DexTypeValue> joined_type_value;
-  // `join_with` is neither associative nor commutative. When the common super
-  // class walk reaches Object, `find_common_type` resolves through the
-  // interfaces the operands share: sharing several incomparable ones is an
-  // intersection type no DexType can hold, so it gives up to Top, and the
-  // shared set is collected from the left operand only. Either one makes the
-  // fold depend on the visit order. Fold in a stable type order.
-  for (const auto* t : unordered_to_ordered(types, compare_dextypes)) {
-    if (!type::is_object(t)) {
-      return nullptr;
-    }
-    auto type_value = dtv_impl::DexTypeValue(t);
-    if (joined_type_value) {
-      if (joined_type_value->join_with(type_value) ==
-          sparta::AbstractValueKind::Top) {
-        return nullptr;
-      }
-      always_assert(joined_type_value->get_dex_type());
-    } else {
-      joined_type_value = type_value;
-    }
-  }
-  return joined_type_value ? joined_type_value->get_dex_type() : nullptr;
-}
-
-// Compute the (widened) type of all given definitions.
-const DexType* OutlinerTypeAnalysis::get_type_of_defs(
-    const CandidateAdapter* ca,
+art::Value OutlinerTypeAnalysis::value_of_defs(
     const UnorderedSet<const IRInstruction*>& defs,
-    const DexType* optional_extra_type) {
-  UnorderedSet<const DexType*> types;
-  if (optional_extra_type != nullptr) {
-    types.insert(optional_extra_type);
-  }
+    art::Value value,
+    const Membership& candidate) {
   UnorderedSet<const IRInstruction*> const_insns;
-  bool any_unreachable = false;
   for (const auto* def : UnorderedIterable(defs)) {
     always_assert(!opcode::is_a_move(def->opcode()) &&
                   !opcode::is_move_result_any(def->opcode()));
-    UnorderedSet<const IRInstruction*> expanded_defs;
     UnorderedSet<const IRInstruction*> visited;
-    // Helper function that expands bitwise operations that can preserve
-    // booleanness. Returns true when we know result is type::_int()
+    // Joins the value of `def` into `value`, expanding the bitwise operations
+    // that can keep a boolean into their operands. Returns true when the
+    // register is known to be `int`.
     std::function<bool(const IRInstruction*)> expand;
     expand = [&](const IRInstruction* def) {
       if (!visited.insert(def).second) {
         return false;
       }
-      switch (def->opcode()) {
-      case OPCODE_AND_INT:
-      case OPCODE_OR_INT:
-      case OPCODE_XOR_INT:
-      case OPCODE_AND_INT_LIT:
-      case OPCODE_OR_INT_LIT:
-      case OPCODE_XOR_INT_LIT:
-        if (def->has_literal() && def->get_literal() != 0 &&
-            def->get_literal() != 1) {
+      if (is_bitwise(def->opcode())) {
+        if (!keeps_booleanness(def)) {
           // Overall result cannot be a boolean (as far as the Android type
           // checker is concerned), so it must be an int.
           return true;
@@ -1003,102 +1323,31 @@ const DexType* OutlinerTypeAnalysis::get_type_of_defs(
           }
         }
         return false;
+      }
+      switch (def->opcode()) {
       case IOPCODE_UNREACHABLE:
-        // A synthetic undefined value carries no literal and no type demand.
-        // Keep it out of `const_insns`: the constant-uses analysis and the
-        // literal-range checks (`any_outside*`) below both call
-        // `get_literal()`, which asserts on it. Its only effect is that, if
-        // nothing else contributes a type, the result is undeterminable
-        // (handled below where `types` is empty).
-        any_unreachable = true;
+        // A synthetic undefined value contributes nothing.
         return false;
       case OPCODE_CONST:
       case OPCODE_CONST_WIDE:
         const_insns.insert(def);
+        value.join_with(art::Value::constant(def));
         return false;
       default:
-        expanded_defs.insert(def);
+        value.join_with(art::Value::of_type(get_result_type_helper(def)));
         return false;
       }
     };
     if (expand(def)) {
-      return type::_int();
-    }
-    for (const auto* inner_def : UnorderedIterable(expanded_defs)) {
-      const DexType* t = get_result_type_helper(inner_def);
-      types.insert(t);
+      return art::Value::of_type(type::_int());
     }
   }
-  // TODO: Figure out a most general way of doing this.
-  // In practice, the following special cases seem to most of what matters.
-
-  if (types.count(nullptr) != 0u) {
-    return nullptr;
+  if (value.is_constant()) {
+    // Constants alone give a register no type; their uses do.
+    return art::Value::of_type(
+        get_const_insns_type_demand(candidate, const_insns));
   }
-
-  if (types.empty()) {
-    if (const_insns.empty()) {
-      // Only undefined (unreachable) defs contributed; with no real const or
-      // typed producer, the type is undeterminable.
-      always_assert(any_unreachable);
-      return nullptr;
-    }
-    return get_const_insns_type_demand(ca, const_insns);
-  }
-
-  // Stricter primitive types can be removed
-  if (types.count(type::_int()) != 0u) {
-    types.erase(type::_boolean());
-    types.erase(type::_byte());
-    types.erase(type::_short());
-    types.erase(type::_char());
-  } else {
-    if (types.count(type::_short()) != 0u) {
-      types.erase(type::_boolean());
-      types.erase(type::_byte());
-    }
-    if ((types.count(type::_byte()) != 0u) ||
-        (types.count(type::_char()) != 0u)) {
-      types.erase(type::_boolean());
-    }
-    // Widen primitive types
-    if ((types.count(type::_char()) != 0u) &&
-        ((types.count(type::_byte()) != 0u) ||
-         (types.count(type::_short()) != 0u))) {
-      types.erase(type::_byte());
-      types.erase(type::_short());
-      types.erase(type::_char());
-      types.insert(type::_int());
-    }
-  }
-
-  // remove more specific object types
-  unordered_erase_if(types, [&types](auto* u) {
-    return type::is_object(u) && unordered_any_of(types, [u](const DexType* t) {
-             return t != u && type::is_object(t) && type::check_cast(u, t);
-           });
-  });
-
-  if (types.size() > 1) {
-    // TODO: Consider folding the above attempts to reduce the types set
-    // into DexTypeValue.
-    return compute_joined_type(types);
-  }
-  if (types.empty()) {
-    return nullptr;
-  }
-  always_assert(types.size() == 1);
-
-  // Give up when we have an incompatible constant.
-  // TODO: Do some careful widening.
-  const auto* defs_type = *unordered_any(types);
-  if ((defs_type == type::_short() && any_outside<int16_t>(const_insns)) ||
-      (defs_type == type::_byte() && any_outside<int8_t>(const_insns)) ||
-      (defs_type == type::_char() && any_outside<uint16_t>(const_insns)) ||
-      (defs_type == type::_boolean() && any_outside_range(const_insns, 0, 1))) {
-    return nullptr;
-  }
-  return defs_type;
+  return value;
 }
 
 } // namespace outliner_impl

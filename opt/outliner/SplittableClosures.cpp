@@ -525,6 +525,16 @@ std::vector<SplittableClosure> to_splittable_closures(
     auto in_cover = [&insns, &sc](IRInstruction* insn) {
       return sc.reduced_components.count(insns->at(insn)) != 0u;
     };
+    // A suffix whose head is a loop is entered at the loop header, so a
+    // definition of a live-in inside the loop reaches the entry too, through
+    // the back edge. The launchpad passes only the definitions from outside
+    // the closure. Typing the parameter by the uses of an in-loop definition
+    // could declare it narrower than the value the host passes.
+    auto passed_defs = [&](reg_t reg) {
+      auto defs = ota->immediate_defs_at(first_insn, reg);
+      defs.filter([&](IRInstruction* def) { return !in_cover(def); });
+      return defs;
+    };
     for (auto reg : ordered_live_in) {
       auto defs = ota->defs_at(first_insn, reg);
       if (defs.size() == 1 && opcode::is_a_const((*defs.begin())->opcode())) {
@@ -532,8 +542,7 @@ std::vector<SplittableClosure> to_splittable_closures(
         continue;
       }
       const auto* type = art::declare_parameter(
-          ota->demand_of_uses(ota->immediate_defs_at(first_insn, reg),
-                              in_cover),
+          ota->demand_of_uses(passed_defs(reg), in_cover),
           [&]() { return ota->value_at(first_insn, reg); });
       if (!type) {
         return true;

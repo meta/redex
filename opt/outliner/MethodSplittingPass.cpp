@@ -12,6 +12,8 @@
  */
 #include "MethodSplittingPass.h"
 
+#include <string>
+
 #include "BaselineProfile.h"
 #include "ConfigFiles.h"
 #include "DexUtil.h"
@@ -78,6 +80,56 @@ void MethodSplittingPass::bind_config() {
        "Master switch for cold-region outlining (off by default).");
 }
 
+namespace method_splitting_impl {
+
+void Stats::export_metrics(PassManager& mgr) const {
+  mgr.set_metric("split_count", added_methods.size());
+  mgr.set_metric("split_count_simple", split_count_simple.load());
+  mgr.set_metric("split_count_switches", split_count_switches.load());
+  mgr.set_metric("split_count_switch_cases", split_count_switch_cases.load());
+  mgr.set_metric("hot_split_count", hot_split_count.load());
+  mgr.set_metric("hot_cold_split_count", hot_cold_split_count.load());
+  mgr.set_metric("cold_split_count", cold_split_count.load());
+  mgr.set_metric("dex_limits_hit", dex_limits_hit.load());
+  mgr.set_metric("added_code_size", added_code_size.load());
+  mgr.set_metric("split_code_size", split_code_size.load());
+  mgr.set_metric("kept_large_packed_switches",
+                 kept_large_packed_switches.load());
+  mgr.set_metric("destroyed_large_packed_switches",
+                 destroyed_large_packed_switches.load());
+  mgr.set_metric("created_large_sparse_switches",
+                 created_large_sparse_switches.load());
+  mgr.set_metric("excluded_methods", excluded_methods.load());
+  // A nonzero value on a run that also reports `min_sdk_no_file` means the gate
+  // rejected external types for want of an api model rather than on a real
+  // min-sdk violation.
+  mgr.set_metric("arg_type_illegal", arg_type_illegal.load());
+  mgr.set_metric("iterations", iterations);
+}
+
+} // namespace method_splitting_impl
+
+namespace {
+
+// The pass's metrics: the splitter's, and what the pass derived from its
+// result.
+void export_metrics(PassManager& mgr,
+                    const Stats& stats,
+                    size_t new_hot_split_methods,
+                    size_t derived_method_profile_stats,
+                    const InsertOnlyConcurrentMap<DexMethod*, size_t>&
+                        splittable_no_optimizations_methods) {
+  stats.export_metrics(mgr);
+  mgr.set_metric("new_hot_split_methods", new_hot_split_methods);
+  mgr.set_metric("derived_method_profile_stats", derived_method_profile_stats);
+  for (auto [method, size] :
+       UnorderedIterable(splittable_no_optimizations_methods)) {
+    mgr.set_metric("no_optimizations_" + show_deobfuscated(method), size);
+  }
+}
+
+} // namespace
+
 void MethodSplittingPass::run_pass(DexStoresVector& stores,
                                    ConfigFiles& conf,
                                    PassManager& mgr) {
@@ -126,38 +178,10 @@ void MethodSplittingPass::run_pass(DexStoresVector& stores,
         method_profiles.derive_stats(new_method, {root_method});
   }
 
-  mgr.set_metric("split_count", stats.added_methods.size());
-  mgr.set_metric("split_count_simple", (size_t)stats.split_count_simple);
-  mgr.set_metric("split_count_switches", (size_t)stats.split_count_switches);
-  mgr.set_metric("split_count_switch_cases",
-                 (size_t)stats.split_count_switch_cases);
-  mgr.set_metric("hot_split_count", (size_t)stats.hot_split_count);
-  mgr.set_metric("hot_cold_split_count", (size_t)stats.hot_cold_split_count);
-  mgr.set_metric("cold_split_count", (size_t)stats.cold_split_count);
-  mgr.set_metric("dex_limits_hit", (size_t)stats.dex_limits_hit);
-  mgr.set_metric("added_code_size", (size_t)stats.added_code_size);
-  mgr.set_metric("split_code_size", (size_t)stats.split_code_size);
-  mgr.set_metric("kept_large_packed_switches",
-                 (size_t)stats.kept_large_packed_switches);
-  mgr.set_metric("destroyed_large_packed_switches",
-                 (size_t)stats.destroyed_large_packed_switches);
-  mgr.set_metric("created_large_sparse_switches",
-                 (size_t)stats.created_large_sparse_switches);
-  mgr.set_metric("new_hot_split_methods",
-                 concurrent_new_hot_split_methods.size());
-  mgr.set_metric("derived_method_profile_stats", derived_method_profile_stats);
-  mgr.set_metric("excluded_methods", (size_t)stats.excluded_methods);
-  // A nonzero value on a run that also reports `min_sdk_no_file` means the gate
-  // rejected external types for want of an api model rather than on a real
-  // min-sdk violation.
-  mgr.set_metric("arg_type_illegal", (size_t)stats.arg_type_illegal);
-  mgr.set_metric("iterations", stats.iterations);
+  export_metrics(mgr, stats, concurrent_new_hot_split_methods.size(),
+                 derived_method_profile_stats,
+                 concurrent_splittable_no_optimizations_methods);
   TRACE(MS, 1, "Split out %zu methods", stats.added_methods.size());
-
-  for (auto [method, size] :
-       UnorderedIterable(concurrent_splittable_no_optimizations_methods)) {
-    mgr.set_metric("no_optimizations_" + show_deobfuscated(method), size);
-  }
   m_iteration++;
 }
 

@@ -149,7 +149,8 @@ class Demand {
 
   bool is_none() const;
   // The widest type every use accepts; nullptr when a demand is unknown, there
-  // is no use, or the demands name more than one type.
+  // is no use, or no one type is accepted by every use: two classes or
+  // categories, or `char` beside `byte` or `short`.
   const DexType* widest() const;
 
  private:

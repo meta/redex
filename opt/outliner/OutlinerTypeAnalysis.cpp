@@ -418,7 +418,9 @@ const DexType* Demand::widest() const {
   if (has(Z)) {
     integral = type::_boolean();
   } else if (has(C) && (has(B) || has(S))) {
-    return type::_int();
+    // Of the integral types, only `boolean` is assignable both to `char` and
+    // to `byte` or `short`, and `int` is assignable to neither.
+    return nullptr;
   } else {
     for (uint8_t k : {B, S, C, I}) {
       if (has(k)) {

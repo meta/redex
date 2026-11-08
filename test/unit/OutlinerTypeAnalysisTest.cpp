@@ -215,6 +215,15 @@ TEST_F(OutlinerTypeAnalysisTest, integral_type_join_and_order) {
   EXPECT_FALSE(join({k(1), k(40000)}).leq(join({k(0), k(65)})));
   EXPECT_TRUE(t(type::_byte()).leq(t(type::_short())));
   EXPECT_FALSE(t(type::_byte()).leq(t(type::_char())));
+
+  art::Demand demand;
+  EXPECT_EQ(demand.widest(), nullptr);
+  demand.meet_with(art::Demand::of_use(type::_int()));
+  EXPECT_EQ(demand.widest(), type::_int());
+  demand.meet_with(art::Demand::of_use(type::_short()));
+  EXPECT_EQ(demand.widest(), type::_short());
+  demand.meet_with(art::Demand::of_use(type::_char()));
+  EXPECT_EQ(demand.widest(), nullptr);
 }
 
 // Which integral types hold a constant, at every edge of their ranges: `int`
@@ -1174,6 +1183,44 @@ TEST_F(OutlinerTypeAnalysisTest,
   };
   EXPECT_EQ(demand(OPCODE_APUT_BYTE), type::_byte());
   EXPECT_EQ(demand(OPCODE_APUT_CHAR), type::_int());
+}
+
+// A `byte` demand and a `char` demand do not accept each other's type, and
+// neither do `short` and `char`. ART accepts a value for both only if it is a
+// boolean or a constant in their common range, and an `int` is neither. So the
+// two demands have no common type, and `get_type_demand` falls back to the
+// value's own type.
+TEST_F(OutlinerTypeAnalysisTest, get_type_demand_byte_and_char_have_no_meet) {
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(Z)V" (
+        (load-param v0)
+        (invoke-static (v0) "LFoo;.takeByte:(B)V")
+        (invoke-static (v0) "LFoo;.takeChar:(C)V")
+        (const v1 5)
+        (invoke-static (v1) "LFoo;.takeShort:(S)V")
+        (invoke-static (v1) "LFoo;.takeChar:(C)V")
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+
+  {
+    // the boolean that flows in satisfies both demands
+    auto* insn1 = find_insn(foo_method, OPCODE_INVOKE_STATIC, 1);
+    auto* insn2 = find_insn(foo_method, OPCODE_INVOKE_STATIC, 2);
+    auto root = create_node({insn1, insn2});
+    auto candidate = create_candidate(ota, root);
+    EXPECT_EQ(get_type_demand(candidate, insn1->src(0)), type::_boolean());
+  }
+
+  {
+    // the constant 5 satisfies both demands, but no parameter type does
+    auto* insn1 = find_insn(foo_method, OPCODE_INVOKE_STATIC, 3);
+    auto* insn2 = find_insn(foo_method, OPCODE_INVOKE_STATIC, 4);
+    auto root = create_node({insn1, insn2});
+    auto candidate = create_candidate(ota, root);
+    EXPECT_EQ(get_type_demand(candidate, insn1->src(0)), nullptr);
+  }
 }
 
 TEST_F(OutlinerTypeAnalysisTest, get_type_demand_aput_object) {

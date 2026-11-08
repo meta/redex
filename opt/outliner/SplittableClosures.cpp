@@ -181,28 +181,6 @@ std::optional<ScoredClosure> score(
       closures.size() > 1
           ? config.cost_split_switch_case * (closures.size() - 1)
           : 0;
-  auto estimated_remaining_size =
-      mcs.original_size - reduced_components_code_size;
-  estimated_remaining_size =
-      estimated_remaining_size < remaining_size_reduction
-          ? 0
-          : estimated_remaining_size - remaining_size_reduction;
-
-  switch (sc.hot_split_kind.value()) {
-  case HotSplitKind::Hot:
-  case HotSplitKind::HotCold:
-    if (estimated_remaining_size < config.min_hot_split_size) {
-      return std::nullopt;
-    }
-    break;
-  case HotSplitKind::Cold:
-    if (estimated_remaining_size < config.min_cold_split_size) {
-      return std::nullopt;
-    }
-    break;
-  default:
-    not_reached();
-  }
 
   UnorderedSet<int32_t> except_case_keys;
   auto except_preds = get_except_preds(
@@ -227,6 +205,14 @@ std::optional<ScoredClosure> score(
   sc.remaining_size = sc.remaining_size < remaining_size_reduction
                           ? 0
                           : sc.remaining_size - remaining_size_reduction;
+  // The host's floor counts what the host keeps, including a block the split
+  // copies that the host still reaches.
+  const auto min_remaining = sc.hot_split_kind == HotSplitKind::Cold
+                                 ? config.min_cold_split_size
+                                 : config.min_hot_split_size;
+  if (sc.remaining_size < min_remaining) {
+    return std::nullopt;
+  }
   auto overhead_ratio = static_cast<double>(sc.split_size + sc.remaining_size) /
                             static_cast<double>(mcs.original_size) -
                         1.0;

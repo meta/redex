@@ -1320,3 +1320,135 @@ TEST_F(MethodSplitterTest, RefuseLiveInWithoutType) {
             0u);
   EXPECT_EQ(split_count("(I)I", code(""), defaultConfig()), 0u);
 }
+
+namespace {
+
+// `n` writes of `v0` to distinct static fields named `<prefix>_<i>`, 2 code
+// units each.
+std::string sputs(size_t n, const std::string& prefix) {
+  std::string out;
+  for (size_t i = 0; i < n; ++i) {
+    out += "  (sput v0 \"LFoo;." + prefix + "_" + std::to_string(i) + ":I\")\n";
+  }
+  return out;
+}
+
+// A hot entry (`kEntrySputs` writes) branches to a head block (`kHeadSputs`
+// writes) or to a hot block (`kOtherSputs`), and both jump to a hot join
+// (`kJoinSputs` writes, then `return-void`). The suffix at the head takes the
+// head and the join, and the host keeps the join too: it still reaches it
+// through the hot block. The head is cold unless `hot_head`, and every block
+// is cold when `all_cold`.
+constexpr size_t kEntrySputs = 100;
+constexpr size_t kHeadSputs = 150;
+constexpr size_t kOtherSputs = 5;
+constexpr size_t kJoinSputs = 5;
+
+std::string sharedJoinCode(bool hot_head, bool all_cold = false) {
+  const std::string hot = all_cold ? "(0.0 0.0)" : "(1.0 1.0)";
+  const std::string head = hot_head ? hot : "(0.0 0.0)";
+  return "(\n  (load-param v0)\n  (.src_block \"LFoo;.bar:(I)V\" 0 " + hot +
+         ")\n" + sputs(kEntrySputs, "entry") + "  (if-eqz v0 :other)\n" +
+         "  (.src_block \"LFoo;.bar:(I)V\" 1 " + head + ")\n" +
+         sputs(kHeadSputs, "head") + "  (goto :join)\n  (:other)\n" +
+         "  (.src_block \"LFoo;.bar:(I)V\" 2 " + hot + ")\n" +
+         sputs(kOtherSputs, "other") + "  (goto :join)\n  (:join)\n" +
+         "  (.src_block \"LFoo;.bar:(I)V\" 3 " + hot + ")\n" +
+         sputs(kJoinSputs, "join") + "  (return-void)\n)\n";
+}
+
+// What the host keeps of `sharedJoinCode` once the head's suffix is split: the
+// entry with its `if-eqz`, the hot block, and the join with its
+// `return-void`.
+constexpr size_t kKeptCodeUnits =
+    2 * kEntrySputs + 2 + 2 * kOtherSputs + 2 * kJoinSputs + 1;
+
+// Floors that leave the head's suffix the only candidate to clear them: the
+// hot block's and the join's suffixes are far smaller than the head's.
+method_splitting_impl::Config floorConfig() {
+  method_splitting_impl::Config config;
+  config.min_original_size = 1;
+  config.split_block_size = 100000;
+  config.max_overhead_ratio = 0.5;
+  config.max_hot_overhead_ratio = 0.5;
+  config.max_iteration = 1;
+  config.cost_split_method = 1;
+  config.min_hot_cold_split_size = 4;
+  config.min_hot_split_size = 4;
+  config.min_cold_split_size = 4;
+  return config;
+}
+
+} // namespace
+
+// The remaining floor reads what the host keeps, including the join that the
+// split copies. A floor of exactly that size admits the suffix, and a floor one
+// code unit higher refuses it. The method's size less the suffix's blocks falls
+// `kJoinSputs * 2 + 1` code units short of what the host keeps.
+TEST_F(MethodSplitterTest, RemainingFloorHotColdAtItsBoundary) {
+  auto config = floorConfig();
+  config.min_hot_split_size = kKeptCodeUnits;
+  EXPECT_EQ(split_count("(I)V", sharedJoinCode(/*hot_head=*/false), config),
+            1u);
+  config.min_hot_split_size = kKeptCodeUnits + 1;
+  EXPECT_EQ(split_count("(I)V", sharedJoinCode(/*hot_head=*/false), config),
+            0u);
+}
+
+// A hot suffix's floors are both `min_hot_split_size`.
+TEST_F(MethodSplitterTest, RemainingFloorHotAtItsBoundary) {
+  auto config = floorConfig();
+  config.min_hot_split_size = kKeptCodeUnits;
+  EXPECT_EQ(split_count("(I)V", sharedJoinCode(/*hot_head=*/true), config), 1u);
+  config.min_hot_split_size = kKeptCodeUnits + 1;
+  EXPECT_EQ(split_count("(I)V", sharedJoinCode(/*hot_head=*/true), config), 0u);
+}
+
+// A cold suffix's floors are both `min_cold_split_size`.
+TEST_F(MethodSplitterTest, RemainingFloorColdAtItsBoundary) {
+  auto config = floorConfig();
+  const auto code = sharedJoinCode(/*hot_head=*/false, /*all_cold=*/true);
+  config.min_cold_split_size = kKeptCodeUnits;
+  EXPECT_EQ(split_count("(I)V", code, config), 1u);
+  config.min_cold_split_size = kKeptCodeUnits + 1;
+  EXPECT_EQ(split_count("(I)V", code, config), 0u);
+}
+
+namespace {
+
+// A hot `switch` whose default (`kCaseSputs` writes) and two cases (as many
+// writes each) are cold and return. The only candidate the floors of the test
+// below admit is the group of the default and one case: each block alone is
+// under the split floor.
+constexpr size_t kCaseSputs = 100;
+
+std::string switchGroupCode() {
+  return "(\n  (load-param v0)\n  (.src_block \"LFoo;.bar:(I)V\" 0 (1.0 1.0))\n"
+         "  (switch v0 (:a :b))\n"
+         "  (.src_block \"LFoo;.bar:(I)V\" 1 (0.0 0.0))\n" +
+         sputs(kCaseSputs, "dflt") +
+         "  (return-void)\n  (:a 1)\n"
+         "  (.src_block \"LFoo;.bar:(I)V\" 2 (0.0 0.0))\n" +
+         sputs(kCaseSputs, "casea") +
+         "  (return-void)\n  (:b 2)\n"
+         "  (.src_block \"LFoo;.bar:(I)V\" 3 (0.0 0.0))\n" +
+         sputs(kCaseSputs, "caseb") + "  (return-void)\n)\n";
+}
+
+} // namespace
+
+// A group's remaining size is what the host keeps, less
+// `cost_split_switch_case` for each case after the first, and its floor reads
+// that size. The host keeps the entry (a 2-key packed `switch`, 11 code units
+// with its payload) and the case the group leaves (`2 * kCaseSputs + 1` code
+// units).
+TEST_F(MethodSplitterTest, RemainingFloorOfASwitchGroupAtItsBoundary) {
+  auto config = floorConfig();
+  config.cost_split_switch_case = 20;
+  config.min_hot_cold_split_size = 3 * kCaseSputs;
+  constexpr size_t kGroupRemaining = 11 + 2 * kCaseSputs + 1 - 20;
+  config.min_hot_split_size = kGroupRemaining;
+  EXPECT_EQ(split_count("(I)V", switchGroupCode(), config), 1u);
+  config.min_hot_split_size = kGroupRemaining + 1;
+  EXPECT_EQ(split_count("(I)V", switchGroupCode(), config), 0u);
+}

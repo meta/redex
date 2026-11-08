@@ -100,6 +100,9 @@ class MethodSplitterTest : public RedexTest {
         stores, /* min_sdk */ 0, config, store_ref_checkers,
         /* create_init_class_insns */ false,
         /* reserved_mrefs */ 0, /* reserved_trefs */ 0, &stats);
+    // Every candidate is recorded once, at its final fate.
+    const auto fates = stats.snapshot().suffix_fates;
+    EXPECT_EQ(fates.recorded(), fates.candidates);
     m->get_code()->cfg().simplify();
     for (const auto& [out, kind] : stats.added_methods) {
       (void)kind;
@@ -172,6 +175,8 @@ class MethodSplitterTest : public RedexTest {
         stores, /* min_sdk */ 0, config, store_ref_checkers,
         /* create_init_class_insns */ false,
         /* reserved_mrefs */ 0, /* reserved_trefs */ 0, &stats);
+    const auto fates = stats.snapshot().suffix_fates;
+    EXPECT_EQ(fates.recorded(), fates.candidates);
     return stats.added_methods.size();
   }
 

@@ -37,6 +37,9 @@ struct ScoredClosure {
   UnorderedSet<const ReducedBlock*> reduced_components;
   size_t split_size{};
   size_t remaining_size{};
+  // The code units of the closures' blocks. The split copies these blocks, and
+  // the candidate's fate counts these code units.
+  size_t covered_code_units{0};
   std::optional<HotSplitKind> hot_split_kind{std::nullopt};
   bool is_large_packed_switch{false};
   bool creates_large_sparse_switch{false};
@@ -141,6 +144,7 @@ std::optional<ScoredClosure> score(
     insert_unordered_iterable(sc.reduced_components, c->reduced_components);
   }
   auto reduced_components_code_size = code_size(sc.reduced_components);
+  sc.covered_code_units = reduced_components_code_size;
   sc.split_size = config.cost_split_method + reduced_components_code_size;
   if (closures.size() > 1) {
     sc.split_size += config.cost_split_switch +
@@ -444,15 +448,15 @@ struct CandidateEvalContext {
   Lazy<UninitializedObjectEnvironments>& uninitialized_objects;
   Lazy<UnorderedMap<IRInstruction*, const ReducedBlock*>>& insns;
   const RefChecker* ref_checker;
-  std::atomic<size_t>* arg_type_illegal;
   size_t max_live_in;
 };
 
 // Evaluates one candidate on its own: resolves its live-in arguments into
-// `sc.args` and checks every rule a candidate must pass by itself. Returns true
-// when the candidate must be dropped (the `std::erase_if` predicate). Overlap
-// between candidates is resolved by the caller, not here.
-bool evaluate_candidate(ScoredClosure& sc, CandidateEvalContext& ctx) {
+// `sc.args` and checks every rule a candidate must pass by itself. Returns the
+// fate of a candidate that must be dropped, nullopt for one that stays.
+// Overlap between candidates is resolved by the caller, not here.
+std::optional<CandidateFate> evaluate_candidate(ScoredClosure& sc,
+                                                CandidateEvalContext& ctx) {
   sparta::PatriciaTreeSet<reg_t> live_in;
   for (const auto* c : sc.closures) {
     live_in.union_with(
@@ -468,13 +472,13 @@ bool evaluate_candidate(ScoredClosure& sc, CandidateEvalContext& ctx) {
     const auto* c = sc.closures.front();
     auto it = c->target->get_first_insn();
     if (it == c->target->end()) {
-      return true;
+      return CandidateFate::Evaluation_EmptyHead;
     }
     first_insn = it->insn;
   }
   std::vector<reg_t> ordered_live_in(live_in.begin(), live_in.end());
   if (ordered_live_in.size() > ctx.max_live_in) {
-    return true;
+    return CandidateFate::Evaluation_TooManyLiveIns;
   }
   std::sort(ordered_live_in.begin(), ordered_live_in.end());
 
@@ -501,27 +505,26 @@ bool evaluate_candidate(ScoredClosure& sc, CandidateEvalContext& ctx) {
         ctx.ota->demand_of_uses(passed_defs(reg), in_cover),
         [&]() { return ctx.ota->value_at(first_insn, reg); });
     if (type == nullptr) {
-      return true;
+      return CandidateFate::Evaluation_LiveInUntypable;
     }
     // The type demand is a meet over the uses, so it can name a type that no
     // individual use named -- possibly an external one above the min-sdk
     // floor, which type-checks at build time and fails to resolve on an old
     // device.
     if (ctx.ref_checker != nullptr && !ctx.ref_checker->check_type(type)) {
-      ++*ctx.arg_type_illegal;
-      return true;
+      return CandidateFate::Evaluation_ArgTypeIllegal;
     }
     sc.args.push_back((ClosureArgument){reg, type, nullptr});
     if (type::is_object(type)) {
       const auto& uninitialized_env = ctx.uninitialized_objects->at(first_insn);
       auto opt_uninitialized = uninitialized_env.get(reg).get_constant();
       if (!opt_uninitialized || *opt_uninitialized) {
-        return true;
+        return CandidateFate::Evaluation_LiveInUninitialized;
       }
     }
   }
 
-  return false;
+  return std::nullopt;
 }
 
 // Filter out overlapping closures, unsplittable closures (when we cannot
@@ -531,9 +534,9 @@ std::vector<SplittableClosure> to_splittable_closures(
     size_t max_live_in,
     const std::shared_ptr<MethodClosures>& mcs,
     std::vector<ScoredClosure> scored_closures,
-    // Both null on the top-level-switch path, which has no store context.
-    const RefChecker* ref_checker,
-    std::atomic<size_t>* arg_type_illegal) {
+    Stats& stats,
+    // Null on the top-level-switch path, which has no store context.
+    const RefChecker* ref_checker) {
   std::vector<SplittableClosure> splittable_closures;
   // We sort closures in a way that allows us to quickly prune contained
   // closures if we found a viable containing closure.
@@ -577,18 +580,28 @@ std::vector<SplittableClosure> to_splittable_closures(
   });
   UnorderedSet<const ReducedBlock*> covered;
 
-  CandidateEvalContext ctx{ota,        liveness_fp_iter, uninitialized_objects,
-                           insns,      ref_checker,      arg_type_illegal,
-                           max_live_in};
-  std::erase_if(scored_closures, [&covered, &ctx](auto& sc) {
+  // Every scored suffix is a candidate from here on.
+  stats.suffix_fates.candidates += scored_closures.size();
+  auto record = [&stats](const ScoredClosure& sc, CandidateFate fate) {
+    stats.record(
+        SplitKind::Suffix,
+        [&sc] { return SplittableClosure::head_ids(sc.closures); }, fate,
+        sc.covered_code_units);
+  };
+
+  CandidateEvalContext ctx{ota,   liveness_fp_iter, uninitialized_objects,
+                           insns, ref_checker,      max_live_in};
+  std::erase_if(scored_closures, [&covered, &ctx, &record](auto& sc) {
     for (auto* c : sc.closures) {
       if (covered.count(c->reduced_block)) {
         // We already have this contained closure covered by a valid
         // containing closure
+        record(sc, CandidateFate::Selection_Displaced);
         return true;
       }
     }
-    if (evaluate_candidate(sc, ctx)) {
+    if (auto fate = evaluate_candidate(sc, ctx)) {
+      record(sc, *fate);
       return true;
     }
     insert_unordered_iterable(covered, sc.reduced_components);
@@ -640,9 +653,17 @@ std::vector<SplittableClosure> to_splittable_closures(
     auto added_code_size =
         sc.split_size + sc.remaining_size - mcs->original_size;
     splittable_closures.push_back((SplittableClosure){
-        mcs, sc.switch_block, std::move(sc.closures), std::move(sc.args), rank,
-        added_code_size, sc.hot_split_kind, sc.is_large_packed_switch,
-        sc.creates_large_sparse_switch, sc.destroys_large_packed_switch});
+        .method_closures = mcs,
+        .switch_block = sc.switch_block,
+        .closures = std::move(sc.closures),
+        .args = std::move(sc.args),
+        .rank = rank,
+        .added_code_size = added_code_size,
+        .hot_split_kind = sc.hot_split_kind,
+        .is_large_packed_switch = sc.is_large_packed_switch,
+        .creates_large_sparse_switch = sc.creates_large_sparse_switch,
+        .destroys_large_packed_switch = sc.destroys_large_packed_switch,
+        .covered_code_units = sc.covered_code_units});
   }
   return splittable_closures;
 };
@@ -679,7 +700,7 @@ select_splittable_closures_based_on_costs(
     InsertOnlyConcurrentSet<const DexMethod*>* concurrent_hot_methods,
     InsertOnlyConcurrentMap<DexMethod*, size_t>*
         concurrent_splittable_no_optimizations_methods,
-    std::atomic<size_t>* arg_type_illegal) {
+    Stats& stats) {
   Timer t("select_splittable_closures_based_on_costs");
   ConcurrentMap<DexType*, std::vector<SplittableClosure>>
       concurrent_splittable_closures;
@@ -743,8 +764,8 @@ select_splittable_closures_based_on_costs(
       return;
     }
     auto splittable_closures = to_splittable_closures(
-        config.max_live_in, mcs, std::move(scored_closures),
-        &store_ref_checkers.get(method->get_class()), arg_type_illegal);
+        config.max_live_in, mcs, std::move(scored_closures), stats,
+        &store_ref_checkers.get(method->get_class()));
     concurrent_splittable_closures.update(
         method->get_class(), [&](auto, auto& v, bool) {
           v.insert(v.end(),
@@ -762,6 +783,8 @@ select_splittable_closures_from_top_level_switch_cases(
   Timer t("select_splittable_closures_from_top_level_switch_cases");
   InsertOnlyConcurrentMap<DexMethod*, std::vector<SplittableClosure>>
       concurrent_splittable_closures;
+  // The fates of these unscored candidates are not reported.
+  Stats stats;
   auto concurrent_process_method = [&](DexMethod* method) {
     if (method->rstate.no_optimizations() ||
         method->rstate.should_not_outline()) {
@@ -809,8 +832,7 @@ select_splittable_closures_from_top_level_switch_cases(
     }
     auto splittable_closures =
         to_splittable_closures(max_live_in, mcs, std::move(scored_closures),
-                               /* ref_checker */ nullptr,
-                               /* arg_type_illegal */ nullptr);
+                               stats, /* ref_checker */ nullptr);
     if (!splittable_closures.empty()) {
       concurrent_splittable_closures.emplace(method,
                                              std::move(splittable_closures));

@@ -16,6 +16,7 @@
 #include "DexStore.h"
 #include "MethodClosures.h"
 #include "MethodSplittingConfig.h"
+#include "MethodSplittingStats.h"
 #include "RefChecker.h"
 
 namespace api {
@@ -68,6 +69,9 @@ struct SplittableClosure {
   bool is_large_packed_switch{false};
   bool creates_large_sparse_switch{false};
   bool destroys_large_packed_switch{false};
+  // The code units of the closures' blocks. The candidate's fate counts these
+  // code units.
+  size_t covered_code_units{0};
 
   int is_switch() const { return switch_block != nullptr ? 1 : 0; }
 
@@ -80,12 +84,26 @@ struct SplittableClosure {
     return closures.front()->target->id();
   }
 
+  // Head-block ids in `closures` order.
+  std::vector<cfg::BlockId> head_ids() const { return head_ids(closures); }
+
+  // The head-block ids of `closures`, in order, also for a candidate that is
+  // not a `SplittableClosure` yet.
+  static std::vector<cfg::BlockId> head_ids(
+      const std::vector<const Closure*>& closures) {
+    std::vector<cfg::BlockId> ids;
+    ids.reserve(closures.size());
+    for (const auto* c : closures) {
+      ids.push_back(c->target->id());
+    }
+    return ids;
+  }
+
   std::vector<const DexType*> get_arg_types() const;
 };
 
 // Selects splittable closures for a given set of methods based of configured
-// costs. Closures whose synthesized argument types are not loadable are
-// dropped, counted in `arg_type_illegal`.
+// costs. `stats` receives the fate of every candidate dropped on the way.
 ConcurrentMap<DexType*, std::vector<SplittableClosure>>
 select_splittable_closures_based_on_costs(
     const ConcurrentSet<DexMethod*>& methods,
@@ -94,7 +112,7 @@ select_splittable_closures_based_on_costs(
     InsertOnlyConcurrentSet<const DexMethod*>* concurrent_hot_methods,
     InsertOnlyConcurrentMap<DexMethod*, size_t>*
         concurrent_splittable_no_optimizations_methods,
-    std::atomic<size_t>* arg_type_illegal);
+    Stats& stats);
 
 // Selects splittable closures for a given set of methods from all contained
 // top-level switch cases.

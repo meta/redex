@@ -122,7 +122,23 @@ struct SplitResult {
   std::vector<DexMethod*> region_splits;
   std::vector<DexMethod*> suffix_splits;
   method_splitting_impl::StatsSnapshot stats;
+  // One record per candidate, over every iteration, in the order the fates
+  // were decided: its kind, heads, fate and iteration.
+  std::vector<method_splitting_impl::CandidateEvaluation> evaluations;
 };
+
+// The partition invariant, asserted after every run. Throws when any part of
+// it fails:
+// - per kind, the number of candidates a run considered equals the sum of its
+//   fate counts;
+// - every candidate has one evaluation record, so per kind and fate the
+//   records match the counters;
+// - with `one_host` (a run over one host), no two records of the first
+//   iteration name the same candidate, that is, the same kind and heads.
+void expectEveryCandidateHasOneFate(
+    const method_splitting_impl::StatsSnapshot& stats,
+    const std::vector<method_splitting_impl::CandidateEvaluation>& records,
+    bool one_host);
 
 // Construct a class with a single method `bar` from the given IR
 // S-expression and signature, run `split_methods_in_stores` on it,

@@ -186,7 +186,16 @@ ConcurrentSet<DexMethod*> split_splittable_closures(
                 return c->id() > d->id();
               });
     UnorderedSet<DexMethod*> affected_methods;
-    for (const auto* splittable_closure : ranked_splittable_closures) {
+    auto record = [stats](const SplittableClosure& sc, CandidateFate fate,
+                          const DexMethod* split = nullptr) {
+      stats->record(
+          SplitKind::Suffix, [&sc] { return sc.head_ids(); }, fate,
+          sc.covered_code_units, split);
+    };
+    for (auto it = ranked_splittable_closures.begin();
+         it != ranked_splittable_closures.end();
+         ++it) {
+      const auto* splittable_closure = *it;
       auto* method = splittable_closure->method_closures->method;
       std::string id =
           method->get_class()->str() + "." + method->get_name()->str();
@@ -194,6 +203,10 @@ ConcurrentSet<DexMethod*> split_splittable_closures(
       auto arg_types = splittable_closure->get_arg_types();
       if (!account_for_added_split_method(arg_types, dex_state.get())) {
         stats->dex_limits_hit++;
+        // This candidate and every one ranked after it in the dex.
+        for (auto rest = it; rest != ranked_splittable_closures.end(); ++rest) {
+          record(**rest, CandidateFate::Emission_DexLimit);
+        }
         for (auto* m : UnorderedIterable(affected_methods)) {
           m->get_code()->cfg().remove_unreachable_blocks();
         }
@@ -269,6 +282,7 @@ ConcurrentSet<DexMethod*> split_splittable_closures(
       affected_methods.insert(method);
       affected_methods.insert(new_method);
       concurrent_added_methods->insert(new_method);
+      record(*splittable_closure, CandidateFate::Emitted, new_method);
     }
     insert_unordered_iterable(concurrent_affected_methods, affected_methods);
   };
@@ -555,11 +569,11 @@ void split_methods_in_stores(
   AtomicMap<std::string, size_t> uniquifiers;
   while (!methods.empty() && iteration < config.max_iteration) {
     TRACE(MS, 2, "=== iteration[%zu]", iteration);
+    stats->iterations = iteration;
     Timer t("iteration " + std::to_string(iteration++));
     auto splittable_closures = select_splittable_closures_based_on_costs(
         methods, config, store_ref_checkers, concurrent_hot_methods,
-        concurrent_splittable_no_optimizations_methods,
-        &stats->arg_type_illegal);
+        concurrent_splittable_no_optimizations_methods, *stats);
     ConcurrentSet<DexMethod*> concurrent_added_methods;
     methods = split_splittable_closures(
         config, dexen, min_sdk, init_classes_with_side_effects, reserved_trefs,

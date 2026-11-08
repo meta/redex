@@ -7,13 +7,80 @@
 
 #pragma once
 
+#include <array>
+#include <cstdint>
 #include <memory>
+#include <optional>
+#include <string_view>
 #include <vector>
 
 #include "DeterministicContainers.h"
 #include "ReducedControlFlow.h"
 
 namespace method_splitting_impl {
+
+// What became of a split candidate: the stage that decided it, and why. Every
+// candidate is recorded exactly once, at its final fate. So for each kind, the
+// number of candidates a run considered equals the sum of its fate counts.
+//
+// A suffix candidate is one the overhead-ratio sweep scored. `Emitted` is the
+// only fate that is not a drop.
+enum class CandidateFate : uint8_t {
+  // Per-candidate evaluation.
+  Evaluation_EmptyHead,
+  Evaluation_TooManyLiveIns,
+  Evaluation_LiveInUntypable,
+  // A synthesized argument type is not loadable: external and above the
+  // min-sdk floor, or cross-store illegal. A nonzero count on a run that also
+  // reports `min_sdk_no_file` means the gate rejected external types for want
+  // of an api model rather than on a real min-sdk violation.
+  Evaluation_ArgTypeIllegal,
+  Evaluation_LiveInUninitialized,
+  // Selection, emission.
+  Selection_Displaced, // an overlapping candidate ranked ahead claimed it
+  Emission_DexLimit,
+  Emitted,
+};
+
+inline constexpr size_t kCandidateFateCount =
+    static_cast<size_t>(CandidateFate::Emitted) + 1;
+
+// The metric name of each fate. Each entry names its fate, so the table can be
+// checked against the enum's order.
+struct CandidateFateName {
+  CandidateFate fate;
+  std::string_view name;
+};
+inline constexpr std::array<CandidateFateName, kCandidateFateCount>
+    kCandidateFateNames{{
+        {CandidateFate::Evaluation_EmptyHead, "evaluation_empty_head"},
+        {CandidateFate::Evaluation_TooManyLiveIns,
+         "evaluation_too_many_live_ins"},
+        {CandidateFate::Evaluation_LiveInUntypable,
+         "evaluation_live_in_untypable"},
+        {CandidateFate::Evaluation_ArgTypeIllegal,
+         "evaluation_arg_type_illegal"},
+        {CandidateFate::Evaluation_LiveInUninitialized,
+         "evaluation_live_in_uninitialized"},
+        {CandidateFate::Selection_Displaced, "selection_displaced"},
+        {CandidateFate::Emission_DexLimit, "emission_dex_limit"},
+        {CandidateFate::Emitted, "emitted"},
+    }};
+static_assert(
+    [] {
+      for (size_t i = 0; i < kCandidateFateCount; ++i) {
+        if (kCandidateFateNames[i].fate != static_cast<CandidateFate>(i) ||
+            kCandidateFateNames[i].name.empty()) {
+          return false;
+        }
+      }
+      return true;
+    }(),
+    "one name per CandidateFate, in enum order");
+
+inline std::string_view describe(CandidateFate fate) {
+  return kCandidateFateNames[static_cast<size_t>(fate)].name;
+}
 
 // A "closure" here represents the transitive closure of all blocks reachable
 // from a given reduced block.

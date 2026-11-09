@@ -1522,6 +1522,7 @@ void redex_frontend(ConfigFiles& conf, /* input */
     d["parse_errors"] = (u64)parser_stats.parse_errors;
     d["unknown_tokens"] = (u64)parser_stats.unknown_tokens;
     d["unimplemented"] = (u64)parser_stats.unimplemented;
+    d["skipped_if_rules"] = (u64)parser_stats.skipped_if_rules;
     d["unknown_commands"] = (u64)parser_stats.unknown_commands;
     d["ok"] = (u64)(pg_config.ok ? 1 : 0);
     d["blocklisted_rules"] = (u64)blocklisted_rules;

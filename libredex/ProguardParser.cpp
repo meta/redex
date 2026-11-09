@@ -1173,6 +1173,9 @@ void parse(const std::vector<Token>& vec,
       idx.to_last(); // Unwind moving forward.
       always_assert(idx.it->is_command());
       const auto& name = idx.data();
+      if (name == "if") {
+        ++stats.skipped_if_rules;
+      }
       // It is benign to drop -dontnote
       if (name != "dontnote") {
         std::cerr << "Unimplemented command (skipping): " << idx.show()

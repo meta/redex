@@ -13,10 +13,10 @@
 
 #include "ProguardConfiguration.h"
 #include "ProguardParser.h"
+#include "ProguardPrintConfiguration.h"
 
 using namespace keep_rules;
 
-// Make sure we can parse an empty string
 // Identical rules are separate entries, and erasing calls the predicate once
 // per entry.
 TEST(ProguardParserTest, identical_keep_rules_are_separate_entries) {
@@ -39,6 +39,7 @@ TEST(ProguardParserTest, identical_keep_rules_are_separate_entries) {
   EXPECT_TRUE(config.keep_rules.empty());
 }
 
+// Make sure we can parse an empty string
 TEST(ProguardParserTest, empty1) {
   ProguardConfiguration config;
   std::istringstream ss1("");
@@ -56,6 +57,54 @@ TEST(ProguardParserTest, empty1) {
   std::istringstream ss5(" \n");
   proguard_parser::parse(ss5, &config);
   ASSERT_TRUE(config.ok);
+}
+
+TEST(ProguardParserTest, skipped_if_rules) {
+  ProguardConfiguration config;
+  std::istringstream conditional(R"(
+    -if class Missing { public int field; }
+    -keep,allowobfuscation class Foo { *; }
+    -if class Missing { public int field; }
+    -keepclassmembers class Bar { public void method(); }
+    -dontnote **
+    -dump unused.txt
+)");
+  auto stats = proguard_parser::parse(conditional, &config);
+  ASSERT_TRUE(config.ok);
+  EXPECT_EQ(stats.skipped_if_rules, 2);
+  EXPECT_EQ(stats.unimplemented, 3);
+  EXPECT_EQ(stats.parse_errors, 0);
+
+  ProguardConfiguration expected;
+  std::istringstream unconditional(R"(
+    -keep,allowobfuscation class Foo { *; }
+    -keepclassmembers class Bar { public void method(); }
+)");
+  auto baseline_stats = proguard_parser::parse(unconditional, &expected);
+  ASSERT_TRUE(expected.ok);
+  EXPECT_EQ(baseline_stats.skipped_if_rules, 0);
+  ASSERT_EQ(config.keep_rules.size(), expected.keep_rules.size());
+  auto it = expected.keep_rules.begin();
+  for (const auto* rule : config.keep_rules) {
+    EXPECT_EQ(show_keep(*rule, false), show_keep(**it++, false));
+  }
+}
+
+TEST(ProguardParserTest, skipped_if_rules_accumulate) {
+  ProguardConfiguration config;
+  proguard_parser::Stats total;
+  for (size_t count : {1, 2}) {
+    std::stringstream input;
+    for (size_t i = 0; i < count; ++i) {
+      input << "-if class Missing\n-keep class Foo\n";
+    }
+    auto stats = proguard_parser::parse(input, &config);
+    ASSERT_TRUE(config.ok);
+    EXPECT_EQ(stats.skipped_if_rules, count);
+    total += stats;
+  }
+  EXPECT_EQ(total.skipped_if_rules, 3);
+  EXPECT_EQ(config.keep_rules.size(), 3);
 }
 
 // Make sure we can recognize a parsing failure.

@@ -62,5 +62,5 @@ for details.
  private:
   Stats m_stats;
   DexMethodRef* m_getClass_ref;
-  DexType* m_null_check_type;
+  DexMethod* m_null_check_ref;
 };

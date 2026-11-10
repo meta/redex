@@ -46,6 +46,7 @@ COMMON_INCLUDES = \
 	-I$(top_srcdir)/opt/make-public \
 	-I$(top_srcdir)/opt/merge_interface \
 	-I$(top_srcdir)/opt/methodinline \
+	-I$(top_srcdir)/opt/nullcheck_conversion \
 	-I$(top_srcdir)/opt/obfuscate \
 	-I$(top_srcdir)/opt/obfuscate_resources \
 	-I$(top_srcdir)/opt/object-sensitive-dce \

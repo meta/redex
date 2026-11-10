@@ -541,6 +541,20 @@ void gather_true_virtual_methods(
   });
 
   // Post processing candidates.
+  // A call site recorded for a cluster's representative can reach any other
+  // method of the cluster at run time, so none of those sees all its callers.
+  UnorderedSet<const SameImplementation*> called_same_implementations;
+  for (const auto& p : UnorderedIterable(same_implementation_invokes)) {
+    called_same_implementations.insert(p.second);
+  }
+  for (const auto* same_implementation :
+       UnorderedIterable(called_same_implementations)) {
+    for (const auto* method : same_implementation->methods) {
+      if (method != same_implementation->representative) {
+        add_other_call_site(method);
+      }
+    }
+  }
   std::vector<const DexMethod*> true_virtual_callees;
   for (auto& p : UnorderedIterable(concurrent_true_virtual_callers)) {
     true_virtual_callees.push_back(p.first);

@@ -17,6 +17,8 @@
 #include "Inliner.h"
 #include "InlinerConfig.h"
 #include "LegacyInliner.h"
+#include "MethodInlinePass.h"
+#include "PassManager.h"
 #include "RedexTest.h"
 #include "Walkers.h"
 
@@ -4635,4 +4637,153 @@ TEST_F(MethodInlineTest, partially_inline_dex_position_marker_gone) {
 
   auto caller_expected = assembler::ircode_from_string(caller_expected_str);
   EXPECT_CODE_EQ(caller_actual, caller_expected.get());
+}
+namespace {
+
+// Runs MethodInlinePass with true-virtual inlining over prepared stores and
+// returns its metrics. The pass leaves method bodies without a CFG.
+auto run_method_inline_pass(DexStoresVector& stores, bool normal_primary_dex) {
+  Json::Value config;
+  config["inliner"]["virtual"] = true;
+  config["inliner"]["true_virtual_inline"] = true;
+  config["inliner"]["run_const_prop"] = false;
+  config["InterDexPass"]["normal_primary_dex"] = normal_primary_dex;
+  ConfigFiles conf(config);
+  conf.parse_global_config();
+  MethodInlinePass pass;
+  PassManager manager({&pass}, conf);
+  manager.run_passes(stores, conf);
+  return manager.get_pass_info().at(0).metrics;
+}
+
+// `LHelper;.choose:(I)I` returns 10 for 0 and 20 otherwise.
+DexClass* make_choose_helper() {
+  return assembler::class_from_string(R"(
+    (class (public) "LHelper;"
+      (method (public static) "LHelper;.choose:(I)I"
+        (
+          (load-param v0)
+          (if-eqz v0 :zero)
+          (const v1 20)
+          (return v1)
+          (:zero)
+          (const v1 10)
+          (return v1)
+        )
+      )
+    )
+  )");
+}
+
+// An implementation of `LI;.get:(I)I` that returns `LHelper;.choose(x)`.
+DexClass* make_choosing_impl(const std::string& type,
+                             const std::string& super = "") {
+  return assembler::class_from_string(
+      "(class (public) \"" + type + "\" " + super +
+      " implements \"LI;\" (method (public) \"" + type +
+      ".get:(I)I\" ((load-param-object v0) (load-param v1) (invoke-static "
+      "(v1) \"LHelper;.choose:(I)I\") (move-result v2) (return v2))))");
+}
+
+// A static `use:(LI;)I` that returns `get(arg)` on its argument.
+DexClass* make_constant_caller(const std::string& type, int arg) {
+  return assembler::class_from_string(
+      "(class (public) \"" + type + "\" (method (public static) \"" + type +
+      ".use:(LI;)I\" ((load-param-object v0) (const v1 " + std::to_string(arg) +
+      ") (invoke-interface (v0 v1) \"LI;.get:(I)I\") (move-result v2) "
+      "(return v2))))");
+}
+
+// The helper may be inlined without specialization, so either form is valid.
+bool keeps_choose_result(DexMethod* method, int64_t value) {
+  const auto* choose = DexMethod::get_method("LHelper;.choose:(I)I");
+  method->get_code()->build_cfg();
+  for (auto& mie : InstructionIterable(method->get_code()->cfg())) {
+    if ((mie.insn->opcode() == OPCODE_INVOKE_STATIC &&
+         mie.insn->get_method() == choose) ||
+        (opcode::is_a_const(mie.insn->opcode()) &&
+         mie.insn->get_literal() == value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// `LA;` sorts first, so shared calls are recorded against its representative
+// method but may run the other implementations despite their super calls
+// passing 0. The extra implementation also adds a second shared caller.
+void check_identical_implementation_callers(bool keep_shared_calls,
+                                            bool extra_implementation) {
+  auto* intf_cls = assembler::class_from_string(
+      R"((interface (public) "LI;" (method "LI;.get:(I)I")))");
+  auto* b_cls = make_choosing_impl("LB;");
+  auto* caller_cls = make_constant_caller("LCaller;", 1);
+  if (keep_shared_calls) {
+    caller_cls->get_dmethods().at(0)->rstate.set_no_optimizations();
+  }
+  auto make_super_caller = [](const std::string& type,
+                              const std::string& base) {
+    return assembler::class_from_string(
+        "(class (public) \"" + type + "\" extends \"" + base +
+        "\" (method (public) \"" + type +
+        ".use:()I\" ((load-param-object v0) (const v1 0) "
+        "(invoke-super (v0 v1) \"" +
+        base + ".get:(I)I\") (move-result v2) (return v2))))");
+  };
+  auto* sub_cls = make_super_caller("LSub;", "LB;");
+  sub_cls->get_vmethods().at(0)->rstate.set_no_optimizations();
+  std::vector<DexClass*> classes{
+      intf_cls, make_choose_helper(), make_choosing_impl("LA;"),
+      b_cls,    caller_cls,           sub_cls};
+  DexClass* c_cls = nullptr;
+  if (extra_implementation) {
+    c_cls = make_choosing_impl("LC;");
+    auto* other_caller = make_constant_caller("LOtherCaller;", 1);
+    if (keep_shared_calls) {
+      other_caller->get_dmethods().at(0)->rstate.set_no_optimizations();
+    }
+    auto* sub_c = make_super_caller("LSubC;", "LC;");
+    sub_c->get_vmethods().at(0)->rstate.set_no_optimizations();
+    classes.insert(classes.end(), {c_cls, other_caller, sub_c});
+  }
+
+  DexStoresVector stores;
+  DexStore store("classes");
+  store.add_classes(classes);
+  stores.push_back(std::move(store));
+  auto scope = build_class_scope(stores);
+  walk::parallel::code(scope, [&](auto*, IRCode& code) { code.build_cfg(); });
+  api::LevelChecker::init(0, scope);
+  always_assert(DexMethod::get_method("LHelper;.choose:(I)I") != nullptr);
+  auto metrics = run_method_inline_pass(stores, /* normal_primary_dex */ false);
+
+  EXPECT_TRUE(keeps_choose_result(b_cls->get_vmethods().at(0), 20));
+  if (c_cls != nullptr) {
+    EXPECT_TRUE(keeps_choose_result(c_cls->get_vmethods().at(0), 20));
+  }
+  if (!keep_shared_calls) {
+    auto* code = caller_cls->get_dmethods().at(0)->get_code();
+    code->build_cfg();
+    for (auto& mie : InstructionIterable(code->cfg())) {
+      EXPECT_NE(mie.insn->opcode(), OPCODE_INVOKE_INTERFACE);
+    }
+    EXPECT_GT(metrics.at("calls_inlined"), 0);
+  }
+}
+
+} // namespace
+
+TEST_F(MethodInlineTest, identical_implementation_keeps_shared_call_sites) {
+  check_identical_implementation_callers(/* keep_shared_calls */ true,
+                                         /* extra_implementation */ false);
+}
+
+TEST_F(MethodInlineTest, identical_implementation_keeps_all_cluster_members) {
+  check_identical_implementation_callers(/* keep_shared_calls */ true,
+                                         /* extra_implementation */ true);
+}
+
+TEST_F(MethodInlineTest, identical_implementation_still_inlines_shared_calls) {
+  check_identical_implementation_callers(/* keep_shared_calls */ false,
+                                         /* extra_implementation */ false);
 }

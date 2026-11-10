@@ -175,9 +175,9 @@ class Demand {
   UnorderedSet<const DexType*> m_references;
 };
 
-// The type of a value passed into outlined code. The widest type every use
-// accepts keeps the signature independent of what one caller holds; when the
-// uses do not determine it, the type of the value `supply` gives.
+// The type of a value passed into outlined code: the widest type every use
+// accepts, so that the signature does not depend on what one caller holds.
+// When the uses do not determine a type, the type of the value `supply` gives.
 const DexType* declare_parameter(const Demand& uses,
                                  const std::function<Value()>& supply);
 
@@ -211,9 +211,8 @@ class OutlinerTypeAnalysis {
   // The value of `reg` where `anchor` reads it.
   art::Value value_at(const IRInstruction* anchor, reg_t reg);
 
-  // What the instructions of `pc` require of `reg`, the value it holds on
-  // entry. `result` is the register the candidate gives back and its declared
-  // type.
+  // What the instructions of `pc` require of the value `reg` holds on entry.
+  // `result` is the register the candidate gives back, with its declared type.
   art::Demand demand_in_candidate(
       const PartialCandidate& pc,
       reg_t reg,

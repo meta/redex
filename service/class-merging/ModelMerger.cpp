@@ -464,35 +464,6 @@ std::string merger_info(const MergerType& merger) {
   return ss.str();
 }
 
-void set_interfaces(DexClass* cls, const TypeSet& intfs) {
-  if (!intfs.empty()) {
-    auto intf_list = DexTypeList::ContainerType();
-    for (const auto& intf : intfs) {
-      intf_list.emplace_back(const_cast<DexType*>(intf));
-    }
-    auto* new_intfs = DexTypeList::make_type_list(std::move(intf_list));
-    cls->set_interfaces(new_intfs);
-  }
-};
-
-void fix_existing_merger_cls(const Model& model,
-                             const MergerType& merger,
-                             DexClass* cls,
-                             DexType* type) {
-  always_assert_log(!cls->is_external(), "%s and must be an internal DexClass",
-                    SHOW(type));
-  always_assert_log(merger.mergeables.empty(),
-                    "%s cannot have mergeables",
-                    merger_info(merger).c_str());
-  const auto& intfs = model.get_interfaces(type);
-  set_interfaces(cls, intfs);
-  cls->set_super_class(const_cast<DexType*>(model.get_parent(type)));
-  TRACE(CLMG,
-        5,
-        "create hierarchy: updated DexClass from MergerType: %s",
-        SHOW(cls));
-}
-
 // Trim the debug map to only contain mergeable methods.
 void trim_method_debug_map(
     const UnorderedMap<const DexType*, DexType*>& mergeable_to_merger,
@@ -584,23 +555,15 @@ std::vector<DexClass*> ModelMerger::merge_model(
   model.walk_hierarchy([&](const MergerType& merger) {
     // a model hierarchy is walked top down BFS style.
     // The walker is passed only merger that need computation.
-    // A MergerType may or may not have mergeables.
-    // A MergerType may or may not have a DexClass, if not one has
-    // to be created.
     // A set of properties in the MergerType define the operation to
     // perform on the given type.
 
     auto* cls = type_class(merger.type);
     const auto& intfs = model.get_interfaces(merger.type);
     TRACE(CLMG, 3, "%s", merger_info(merger).c_str());
-
-    // MergerType has an existing class, update interfaces,
-    // fields and parent
-    if (cls != nullptr) {
-      fix_existing_merger_cls(model, merger, cls,
-                              const_cast<DexType*>(merger.type));
-      return;
-    }
+    always_assert_log(cls == nullptr,
+                      "Shape type %s already names a class",
+                      SHOW(merger.type));
 
     update_merger_fields(merger);
     cls = create_merger_class(merger.type,

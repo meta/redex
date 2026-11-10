@@ -162,9 +162,9 @@ class WorkerState final {
 
   ~WorkerState() {
     for (auto* erased = m_erased.load(); erased != nullptr;) {
-      auto* prev = erased->prev;
+      auto* next = erased->next_erased;
       delete erased;
-      erased = prev;
+      erased = next;
     }
   }
 
@@ -201,9 +201,10 @@ class WorkerState final {
         }
         // We can't just delete the node right here, as there may be racing
         // pop_tasks that read the `->prev` field above. So we stack it away in
-        // a different list that gets destructed later.
-        node->prev = m_erased.load();
-        while (!m_erased.compare_exchange_strong(node->prev, node)) {
+        // a different list that gets destructed later, linked through a field
+        // of its own: writing `->prev` here would race with those reads.
+        node->next_erased = m_erased.load();
+        while (!m_erased.compare_exchange_strong(node->next_erased, node)) {
         }
         other->set_running(true);
         return boost::optional<Input>(std::move(node->task));
@@ -223,6 +224,7 @@ class WorkerState final {
   struct Node {
     Input task;
     Node* prev;
+    Node* next_erased{nullptr};
   };
   std::atomic<Node*> m_additional_tasks{nullptr};
   std::atomic<Node*> m_erased{nullptr};
@@ -444,12 +446,11 @@ void WorkQueue<Input, Executor>::run_in_parallel(const Worker& worker,
     size_t remaining = num_runners;
     auto func = [&](size_t i) {
       worker(m_states[i].get(), i);
-      bool notify;
-      {
-        std::lock_guard<std::mutex> lock(mutex);
-        notify = --remaining == 0;
-      }
-      if (notify) {
+      // Notify under the lock: once `remaining` is zero the waiter can return
+      // and destroy `condition_variable`, which a notification after the
+      // unlock would then use.
+      std::lock_guard<std::mutex> lock(mutex);
+      if (--remaining == 0) {
         condition_variable.notify_one();
       }
     };

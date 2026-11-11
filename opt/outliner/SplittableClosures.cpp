@@ -227,6 +227,44 @@ SizeFloors floors_for(const Config& config, HotSplitKind kind, bool gate) {
   return floors;
 }
 
+// What the host keeps, block by block, once a split of `sc` is applied.
+// Emission sends to the launchpad the switch's edges into the grouped heads
+// (for a group), or every edge into the head (for one closure). It leaves every
+// other edge in place. That includes an edge from a closure block the host
+// still reaches, so the block that edge enters stays in the host too.
+UnorderedSet<cfg::Block*> host_blocks_kept(cfg::ControlFlowGraph& cfg,
+                                           const ScoredClosure& sc) {
+  always_assert(!sc.closures.empty());
+  const auto* head = sc.closures.front()->target;
+  return reachable_blocks({cfg.entry_block()}, [&](const cfg::Edge* e) {
+    return sc.switch_block != nullptr
+               ? e->src() == sc.switch_block &&
+                     sc.grouped_heads.contains(e->target()->id())
+               : e->target() == head;
+  });
+}
+
+// Sizes what a split of `sc` evicts from the host and what it duplicates,
+// given the blocks the host keeps (`host_blocks_kept`).
+void size_eviction(const UnorderedSet<cfg::Block*>& remaining_cfg_blocks,
+                   ScoredClosure* sc) {
+  // A block of the split that the host still reaches exists in both methods;
+  // every other block leaves the host.
+  size_t duplicated_size = 0;
+  for (const auto* rb : UnorderedIterable(sc->reduced_components)) {
+    for (const auto* b : UnorderedIterable(rb->blocks)) {
+      const auto units = b->estimate_code_units();
+      if (remaining_cfg_blocks.contains(const_cast<cfg::Block*>(b))) {
+        duplicated_size += units;
+        sc->duplicated_dex_code_units += dex_code_units(b);
+      } else if (is_hot(b)) {
+        sc->evicted_hot_size += units;
+      }
+    }
+  }
+  sc->evicted_size = sc->covered_code_units - duplicated_size;
+}
+
 std::optional<ScoredClosure> score(
     const Config& config,
     const MethodClosures& mcs,
@@ -287,20 +325,8 @@ std::optional<ScoredClosure> score(
     }
   }
 
-  // What the host keeps, block by block. Emission sends to the launchpad the
-  // switch's edges into the grouped heads (for a group), or every edge into
-  // the head (for one closure). It leaves every other edge in place. That
-  // includes an edge from a closure block the host still reaches, so the block
-  // that edge enters stays in the host too.
-  auto& cfg = mcs.method->get_code()->cfg();
-  const auto* head = closures.front()->target;
   const auto remaining_cfg_blocks =
-      reachable_blocks({cfg.entry_block()}, [&](const cfg::Edge* e) {
-        return switch_block != nullptr
-                   ? e->src() == switch_block &&
-                         sc.grouped_heads.contains(e->target()->id())
-                   : e->target() == head;
-      });
+      host_blocks_kept(mcs.method->get_code()->cfg(), sc);
   size_t raw_remaining = 0;
   for (const auto* b : UnorderedIterable(remaining_cfg_blocks)) {
     raw_remaining += b->estimate_code_units();
@@ -338,21 +364,9 @@ std::optional<ScoredClosure> score(
   if (switch_block != nullptr) {
     sc.dispatch = partition_switch(switch_block, sc.grouped_heads);
   }
-  // A block of the split that the host still reaches exists in both methods;
-  // every other block leaves the host.
-  size_t duplicated_size = 0;
-  for (const auto* rb : UnorderedIterable(sc.reduced_components)) {
-    for (const auto* b : UnorderedIterable(rb->blocks)) {
-      const auto units = b->estimate_code_units();
-      if (remaining_cfg_blocks.contains(const_cast<cfg::Block*>(b))) {
-        duplicated_size += units;
-        sc.duplicated_dex_code_units += dex_code_units(b);
-      } else if (is_hot(b)) {
-        sc.evicted_hot_size += units;
-      }
-    }
-  }
-  sc.evicted_size = reduced_components_code_size - duplicated_size;
+  // `size_eviction` sizes from `covered_code_units`, which is this size.
+  always_assert(sc.covered_code_units == reduced_components_code_size);
+  size_eviction(remaining_cfg_blocks, &sc);
   auto overhead_ratio = static_cast<double>(sc.split_size + sc.remaining_size) /
                             static_cast<double>(mcs.original_size) -
                         1.0;

@@ -18,6 +18,7 @@
 #include "ControlFlow.h"
 #include "DexUtil.h"
 #include "IRCode.h"
+#include "IRInstruction.h"
 #include "MethodUtil.h"
 #include "Show.h"
 #include "TypeUtil.h"
@@ -39,6 +40,31 @@ uint32_t dex2oat_code_units(DexMethod* method) {
     code_units += code->cfg().get_size_adjustment();
   }
   return code_units;
+}
+
+uint32_t lowered_unreachable_extra_code_units() {
+  static const uint32_t extra = [] {
+    IRInstruction invoke(OPCODE_INVOKE_STATIC);
+    IRInstruction move_result(OPCODE_MOVE_RESULT_OBJECT);
+    IRInstruction unreachable(IOPCODE_UNREACHABLE);
+    return static_cast<uint32_t>(invoke.size() + move_result.size() -
+                                 unreachable.size());
+  }();
+  return extra;
+}
+
+uint32_t dex2oat_code_units_before_unreachable_lowering(DexMethod* method) {
+  auto* code = method->get_code();
+  if (code == nullptr) {
+    return 0;
+  }
+  const UnorderedSet<IROpcode> unreachable{IOPCODE_UNREACHABLE};
+  auto unreachables =
+      code->cfg_built()
+          ? method::count_opcode_of_types(code->cfg(), unreachable)
+          : method::count_opcode_of_types(*code, unreachable);
+  return dex2oat_code_units(method) +
+         lowered_unreachable_extra_code_units() * unreachables;
 }
 
 UncompilableReason uncompilable_reason(DexMethod* method,

@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include "BaselineProfile.h"
 #include "Creators.h"
 #include "DexUtil.h"
 #include "IRAssembler.h"
@@ -18,6 +19,13 @@
 class UnreachableLoweringPassTest : public RedexTest {
  public:
   ::sparta::s_expr run_pass(const std::string& code) {
+    auto* method = make_method(code);
+    lower(method);
+    return assembler::to_s_expr(method->get_code());
+  }
+
+  // `LTest;.foo:()V` with `code`, in a class of its own.
+  DexMethod* make_method(const std::string& code) {
     // The tests need java.lang.Object to resolve to a DexClass to build a
     // proper scope.
     create_object_class();
@@ -30,18 +38,21 @@ class UnreachableLoweringPassTest : public RedexTest {
         ACC_PUBLIC | ACC_STATIC, false);
     method->set_code(assembler::ircode_from_string(code));
     creator.add_method(method);
+    creator.create();
+    return method;
+  }
 
+  // Runs UnreachableLoweringPass on the class of `method`.
+  static void lower(DexMethod* method) {
     UnreachableLoweringPass pass;
     PassManager manager({&pass});
     ConfigFiles config(Json::nullValue);
     config.parse_global_config();
     DexStore store("classes");
-    store.add_classes({creator.create()});
+    store.add_classes({type_class(method->get_class())});
     std::vector<DexStore> stores;
     stores.emplace_back(std::move(store));
     manager.run_passes(stores, config);
-
-    return assembler::to_s_expr(method->get_code());
   }
 
   ::sparta::s_expr get_s_expr(const std::string& code) {
@@ -117,4 +128,24 @@ TEST_F(UnreachableLoweringPassTest, invokes_are_tolerated) {
      )
     )";
   ASSERT_TRUE(run_test(original_code, expected_code));
+}
+
+TEST_F(UnreachableLoweringPassTest, size_before_lowering_is_the_lowered_size) {
+  // What a pass that runs before the lowering is told dex2oat will see is
+  // what the lowering's output measures.
+  auto* method = make_method(R"(
+    (
+      (const v0 0)
+      (if-nez v0 :other)
+      (unreachable v1)
+      (throw v1)
+      (:other)
+      (unreachable v2)
+      (throw v2)
+    )
+  )");
+  auto predicted =
+      baseline_profiles::dex2oat_code_units_before_unreachable_lowering(method);
+  lower(method);
+  EXPECT_EQ(baseline_profiles::dex2oat_code_units(method), predicted);
 }

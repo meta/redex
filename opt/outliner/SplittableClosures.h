@@ -18,6 +18,7 @@
 #include "MethodClosures.h"
 #include "MethodSplittingConfig.h"
 #include "MethodSplittingStats.h"
+#include "NeverInlineEligibility.h"
 #include "RefChecker.h"
 
 namespace api {
@@ -160,6 +161,12 @@ struct RareSuffixSelectionStats {
   std::atomic<size_t> method_never_ran{0};
   // Suffixes that return and run rarely enough, considered for splitting.
   std::atomic<size_t> returning_suffixes{0};
+  // Methods with no compiled copy before any split, so that no split of them
+  // saves compiled code.
+  std::atomic<size_t> no_compiled_copies{0};
+  // Suffixes whose split would change how many compiled copies of their method
+  // there are.
+  std::atomic<size_t> copies_changed{0};
   // Every such suffix makes fewer than the required runtime calls.
   std::atomic<size_t> too_few_runtime_calls{0};
   // The candidate evaluation dropped every remaining suffix; `Stats` records
@@ -179,10 +186,13 @@ struct RareSuffixSelectionStats {
 // field and throws is about as cheap as the call that would replace it. Each
 // suffix goes through the candidate evaluation MethodSplittingPass's suffixes
 // go through, under `config`, and is kept only when `split_net_saving` finds a
-// positive net saving with `compiled_copies(method)` compiled copies of its
-// method; `stats` records the fate of every suffix evaluated. Methods must
-// have no try blocks. A suffix is classified as hot, hot-cold or cold as
-// MethodSplittingPass does; see `classify_hot_split_kind`.
+// positive net saving with the compiled copies of its method before the split
+// and after it. `compiled_copies(method, shape)` gives the compiled copies of
+// `method` with a body of `shape`, as ArtProfileWriterPass measures it once
+// each `unreachable` is lowered; it is asked about the method before any split
+// and as each split would leave it. `stats` records the fate of every suffix
+// evaluated. Methods must have no try blocks. A suffix is classified as hot,
+// hot-cold or cold as MethodSplittingPass does; see `classify_hot_split_kind`.
 //
 // RareSuffixMethodSplittingPass's selector; it lives here because it builds
 // on this file's selection helpers (`to_splittable_closures`,
@@ -199,7 +209,9 @@ class RareSuffixSelection {
       const Config& config,
       size_t min_suffix_runtime_calls,
       std::optional<float> max_returning_suffix_ratio,
-      const std::function<size_t(const DexMethod*)>& compiled_copies,
+      const std::function<size_t(const DexMethod*,
+                                 const never_inline_analysis::CalleeShape&)>&
+          compiled_copies,
       const StoreRefCheckers& store_ref_checkers,
       Stats& stats,
       RareSuffixSelectionStats& selection_stats);

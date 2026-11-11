@@ -46,7 +46,6 @@ allocations.
  private:
   bool m_enabled{false};
   uint32_t m_art_inline_max_code_units;
-  size_t m_max_caller_instructions;
   size_t m_min_compiled_call_sites;
   size_t m_min_suffix_runtime_calls;
   float m_max_returning_suffix_ratio;

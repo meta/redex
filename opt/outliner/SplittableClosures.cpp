@@ -86,8 +86,10 @@ struct ScoredClosure {
   NetSavingUse net_saving_use{NetSavingUse::None};
   // The net saving of a candidate its net gate reads (`split_net_saving`).
   std::optional<ClosureNetTerms> net_terms{std::nullopt};
-  // The compiled copies of the host its net saving counts (`split_net_saving`).
+  // The compiled copies of the host its net saving counts (`split_net_saving`),
+  // and those after the split where it changes them.
   size_t compiled_copies{1};
+  std::optional<NetSavingInput::CopiesAfter> copies_after{std::nullopt};
   // The partition of `switch_block`'s edges by `grouped_heads`; set for a
   // candidate taking several cases of a switch.
   std::optional<SwitchPartition> dispatch{std::nullopt};
@@ -686,6 +688,7 @@ NetSavingInput net_saving_input(const ScoredClosure& sc,
       .passed_arg_registers = passed_arg_registers,
       .recreated_defs = recreated_defs,
       .compiled_copies = sc.compiled_copies,
+      .copies_after = sc.copies_after,
       .split_compiled = sc.hot_split_kind == HotSplitKind::Hot,
   };
 }
@@ -1260,6 +1263,35 @@ std::optional<float> block_count(const cfg::Block* b) {
   return count;
 }
 
+// What ArtProfileWriterPass measures of a body, which it reads once each
+// `unreachable` is lowered to a call and its move-result.
+struct LoweredSize {
+  size_t code_units{0};
+  size_t instructions{0};
+  bool returns{false};
+
+  void add(const cfg::Block* b) {
+    const auto unreachables =
+        method::count_opcode_of_types(*b, {IOPCODE_UNREACHABLE});
+    code_units += b->estimate_code_units() +
+                  baseline_profiles::lowered_unreachable_extra_code_units() *
+                      unreachables;
+    // `num_opcodes` does not count the internal `unreachable`; the call and
+    // move-result it is lowered to are two instructions.
+    instructions += b->num_opcodes() + 2 * unreachables;
+    returns = returns || b->branchingness() == opcode::BRANCH_RETURN;
+  }
+
+  never_inline_analysis::CalleeShape shape(bool simple) const {
+    return never_inline_analysis::CalleeShape{
+        .returns = returns,
+        .code_units = static_cast<uint32_t>(code_units),
+        .instructions = instructions,
+        .simple = simple,
+    };
+  }
+};
+
 } // namespace
 
 RareSuffixSelection::RareSuffixSelection(
@@ -1267,7 +1299,9 @@ RareSuffixSelection::RareSuffixSelection(
     const Config& config,
     size_t min_suffix_runtime_calls,
     std::optional<float> max_returning_suffix_ratio,
-    const std::function<size_t(const DexMethod*)>& compiled_copies,
+    const std::function<size_t(const DexMethod*,
+                               const never_inline_analysis::CalleeShape&)>&
+        compiled_copies,
     const StoreRefCheckers& store_ref_checkers,
     Stats& stats,
     RareSuffixSelectionStats& selection_stats) {
@@ -1307,7 +1341,27 @@ RareSuffixSelection::RareSuffixSelection(
         if (mcs != nullptr) {
           auto& cfg = method->get_code()->cfg();
           auto reaching_return = cfg.blocks_reaching_return();
-          auto copies = compiled_copies(method);
+          LoweredSize before;
+          for (const auto* b : cfg.blocks()) {
+            before.add(b);
+          }
+          const auto copies =
+              compiled_copies(method,
+                              before.shape(never_inline_analysis::is_simple(
+                                  *method->get_code())));
+          if (copies == 0) {
+            selection_stats.no_compiled_copies++;
+          }
+          // The launchpad that replaces the suffix in the host: the invoke of
+          // the split, its `move-result` if the host returns a value, and a
+          // return.
+          const bool returns_value =
+              !type::is_void(method->get_proto()->get_rtype());
+          const size_t launchpad_code_units =
+              opcode_code_units(OPCODE_INVOKE_STATIC) +
+              (returns_value ? opcode_code_units(OPCODE_MOVE_RESULT) : 0) +
+              opcode_code_units(OPCODE_RETURN);
+          const size_t launchpad_instructions = returns_value ? 3 : 2;
           for (const auto& c : mcs->closures) {
             if (reaching_return.count(c.target) != 0u) {
               // A suffix that returns qualifies when it runs rarely: at most
@@ -1382,8 +1436,28 @@ RareSuffixSelection::RareSuffixSelection(
                 }
               }
             }
+            // The host as the split leaves it keeps its entry block and gains
+            // the launchpad block, so it is not a single-block forwarder.
+            LoweredSize after;
+            for (const auto* b : UnorderedIterable(kept)) {
+              after.add(b);
+            }
+            const size_t host_after = after.code_units;
+            after.code_units += launchpad_code_units;
+            after.instructions += launchpad_instructions;
+            after.returns = true;
+            const auto copies_after =
+                compiled_copies(method, after.shape(/* simple */ false));
+            if (copies_after != copies) {
+              selection_stats.copies_changed++;
+            }
             sc.net_saving_use = NetSavingUse::Gate;
             sc.compiled_copies = copies;
+            sc.copies_after = NetSavingInput::CopiesAfter{
+                .copies = copies_after,
+                .host_before = before.code_units,
+                .host_after = host_after,
+            };
             scored_closures.emplace_back(std::move(sc));
           }
         }

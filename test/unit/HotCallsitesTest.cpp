@@ -99,6 +99,7 @@ TEST_F(HotCallsitesTest, ClassifiesCompiledCallersSites) {
 
   EXPECT_EQ(callsites.hot_callsite_counts.load(callee), 2u);
   EXPECT_EQ(callsites.hot_cold_callees.count_unsafe(callee), 1u);
+  EXPECT_EQ(callsites.callsite_counts.load(callee), 3u);
 }
 
 // The writer's decision, rule by rule.
@@ -127,4 +128,31 @@ TEST_F(HotCallsitesTest, DecidesNeverInlineAsTheWriter) {
   verdict = nia::decide_never_inline(*code, false, false, 3, min_hot);
   EXPECT_EQ(verdict.decision, D::kAnnotate);
   EXPECT_TRUE(verdict.min_hot_callsites_rule_met);
+}
+
+// The writer's decision on a shape agrees with its decision on a body of that
+// shape, and a shape too small for the instruction floor is not annotated.
+TEST_F(HotCallsitesTest, DecidesNeverInlineOnAShape) {
+  auto code = assembler::ircode_from_string(kCalleeBody);
+  code->build_cfg();
+  const nia::CalleeShape shape{
+      .returns = !code->cfg().return_blocks().empty(),
+      .code_units = code->estimate_code_units(),
+      .instructions = code->count_opcodes(),
+      .simple = nia::is_simple(*code),
+  };
+  for (bool has_cold : {false, true}) {
+    for (size_t hot : {0, 1}) {
+      EXPECT_EQ(
+          nia::decide_never_inline(shape, false, has_cold, hot, criteria())
+              .decision,
+          nia::decide_never_inline(*code, false, has_cold, hot, criteria())
+              .decision);
+    }
+  }
+  auto small = shape;
+  small.instructions = nia::kDefaultMinCalleeInstructions - 1;
+  auto verdict = nia::decide_never_inline(small, false, true, 0, criteria());
+  EXPECT_EQ(verdict.decision, nia::NeverInlineDecision::kIneligible);
+  EXPECT_EQ(verdict.ineligibility, nia::Ineligibility::kTooSmall);
 }

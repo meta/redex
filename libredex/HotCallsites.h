@@ -158,6 +158,8 @@ struct HotCallsites {
   InsertOnlyConcurrentSet<DexMethod*> hot_cold_callees;
   // Per callee with at least one hot call site, how many it has.
   AtomicMap<DexMethod*, size_t> hot_callsite_counts;
+  // Per callee, how many call sites it has, hot or not.
+  AtomicMap<DexMethod*, size_t> callsite_counts;
 };
 
 // `ArtProfileWriterPass`'s criteria for annotating a callee `@NeverInline`.
@@ -190,6 +192,14 @@ struct NeverInlineVerdict {
 // hot, and with `hot_callsites` hot ones, as `HotCallsites` classifies them.
 // The pass attaches the annotation on `kAnnotate` when it attaches any.
 NeverInlineVerdict decide_never_inline(IRCode& code,
+                                       bool already_never_inline,
+                                       bool has_cold_callsite,
+                                       size_t hot_callsites,
+                                       const NeverInlineCriteria& criteria);
+
+// The same decision on a callee whose body has `shape`, which lets a pass ask
+// about a body it has yet to build.
+NeverInlineVerdict decide_never_inline(const CalleeShape& shape,
                                        bool already_never_inline,
                                        bool has_cold_callsite,
                                        size_t hot_callsites,

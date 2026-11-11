@@ -72,23 +72,56 @@ Ineligibility never_inline_eligibility(DexMethod* method,
                                   min_callee_instructions);
 }
 
+namespace {
+
+// The checks of `never_inline_eligibility`, in order, each reading only what
+// it needs of the body: `returns`, `code_units`, `instructions` and `simple`
+// give a `CalleeShape`'s fields.
+template <typename Returns,
+          typename CodeUnits,
+          typename Instructions,
+          typename Simple>
+Ineligibility eligibility(uint32_t max_callee_code_units,
+                          size_t min_callee_instructions,
+                          const Returns& returns,
+                          const CodeUnits& code_units,
+                          const Instructions& instructions,
+                          const Simple& simple) {
+  if (!returns()) {
+    return Ineligibility::kAlwaysThrows;
+  }
+  if (code_units() > max_callee_code_units) {
+    return Ineligibility::kTooLarge;
+  }
+  if (instructions() < min_callee_instructions) {
+    return Ineligibility::kTooSmall;
+  }
+  if (simple()) {
+    return Ineligibility::kSimple;
+  }
+  return Ineligibility::kEligible;
+}
+
+} // namespace
+
 Ineligibility never_inline_eligibility(IRCode& code,
                                        uint32_t max_callee_code_units,
                                        size_t min_callee_instructions) {
   always_assert(code.cfg_built());
-  if (code.cfg().return_blocks().empty()) {
-    return Ineligibility::kAlwaysThrows;
-  }
-  if (code.estimate_code_units() > max_callee_code_units) {
-    return Ineligibility::kTooLarge;
-  }
-  if (code.count_opcodes() < min_callee_instructions) {
-    return Ineligibility::kTooSmall;
-  }
-  if (is_simple(code)) {
-    return Ineligibility::kSimple;
-  }
-  return Ineligibility::kEligible;
+  return eligibility(
+      max_callee_code_units, min_callee_instructions,
+      [&] { return !code.cfg().return_blocks().empty(); },
+      [&] { return code.estimate_code_units(); },
+      [&] { return code.count_opcodes(); }, [&] { return is_simple(code); });
+}
+
+Ineligibility never_inline_eligibility(const CalleeShape& shape,
+                                       uint32_t max_callee_code_units,
+                                       size_t min_callee_instructions) {
+  return eligibility(
+      max_callee_code_units, min_callee_instructions,
+      [&] { return shape.returns; }, [&] { return shape.code_units; },
+      [&] { return shape.instructions; }, [&] { return shape.simple; });
 }
 
 Shape never_inline_shape(DexMethod* method) {

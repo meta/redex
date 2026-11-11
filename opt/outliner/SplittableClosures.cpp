@@ -658,11 +658,16 @@ NetSavingInput net_saving_input(const ScoredClosure& sc,
       .split = NetSavingInput::Suffix{.returns_value = !type::is_void(
                                           method->get_proto()->get_rtype())},
       .dispatch = dispatch,
-      .evicted = sc.evicted_size - sc.evicted_hot_size,
+      // A Hot split is compiled, so its hot code counts like the rest of what
+      // it evicts.
+      .evicted = sc.hot_split_kind == HotSplitKind::Hot
+                     ? sc.evicted_size
+                     : sc.evicted_size - sc.evicted_hot_size,
       .duplicated = sc.duplicated_dex_code_units,
       .passed_args = passed_args,
       .passed_arg_registers = passed_arg_registers,
       .recreated_defs = recreated_defs,
+      .split_compiled = sc.hot_split_kind == HotSplitKind::Hot,
   };
 }
 

@@ -159,6 +159,35 @@ TEST_F(SplitNetSavingTest, SuffixTerminalLaunchpad) {
                4 + metadata() + load_params(2) + 5);
 }
 
+TEST_F(SplitNetSavingTest,
+       EveryCompiledCopyLosesTheEvictedCodeAndGainsALaunchpad) {
+  msi::Config config;
+  // A host ART inlines into three compiled callers: each copy loses the 100
+  // evicted code units and gains the 5-unit launchpad, while the dex pays for
+  // the split once.
+  auto inlined = suffix_input();
+  inlined.compiled_copies = 3;
+  expect_terms(split_net_saving(inlined, config, /*host_compiled=*/true), 300,
+               15, 5 + metadata() + load_params(2) + 5);
+  // By default the host itself is the one compiled copy.
+  EXPECT_EQ(suffix_input().compiled_copies, 1u);
+}
+
+TEST_F(SplitNetSavingTest, AHotSplitKeepsOneCompiledCopyOfWhatItEvicts) {
+  msi::Config config;
+  // A Hot split is compiled: with one compiled copy of the host, the evicted
+  // code moves into the split and stays compiled, so nothing is saved.
+  auto hot = suffix_input();
+  hot.split_compiled = true;
+  expect_terms(split_net_saving(hot, config, /*host_compiled=*/true), 0, 5,
+               5 + metadata() + load_params(2) + 5);
+  // With three compiled copies, two of them lose the evicted code; each keeps
+  // a launchpad.
+  hot.compiled_copies = 3;
+  expect_terms(split_net_saving(hot, config, /*host_compiled=*/true), 200, 15,
+               5 + metadata() + load_params(2) + 5);
+}
+
 TEST_F(SplitNetSavingTest, RecreatedConstantsCostTheirDexSizeNotALoadParam) {
   msi::Config config;
   auto in = suffix_input();

@@ -21,6 +21,7 @@
 #include "InstructionLowering.h"
 #include "Lazy.h"
 #include "Liveness.h"
+#include "MethodUtil.h"
 #include "OutlinerTypeAnalysis.h"
 #include "Show.h"
 #include "SplitNetSaving.h"
@@ -684,6 +685,7 @@ struct CandidateEvalContext {
   Lazy<LivenessFixpointIterator>& liveness_fp_iter;
   Lazy<UninitializedObjectEnvironments>& uninitialized_objects;
   Lazy<UnorderedMap<IRInstruction*, const ReducedBlock*>>& insns;
+  Lazy<std::optional<reg_t>>& receiver;
   const RefChecker* ref_checker;
   const Config& config;
   bool host_compiled;
@@ -714,6 +716,21 @@ std::optional<CandidateFate> evaluate_candidate(ScoredClosure& sc,
       return CandidateFate::Evaluation_EmptyHead;
     }
     first_insn = it->insn;
+  }
+  // The launchpad returns where the closure started. In a constructor whose
+  // receiver may not be initialized there yet, that is a return ART's
+  // verifier rejects, e.g. when a check that throws runs before the call of
+  // the superclass constructor.
+  if (method::is_init(ctx.method)) {
+    if (!ctx.receiver->has_value()) {
+      return CandidateFate::Evaluation_ReceiverUninitialized;
+    }
+    auto opt_uninitialized = ctx.uninitialized_objects->at(first_insn)
+                                 .get(**ctx.receiver)
+                                 .get_constant();
+    if (!opt_uninitialized || *opt_uninitialized) {
+      return CandidateFate::Evaluation_ReceiverUninitialized;
+    }
   }
   std::vector<reg_t> ordered_live_in(live_in.begin(), live_in.end());
   if (ordered_live_in.size() > static_cast<size_t>(ctx.config.max_live_in)) {
@@ -842,6 +859,22 @@ std::vector<SplittableClosure> to_splittable_closures(
     }
     return res;
   });
+  // A constructor's receiver register, or none if the constructor redefines
+  // it, in which case its initialization cannot be tracked.
+  Lazy<std::optional<reg_t>> receiver([&cfg]() {
+    // Read only in an instance constructor, whose first parameter is its
+    // receiver.
+    auto params = cfg.get_param_instructions();
+    always_assert(params.begin() != params.end());
+    auto receiver_reg = params.begin()->insn->dest();
+    for (const auto& mie : cfg::ConstInstructionIterable(cfg)) {
+      if (!opcode::is_a_load_param(mie.insn->opcode()) &&
+          mie.insn->has_dest() && mie.insn->dest() == receiver_reg) {
+        return std::make_unique<std::optional<reg_t>>(std::nullopt);
+      }
+    }
+    return std::make_unique<std::optional<reg_t>>(receiver_reg);
+  });
   UnorderedSet<const ReducedBlock*> covered;
 
   // Every scored suffix is a candidate from here on.
@@ -853,9 +886,9 @@ std::vector<SplittableClosure> to_splittable_closures(
         sc.net_terms, fate, sc.covered_code_units);
   };
 
-  CandidateEvalContext ctx{
-      ota,         liveness_fp_iter, uninitialized_objects, insns,
-      ref_checker, config,           host_compiled,         method};
+  CandidateEvalContext ctx{ota,    liveness_fp_iter, uninitialized_objects,
+                           insns,  receiver,         ref_checker,
+                           config, host_compiled,    method};
   std::erase_if(scored_closures, [&covered, &ctx, &record](auto& sc) {
     for (auto* c : sc.closures) {
       if (covered.count(c->reduced_block)) {

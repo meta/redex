@@ -61,6 +61,7 @@ inline constexpr std::array kSuffixFates{
     CandidateFate::Evaluation_LiveInUntypable,
     CandidateFate::Evaluation_ArgTypeIllegal,
     CandidateFate::Evaluation_LiveInUninitialized,
+    CandidateFate::Evaluation_ReceiverUninitialized,
     CandidateFate::Evaluation_NetNotPositive,
     CandidateFate::Selection_Displaced,
     CandidateFate::Emission_DexLimit,

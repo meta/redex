@@ -299,6 +299,46 @@ TEST_F(MethodSplitterTest, SplitNameSkipsExistingMethods) {
   EXPECT_EQ(named_cold0, 1);
 }
 
+TEST_F(MethodSplitterTest, KeepsConstructorCodeBeforeReceiverInitialization) {
+  // The throwing check runs before the superclass constructor call. Splitting
+  // it out would leave a launchpad that returns with the receiver
+  // uninitialized, which ART's verifier rejects.
+  std::string name = "LReceiverInit;";
+  ClassCreator cc{DexType::make_type(name)};
+  cc.set_super(type::java_lang_Object());
+  auto* init = DexMethod::make_method(name + ".<init>:(Ljava/lang/Object;)V")
+                   ->make_concrete(ACC_PUBLIC | ACC_CONSTRUCTOR,
+                                   assembler::ircode_from_string(R"(
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (if-nez v1 :ok)
+        (new-instance "Ljava/lang/IllegalStateException;")
+        (move-result-pseudo-object v2)
+        (invoke-direct (v2) "Ljava/lang/IllegalStateException;.<init>:()V")
+        (throw v2)
+        (:ok)
+        (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+        (return-void)
+      ))"),
+                                   false);
+  init->set_deobfuscated_name(show(init));
+  cc.add_method(init);
+  auto* cls = cc.create();
+  init->get_code()->build_cfg();
+  DexStoresVector stores;
+  stores.emplace_back("test_store");
+  stores.front().get_dexen().push_back(DexClasses{cls});
+  method_splitting_impl::StoreRefCheckers store_ref_checkers(
+      stores, /* normal_primary_dex */ true, /* min_sdk_api */ nullptr);
+  method_splitting_impl::Stats stats;
+  method_splitting_impl::split_methods_in_stores(
+      stores, /* min_sdk */ 0, defaultConfig(), store_ref_checkers,
+      /* create_init_class_insns */ false,
+      /* reserved_mrefs */ 0, /* reserved_trefs */ 0, &stats);
+  EXPECT_EQ(stats.added_methods.size(), 0);
+}
+
 TEST_F(MethodSplitterTest, SplitConstants) {
   const auto* before = R"(
     (

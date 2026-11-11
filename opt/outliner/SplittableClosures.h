@@ -8,6 +8,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -143,5 +144,74 @@ HotSplitKind classify_hot_split_kind(
 InsertOnlyConcurrentMap<DexMethod*, std::vector<SplittableClosure>>
 select_splittable_closures_from_top_level_switch_cases(
     const std::vector<DexMethod*>& methods, size_t max_live_in);
+
+// Why `RareSuffixSelection` selected nothing in a method.
+struct RareSuffixSelectionStats {
+  // The method must not be split: it is marked no_optimizations or
+  // should_not_outline, or loads a native library.
+  std::atomic<size_t> unsplittable{0};
+  // No splittable suffix of the method runs rarely enough.
+  std::atomic<size_t> no_rare_suffix{0};
+  // Every such suffix makes fewer than the required runtime calls.
+  std::atomic<size_t> too_few_runtime_calls{0};
+  // The candidate evaluation dropped every remaining suffix; `Stats` records
+  // why, per suffix.
+  std::atomic<size_t> not_splittable{0};
+};
+
+// Selects, in each of the given methods, the suffixes that run rarely and
+// make at least `min_suffix_runtime_calls` invokes or allocations: the
+// suffixes that never return, typically because they end in a throw. A split
+// leaves a call in every compiled copy, which pays only when the suffix's own
+// calls, each compiled to a call sequence plus the stack map ART keeps for it,
+// outweigh it; a suffix that, say, only reads a field and throws is about as
+// cheap as the call that would replace it. Each suffix goes through the
+// candidate evaluation MethodSplittingPass's suffixes go through, under
+// `config`, and is kept only when `split_net_saving` finds a positive net
+// saving with `compiled_copies(method)` compiled copies of its method; `stats`
+// records the fate of every suffix evaluated. Methods must have no try blocks.
+// A suffix is classified as hot, hot-cold or cold as MethodSplittingPass does;
+// see `classify_hot_split_kind`.
+//
+// RareSuffixMethodSplittingPass's selector; it lives here because it builds
+// on this file's selection helpers (`to_splittable_closures`,
+// `host_blocks_kept`).
+//
+// The analysis normalizes a copy of each method's code. A method keeps its
+// original code unless something is selected, in which case it gets the
+// normalized copy the selected closures refer to, until `finish` or the
+// destructor gives every method that was not split its original code back.
+class RareSuffixSelection {
+ public:
+  RareSuffixSelection(
+      const std::vector<DexMethod*>& methods,
+      const Config& config,
+      size_t min_suffix_runtime_calls,
+      const std::function<size_t(const DexMethod*)>& compiled_copies,
+      const StoreRefCheckers& store_ref_checkers,
+      Stats& stats,
+      RareSuffixSelectionStats& selection_stats);
+  RareSuffixSelection(const RareSuffixSelection&) = delete;
+  RareSuffixSelection& operator=(const RareSuffixSelection&) = delete;
+  RareSuffixSelection(RareSuffixSelection&&) = delete;
+  RareSuffixSelection& operator=(RareSuffixSelection&&) = delete;
+  ~RareSuffixSelection();
+
+  // The selected closures, keyed by the type of the class of their method.
+  const ConcurrentMap<DexType*, std::vector<SplittableClosure>>&
+  splittable_closures() const {
+    return m_splittable_closures;
+  }
+
+  size_t selected_method_count() const { return m_original_code.size(); }
+
+  // Gives every selected method that `split` does not contain its original
+  // code back, and drops the closures, which refer to code that may be gone.
+  void finish(const ConcurrentSet<DexMethod*>& split) &&;
+
+ private:
+  ConcurrentMap<DexType*, std::vector<SplittableClosure>> m_splittable_closures;
+  ConcurrentMap<DexMethod*, std::unique_ptr<IRCode>> m_original_code;
+};
 
 } // namespace method_splitting_impl

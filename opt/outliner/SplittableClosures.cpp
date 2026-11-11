@@ -15,6 +15,7 @@
 
 #include <sparta/PatriciaTreeSet.h>
 
+#include "BaselineProfile.h"
 #include "ClosureAggregator.h"
 #include "ConcurrentContainers.h"
 #include "Debug.h"
@@ -84,6 +85,8 @@ struct ScoredClosure {
   NetSavingUse net_saving_use{NetSavingUse::None};
   // The net saving of a candidate its net gate reads (`split_net_saving`).
   std::optional<ClosureNetTerms> net_terms{std::nullopt};
+  // The compiled copies of the host its net saving counts (`split_net_saving`).
+  size_t compiled_copies{1};
   // The partition of `switch_block`'s edges by `grouped_heads`; set for a
   // candidate taking several cases of a switch.
   std::optional<SwitchPartition> dispatch{std::nullopt};
@@ -681,6 +684,7 @@ NetSavingInput net_saving_input(const ScoredClosure& sc,
       .passed_args = passed_args,
       .passed_arg_registers = passed_arg_registers,
       .recreated_defs = recreated_defs,
+      .compiled_copies = sc.compiled_copies,
       .split_compiled = sc.hot_split_kind == HotSplitKind::Hot,
   };
 }
@@ -1208,6 +1212,149 @@ bool has_load_library_call(const DexMethod* method) {
     }
   }
   return false;
+}
+
+namespace {
+
+// Instructions that compile to a call out of the method: invokes, allocations
+// (runtime entry points) and `unreachable`, which is lowered to a call of
+// `UnreachableException.createAndThrow`.
+bool is_runtime_call(IROpcode op) {
+  return opcode::is_an_invoke(op) || op == OPCODE_NEW_INSTANCE ||
+         op == OPCODE_NEW_ARRAY || op == OPCODE_FILLED_NEW_ARRAY ||
+         op == IOPCODE_UNREACHABLE;
+}
+
+} // namespace
+
+void RareSuffixSelection::finish(const ConcurrentSet<DexMethod*>& split) && {
+  for (auto&& [method, code] : UnorderedIterable(m_original_code)) {
+    if (split.count(method) == 0) {
+      method->set_code(std::move(code));
+    }
+  }
+  m_original_code.clear();
+  m_splittable_closures.clear();
+}
+
+RareSuffixSelection::~RareSuffixSelection() {
+  std::move(*this).finish(/* split */ {});
+}
+
+RareSuffixSelection::RareSuffixSelection(
+    const std::vector<DexMethod*>& methods,
+    const Config& config,
+    size_t min_suffix_runtime_calls,
+    const std::function<size_t(const DexMethod*)>& compiled_copies,
+    const StoreRefCheckers& store_ref_checkers,
+    Stats& stats,
+    RareSuffixSelectionStats& selection_stats) {
+  Timer t("RareSuffixSelection");
+  const size_t lowered_unreachable_extra =
+      baseline_profiles::lowered_unreachable_extra_code_units();
+  workqueue_run<DexMethod*>(
+      [&](DexMethod* method) {
+        if (method->rstate.no_optimizations() ||
+            method->rstate.should_not_outline() ||
+            has_load_library_call(method)) {
+          selection_stats.unsplittable++;
+          return;
+        }
+        always_assert_log(!method->get_code()->has_try_blocks(),
+                          "%s has try blocks", SHOW(method));
+        auto original_code = method->release_code();
+        method->set_code(std::make_unique<IRCode>(*original_code));
+        normalize_cfg_for_splitting(method);
+        auto mcs = discover_closures(method, reduce_cfg(method));
+        bool any_rare_suffix = false;
+        std::vector<ScoredClosure> scored_closures;
+        if (mcs != nullptr) {
+          auto& cfg = method->get_code()->cfg();
+          auto reaching_return = cfg.blocks_reaching_return();
+          auto copies = compiled_copies(method);
+          for (const auto& c : mcs->closures) {
+            if (reaching_return.count(c.target) != 0u) {
+              continue;
+            }
+            any_rare_suffix = true;
+            size_t runtime_calls = 0;
+            for (const auto* rb : UnorderedIterable(c.reduced_components)) {
+              for (const auto* b : UnorderedIterable(rb->blocks)) {
+                for (const auto& mie : InstructionIterable(b)) {
+                  runtime_calls += is_runtime_call(mie.insn->opcode()) ? 1 : 0;
+                }
+              }
+            }
+            if (runtime_calls < min_suffix_runtime_calls) {
+              continue;
+            }
+            // Sized and evaluated the way `score` sizes and evaluates a
+            // suffix of a compiled host, with a compiled copy per inlined
+            // copy.
+            ScoredClosure sc{
+                .switch_block = nullptr,
+                .closures = {&c},
+                .grouped_heads = collect_head_ids({&c}),
+                .reduced_components = c.reduced_components,
+                .args = {},
+            };
+            sc.covered_code_units = code_size(sc.reduced_components);
+            sc.split_size = config.cost_split_method + sc.covered_code_units;
+            sc.hot_split_kind = classify_hot_split_kind({&c});
+            const auto kept = host_blocks_kept(cfg, sc);
+            for (const auto* b : UnorderedIterable(kept)) {
+              sc.remaining_size += b->estimate_code_units();
+            }
+            size_eviction(kept, &sc);
+            // Each `unreachable` is lowered to a call and its move-result,
+            // which every compiled copy of the method carries.
+            for (const auto* rb : UnorderedIterable(sc.reduced_components)) {
+              for (const auto* b : UnorderedIterable(rb->blocks)) {
+                const size_t extra =
+                    lowered_unreachable_extra *
+                    method::count_opcode_of_types(*b, {IOPCODE_UNREACHABLE});
+                if (kept.contains(const_cast<cfg::Block*>(b))) {
+                  sc.duplicated_dex_code_units += extra;
+                  continue;
+                }
+                sc.evicted_size += extra;
+                if (is_hot(b)) {
+                  sc.evicted_hot_size += extra;
+                }
+              }
+            }
+            sc.net_saving_use = NetSavingUse::Gate;
+            sc.compiled_copies = copies;
+            scored_closures.emplace_back(std::move(sc));
+          }
+        }
+        std::vector<SplittableClosure> splittable_closures;
+        if (!any_rare_suffix) {
+          selection_stats.no_rare_suffix++;
+        } else if (scored_closures.empty()) {
+          selection_stats.too_few_runtime_calls++;
+        } else {
+          splittable_closures = to_splittable_closures(
+              mcs, std::move(scored_closures), config, stats,
+              /* host_compiled */ true,
+              &store_ref_checkers.get(method->get_class()));
+          if (splittable_closures.empty()) {
+            selection_stats.not_splittable++;
+          }
+        }
+        if (splittable_closures.empty()) {
+          method->set_code(std::move(original_code));
+          return;
+        }
+        m_original_code.emplace(method, std::move(original_code));
+        m_splittable_closures.update(
+            method->get_class(), [&](auto, auto& vec, bool) {
+              vec.insert(vec.end(),
+                         std::make_move_iterator(splittable_closures.begin()),
+                         std::make_move_iterator(splittable_closures.end()));
+            });
+      },
+      methods);
 }
 
 } // namespace method_splitting_impl

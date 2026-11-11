@@ -87,6 +87,11 @@ class RareSuffixMethodSplittingTest : public RedexTest {
     json_conf["RareSuffixMethodSplittingPass"]["enabled"] = enabled;
     json_conf["RareSuffixMethodSplittingPass"]["net_oat_weight"] =
         m_net_oat_weight;
+    if (!m_call_counts.empty()) {
+      json_conf["baseline_profile"]["default"]["deep_data_interaction_config"]
+               [method_profiles::COLD_START]["name"] =
+                   method_profiles::COLD_START;
+    }
     m_conf = std::make_unique<ConfigFiles>(json_conf);
     auto& conf = *m_conf;
     conf.parse_global_config();
@@ -94,8 +99,22 @@ class RareSuffixMethodSplittingTest : public RedexTest {
     for (auto* m : m_compiled) {
       hot[m] = method_profiles::Stats{};
     }
-    conf.get_method_profiles() =
-        method_profiles::MethodProfiles::initialize("manual_hot", hot);
+    if (m_call_counts.empty()) {
+      conf.get_method_profiles() =
+          method_profiles::MethodProfiles::initialize("manual_hot", hot);
+    } else {
+      // A cold-start profile that reports call counts, and compiles every
+      // method it has.
+      for (auto& [m, stats] : UnorderedIterable(hot)) {
+        stats.appear_percent = 100;
+        stats.call_count = 1;
+      }
+      for (const auto& [m, call_count] : m_call_counts) {
+        hot[m].call_count = call_count;
+      }
+      conf.get_method_profiles() = method_profiles::MethodProfiles::initialize(
+          method_profiles::COLD_START, hot);
+    }
 
     RareSuffixMethodSplittingPass pass;
     MaterializeNullChecksPass materialize_pass;
@@ -178,6 +197,8 @@ class RareSuffixMethodSplittingTest : public RedexTest {
   double m_net_oat_weight{1000.0};
   std::vector<DexClass*> m_extra_classes;
   std::vector<DexMethod*> m_compiled;
+  // Call counts the profile reports for these methods.
+  std::vector<std::pair<DexMethod*, double>> m_call_counts;
   size_t m_callers{0};
 };
 
@@ -254,6 +275,24 @@ TEST_F(RareSuffixMethodSplittingTest,
   auto metrics = run();
   EXPECT_EQ(helper(check), nullptr);
   EXPECT_EQ(metrics["callers_too_many_instructions"], 2);
+}
+
+TEST_F(RareSuffixMethodSplittingTest, reportsTheTopSplitMethods) {
+  auto* rare = add_method("rare:(Ljava/lang/Object;)V", kCheck);
+  add_callers(rare, 3);
+  auto* frequent = add_method("frequent:(Ljava/lang/Object;)V", kCheck);
+  add_callers(frequent, 2);
+  m_call_counts = {{rare, 5}, {frequent, 100}};
+  auto metrics = run();
+  const std::string rare_name = "cold_LFoo;.rare:(Ljava/lang/Object;)V";
+  const std::string frequent_name = "cold_LFoo;.frequent:(Ljava/lang/Object;)V";
+  EXPECT_EQ(metrics["top_split_by_call_count_0_" + frequent_name], 100);
+  EXPECT_EQ(metrics["top_split_by_call_count_1_" + rare_name], 5);
+  EXPECT_EQ(metrics["top_split_by_compiled_call_sites_0_" + rare_name], 3);
+  EXPECT_EQ(metrics["top_split_by_compiled_call_sites_1_" + frequent_name], 2);
+  EXPECT_GT(metrics["top_split_by_call_count_0_" + frequent_name +
+                    "_split_code_units"],
+            0);
 }
 
 TEST_F(RareSuffixMethodSplittingTest, isOffByDefault) {

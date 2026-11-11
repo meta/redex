@@ -129,6 +129,14 @@ const DexString* get_split_method_name(
                                 name_infix + std::to_string(index));
 }
 
+DexProto* get_split_proto(const DexMethod* method,
+                          const std::vector<const DexType*>& arg_types) {
+  return DexProto::make_proto(
+      method->get_proto()->get_rtype(),
+      // TODO: Remove overhead.
+      DexTypeList::make_type_list(std::vector<const DexType*>(arg_types)));
+}
+
 ConcurrentSet<DexMethod*> split_splittable_closures(
     const Config& config,
     const std::vector<DexClasses*>& dexen,
@@ -216,9 +224,19 @@ ConcurrentSet<DexMethod*> split_splittable_closures(
       }
       const auto* split_name =
           get_split_method_name(*splittable_closure, name_infix, index);
-      auto split_method =
-          SplitMethod::create(*splittable_closure, method->get_class(),
-                              split_name, std::move(arg_types));
+      // The name may belong to a method that is not a split of this one: a
+      // split made by an earlier run, or a method whose name a constructor's
+      // split shares, such as `$init$` for `<init>`. Reusing it would replace
+      // that method's code. Unlike `DexMethod::get_unique_name`, which appends
+      // its own suffix, this keeps the splits' index numbering.
+      auto* split_proto = get_split_proto(method, arg_types);
+      while (DexMethod::get_method(method->get_class(), split_name,
+                                   split_proto) != nullptr) {
+        split_name = get_split_method_name(*splittable_closure, name_infix,
+                                           uniquifiers->fetch_add(id, 1));
+      }
+      auto split_method = SplitMethod::create(
+          *splittable_closure, method->get_class(), split_name, arg_types);
       auto* new_method = split_method.get_new_method();
 
       new_method->rstate.set_dont_inline(); // Don't undo our work.
@@ -356,20 +374,8 @@ std::unique_ptr<IRCode> clone_host_cfg(DexMethod* method) {
 // The private static split method with body `split_code`, made concrete.
 DexMethod* make_split_method(DexType* target_type,
                              const DexString* split_name,
-                             DexType* rtype,
-                             std::vector<const DexType*> arg_types,
+                             DexProto* split_proto,
                              std::unique_ptr<IRCode> split_code) {
-  auto* split_type_list = DexTypeList::make_type_list(
-      // TODO: Remove overhead.
-      [&]() {
-        std::vector<const DexType*> non_const_args;
-        non_const_args.reserve(arg_types.size());
-        std::transform(arg_types.begin(), arg_types.end(),
-                       std::back_inserter(non_const_args),
-                       [](const auto* t) { return const_cast<DexType*>(t); });
-        return non_const_args;
-      }());
-  auto* split_proto = DexProto::make_proto(rtype, split_type_list);
   auto* split_method_ref =
       DexMethod::make_method(target_type, split_name, split_proto);
   DexAccessFlags split_access_flags =
@@ -534,7 +540,7 @@ void edit_host_switch(
 SplitMethod SplitMethod::create(const SplittableClosure& splittable_closure,
                                 DexType* target_type,
                                 const DexString* split_name,
-                                std::vector<const DexType*> arg_types) {
+                                const std::vector<const DexType*>& arg_types) {
   auto* method = splittable_closure.method_closures->method;
   auto split_code = clone_host_cfg(method);
   auto& split_cfg = split_code->cfg();
@@ -557,9 +563,9 @@ SplitMethod SplitMethod::create(const SplittableClosure& splittable_closure,
   }
   split_cfg.add_edge(split_entry_block, split_landingpad, cfg::EDGE_GOTO);
 
-  auto* split_method = make_split_method(
-      target_type, split_name, method->get_proto()->get_rtype(),
-      std::move(arg_types), std::move(split_code));
+  auto* split_method = make_split_method(target_type, split_name,
+                                         get_split_proto(method, arg_types),
+                                         std::move(split_code));
 
   // When splitting many cases out of a switch, we keep the positions of the
   // switch block, but not the source-block, so we insert a synthetic one here.

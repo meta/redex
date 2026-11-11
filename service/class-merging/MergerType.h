@@ -329,7 +329,7 @@ struct MergerType {
   }
 
   int start_index_for(const DexType* t) const {
-    static auto* const string_type = type::java_lang_String();
+    auto* const string_type = type::java_lang_String();
     if (t == string_type) {
       return 0;
     }

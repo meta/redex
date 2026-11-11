@@ -12,6 +12,7 @@
 #include "ClassMerging.h"
 #include "ClassMergingPass.h"
 #include "ConfigFiles.h"
+#include "CppUtil.h"
 #include "DexStore.h"
 #include "HotColdGrouping.h"
 #include "IRAssembler.h"
@@ -398,6 +399,28 @@ TEST_F(ClassMergingHotColdGroupingTest, AllHotIsNotSplit) {
   EXPECT_EQ(merger_groups(true, &stats),
             (std::vector<std::vector<std::string>>{{"LA;", "LB;", "LC;"}}));
   EXPECT_EQ(stats.m_hot_cold_split_groups, 0u);
+}
+
+TEST_F(ClassMergingHotColdGroupingTest, StringFieldOffsetsFollowTheContext) {
+  MergerType merger{};
+  merger.shape.string_fields = 1;
+  merger.shape.reference_fields = 1;
+  auto* first_string = type::java_lang_String();
+  EXPECT_EQ(merger.start_index_for(first_string), 0);
+
+  // Keep the first context alive so allocator address reuse cannot hide a stale
+  // type pointer.
+  auto* first_context = g_redex;
+  g_redex = new RedexContext();
+  ScopeGuard restore_context{[first_context]() {
+    delete g_redex;
+    g_redex = first_context;
+  }};
+
+  auto* second_string = type::java_lang_String();
+  ASSERT_NE(first_string, second_string);
+  EXPECT_EQ(merger.start_index_for(second_string), 0);
+  EXPECT_EQ(merger.start_index_for(type::java_lang_Object()), 1);
 }
 
 TEST_F(ClassMergingFieldMetricsTest, FieldMetricsCountSourcesNotSlots) {

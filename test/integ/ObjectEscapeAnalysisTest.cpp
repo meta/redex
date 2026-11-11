@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 
+#include "BaselineProfile.h"
 #include "BranchPrefixHoistingPass.h"
 #include "Debug.h"
 #include "DexClass.h"
@@ -796,6 +797,72 @@ TEST_F(ObjectEscapeAnalysisTest, nothingToReduce) {
     )
 )");
   ASSERT_EQ(actual.str(), assembler::to_s_expr(expected.get()).str());
+}
+
+TEST_F(ObjectEscapeAnalysisTest, expandedMethodKeepsForcedCompilation) {
+  auto* source_ref = DexMethod::get_method(
+      "Lcom/facebook/redextest/ObjectEscapeAnalysisTest$N;"
+      ".onlyUseInstanceField:(Lcom/facebook/redextest/"
+      "ObjectEscapeAnalysisTest$N$Builder;)V");
+  ASSERT_NE(source_ref, nullptr);
+  ASSERT_TRUE(source_ref->is_def());
+  auto* source = source_ref->as_def();
+  source->rstate.set_force_hot_in_baseline_profile();
+  baseline_profiles::BaselineProfile before;
+  baseline_profiles::apply_forced_method_flags(
+      {type_class(source->get_class())}, &before);
+  ASSERT_TRUE(baseline_profiles::is_compiled(before, source));
+
+  run();
+
+  auto* expanded_ref = DexMethod::get_method(
+      "Lcom/facebook/redextest/ObjectEscapeAnalysisTest$N;"
+      ".onlyUseInstanceField$oea$0:(I)V");
+  ASSERT_NE(expanded_ref, nullptr);
+  ASSERT_TRUE(expanded_ref->is_def());
+  auto* expanded = expanded_ref->as_def();
+  auto* caller = DexMethod::get_method(
+                     "Lcom/facebook/redextest/ObjectEscapeAnalysisTest;"
+                     ".reduceTo42WithExpandedMethod:()V")
+                     ->as_def();
+  bool calls_expanded = false;
+  for (const auto& mie : InstructionIterable(*caller->get_code())) {
+    if (opcode::is_invoke_static(mie.insn->opcode()) &&
+        mie.insn->get_method() == expanded) {
+      calls_expanded = true;
+    }
+  }
+  ASSERT_TRUE(calls_expanded);
+  baseline_profiles::BaselineProfile after;
+  baseline_profiles::apply_forced_method_flags(
+      {type_class(expanded->get_class())}, &after);
+  EXPECT_TRUE(baseline_profiles::is_compiled(after, expanded));
+  EXPECT_FALSE(expanded->rstate.force_startup_in_baseline_profile());
+}
+
+TEST_F(ObjectEscapeAnalysisTest, expandedCtorKeepsForcedHotAndStartup) {
+  auto* source_ref = DexMethod::get_method(
+      "Lcom/facebook/redextest/ObjectEscapeAnalysisTest$N;"
+      ".<init>:(Lcom/facebook/redextest/"
+      "ObjectEscapeAnalysisTest$N$Builder;)V");
+  ASSERT_NE(source_ref, nullptr);
+  ASSERT_TRUE(source_ref->is_def());
+  auto* source = source_ref->as_def();
+  source->rstate.set_force_hot_in_baseline_profile();
+  source->rstate.set_force_startup_in_baseline_profile();
+
+  run();
+
+  auto* expanded_ref = DexMethod::get_method(
+      "Lcom/facebook/redextest/ObjectEscapeAnalysisTest$N;.<init>:(I)V");
+  ASSERT_NE(expanded_ref, nullptr);
+  ASSERT_TRUE(expanded_ref->is_def());
+  auto* expanded = expanded_ref->as_def();
+  baseline_profiles::BaselineProfile profile;
+  baseline_profiles::apply_forced_method_flags(
+      {type_class(expanded->get_class())}, &profile);
+  EXPECT_TRUE(baseline_profiles::is_compiled(profile, expanded));
+  EXPECT_TRUE(expanded->rstate.force_startup_in_baseline_profile());
 }
 
 TEST_F(ObjectEscapeAnalysisTest, reduceInstanceOfInterface) {

@@ -250,6 +250,12 @@ DexMethod* ExpandableMethodParams::make_expanded_method_concrete(
   auto* expanded_method = expanded_method_ref->as_def();
   always_assert(expanded_method);
   expanded_method->rstate.set_generated();
+  if (method->rstate.force_hot_in_baseline_profile()) {
+    expanded_method->rstate.set_force_hot_in_baseline_profile();
+  }
+  if (method->rstate.force_startup_in_baseline_profile()) {
+    expanded_method->rstate.set_force_startup_in_baseline_profile();
+  }
   int api_level = api::LevelChecker::get_method_level(method);
   expanded_method->rstate.set_api_level(api_level);
   expanded_method->set_deobfuscated_name(show_deobfuscated(expanded_method));

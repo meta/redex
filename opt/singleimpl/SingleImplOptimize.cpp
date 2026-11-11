@@ -18,6 +18,7 @@
 #include "IRCode.h"
 #include "IRList.h"
 #include "LocalDce.h"
+#include "MethodProfiles.h"
 #include "ReachableClasses.h"
 #include "Resolver.h"
 #include "Show.h"
@@ -203,8 +204,12 @@ using CheckCastSet = UnorderedSet<const IRInstruction*>;
 struct OptimizationImpl {
   OptimizationImpl(std::unique_ptr<SingleImplAnalysis> analysis,
                    const ClassHierarchy& ch,
-                   const api::AndroidSDK& api)
-      : single_impls(std::move(analysis)), ch(ch), m_api(api) {}
+                   const api::AndroidSDK& api,
+                   method_profiles::MethodProfiles& method_profiles)
+      : single_impls(std::move(analysis)),
+        ch(ch),
+        m_api(api),
+        m_method_profiles(method_profiles) {}
 
   OptimizeStats optimize(Scope& scope, const SingleImplConfig& config);
 
@@ -247,6 +252,7 @@ struct OptimizationImpl {
   const ClassHierarchy& ch;
   UnorderedMap<std::string_view, size_t> deobfuscated_name_counters;
   const api::AndroidSDK& m_api;
+  method_profiles::MethodProfiles& m_method_profiles;
 };
 
 /**
@@ -529,6 +535,7 @@ void OptimizationImpl::rewrite_interface_methods(const DexType* intf,
       new_meth->rstate = meth->rstate;
       TRACE(INTF, 5, "(MITF) created impl method %s", SHOW(new_meth));
       setup_method(meth, new_meth);
+      m_method_profiles.substitute_stats(new_meth, {meth});
       redex_assert(new_meth->is_virtual());
       impl->add_method(new_meth);
       TRACE(INTF, 3, "(MITF) moved interface method %s", SHOW(new_meth));
@@ -969,7 +976,8 @@ OptimizeStats optimize(std::unique_ptr<SingleImplAnalysis> analysis,
                        const ClassHierarchy& ch,
                        Scope& scope,
                        const SingleImplConfig& config,
-                       const api::AndroidSDK& api) {
-  OptimizationImpl optimizer(std::move(analysis), ch, api);
+                       const api::AndroidSDK& api,
+                       method_profiles::MethodProfiles& method_profiles) {
+  OptimizationImpl optimizer(std::move(analysis), ch, api, method_profiles);
   return optimizer.optimize(scope, config);
 }

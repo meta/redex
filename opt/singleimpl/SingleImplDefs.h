@@ -214,4 +214,5 @@ OptimizeStats optimize(std::unique_ptr<SingleImplAnalysis> analysis,
                        const ClassHierarchy& ch,
                        Scope& scope,
                        const SingleImplConfig& config,
-                       const api::AndroidSDK& api);
+                       const api::AndroidSDK& api,
+                       method_profiles::MethodProfiles& method_profiles);

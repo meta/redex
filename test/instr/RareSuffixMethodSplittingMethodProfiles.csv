@@ -1,0 +1,5 @@
+interaction,appear#
+ColdStart,100
+index,name,appear100,appear#,avg_call,avg_order,avg_rank100,min_api_level
+1,Lredex/RareSuffixMethodSplittingTest;.splitThrowingSuffix:()V,99.0000,99,1.0000,0.0000,0.000000,21
+2,Lredex/RareSuffixMethodSplittingTest;.splitConstructorThrowingSuffix:()V,99.0000,99,1.0000,0.0000,0.000000,21

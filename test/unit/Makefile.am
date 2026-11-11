@@ -209,6 +209,7 @@ check_PROGRAMS = \
     switch_equiv_test \
     throw_propagation_test \
     rare_suffix_selection_test \
+    rare_suffix_method_splitting_test \
     timer_test \
     trace_multithreading_test \
     true_virtuals_test \
@@ -645,6 +646,8 @@ throw_propagation_test_SOURCES = ThrowPropagationTest.cpp
 throw_propagation_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 rare_suffix_selection_test_SOURCES = RareSuffixSelectionTest.cpp
+
+rare_suffix_method_splitting_test_SOURCES = RareSuffixMethodSplittingTest.cpp
 
 timer_test_SOURCES = TimerTest.cpp
 

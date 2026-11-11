@@ -17,7 +17,6 @@
 #include "BaselineProfile.h"
 #include "ConfigFiles.h"
 #include "DexUtil.h"
-#include "InterDexPassMetrics.h"
 #include "MethodSplitter.h"
 #include "PassManager.h"
 #include "Show.h"
@@ -179,12 +178,6 @@ void export_metrics(PassManager& mgr,
 void MethodSplittingPass::run_pass(DexStoresVector& stores,
                                    ConfigFiles& conf,
                                    PassManager& mgr) {
-  const auto& interdex_metrics = mgr.get_interdex_metrics();
-  auto it = interdex_metrics.find(interdex::METRIC_RESERVED_MREFS);
-  size_t reserved_mrefs = it == interdex_metrics.end() ? 0 : it->second;
-  it = interdex_metrics.find(interdex::METRIC_RESERVED_TREFS);
-  size_t reserved_trefs = it == interdex_metrics.end() ? 0 : it->second;
-
   auto scope = build_class_scope(stores);
   auto baseline_profile = baseline_profiles::get_default_baseline_profile(
       scope, conf.get_baseline_profile_configs(), conf.get_method_profiles());
@@ -201,28 +194,14 @@ void MethodSplittingPass::run_pass(DexStoresVector& stores,
       concurrent_new_hot_split_methods;
   InsertOnlyConcurrentMap<DexMethod*, size_t>
       concurrent_splittable_no_optimizations_methods;
-  int32_t min_sdk = mgr.get_redex_options().min_sdk;
-  const api::AndroidSDK* min_sdk_api{nullptr};
-  if (conf.get_android_sdk_api_file(min_sdk)) {
-    min_sdk_api = &conf.get_android_sdk_api(min_sdk);
-  } else {
-    mgr.incr_metric("min_sdk_no_file", 1);
-  }
-  StoreRefCheckers store_ref_checkers(stores, conf.normal_primary_dex(),
-                                      min_sdk_api);
-  split_methods_in_stores(
-      stores, min_sdk, m_config, store_ref_checkers,
-      conf.create_init_class_insns(), reserved_mrefs, reserved_trefs, &stats,
-      name_infix, &concurrent_hot_methods, &concurrent_new_hot_split_methods,
-      &concurrent_splittable_no_optimizations_methods);
+  auto env = make_split_environment(stores, conf, mgr);
+  split_methods_in_stores(stores, env, m_config, &stats, name_infix,
+                          &concurrent_hot_methods,
+                          &concurrent_new_hot_split_methods,
+                          &concurrent_splittable_no_optimizations_methods);
 
-  auto& method_profiles = conf.get_method_profiles();
-  size_t derived_method_profile_stats{0};
-  for (auto [new_method, root_method] :
-       UnorderedIterable(concurrent_new_hot_split_methods)) {
-    derived_method_profile_stats +=
-        method_profiles.derive_stats(new_method, {root_method});
-  }
+  auto derived_method_profile_stats = derive_hot_split_profiles(
+      conf.get_method_profiles(), concurrent_new_hot_split_methods);
 
   export_metrics(mgr, stats, concurrent_new_hot_split_methods.size(),
                  derived_method_profile_stats,

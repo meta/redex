@@ -252,17 +252,7 @@ std::optional<ScoredClosure> score(
     sc.split_size += config.cost_split_switch +
                      config.cost_split_switch_case * closures.size();
   }
-  bool any_src_hot{false};
-  bool any_target_hot{false};
-  for (const auto* c : closures) {
-    for (const auto* pred : UnorderedIterable(c->reduced_block->preds)) {
-      any_src_hot |= pred->src->is_hot;
-    }
-    any_target_hot |= c->reduced_block->is_hot;
-  }
-  const auto kind = !any_src_hot     ? HotSplitKind::Cold
-                    : any_target_hot ? HotSplitKind::Hot
-                                     : HotSplitKind::HotCold;
+  const auto kind = classify_hot_split_kind(closures);
   sc.hot_split_kind = kind;
   // A net gate applies to the suffixes of its kind on a compiled host, the
   // only host whose evicted cold code leaves compiled code.
@@ -972,6 +962,22 @@ std::vector<SplittableClosure> to_splittable_closures(
 
 namespace method_splitting_impl {
 
+HotSplitKind classify_hot_split_kind(
+    const std::vector<const Closure*>& closures) {
+  bool any_src_hot{false};
+  bool any_target_hot{false};
+  for (const auto* c : closures) {
+    for (const auto* pred : UnorderedIterable(c->reduced_block->preds)) {
+      any_src_hot |= pred->src->is_hot;
+    }
+    any_target_hot |= c->reduced_block->is_hot;
+  }
+  if (!any_src_hot) {
+    return HotSplitKind::Cold;
+  }
+  return any_target_hot ? HotSplitKind::Hot : HotSplitKind::HotCold;
+}
+
 StoreRefCheckers::StoreRefCheckers(const DexStoresVector& stores,
                                    bool normal_primary_dex,
                                    const api::AndroidSDK* min_sdk_api)
@@ -1152,6 +1158,37 @@ select_splittable_closures_from_top_level_switch_cases(
   };
   workqueue_run<DexMethod*>(concurrent_process_method, methods);
   return concurrent_splittable_closures;
+}
+
+// Exclude methods containing loadLibrary/loadLibraryUnsafe calls from
+// splitting. Splitting these methods separates the const-string (library
+// name) from the invoke, which causes ReachableNativesPass to crash.
+bool has_load_library_call(const DexMethod* method) {
+  const auto* code = method->get_code();
+  if (code == nullptr || !code->cfg_built()) {
+    return false;
+  }
+  for (auto* block : code->cfg().blocks()) {
+    for (auto& mie : *block) {
+      if (mie.type != MFLOW_OPCODE) {
+        continue;
+      }
+      auto* insn = mie.insn;
+      if (!insn->has_method() || !opcode::is_invoke_static(insn->opcode())) {
+        continue;
+      }
+      auto callee_name = insn->get_method()->get_name()->str();
+      if (callee_name != "loadLibrary" && callee_name != "loadLibraryUnsafe") {
+        continue;
+      }
+      auto cls_name = insn->get_method()->get_class()->str();
+      if (cls_name == "Lcom/facebook/soloader/SoLoader;" ||
+          cls_name == "Lcom/facebook/soloader/nativeloader/NativeLoader;") {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 } // namespace method_splitting_impl

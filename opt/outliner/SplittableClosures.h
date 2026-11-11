@@ -37,6 +37,12 @@ class StoreRefCheckers {
                    bool normal_primary_dex,
                    const api::AndroidSDK* min_sdk_api);
 
+  // Each `RefChecker` points into `m_xstores`.
+  StoreRefCheckers(const StoreRefCheckers&) = delete;
+  StoreRefCheckers& operator=(const StoreRefCheckers&) = delete;
+  StoreRefCheckers(StoreRefCheckers&&) = delete;
+  StoreRefCheckers& operator=(StoreRefCheckers&&) = delete;
+
   const RefChecker& get(const DexType* type) const {
     return *m_ref_checkers[m_xstores.get_store_idx(type)];
   }
@@ -121,6 +127,16 @@ select_splittable_closures_based_on_costs(
     InsertOnlyConcurrentMap<DexMethod*, size_t>*
         concurrent_splittable_no_optimizations_methods,
     Stats& stats);
+
+// True when `method` calls SoLoader's or NativeLoader's `loadLibrary` or
+// `loadLibraryUnsafe`. Such methods are never split.
+bool has_load_library_call(const DexMethod* method);
+
+// How hot a split of `closures` is: `Hot` when a block entering them and their
+// target are both hot, `HotCold` when only a block entering them is, and `Cold`
+// when none is.
+HotSplitKind classify_hot_split_kind(
+    const std::vector<const Closure*>& closures);
 
 // Selects splittable closures for a given set of methods from all contained
 // top-level switch cases.

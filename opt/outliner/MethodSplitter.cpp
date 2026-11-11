@@ -8,6 +8,7 @@
 #include "MethodSplitter.h"
 
 #include "ConcurrentContainers.h"
+#include "ConfigFiles.h"
 #include "ControlFlow.h"
 #include "Debug.h"
 #include "DexLimits.h"
@@ -15,7 +16,10 @@
 #include "DexStore.h"
 #include "DexUtil.h"
 #include "InitClassesWithSideEffects.h"
+#include "InterDexPassMetrics.h"
 #include "MethodClosures.h"
+#include "MethodProfiles.h"
+#include "PassManager.h"
 #include "Show.h"
 #include "SourceBlocks.h"
 #include "Trace.h"
@@ -138,7 +142,7 @@ DexProto* get_split_proto(const DexMethod* method,
 }
 
 ConcurrentSet<DexMethod*> split_splittable_closures(
-    const Config& config,
+    bool fix_new_hot_split_registration,
     const std::vector<DexClasses*>& dexen,
     int32_t min_sdk,
     const init_classes::InitClassesWithSideEffects&
@@ -152,6 +156,7 @@ ConcurrentSet<DexMethod*> split_splittable_closures(
     Stats* stats,
     UnorderedMap<DexClasses*, std::unique_ptr<DexState>>* dex_states,
     ConcurrentSet<DexMethod*>* concurrent_added_methods,
+    ConcurrentSet<DexMethod*>* concurrent_split_methods,
     InsertOnlyConcurrentSet<const DexMethod*>* concurrent_hot_methods,
     InsertOnlyConcurrentMap<DexMethod*, DexMethod*>*
         concurrent_new_hot_split_methods) {
@@ -285,7 +290,7 @@ ConcurrentSet<DexMethod*> split_splittable_closures(
           // Re-inserting `method` (the historical behaviour, kept when the flag
           // is off) is a no-op: the guard has already proven it present.
           concurrent_hot_methods->insert(
-              config.fix_new_hot_split_registration ? new_method : method);
+              fix_new_hot_split_registration ? new_method : method);
         }
         break;
       }
@@ -298,6 +303,7 @@ ConcurrentSet<DexMethod*> split_splittable_closures(
       default:
         not_reached();
       }
+      concurrent_split_methods->insert(method);
       affected_methods.insert(method);
       affected_methods.insert(new_method);
       concurrent_added_methods->insert(new_method);
@@ -311,6 +317,81 @@ ConcurrentSet<DexMethod*> split_splittable_closures(
   workqueue_run<DexClasses*>(process_dex, dexen);
   return concurrent_affected_methods;
 }
+
+// What splitting closures needs across the iterations of one run: the scope,
+// per-dex reference accounting, and the uniquifiers that keep split names
+// distinct.
+class SplitRun {
+ public:
+  SplitRun(DexStoresVector& stores,
+           int32_t min_sdk,
+           bool create_init_class_insns,
+           size_t reserved_mrefs,
+           size_t reserved_trefs)
+      : m_scope(build_class_scope(stores)),
+        m_init_classes_with_side_effects(m_scope, create_init_class_insns),
+        m_min_sdk(min_sdk),
+        m_reserved_mrefs(reserved_mrefs),
+        m_reserved_trefs(reserved_trefs) {
+    for (auto& store : stores) {
+      for (auto& dex : store.get_dexen()) {
+        m_dexen.push_back(&dex);
+        m_dex_states[&dex];
+      }
+    }
+  }
+
+  const Scope& scope() const { return m_scope; }
+
+  struct Result {
+    // The changed methods of the dexes that did not run out of references,
+    // for another iteration.
+    ConcurrentSet<DexMethod*> revisit;
+    // The methods that got at least one split.
+    ConcurrentSet<DexMethod*> split;
+  };
+
+  // Splits `splittable_closures`, keyed by the type of their method's class,
+  // and appends every new split to `stats`.
+  Result split(
+      bool fix_new_hot_split_registration,
+      const ConcurrentMap<DexType*, std::vector<SplittableClosure>>&
+          splittable_closures,
+      const std::string& name_infix,
+      Stats* stats,
+      InsertOnlyConcurrentSet<const DexMethod*>* concurrent_hot_methods,
+      InsertOnlyConcurrentMap<DexMethod*, DexMethod*>*
+          concurrent_new_hot_split_methods) {
+    Result result;
+    ConcurrentSet<DexMethod*> concurrent_added_methods;
+    result.revisit = split_splittable_closures(
+        fix_new_hot_split_registration, m_dexen, m_min_sdk,
+        m_init_classes_with_side_effects, m_reserved_trefs, m_reserved_mrefs,
+        splittable_closures, name_infix, &m_uniquifiers, stats, &m_dex_states,
+        &concurrent_added_methods, &result.split, concurrent_hot_methods,
+        concurrent_new_hot_split_methods);
+    // Transfer per-iteration newly-emitted splits into Stats. Sort by
+    // method identity so the append order is deterministic across
+    // runs (ConcurrentSet iteration is not).
+    auto sorted =
+        unordered_to_ordered(concurrent_added_methods, compare_dexmethods);
+    stats->added_methods.reserve(stats->added_methods.size() + sorted.size());
+    for (auto* m : sorted) {
+      stats->added_methods.emplace_back(m, SplitKind::Suffix);
+    }
+    return result;
+  }
+
+ private:
+  Scope m_scope;
+  init_classes::InitClassesWithSideEffects m_init_classes_with_side_effects;
+  int32_t m_min_sdk;
+  size_t m_reserved_mrefs;
+  size_t m_reserved_trefs;
+  std::vector<DexClasses*> m_dexen;
+  UnorderedMap<DexClasses*, std::unique_ptr<DexState>> m_dex_states;
+  AtomicMap<std::string, size_t> m_uniquifiers;
+};
 
 } // namespace
 
@@ -624,12 +705,8 @@ void SplitMethod::apply_code_changes() {
 
 void split_methods_in_stores(
     DexStoresVector& stores,
-    int32_t min_sdk,
+    const SplitEnvironment& env,
     const Config& config,
-    const StoreRefCheckers& store_ref_checkers,
-    bool create_init_class_insns,
-    size_t reserved_mrefs,
-    size_t reserved_trefs,
     Stats* stats,
     const std::string& name_infix,
     InsertOnlyConcurrentSet<const DexMethod*>* concurrent_hot_methods,
@@ -637,19 +714,11 @@ void split_methods_in_stores(
         concurrent_new_hot_split_methods,
     InsertOnlyConcurrentMap<DexMethod*, size_t>*
         concurrent_splittable_no_optimizations_methods) {
-  auto scope = build_class_scope(stores);
-  init_classes::InitClassesWithSideEffects init_classes_with_side_effects(
-      scope, create_init_class_insns);
+  SplitRun run(stores, env.min_sdk, env.create_init_class_insns,
+               env.reserved_mrefs, env.reserved_trefs);
+  const auto& scope = run.scope();
 
   ConcurrentSet<DexMethod*> methods;
-  std::vector<DexClasses*> dexen;
-  UnorderedMap<DexClasses*, std::unique_ptr<DexState>> dex_states;
-  for (auto& store : stores) {
-    for (auto& dex : store.get_dexen()) {
-      dexen.push_back(&dex);
-      dex_states[&dex];
-    }
-  }
 
   auto is_excluded = [&](DexMethod* method) {
     if (!config.split_clinits && method::is_clinit(method)) {
@@ -663,37 +732,6 @@ void split_methods_in_stores(
     }
     return false;
   };
-  // Exclude methods containing loadLibrary/loadLibraryUnsafe calls from
-  // splitting. Splitting these methods separates the const-string (library
-  // name) from the invoke, which causes ReachableNativesPass to crash.
-  auto has_load_library_call = [](DexMethod* method) {
-    auto* code = method->get_code();
-    if (code == nullptr || !code->cfg_built()) {
-      return false;
-    }
-    for (auto* block : code->cfg().blocks()) {
-      for (auto& mie : *block) {
-        if (mie.type != MFLOW_OPCODE) {
-          continue;
-        }
-        auto* insn = mie.insn;
-        if (!insn->has_method() || !opcode::is_invoke_static(insn->opcode())) {
-          continue;
-        }
-        auto callee_name = insn->get_method()->get_name()->str();
-        if (callee_name != "loadLibrary" &&
-            callee_name != "loadLibraryUnsafe") {
-          continue;
-        }
-        auto cls_name = insn->get_method()->get_class()->str();
-        if (cls_name == "Lcom/facebook/soloader/SoLoader;" ||
-            cls_name == "Lcom/facebook/soloader/nativeloader/NativeLoader;") {
-          return true;
-        }
-      }
-    }
-    return false;
-  };
   walk::parallel::code(scope, [&](DexMethod* method, IRCode&) {
     if (is_excluded(method) || has_load_library_call(method)) {
       stats->excluded_methods++;
@@ -703,36 +741,95 @@ void split_methods_in_stores(
   });
 
   size_t iteration{0};
-  AtomicMap<std::string, size_t> uniquifiers;
   while (!methods.empty() && iteration < config.max_iteration) {
     TRACE(MS, 2, "=== iteration[%zu]", iteration);
     stats->iterations = iteration;
     Timer t("iteration " + std::to_string(iteration++));
     auto splittable_closures = select_splittable_closures_based_on_costs(
-        methods, config, store_ref_checkers, concurrent_hot_methods,
+        methods, config, env.store_ref_checkers, concurrent_hot_methods,
         concurrent_splittable_no_optimizations_methods, *stats);
-    ConcurrentSet<DexMethod*> concurrent_added_methods;
-    methods = split_splittable_closures(
-        config, dexen, min_sdk, init_classes_with_side_effects, reserved_trefs,
-        reserved_mrefs, splittable_closures, name_infix, &uniquifiers, stats,
-        &dex_states, &concurrent_added_methods, concurrent_hot_methods,
-        concurrent_new_hot_split_methods);
-    // Transfer per-iteration newly-emitted splits into Stats. Sort by
-    // method identity so the append order is deterministic across
-    // runs (ConcurrentSet iteration is not).
-    auto sorted =
-        unordered_to_ordered(concurrent_added_methods, compare_dexmethods);
-    stats->added_methods.reserve(stats->added_methods.size() + sorted.size());
-    for (auto* m : sorted) {
-      stats->added_methods.emplace_back(m, SplitKind::Suffix);
-    }
+    auto split_count_before = stats->added_methods.size();
+    methods =
+        run.split(config.fix_new_hot_split_registration, splittable_closures,
+                  name_infix, stats, concurrent_hot_methods,
+                  concurrent_new_hot_split_methods)
+            .revisit;
     TRACE(MS, 1, "[%zu] Split out %zu methods", iteration,
-          concurrent_added_methods.size());
+          stats->added_methods.size() - split_count_before);
   }
   stats->iterations = iteration;
   walk::code(scope, [&](DexMethod* method, IRCode&) {
     method->rstate.reset_too_large_for_inlining_into();
   });
+}
+
+SplitEnvironment make_split_environment(const DexStoresVector& stores,
+                                        ConfigFiles& conf,
+                                        PassManager& mgr) {
+  const auto& interdex_metrics = mgr.get_interdex_metrics();
+  auto it = interdex_metrics.find(interdex::METRIC_RESERVED_MREFS);
+  size_t reserved_mrefs = it == interdex_metrics.end() ? 0 : it->second;
+  it = interdex_metrics.find(interdex::METRIC_RESERVED_TREFS);
+  size_t reserved_trefs = it == interdex_metrics.end() ? 0 : it->second;
+  int32_t min_sdk = mgr.get_redex_options().min_sdk;
+  const api::AndroidSDK* min_sdk_api{nullptr};
+  if (conf.get_android_sdk_api_file(min_sdk)) {
+    min_sdk_api = &conf.get_android_sdk_api(min_sdk);
+  } else {
+    mgr.incr_metric("min_sdk_no_file", 1);
+  }
+  return SplitEnvironment{
+      min_sdk,
+      StoreRefCheckers(stores, conf.normal_primary_dex(), min_sdk_api),
+      conf.create_init_class_insns(),
+      reserved_mrefs,
+      reserved_trefs,
+  };
+}
+
+SelectedSplits split_selected_closures(
+    DexStoresVector& stores,
+    const SplitEnvironment& env,
+    const ConcurrentMap<DexType*, std::vector<SplittableClosure>>&
+        splittable_closures,
+    const std::string& name_infix,
+    method_profiles::MethodProfiles& method_profiles,
+    Stats* stats) {
+  SplitRun run(stores, env.min_sdk, env.create_init_class_insns,
+               env.reserved_mrefs, env.reserved_trefs);
+  InsertOnlyConcurrentMap<DexMethod*, DexMethod*>
+      concurrent_new_hot_split_methods;
+  // The flag only matters with a hot-method set.
+  auto result = run.split(/* fix_new_hot_split_registration */ false,
+                          splittable_closures, name_infix, stats,
+                          /* concurrent_hot_methods */ nullptr,
+                          &concurrent_new_hot_split_methods);
+  for (auto* method : UnorderedIterable(result.revisit)) {
+    // Every revisited method is a host the splitter changed or a split it
+    // built on a copy of its host's CFG, so its CFG is built.
+    always_assert_log(method->get_code() != nullptr &&
+                          method->get_code()->cfg_built(),
+                      "%s", SHOW(method));
+    method->get_code()->cfg().remove_unreachable_blocks();
+  }
+  return SelectedSplits{
+      std::move(result.split),
+      derive_hot_split_profiles(method_profiles,
+                                concurrent_new_hot_split_methods),
+  };
+}
+
+size_t derive_hot_split_profiles(
+    method_profiles::MethodProfiles& method_profiles,
+    const InsertOnlyConcurrentMap<DexMethod*, DexMethod*>&
+        concurrent_new_hot_split_methods) {
+  size_t derived_method_profile_stats{0};
+  for (auto [new_method, root_method] :
+       UnorderedIterable(concurrent_new_hot_split_methods)) {
+    derived_method_profile_stats +=
+        method_profiles.derive_stats(new_method, {root_method});
+  }
+  return derived_method_profile_stats;
 }
 
 } // namespace method_splitting_impl

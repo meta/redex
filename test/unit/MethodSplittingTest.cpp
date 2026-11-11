@@ -10,7 +10,9 @@
 #include <gtest/gtest.h>
 
 #include "MethodClosures.h"
+#include "MethodProfiles.h"
 #include "MethodSplitter.h"
+#include "MethodSplittingTestUtil.h"
 #include "SplittableClosures.h"
 
 #include "Creators.h"
@@ -83,7 +85,10 @@ class MethodSplitterTest : public RedexTest {
       // internal but held by no store is an illegal cross-store reference, so a
       // split taking one as an argument would be dropped.
       const std::vector<DexClass*>& extra_classes = {},
-      bool no_outlining = false) {
+      bool no_outlining = false,
+      // Select the closures first, then split them with
+      // `split_selected_closures`.
+      bool preselect = false) {
     auto [cls, m] = create(sig, code_str);
     m->get_code()->build_cfg();
     if (no_outlining) {
@@ -94,13 +99,26 @@ class MethodSplitterTest : public RedexTest {
     DexClasses dex{cls};
     dex.insert(dex.end(), extra_classes.begin(), extra_classes.end());
     stores.front().get_dexen().push_back(std::move(dex));
-    method_splitting_impl::StoreRefCheckers store_ref_checkers(
-        stores, /* normal_primary_dex */ true, /* min_sdk_api */ nullptr);
+    auto env = method_splitting_test::split_environment(
+        stores, /* normal_primary_dex */ true);
     method_splitting_impl::Stats stats;
-    method_splitting_impl::split_methods_in_stores(
-        stores, /* min_sdk */ 0, config, store_ref_checkers,
-        /* create_init_class_insns */ false,
-        /* reserved_mrefs */ 0, /* reserved_trefs */ 0, &stats);
+    if (preselect) {
+      ConcurrentSet<DexMethod*> methods;
+      methods.insert(m);
+      auto splittable_closures =
+          method_splitting_impl::select_splittable_closures_based_on_costs(
+              methods, config, env.store_ref_checkers,
+              /* concurrent_hot_methods */ nullptr,
+              /* concurrent_splittable_no_optimizations_methods */ nullptr,
+              stats);
+      method_profiles::MethodProfiles method_profiles;
+      method_splitting_impl::split_selected_closures(
+          stores, env, splittable_closures, /* name_infix */ "",
+          method_profiles, &stats);
+    } else {
+      method_splitting_impl::split_methods_in_stores(stores, env, config,
+                                                     &stats);
+    }
     // Every candidate is recorded once, at its final fate.
     const auto fates = stats.snapshot().suffix_fates;
     EXPECT_EQ(fates.recorded(), fates.candidates);
@@ -169,13 +187,10 @@ class MethodSplitterTest : public RedexTest {
     DexStoresVector stores;
     stores.emplace_back("test_store");
     stores.front().get_dexen().push_back({cls});
-    method_splitting_impl::StoreRefCheckers store_ref_checkers(
-        stores, /* normal_primary_dex */ true, /* min_sdk_api */ nullptr);
+    auto env = method_splitting_test::split_environment(
+        stores, /* normal_primary_dex */ true);
     method_splitting_impl::Stats stats;
-    method_splitting_impl::split_methods_in_stores(
-        stores, /* min_sdk */ 0, config, store_ref_checkers,
-        /* create_init_class_insns */ false,
-        /* reserved_mrefs */ 0, /* reserved_trefs */ 0, &stats);
+    method_splitting_impl::split_methods_in_stores(stores, env, config, &stats);
     const auto fates = stats.snapshot().suffix_fates;
     EXPECT_EQ(fates.recorded(), fates.candidates);
     return stats.added_methods.size();
@@ -281,13 +296,11 @@ TEST_F(MethodSplitterTest, SplitNameSkipsExistingMethods) {
   DexStoresVector stores;
   stores.emplace_back("test_store");
   stores.front().get_dexen().push_back(DexClasses{cls});
-  method_splitting_impl::StoreRefCheckers store_ref_checkers(
-      stores, /* normal_primary_dex */ true, /* min_sdk_api */ nullptr);
+  auto env = method_splitting_test::split_environment(
+      stores, /* normal_primary_dex */ true);
   method_splitting_impl::Stats stats;
-  method_splitting_impl::split_methods_in_stores(
-      stores, /* min_sdk */ 0, defaultConfig(), store_ref_checkers,
-      /* create_init_class_insns */ false,
-      /* reserved_mrefs */ 0, /* reserved_trefs */ 0, &stats);
+  method_splitting_impl::split_methods_in_stores(stores, env, defaultConfig(),
+                                                 &stats);
   ASSERT_EQ(stats.added_methods.size(), 1);
   auto* split = stats.added_methods.begin()->first;
   EXPECT_EQ(split->str(), "bar$split$cold1");
@@ -329,14 +342,46 @@ TEST_F(MethodSplitterTest, KeepsConstructorCodeBeforeReceiverInitialization) {
   DexStoresVector stores;
   stores.emplace_back("test_store");
   stores.front().get_dexen().push_back(DexClasses{cls});
-  method_splitting_impl::StoreRefCheckers store_ref_checkers(
-      stores, /* normal_primary_dex */ true, /* min_sdk_api */ nullptr);
+  auto env = method_splitting_test::split_environment(
+      stores, /* normal_primary_dex */ true);
   method_splitting_impl::Stats stats;
-  method_splitting_impl::split_methods_in_stores(
-      stores, /* min_sdk */ 0, defaultConfig(), store_ref_checkers,
-      /* create_init_class_insns */ false,
-      /* reserved_mrefs */ 0, /* reserved_trefs */ 0, &stats);
+  method_splitting_impl::split_methods_in_stores(stores, env, defaultConfig(),
+                                                 &stats);
   EXPECT_EQ(stats.added_methods.size(), 0);
+}
+
+TEST_F(MethodSplitterTest, SplitPreselectedClosures) {
+  const auto* before = R"(
+    (
+      (load-param v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (return v0)
+    ))";
+  const auto* after = R"(
+    (
+      (load-param v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (.pos:dbg_0 "LFoo;.bar:(I)I" RedexGenerated 0)
+      (invoke-static (v0) "LFoo;.bar$split$cold0:(I)I")
+      (move-result v0)
+      (return v0)
+    ))";
+  const auto* split0 = R"(
+    (
+      (load-param v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (return v0)
+    ))";
+  EXPECT_TRUE(test("(I)I", before, defaultConfig(),
+                   {{"", after}, {"split$cold0", split0}}, {},
+                   /* no_outlining */ false, /* preselect */ true));
 }
 
 TEST_F(MethodSplitterTest, SplitConstants) {
@@ -1121,18 +1166,15 @@ TEST_F(MethodSplitterTest, LoopHeadedSplitTypesLiveInsByTheDefsItIsPassed) {
   DexStoresVector stores;
   stores.emplace_back("test_store");
   stores.front().get_dexen().push_back({cls, a_cls, b_cls});
-  method_splitting_impl::StoreRefCheckers store_ref_checkers(
-      stores, /* normal_primary_dex */ true, /* min_sdk_api */ nullptr);
+  auto env = method_splitting_test::split_environment(
+      stores, /* normal_primary_dex */ true);
   // One entry block, and the loop's exit alone is below the floor, so the
   // split is the loop.
   auto config = defaultConfig();
   config.split_block_size = 100000;
   config.min_cold_split_size = 8;
   method_splitting_impl::Stats stats;
-  method_splitting_impl::split_methods_in_stores(
-      stores, /* min_sdk */ 0, config, store_ref_checkers,
-      /* create_init_class_insns */ false,
-      /* reserved_mrefs */ 0, /* reserved_trefs */ 0, &stats);
+  method_splitting_impl::split_methods_in_stores(stores, env, config, &stats);
   ASSERT_EQ(stats.added_methods.size(), 1u);
   auto* split = stats.added_methods.front().first;
   EXPECT_EQ(show(split->get_proto()), "(ILLoopA;)V");

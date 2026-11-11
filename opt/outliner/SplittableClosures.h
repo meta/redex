@@ -152,6 +152,14 @@ struct RareSuffixSelectionStats {
   std::atomic<size_t> unsplittable{0};
   // No splittable suffix of the method runs rarely enough.
   std::atomic<size_t> no_rare_suffix{0};
+  // With suffixes that return admitted, the method's entry carries no block
+  // count, so only suffixes that never return are considered.
+  std::atomic<size_t> no_block_counts{0};
+  // With suffixes that return admitted, the method's entry count is zero: the
+  // method never ran, so only suffixes that never return are considered.
+  std::atomic<size_t> method_never_ran{0};
+  // Suffixes that return and run rarely enough, considered for splitting.
+  std::atomic<size_t> returning_suffixes{0};
   // Every such suffix makes fewer than the required runtime calls.
   std::atomic<size_t> too_few_runtime_calls{0};
   // The candidate evaluation dropped every remaining suffix; `Stats` records
@@ -161,17 +169,20 @@ struct RareSuffixSelectionStats {
 
 // Selects, in each of the given methods, the suffixes that run rarely and
 // make at least `min_suffix_runtime_calls` invokes or allocations: the
-// suffixes that never return, typically because they end in a throw. A split
-// leaves a call in every compiled copy, which pays only when the suffix's own
-// calls, each compiled to a call sequence plus the stack map ART keeps for it,
-// outweigh it; a suffix that, say, only reads a field and throws is about as
-// cheap as the call that would replace it. Each suffix goes through the
-// candidate evaluation MethodSplittingPass's suffixes go through, under
-// `config`, and is kept only when `split_net_saving` finds a positive net
-// saving with `compiled_copies(method)` compiled copies of its method; `stats`
-// records the fate of every suffix evaluated. Methods must have no try blocks.
-// A suffix is classified as hot, hot-cold or cold as MethodSplittingPass does;
-// see `classify_hot_split_kind`.
+// suffixes that never return, typically because they end in a throw, and,
+// with `max_returning_suffix_ratio`, the suffixes that return but whose
+// entry's block count is at most that ratio of the method entry's (a method
+// whose entry carries no count, or a count of zero because it never ran, gets
+// none of these). A split leaves a call in every compiled copy, which pays
+// only when the suffix's own calls, each compiled to a call sequence plus the
+// stack map ART keeps for it, outweigh it; a suffix that, say, only reads a
+// field and throws is about as cheap as the call that would replace it. Each
+// suffix goes through the candidate evaluation MethodSplittingPass's suffixes
+// go through, under `config`, and is kept only when `split_net_saving` finds a
+// positive net saving with `compiled_copies(method)` compiled copies of its
+// method; `stats` records the fate of every suffix evaluated. Methods must
+// have no try blocks. A suffix is classified as hot, hot-cold or cold as
+// MethodSplittingPass does; see `classify_hot_split_kind`.
 //
 // RareSuffixMethodSplittingPass's selector; it lives here because it builds
 // on this file's selection helpers (`to_splittable_closures`,
@@ -187,6 +198,7 @@ class RareSuffixSelection {
       const std::vector<DexMethod*>& methods,
       const Config& config,
       size_t min_suffix_runtime_calls,
+      std::optional<float> max_returning_suffix_ratio,
       const std::function<size_t(const DexMethod*)>& compiled_copies,
       const StoreRefCheckers& store_ref_checkers,
       Stats& stats,

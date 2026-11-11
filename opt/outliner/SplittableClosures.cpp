@@ -25,6 +25,7 @@
 #include "MethodUtil.h"
 #include "OutlinerTypeAnalysis.h"
 #include "Show.h"
+#include "SourceBlocks.h"
 #include "SplitNetSaving.h"
 #include "Timer.h"
 #include "Trace.h"
@@ -1241,10 +1242,31 @@ RareSuffixSelection::~RareSuffixSelection() {
   std::move(*this).finish(/* split */ {});
 }
 
+namespace {
+
+// The largest count the first source block of `b` carries over all
+// interactions, or none if it carries none.
+std::optional<float> block_count(const cfg::Block* b) {
+  const auto* sb = source_blocks::get_first_source_block(b);
+  if (sb == nullptr) {
+    return std::nullopt;
+  }
+  std::optional<float> count;
+  sb->foreach_val([&count](const auto& v) {
+    if (v) {
+      count = std::max(count.value_or(0.0f), v->val);
+    }
+  });
+  return count;
+}
+
+} // namespace
+
 RareSuffixSelection::RareSuffixSelection(
     const std::vector<DexMethod*>& methods,
     const Config& config,
     size_t min_suffix_runtime_calls,
+    std::optional<float> max_returning_suffix_ratio,
     const std::function<size_t(const DexMethod*)>& compiled_copies,
     const StoreRefCheckers& store_ref_checkers,
     Stats& stats,
@@ -1262,6 +1284,20 @@ RareSuffixSelection::RareSuffixSelection(
         }
         always_assert_log(!method->get_code()->has_try_blocks(),
                           "%s has try blocks", SHOW(method));
+        // How often the method runs, for a suffix that returns; read before
+        // anything changes. Set only when the method ran: in a method that
+        // never ran, every count is zero, which says nothing about which of
+        // its suffixes run rarely.
+        std::optional<float> entry_count;
+        if (max_returning_suffix_ratio) {
+          entry_count = block_count(method->get_code()->cfg().entry_block());
+          if (!entry_count) {
+            selection_stats.no_block_counts++;
+          } else if (*entry_count <= 0.0f) {
+            selection_stats.method_never_ran++;
+            entry_count = std::nullopt;
+          }
+        }
         auto original_code = method->release_code();
         method->set_code(std::make_unique<IRCode>(*original_code));
         normalize_cfg_for_splitting(method);
@@ -1274,7 +1310,30 @@ RareSuffixSelection::RareSuffixSelection(
           auto copies = compiled_copies(method);
           for (const auto& c : mcs->closures) {
             if (reaching_return.count(c.target) != 0u) {
-              continue;
+              // A suffix that returns qualifies when it runs rarely: at most
+              // `max_returning_suffix_ratio` times as often as the method.
+              if (!entry_count) {
+                continue;
+              }
+              auto suffix_count = block_count(c.target);
+              if (!suffix_count ||
+                  *suffix_count > *max_returning_suffix_ratio * *entry_count) {
+                continue;
+              }
+              selection_stats.returning_suffixes++;
+              // A suffix takes every block its head reaches, a return among
+              // them, so its split returns too; the pass's per-reason reports
+              // rely on that.
+              always_assert_log(
+                  unordered_any_of(c.reduced_components,
+                                   [](const ReducedBlock* rb) {
+                                     return unordered_any_of(
+                                         rb->blocks, [](const cfg::Block* b) {
+                                           return b->branchingness() ==
+                                                  opcode::BRANCH_RETURN;
+                                         });
+                                   }),
+                  "returning suffix without a return in %s", SHOW(method));
             }
             any_rare_suffix = true;
             size_t runtime_calls = 0;

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,9 @@ namespace {
 
 // See `net_oat_weight`.
 constexpr float kDefaultNetOatWeight = 1.0f;
+
+// See `max_returning_suffix_ratio`.
+constexpr float kDefaultMaxReturningSuffixRatio = 0.01f;
 
 // How many split methods each top list reports.
 constexpr size_t kTopSplitCount = 10;
@@ -110,6 +114,13 @@ void RareSuffixMethodSplittingPass::bind_config() {
        "Fewest invokes or allocations the suffix must make. Each compiles to "
        "a call sequence with a stack map; a suffix with fewer is about as "
        "cheap as the call that replaces it.");
+  bind("max_returning_suffix_ratio", kDefaultMaxReturningSuffixRatio,
+       m_max_returning_suffix_ratio,
+       "Also split a suffix that returns when its entry's block count is at "
+       "most this ratio of the method entry's, as for a lazily computed "
+       "value. The counts come from the source blocks: a profile's, or "
+       "SyntheticBlockCountsPass's estimate. A method without counts, or one "
+       "that never ran, gets no such split. Negative turns this off.");
   bind("max_live_in", int64_t{3}, m_config.max_live_in,
        "Most registers the suffix may read from the rest of the method.");
   // A split is made when MethodSplittingPass's net cost model finds it pays,
@@ -210,6 +221,9 @@ void RareSuffixMethodSplittingPass::run_pass(DexStoresVector& stores,
   Stats stats;
   RareSuffixSelection selection(
       candidates, m_config, m_min_suffix_runtime_calls,
+      m_max_returning_suffix_ratio < 0
+          ? std::nullopt
+          : std::optional<float>(m_max_returning_suffix_ratio),
       [&](const DexMethod* method) {
         return compiled_call_sites.load(const_cast<DexMethod*>(method));
       },
@@ -231,18 +245,24 @@ void RareSuffixMethodSplittingPass::run_pass(DexStoresVector& stores,
   for (const auto& [split, kind] : stats.added_methods) {
     splits.insert(split);
   }
-  std::vector<SplitReport> reports;
+  // A method is listed once per reason its splits were made for: a split that
+  // never returns took a suffix that never returns, one that returns took a
+  // rarely run suffix.
+  std::vector<SplitReport> throw_reports;
+  std::vector<SplitReport> rare_reports;
   for (auto* m : UnorderedIterable(split_methods)) {
-    SplitReport r{.method = m,
-                  .call_count = 0,
-                  .compiled_call_sites = compiled_call_sites.load(m),
-                  .kind = {},
-                  .split_code_units = 0};
+    SplitReport base{.method = m,
+                     .call_count = 0,
+                     .compiled_call_sites = compiled_call_sites.load(m),
+                     .kind = {},
+                     .split_code_units = 0};
     auto stat = conf.get_method_profiles().get_method_stat(
         method_profiles::COLD_START, m);
     if (stat) {
-      r.call_count = static_cast<int64_t>(stat->call_count);
+      base.call_count = static_cast<int64_t>(stat->call_count);
     }
+    std::optional<SplitReport> throw_report;
+    std::optional<SplitReport> rare_report;
     // A method that got a split has code.
     always_assert_log(m->get_code() != nullptr, "%s", SHOW(m));
     for (const auto& mie : cfg::InstructionIterable(m->get_code()->cfg())) {
@@ -256,19 +276,35 @@ void RareSuffixMethodSplittingPass::run_pass(DexStoresVector& stores,
       // with code.
       always_assert_log(split != nullptr && split->get_code() != nullptr, "%s",
                         SHOW(ref));
-      if (r.kind.empty()) {
-        r.kind = kind_of_split(split);
+      // A split returns exactly when the suffix it took was selected as one
+      // that returns: a suffix takes every block its head reaches.
+      auto& r = split->get_code()->cfg().return_blocks().empty() ? throw_report
+                                                                 : rare_report;
+      if (!r) {
+        r = base;
+        r->kind = kind_of_split(split);
       }
-      r.split_code_units += split->get_code()->estimate_code_units();
+      r->split_code_units += split->get_code()->estimate_code_units();
     }
-    reports.push_back(std::move(r));
+    if (throw_report) {
+      throw_reports.push_back(std::move(*throw_report));
+    }
+    if (rare_report) {
+      rare_reports.push_back(std::move(*rare_report));
+    }
   }
-  report_top_splits(mgr, "top_split_by_call_count_", reports,
-                    [](const SplitReport& r) { return r.call_count; });
-  report_top_splits(mgr, "top_split_by_compiled_call_sites_", reports,
-                    [](const SplitReport& r) {
-                      return static_cast<int64_t>(r.compiled_call_sites);
-                    });
+  const auto by_call_count = [](const SplitReport& r) { return r.call_count; };
+  const auto by_compiled_call_sites = [](const SplitReport& r) {
+    return static_cast<int64_t>(r.compiled_call_sites);
+  };
+  report_top_splits(mgr, "top_throw_split_by_call_count_", throw_reports,
+                    by_call_count);
+  report_top_splits(mgr, "top_throw_split_by_compiled_call_sites_",
+                    throw_reports, by_compiled_call_sites);
+  report_top_splits(mgr, "top_rare_split_by_call_count_", rare_reports,
+                    by_call_count);
+  report_top_splits(mgr, "top_rare_split_by_compiled_call_sites_", rare_reports,
+                    by_compiled_call_sites);
 
   mgr.set_metric("callers_too_many_instructions",
                  callers_too_many_instructions.load());
@@ -283,6 +319,12 @@ void RareSuffixMethodSplittingPass::run_pass(DexStoresVector& stores,
   mgr.set_metric("rejected_catch", has_catch_handler.load());
   mgr.set_metric("rejected_no_rare_suffix",
                  selection_stats.no_rare_suffix.load());
+  mgr.set_metric("rejected_no_block_counts",
+                 selection_stats.no_block_counts.load());
+  mgr.set_metric("rejected_method_never_ran",
+                 selection_stats.method_never_ran.load());
+  mgr.set_metric("returning_suffixes",
+                 selection_stats.returning_suffixes.load());
   mgr.set_metric("rejected_too_few_runtime_calls",
                  selection_stats.too_few_runtime_calls.load());
   mgr.set_metric("rejected_not_splittable",

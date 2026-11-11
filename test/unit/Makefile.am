@@ -591,7 +591,7 @@ renamer_test_SOURCES = RenamerTest.cpp VirtScopeHelper.cpp ScopeHelper.cpp
 resolver_test_SOURCES = ResolverTest.cpp
 resolve_proguard_value_test_SOURCES = ResolveProguardAssumeValuesTest.cpp ScopeHelper.cpp
 
-resource_inlining_test_SOURCES = ResourceInliningTest.cpp ScopeHelper.cpp
+resource_inlining_test_SOURCES = ResourceInliningTest.cpp ScopeHelper.cpp arsc/TestStructures.cpp
 
 resource_value_merging_SOURCES = ResourceValueMergingPassTest.cpp
 resource_value_merging_LDADD = $(COMMON_MOCK_TEST_LIBS)

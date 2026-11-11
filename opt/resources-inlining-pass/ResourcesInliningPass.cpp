@@ -416,8 +416,8 @@ void ResourcesInliningPass::inline_resource_values_dex(
           new_insn->set_string(DexString::make_string(stream.str()));
         } else if (inlinable_value.type >= android::Res_value::TYPE_FIRST_INT &&
                    inlinable_value.type <= android::Res_value::TYPE_LAST_INT) {
-          new_insn->set_string(DexString::make_string(
-              std::to_string(inlinable_value.uint_value)));
+          new_insn->set_string(DexString::make_string(std::to_string(
+              static_cast<int32_t>(inlinable_value.uint_value))));
         } else {
           continue;
         }

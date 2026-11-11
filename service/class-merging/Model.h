@@ -387,7 +387,7 @@ class Model {
   // Methods the baseline profile marks hot; only built for hot/cold grouping.
   UnorderedSet<const DexMethod*> m_hot_methods;
 
-  // Number of merger types created with the same shape per model.
+  // Number of merger type names built for each shape in this model.
   std::map<MergerType::Shape, size_t, MergerType::ShapeComp> m_shape_to_count;
   // Cache of the mergeable hashes looked up by the matching Shape. We use this
   // cache to detect potential hash collisions.
@@ -436,7 +436,7 @@ class Model {
                                   const DexType* parent,
                                   const TypeSet& intfs,
                                   const std::vector<const DexType*>& classes);
-  MergerType& create_merger_helper(
+  void create_merger_helper(
       const DexType* merger_type,
       const MergerType::Shape& shape,
       const TypeSet& intf_set,

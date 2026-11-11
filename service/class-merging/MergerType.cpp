@@ -121,6 +121,10 @@ std::string MergerType::Shape::build_type_name(
 /*
  * Old naming scheme example: LPCreatorCreatorShape15S0000000_I1_9
  * <root_type_tag>'Shape'<count>'S'<shape_layout_tag>'_I'<interdex_group_id>'_'<subgroup_idx>
+ *
+ * The layout tag has one digit per field count, and a count of 10 or more
+ * between underscores, so that (1, 11, 0, ...) and (11, 1, 0, ...) get the tags
+ * 1_11_00000 and _11_100000.
  */
 std::string MergerType::Shape::build_type_name_legacy(
     const std::string& prefix,
@@ -137,8 +141,16 @@ std::string MergerType::Shape::build_type_name_legacy(
   auto root_name_tag = get_type_name_tag(parent);
   std::ostringstream ss;
   ss << "L" << prefix << root_name_tag << "Shape";
-  ss << count << "S" << string_fields << reference_fields << bool_fields
-     << int_fields << long_fields << double_fields << float_fields;
+  ss << count << "S";
+  for (int field_count :
+       {string_fields, reference_fields, bool_fields, int_fields, long_fields,
+        double_fields, float_fields}) {
+    if (field_count < 10) {
+      ss << field_count;
+    } else {
+      ss << "_" << field_count << "_";
+    }
+  }
 
   if (opt_dex_id && *opt_dex_id > 0) {
     ss << "_" << *opt_dex_id;

@@ -333,7 +333,7 @@ MergerType& Model::create_merger_shape(
   return merger;
 }
 
-MergerType& Model::create_merger_helper(
+void Model::create_merger_helper(
     const DexType* merger_type,
     const MergerType::Shape& shape,
     const TypeSet& intf_set,
@@ -359,13 +359,22 @@ MergerType& Model::create_merger_helper(
   }
   const auto& shape_type = DexType::make_type(name);
   TRACE(CLMG, 7, "Build shape type %s", SHOW(shape_type));
+  // A class of this name may already exist, created by an earlier model with
+  // the same class name prefix and a root of the same name tag. Leave the group
+  // unmerged rather than merge it into that class or into another merger.
+  if (type_class(shape_type) != nullptr || m_mergers.count(shape_type) != 0) {
+    TRACE(CLMG, 2, "Not merging %zu types: shape type %s is already taken",
+          group_values.size(), SHOW(shape_type));
+    m_stats.m_dropped += group_values.size();
+    return;
+  }
   auto& merger_shape = create_merger_shape(shape_type, shape, merger_type,
                                            intf_set, group_values);
   merger_shape.dex_id = dex_id;
   merger_shape.interdex_subgroup = interdex_subgroup_idx;
 
   map_fields(merger_shape, group_values);
-  return merger_shape;
+  m_stats.m_merging_size_counts[group_values.size()]++;
 }
 
 void Model::create_mergers_helper(
@@ -385,7 +394,6 @@ void Model::create_mergers_helper(
                       create_merger_helper(merger_type, shape, intf_set, dex_id,
                                            group, interdex_subgroup_idx,
                                            subgroup_cnt++);
-                      m_stats.m_merging_size_counts[group.size()]++;
                     });
 }
 

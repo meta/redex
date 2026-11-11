@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <algorithm>
 #include <fstream>
 #include <gtest/gtest.h>
 
@@ -495,4 +496,78 @@ TEST_F(ClassMergingFieldMetricsTest, FieldMetricsSumModelsOnce) {
 TEST_F(ClassMergingFieldMetricsTest, FieldMetricsEmitZeroWithoutModels) {
   auto metrics = run_merging({});
   expect_field_metrics(metrics, 0, 0);
+}
+
+TEST_F(ClassMergingFieldMetricsTest,
+       ShapesWithMultiDigitFieldCountsGetTheirOwnMergers) {
+  // `One1` and `One2` have 1 String field and 11 other reference fields;
+  // `Eleven1` and `Eleven2` have 11 String fields and 1 other reference field.
+  // Each pair merges into a class of its own shape.
+  auto* base = make_class("Lcom/s/Base;", type::java_lang_Object());
+  add_ctor(base);
+  auto add_fields = [this](DexClass* cls, int strings, int refs) {
+    for (int i = 0; i < strings; ++i) {
+      add_field(cls, ("s" + std::to_string(i)).c_str(),
+                type::java_lang_String(), ACC_PUBLIC);
+    }
+    for (int i = 0; i < refs; ++i) {
+      add_field(cls, ("r" + std::to_string(i)).c_str(),
+                type::java_lang_Object(), ACC_PUBLIC);
+    }
+  };
+  for (const auto* name : {"Lcom/s/One1;", "Lcom/s/One2;"}) {
+    auto* cls = make_class(name, base->get_type());
+    add_ctor(cls);
+    add_fields(cls, 1, 11);
+  }
+  for (const auto* name : {"Lcom/s/Eleven1;", "Lcom/s/Eleven2;"}) {
+    auto* cls = make_class(name, base->get_type());
+    add_ctor(cls);
+    add_fields(cls, 11, 1);
+  }
+
+  auto metrics = run_merging({field_metrics_model(base)});
+
+  EXPECT_EQ(metrics.at(" total_class_merged"), 4);
+  std::vector<std::pair<int, int>> merger_fields;
+  for (const auto* cls : m_scope) {
+    if (cls->get_super_class() != base->get_type()) {
+      continue;
+    }
+    int strings = 0;
+    int objects = 0;
+    for (const auto* field : cls->get_ifields()) {
+      strings += field->get_type() == type::java_lang_String() ? 1 : 0;
+      objects += field->get_type() == type::java_lang_Object() ? 1 : 0;
+    }
+    merger_fields.emplace_back(strings, objects);
+  }
+  std::sort(merger_fields.begin(), merger_fields.end());
+  EXPECT_EQ(merger_fields,
+            (std::vector<std::pair<int, int>>{{1, 11}, {11, 1}}));
+}
+
+TEST_F(ClassMergingFieldMetricsTest, ModelsWithTheSameShapeNamesMergeOnce) {
+  // Both models use the same class name prefix and have a root named `Base`, so
+  // they name the merger of their two field-less subclasses alike. The second
+  // model leaves its subclasses alone instead of reusing the class the first
+  // model created.
+  for (const auto* pkg : {"Lcom/a/", "Lcom/b/"}) {
+    auto* base = make_class((std::string(pkg) + "Base;").c_str(),
+                            type::java_lang_Object());
+    add_ctor(base);
+    for (const auto* leaf : {"Leaf1;", "Leaf2;"}) {
+      add_ctor(make_class((std::string(pkg) + leaf).c_str(), base->get_type()));
+    }
+  }
+  auto metrics = run_merging(
+      {field_metrics_model(type_class(DexType::make_type("Lcom/a/Base;"))),
+       field_metrics_model(type_class(DexType::make_type("Lcom/b/Base;")))});
+
+  EXPECT_EQ(metrics.at(" total_class_merged"), 2);
+  for (const auto* name : {"Lcom/b/Leaf1;", "Lcom/b/Leaf2;"}) {
+    const auto* cls = type_class(DexType::make_type(name));
+    EXPECT_NE(std::find(m_scope.begin(), m_scope.end(), cls), m_scope.end())
+        << name;
+  }
 }

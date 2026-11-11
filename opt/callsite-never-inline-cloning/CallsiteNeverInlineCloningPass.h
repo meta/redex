@@ -14,6 +14,7 @@
 #include "BaselineProfile.h"
 #include "DexClass.h"
 #include "MethodProfiles.h"
+#include "NeverInlineEligibility.h"
 #include "Pass.h"
 
 class CallsiteNeverInlineCloningPass : public Pass {
@@ -152,8 +153,10 @@ class CallsiteNeverInlineCloningPass : public Pass {
     // so both passes agree on what "hot" means at a given call site.
     float hot_block_appear_threshold{-1.0f};
     float hot_method_appear_threshold{-1.0f};
-    size_t max_caller_instructions{1100};
-    size_t max_caller_registers{32};
+    size_t max_caller_instructions{
+        never_inline_analysis::kDefaultMaxCallerInstructions};
+    size_t max_caller_registers{
+        never_inline_analysis::kDefaultMaxCallerRegisters};
     uint32_t max_callee_code_units{40};
     size_t min_callee_instructions{4};
 

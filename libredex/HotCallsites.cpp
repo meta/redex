@@ -30,13 +30,16 @@ CallerVerdict classify_caller(bool compiled,
   if (!compiled) {
     return CallerVerdict::kNotCompiled;
   }
-  if (instructions > max_caller_instructions) {
+  switch (caller_inline_budget(instructions, registers, max_caller_instructions,
+                               max_caller_registers)) {
+  case CallerBudget::kTooManyInstructions:
     return CallerVerdict::kTooManyInstructions;
-  }
-  if (registers > max_caller_registers) {
+  case CallerBudget::kTooManyRegisters:
     return CallerVerdict::kTooManyRegisters;
+  case CallerBudget::kWithin:
+    return CallerVerdict::kRead;
   }
-  return CallerVerdict::kRead;
+  not_reached();
 }
 
 CallsiteWalkCounts walk_callsites(const Scope& scope,

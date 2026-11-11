@@ -11,10 +11,12 @@
 
 #include "NeverInlineEligibility.h"
 
+#include "ControlFlow.h"
 #include "Creators.h"
 #include "DexAccess.h"
 #include "DexClass.h"
 #include "IRAssembler.h"
+#include "MethodOverrideGraph.h"
 #include "RedexTest.h"
 #include "Show.h"
 
@@ -168,4 +170,163 @@ TEST_F(NeverInlineEligibilityTest, IsSimplePopulatesInvokeInsnForForwarder) {
   EXPECT_TRUE(never_inline_analysis::is_simple(caller, &invoke_insn));
   ASSERT_NE(invoke_insn, nullptr);
   EXPECT_TRUE(opcode::is_an_invoke(invoke_insn->opcode()));
+}
+
+TEST_F(NeverInlineEligibilityTest, ExactCallSites) {
+  ClassCreator cc{DexType::make_type("LCalls;")};
+  cc.set_super(type::java_lang_Object());
+  auto add = [&](const std::string& sig, DexAccessFlags access, bool is_virtual,
+                 const std::string& code) {
+    auto* m = DexMethod::make_method("LCalls;." + sig)
+                  ->make_concrete(access, assembler::ircode_from_string(code),
+                                  is_virtual);
+    m->get_code()->build_cfg();
+    cc.add_method(m);
+    return m;
+  };
+  auto* callee =
+      add("callee:()V", ACC_PUBLIC | ACC_STATIC, false, "((return-void))");
+  auto* message =
+      add("message:()Ljava/lang/String;", ACC_PUBLIC | ACC_STATIC, false,
+          "((const-string \"m\") (move-result-pseudo-object v0) (return-object "
+          "v0))");
+  auto* virt = add("virt:()V", ACC_PUBLIC, true,
+                   "((load-param-object v0) (return-void))");
+  auto* caller = add("caller:(LCalls;Z)V", ACC_PUBLIC | ACC_STATIC, false, R"(
+    (
+      (load-param-object v0)
+      (load-param v1)
+      (invoke-static () "LCalls;.callee:()V")
+      (invoke-static () "LSubCalls;.callee:()V")
+      (invoke-static () "Ljava/lang/System;.gc:()V")
+      (invoke-virtual (v0) "LCalls;.virt:()V")
+      (if-eqz v1 :throw)
+      (return-void)
+      (:throw)
+      (invoke-static () "LCalls;.message:()Ljava/lang/String;")
+      (move-result-object v2)
+      (new-instance "Ljava/lang/IllegalStateException;")
+      (move-result-pseudo-object v3)
+      (invoke-direct (v3 v2) "Ljava/lang/IllegalStateException;.<init>:(Ljava/lang/String;)V")
+      (throw v3)
+    )
+  )");
+  cc.create();
+  ClassCreator sub_cc{DexType::make_type("LSubCalls;")};
+  sub_cc.set_super(DexType::make_type("LCalls;"));
+  sub_cc.create();
+
+  auto visit_all = [&](const InsertOnlyConcurrentSet<DexMethod*>& exact) {
+    std::vector<DexMethod*> visited;
+    auto skips = never_inline_analysis::for_each_exact_call_site(
+        caller, caller->get_code()->cfg(), exact,
+        [&](cfg::Block*, IRInstruction*, DexMethod* m) {
+          visited.push_back(m);
+        });
+    return std::make_pair(visited, skips);
+  };
+
+  // The message call is the first non-constructor invoke before the throw, so
+  // it only builds the exception. A call naming `callee` through a subclass is
+  // a call of `callee`.
+  auto [visited, skips] = visit_all({});
+  EXPECT_EQ(visited, (std::vector<DexMethod*>{callee, callee}));
+  EXPECT_EQ(skips.throw_adjacent, 2);
+  EXPECT_EQ(skips.unresolved + skips.external_or_no_code, 1);
+  EXPECT_EQ(skips.ambiguous_virtual, 1);
+
+  InsertOnlyConcurrentSet<DexMethod*> exact;
+  exact.insert(virt);
+  auto [visited_exact, skips_exact] = visit_all(exact);
+  EXPECT_EQ(visited_exact, (std::vector<DexMethod*>{callee, callee, virt}));
+  EXPECT_EQ(skips_exact.ambiguous_virtual, 0);
+  (void)message;
+}
+
+TEST_F(NeverInlineEligibilityTest, ShapeTakesNoThreshold) {
+  using never_inline_analysis::Shape;
+  auto* throws = make_method("(I)V", R"((
+      (load-param v0)
+      (new-instance "Ljava/lang/Exception;")
+      (move-result-pseudo-object v1)
+      (throw v1)
+    ))");
+  EXPECT_EQ(never_inline_analysis::never_inline_shape(throws),
+            Shape::kAlwaysThrows);
+  auto* forwarder = make_method("(I)I", "((load-param v0) (return v0))");
+  EXPECT_EQ(never_inline_analysis::never_inline_shape(forwarder),
+            Shape::kSimple);
+  auto* ordinary = make_method("(I)I", R"((
+      (load-param v0)
+      (const v1 1)
+      (add-int v0 v0 v1)
+      (add-int v0 v0 v1)
+      (return v0)
+    ))");
+  EXPECT_EQ(never_inline_analysis::never_inline_shape(ordinary),
+            Shape::kEligible);
+}
+
+TEST_F(NeverInlineEligibilityTest, CallerInlineBudget) {
+  using never_inline_analysis::CallerBudget;
+  EXPECT_EQ(never_inline_analysis::caller_inline_budget(10, 4, 10, 4),
+            CallerBudget::kWithin);
+  EXPECT_EQ(never_inline_analysis::caller_inline_budget(11, 40, 10, 4),
+            CallerBudget::kTooManyInstructions);
+  EXPECT_EQ(never_inline_analysis::caller_inline_budget(10, 5, 10, 4),
+            CallerBudget::kTooManyRegisters);
+}
+
+TEST_F(NeverInlineEligibilityTest, ExactVirtualsAreThoseNothingOverrides) {
+  auto make_virtual = [](const std::string& cls) {
+    auto* m = DexMethod::make_method(cls + ".run:()V")
+                  ->make_concrete(ACC_PUBLIC,
+                                  assembler::ircode_from_string(
+                                      "((load-param-object v0) (return-void))"),
+                                  /* is_virtual */ true);
+    return m;
+  };
+  ClassCreator base_cc{DexType::make_type("LBase;")};
+  base_cc.set_super(type::java_lang_Object());
+  auto* base_run = make_virtual("LBase;");
+  base_cc.add_method(base_run);
+  auto* base = base_cc.create();
+  ClassCreator leaf_cc{DexType::make_type("LLeaf;")};
+  leaf_cc.set_super(DexType::make_type("LBase;"));
+  auto* leaf_run = make_virtual("LLeaf;");
+  leaf_cc.add_method(leaf_run);
+  auto* leaf = leaf_cc.create();
+
+  // `Leaf.run` overrides `Base.run` but has no overrider itself, so a call of
+  // it is exact; a call of `Base.run` may reach `Leaf.run`.
+  std::vector<DexClass*> scope{base, leaf};
+  auto graph = method_override_graph::build_graph(scope);
+  auto exact = never_inline_analysis::exact_virtuals(*graph, scope);
+  EXPECT_EQ(exact.count(leaf_run), 1);
+  EXPECT_EQ(exact.count(base_run), 0);
+}
+
+TEST_F(NeverInlineEligibilityTest, ThrowConstructingInvokes) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (invoke-static () "LCalls;.before:()V")
+      (invoke-static () "LCalls;.message:()Ljava/lang/String;")
+      (move-result-object v0)
+      (new-instance "Ljava/lang/IllegalStateException;")
+      (move-result-pseudo-object v1)
+      (invoke-direct (v1 v0) "Ljava/lang/IllegalStateException;.<init>:(Ljava/lang/String;)V")
+      (throw v1)
+    )
+  )");
+  code->build_cfg();
+  auto* block = code->cfg().entry_block();
+  auto invokes = never_inline_analysis::throw_constructing_invokes(block);
+  std::vector<std::string> names;
+  for (auto& mie : InstructionIterable(block)) {
+    if (invokes.count(mie.insn) != 0u) {
+      names.push_back(mie.insn->get_method()->get_name()->str_copy());
+    }
+  }
+  // Up to and including the first invoke that is not a constructor call.
+  EXPECT_EQ(names, (std::vector<std::string>{"message", "<init>"}));
 }

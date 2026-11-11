@@ -9,17 +9,33 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <vector>
 
+#include "ConcurrentContainers.h"
+#include "DeterministicContainers.h"
+
+class DexClass;
 class DexMethod;
 class IRCode;
 class IRInstruction;
 
-// The shape-only part of "is this method a sensible `@NeverInline` target":
-// the checks that depend on the method's own body and not on any caller
-// context. An existing `@NeverInline` annotation, and hot/cold call-site
-// classification, remain each caller's own concern. Shared so that a pass
-// deciding to annotate a method and a pass deciding to clone one for
-// annotation cannot drift apart on what is eligible.
+namespace cfg {
+class Block;
+class ControlFlowGraph;
+} // namespace cfg
+
+namespace method_override_graph {
+class Graph;
+} // namespace method_override_graph
+
+// Shared analysis for passes that reason about what ART inlines: the
+// shape-only part of "is this method a sensible `@NeverInline` target" (the
+// checks that depend on the method's own body and not on any caller context),
+// and the walk over the call sites whose callee is known exactly. An existing
+// `@NeverInline` annotation, and hot/cold call-site classification, remain
+// each caller's own concern. Shared so that passes deciding to annotate,
+// clone or split a method cannot drift apart on what is eligible.
 namespace never_inline_analysis {
 
 // True for a single-block method whose body is a trivial forwarder: nothing
@@ -46,6 +62,16 @@ enum class Ineligibility {
   kTooSmall, // Estimated instruction count under the configured floor.
   kSimple, // A trivial forwarder per `is_simple`.
 };
+
+enum class Shape {
+  kEligible,
+  kAlwaysThrows, // No return block: every path through the method throws.
+  kSimple, // A trivial forwarder per `is_simple`.
+};
+
+// The checks of `never_inline_eligibility` that take no threshold. `method`'s
+// code must already have its CFG built.
+Shape never_inline_shape(DexMethod* method);
 
 // `ArtProfileWriterPass`'s defaults for the bounds below, which its doc
 // strings explain.
@@ -80,5 +106,73 @@ Ineligibility never_inline_eligibility(DexMethod* method,
 Ineligibility never_inline_eligibility(IRCode& code,
                                        uint32_t max_callee_code_units,
                                        size_t min_callee_instructions);
+
+// ART inlines into a caller only within these budgets. The instruction budget
+// shadows ART's 1024-HIR caller budget, with a margin, but in a different
+// unit: HIR instructions are not IR opcodes (measured 1.83-1.99 HIR per
+// distinct dex pc, up to 3.60 on tiny methods), so it can land on either side
+// of 1024 HIR depending on the method. The register budget shadows ART's
+// 32-slot inlining environment budget, with no margin.
+inline constexpr size_t kDefaultMaxCallerInstructions = 1100;
+inline constexpr size_t kDefaultMaxCallerRegisters = 32;
+
+enum class CallerBudget {
+  kWithin,
+  kTooManyInstructions, // More IR instructions (`IRCode::count_opcodes`).
+  kTooManyRegisters,
+};
+
+// Whether a caller with `instructions` IR instructions and `registers`
+// registers is within the budgets ART inlines into.
+CallerBudget caller_inline_budget(size_t instructions,
+                                  size_t registers,
+                                  size_t max_instructions,
+                                  size_t max_registers);
+
+// The virtual methods of `scope` that an invoke-virtual reaches exactly: those
+// no method overrides. CallsiteNeverInlineCloningPass keeps the narrower set
+// of non-true virtuals (methods that neither override nor are overridden):
+// widening it would change which call sites it clones. ArtProfileWriterPass
+// resolves invoke-virtuals through receiver types instead.
+InsertOnlyConcurrentSet<DexMethod*> exact_virtuals(
+    const method_override_graph::Graph& graph,
+    const std::vector<DexClass*>& scope);
+
+// The invokes that construct the exception `block` throws: an invoke
+// immediately preceding an explicit `throw` at the end of the block, up to and
+// including the first one that is not an `<init>` call, is typically just
+// constructing the thrown exception rather than a normal call site.
+UnorderedSet<IRInstruction*> throw_constructing_invokes(cfg::Block* block);
+
+// Why `for_each_exact_call_site` passed over an invoke.
+struct ExactCallSiteSkips {
+  // Constructs the exception a block throws; see `throw_constructing_invokes`.
+  size_t throw_adjacent{0};
+  size_t super_invoke{0};
+  size_t interface_invoke{0};
+  // Does not resolve to a method.
+  size_t unresolved{0};
+  // The callee has no code or is in an external class.
+  size_t external_or_no_code{0};
+  // An invoke-virtual whose callee may be overridden.
+  size_t ambiguous_virtual{0};
+};
+
+// Calls `visit(block, invoke, callee)` for every call site in `caller`'s CFG
+// whose callee is known exactly: an invoke-static, an invoke-direct, or an
+// invoke-virtual of a method in `exact_virtuals`, that resolves to a
+// method with code in an internal class. The invoke may name the method
+// through a subclass, e.g. `MyFragment.requireContext()` for
+// `Fragment.requireContext()`. `exact_virtuals` holds the virtual methods the
+// caller treats as reached exactly by an invoke-virtual, e.g. those no other
+// method overrides.
+//
+// Skips the invokes that construct the exception a block throws; see
+// `throw_constructing_invokes`.
+ExactCallSiteSkips for_each_exact_call_site(
+    DexMethod* caller,
+    cfg::ControlFlowGraph& cfg,
+    const InsertOnlyConcurrentSet<DexMethod*>& exact_virtuals,
+    const std::function<void(cfg::Block*, IRInstruction*, DexMethod*)>& visit);
 
 } // namespace never_inline_analysis

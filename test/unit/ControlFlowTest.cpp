@@ -3268,6 +3268,43 @@ std::unique_ptr<IRCode> code_with_every_edge_type() {
 
 } // namespace
 
+TEST_F(ControlFlowTest, blocksReachingReturn) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param v0)
+      (if-eqz v0 :throw)
+      (const v1 1)
+      (return v1)
+      (:throw)
+      (new-instance "Ljava/lang/RuntimeException;")
+      (move-result-pseudo-object v2)
+      (invoke-direct (v2) "Ljava/lang/RuntimeException;.<init>:()V")
+      (throw v2)
+    )
+  )");
+  code->build_cfg();
+  auto& cfg = code->cfg();
+  auto reaching = cfg.blocks_reaching_return();
+  for (auto* block : cfg.blocks()) {
+    bool throws = block->branchingness() == opcode::BRANCH_THROW;
+    EXPECT_EQ(reaching.count(block), throws ? 0u : 1u) << show(block);
+  }
+  EXPECT_EQ(reaching.count(cfg.entry_block()), 1u);
+}
+
+TEST_F(ControlFlowTest, blocksReachingReturnOfAMethodThatAlwaysThrows) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (new-instance "Ljava/lang/RuntimeException;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "Ljava/lang/RuntimeException;.<init>:()V")
+      (throw v0)
+    )
+  )");
+  code->build_cfg();
+  EXPECT_TRUE(code->cfg().blocks_reaching_return().empty());
+}
+
 TEST_F(ControlFlowTest, write_mermaid_format) {
   auto code = code_with_every_edge_type();
   std::ostringstream out;

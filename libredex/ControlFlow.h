@@ -570,6 +570,10 @@ class ControlFlowGraph {
 
   std::vector<Block*> return_blocks() const;
 
+  // The blocks from which a return block is reachable, return blocks included.
+  // Every other block ends in a throw or loops forever.
+  UnorderedSet<Block*> blocks_reaching_return() const;
+
   /*
    * Determine where the exit block is. If there is more than one, create a
    * "ghost" block that is the successor to all of them.

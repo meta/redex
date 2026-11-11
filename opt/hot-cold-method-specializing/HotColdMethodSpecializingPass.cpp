@@ -126,9 +126,7 @@ bool is_pure(cfg::Block* block) {
 // Find cold blocks that are reachable from a pure hot prefix.
 UnorderedSet<cfg::Block*> propose_cold_frontier(
     const cfg::ControlFlowGraph& cfg) {
-  auto return_blocks = cfg.return_blocks();
-  auto normal_blocks = get_backwards_reachable_blocks_from(cfg, return_blocks);
-  insert_unordered_iterable(normal_blocks, return_blocks);
+  auto normal_blocks = cfg.blocks_reaching_return();
   if (normal_blocks.count(cfg.entry_block()) == 0u) {
     // We are not interested in methods that always throw. Those certainly
     // exist.

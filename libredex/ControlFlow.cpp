@@ -2289,6 +2289,27 @@ std::vector<Block*> ControlFlowGraph::real_exit_blocks(
   return result;
 }
 
+UnorderedSet<Block*> ControlFlowGraph::blocks_reaching_return() const {
+  UnorderedSet<Block*> result;
+  std::queue<Block*> work_queue;
+  for (auto* block : return_blocks()) {
+    // `return_blocks()` is exactly the blocks whose branchingness is a return.
+    always_assert(block->branchingness() == opcode::BRANCH_RETURN);
+    work_queue.push(block);
+  }
+  while (!work_queue.empty()) {
+    auto* block = work_queue.front();
+    work_queue.pop();
+    if (!result.insert(block).second) {
+      continue;
+    }
+    for (auto* edge : block->preds()) {
+      work_queue.push(edge->src());
+    }
+  }
+  return result;
+}
+
 std::vector<Block*> ControlFlowGraph::return_blocks() const {
   std::vector<Block*> result;
   for (const auto& entry : m_blocks) {

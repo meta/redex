@@ -14,32 +14,6 @@
 #include "SourceBlocks.h"
 #include "Trace.h"
 
-namespace {
-// Computes all blocks backwards-reachable from return instructions. (All other
-// blocks must eventually throw.)
-UnorderedSet<cfg::Block*> get_normal_blocks(const cfg::ControlFlowGraph& cfg) {
-  UnorderedSet<cfg::Block*> res;
-  std::queue<cfg::Block*> work_queue;
-  for (auto* block : cfg.blocks()) {
-    if (block->branchingness() == opcode::BRANCH_RETURN) {
-      work_queue.push(block);
-    }
-  }
-  while (!work_queue.empty()) {
-    auto* block = work_queue.front();
-    work_queue.pop();
-    if (!res.insert(block).second) {
-      continue;
-    }
-    for (auto* edge : block->preds()) {
-      work_queue.push(edge->src());
-    }
-  }
-  return res;
-}
-
-} // namespace
-
 namespace inliner {
 
 IROpcode get_fallback_invoke_opcode(const DexMethod* method) {
@@ -74,7 +48,7 @@ PartialCode get_partially_inlined_code(const DexMethod* method,
     return PartialCode();
   }
 
-  auto normal_blocks = get_normal_blocks(cfg);
+  auto normal_blocks = cfg.blocks_reaching_return();
   if (normal_blocks.count(cfg.entry_block()) == 0u) {
     // We are not interested in methods that always throw. Those certainly
     // exist.

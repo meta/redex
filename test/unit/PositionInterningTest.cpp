@@ -239,4 +239,102 @@ TEST_F(PositionInterningTest, interning_counters_report_the_saving) {
   EXPECT_EQ(manager()->get_num_interned_positions(), 2u);
 }
 
+TEST_F(PositionInterningTest,
+       pattern_slots_snapshot_parent_provenance_and_keep_line_zero) {
+  auto unreliable_parent = pos("Caller.java", 1);
+  unreliable_parent->mark_unreliable();
+  auto child = pos("Foo.java", 12);
+  child->parent = unreliable_parent.get();
+  auto synthetic = pos("UnknownSource", 0);
+
+  std::vector<DexPosition*> slot_provenance;
+  auto pattern_id =
+      manager()->make_pattern({child.get(), synthetic.get()}, &slot_provenance);
+  ASSERT_EQ(slot_provenance.size(), 2u);
+  // The snapshot keeps the caller's mark on the caller's level.
+  ASSERT_NE(slot_provenance[0], nullptr);
+  EXPECT_FALSE(slot_provenance[0]->is_unreliable());
+  ASSERT_NE(slot_provenance[0]->parent, nullptr);
+  EXPECT_TRUE(slot_provenance[0]->parent->is_unreliable());
+  // Synthetic names no source line, but does not stand for several, so the
+  // slot is not reported as merged.
+  EXPECT_EQ(slot_provenance[1], nullptr);
+
+  const auto& pattern = manager()->get_patterns().at(pattern_id);
+  EXPECT_FALSE(pattern.at(0)->is_unreliable());
+  ASSERT_NE(pattern.at(0)->parent, nullptr);
+  EXPECT_FALSE(pattern.at(0)->parent->is_unreliable());
+  // Interning keeps the line, so the copy is still synthetic.
+  EXPECT_TRUE(pattern.at(1)->is_synthetic());
+}
+
+TEST_F(PositionInterningTest, outliner_slot_provenance_is_precise) {
+  auto first_slot = pos("Foo.java", 12);
+  first_slot->mark_unreliable();
+  auto second_slot = pos("Foo.java", 13);
+  std::vector<DexPosition*> slot_provenance;
+  auto pattern_id = manager()->make_pattern(
+      {first_slot.get(), second_slot.get()}, &slot_provenance);
+  ASSERT_EQ(slot_provenance.size(), 2u);
+  ASSERT_NE(slot_provenance[0], nullptr);
+  EXPECT_TRUE(slot_provenance[0]->is_unreliable());
+  EXPECT_EQ(slot_provenance[1], nullptr);
+
+  auto other_first = pos("Other.java", 22);
+  auto other_second = pos("Other.java", 23);
+  auto other_pattern_id =
+      manager()->make_pattern({other_first.get(), other_second.get()});
+  auto switch_id = manager()->make_switch({
+      {pattern_id, first_slot.get(), slot_provenance[0]},
+      {other_pattern_id, other_first.get(), nullptr},
+  });
+
+  const auto& entries = manager()->get_alternatives().at(switch_id).entries;
+  ASSERT_EQ(entries.size(), 2u);
+  EXPECT_EQ(entries[0].provenance, slot_provenance[0]);
+  EXPECT_EQ(entries[1].provenance, nullptr);
+}
+
+// Pattern ids are content-interned, so every outlined method whose slots hold
+// the same source positions shares one id. What one registration observed about
+// its own occurrences must therefore not be reported back to another.
+TEST_F(PositionInterningTest,
+       marking_one_registration_does_not_rewrite_another) {
+  auto first_slot = pos("Foo.java", 12);
+  auto second_slot = pos("Foo.java", 13);
+  std::vector<DexPosition*> first_registration;
+  auto pattern_id = manager()->make_pattern(
+      {first_slot.get(), second_slot.get()}, &first_registration);
+  ASSERT_EQ(first_registration.at(1), nullptr);
+
+  second_slot->mark_unreliable();
+  std::vector<DexPosition*> second_registration;
+  EXPECT_EQ(manager()->make_pattern({first_slot.get(), second_slot.get()},
+                                    &second_registration),
+            pattern_id);
+  EXPECT_NE(second_registration.at(1), nullptr);
+
+  EXPECT_EQ(first_registration.at(1), nullptr);
+}
+
+// Two switches selecting the same positions but disagreeing about which of them
+// still names one source site are different switches.
+TEST_F(PositionInterningTest,
+       switch_entries_that_disagree_do_not_share_a_group) {
+  auto first_target = pos("Target.java", 30);
+  auto second_target = pos("Target.java", 40);
+  auto marked_first_target = pos("Target.java", 30);
+  marked_first_target->mark_unreliable();
+  auto reliable = manager()->make_switch({
+      {0, first_target.get(), nullptr},
+      {1, second_target.get(), nullptr},
+  });
+  auto unreliable = manager()->make_switch({
+      {0, first_target.get(), marked_first_target.get()},
+      {1, second_target.get(), nullptr},
+  });
+
+  EXPECT_NE(reliable, unreliable);
+}
+
 } // namespace

@@ -755,6 +755,116 @@ TEST_F(PositionMapTrailerTest,
             PositionAlternativesSelection::ByPattern);
 }
 
+TEST_F(PositionMapTrailerTest,
+       outliner_provenance_marks_only_the_matching_target_record) {
+  auto path = map_path("outliner-provenance");
+  auto first_slot = pos(100);
+  auto second_slot = pos(101);
+  second_slot->mark_unreliable();
+  auto other_first_slot = pos(200);
+  auto other_second_slot = pos(201);
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  std::vector<DexPosition*> first_slots;
+  auto first_pattern_id = manager->make_pattern(
+      {first_slot.get(), second_slot.get()}, &first_slots);
+  std::vector<DexPosition*> second_slots;
+  auto second_pattern_id = manager->make_pattern(
+      {other_first_slot.get(), other_second_slot.get()}, &second_slots);
+  // The switch for the second instruction selects each pattern's second slot.
+  auto switch_id = manager->make_switch({
+      {first_pattern_id, second_slot.get(), first_slots.at(1)},
+      {second_pattern_id, other_second_slot.get(), second_slots.at(1)},
+  });
+
+  auto first_pattern_position =
+      manager->make_pattern_position(first_pattern_id);
+  auto second_pattern_position =
+      manager->make_pattern_position(second_pattern_id);
+  auto switch_position = manager->make_switch_position(switch_id);
+  RealPositionMapper mapper(path);
+  mapper.position_to_line(first_pattern_position.get());
+  mapper.position_to_line(second_pattern_position.get());
+  mapper.position_to_line(switch_position.get());
+  mapper.write_map();
+
+  auto bytes = read_file(path);
+  auto read = read_provenance(bytes);
+  ASSERT_EQ(read.trailer.magic, position_map::kTrailerMagic);
+  ASSERT_EQ(read.section.length, sizeof(position_map::ProvenanceEntry));
+  const auto& provenance = read.entries.at(0);
+
+  auto parsed = parse(bytes);
+  ASSERT_LT(provenance.record_index, parsed.positions.size());
+  EXPECT_EQ(parsed.positions[provenance.record_index][3], 101u);
+  std::remove(path.c_str());
+}
+
+// Two patterns of one outlined method select the same interned target, and
+// only one of them disagreed about that slot. The target's record is shared by
+// both cases -- and by any other switch selecting it -- so the disagreement
+// has to land on a record of its own, not on the shared one.
+TEST_F(PositionMapTrailerTest,
+       an_unreliable_slot_does_not_mark_a_shared_target_record) {
+  auto path = map_path("outliner-shared-target");
+  auto marked_target = pos(30);
+  marked_target->mark_unreliable();
+  auto first_rest = pos(100);
+  auto target = pos(30);
+  auto other_rest = pos(200);
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  std::vector<DexPosition*> unreliable_slots;
+  auto unreliable_pattern_id = manager->make_pattern(
+      {marked_target.get(), first_rest.get()}, &unreliable_slots);
+  ASSERT_NE(unreliable_slots.at(0), nullptr);
+  std::vector<DexPosition*> reliable_slots;
+  auto reliable_pattern_id =
+      manager->make_pattern({target.get(), other_rest.get()}, &reliable_slots);
+  ASSERT_EQ(reliable_slots.at(0), nullptr);
+  auto switch_id = manager->make_switch({
+      {unreliable_pattern_id, marked_target.get(), unreliable_slots.at(0)},
+      {reliable_pattern_id, target.get(), reliable_slots.at(0)},
+  });
+
+  auto unreliable_pattern_position =
+      manager->make_pattern_position(unreliable_pattern_id);
+  auto reliable_pattern_position =
+      manager->make_pattern_position(reliable_pattern_id);
+  auto switch_position = manager->make_switch_position(switch_id);
+  RealPositionMapper mapper(path);
+  mapper.position_to_line(unreliable_pattern_position.get());
+  mapper.position_to_line(reliable_pattern_position.get());
+  mapper.position_to_line(switch_position.get());
+  mapper.write_map();
+
+  auto bytes = read_file(path);
+  auto read = read_provenance(bytes);
+  ASSERT_EQ(read.trailer.magic, position_map::kTrailerMagic);
+  ASSERT_EQ(read.section.length, sizeof(position_map::ProvenanceEntry));
+  const auto& provenance = read.entries.at(0);
+
+  auto parsed = parse(bytes);
+  ASSERT_LT(provenance.record_index, parsed.positions.size());
+  EXPECT_EQ(parsed.positions[provenance.record_index][3], 30u);
+
+  size_t cases = 0;
+  for (const auto& record : parsed.positions) {
+    if (parsed.string_pool.at(record[1]) != "case") {
+      continue;
+    }
+    ++cases;
+    ASSERT_NE(record[4], 0u);
+    const auto target_index = record[4] - 1;
+    EXPECT_EQ(parsed.positions.at(target_index)[3], 30u);
+    if (record[3] == unreliable_pattern_id) {
+      EXPECT_EQ(target_index, provenance.record_index);
+    } else {
+      EXPECT_EQ(record[3], reliable_pattern_id);
+      EXPECT_NE(target_index, provenance.record_index);
+    }
+  }
+  EXPECT_EQ(cases, 2u);
+}
+
 // A duplicate folded into an equal survivor contributes no new line of its own,
 // but the survivor inherits every site the duplicate already stood for.
 TEST_F(PositionMapTrailerTest,
@@ -874,6 +984,266 @@ TEST_F(PositionMapTrailerTest,
 
   EXPECT_TRUE(survivor->is_unreliable());
   EXPECT_EQ(survivor->alt_id(), 0u);
+}
+
+// The record a switch case points at, for the case selecting `pattern_id` in
+// the cases following the count record at `count_index`.
+size_t case_target(const std::vector<std::array<uint32_t, 5>>& positions,
+                   const std::vector<std::string>& string_pool,
+                   size_t count_index,
+                   uint32_t pattern_id) {
+  EXPECT_EQ(string_pool.at(positions.at(count_index)[1]), "count");
+  for (size_t i = 1; i <= positions.at(count_index)[3]; ++i) {
+    const auto& record = positions.at(count_index + i);
+    EXPECT_EQ(string_pool.at(record[1]), "case");
+    if (record[3] == pattern_id) {
+      EXPECT_NE(record[4], 0u);
+      return record[4] - 1;
+    }
+  }
+  ADD_FAILURE() << "no case for pattern " << pattern_id;
+  return 0;
+}
+
+const position_map::ProvenanceEntry* provenance_of(
+    const std::vector<position_map::ProvenanceEntry>& entries,
+    size_t record_index) {
+  for (const auto& entry : entries) {
+    if (entry.record_index == record_index) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
+// The lines of the candidate records an entry's alternate points at.
+std::vector<uint32_t> candidate_lines(
+    const std::vector<std::array<uint32_t, 5>>& positions,
+    const position_map::ProvenanceEntry& entry) {
+  std::vector<uint32_t> lines;
+  const auto& count = positions.at(entry.alt_record_index);
+  for (size_t i = 1; i <= count[3]; ++i) {
+    const auto& record = positions.at(entry.alt_record_index + i);
+    lines.push_back(positions.at(record[4] - 1)[3]);
+  }
+  return lines;
+}
+
+// The line map entry of a switch (a `Lredex/$Position;.switch` record), whose
+// line the writer rewrote into the index of its count record.
+size_t switch_count_index(const std::vector<std::array<uint32_t, 5>>& positions,
+                          const std::vector<std::string>& string_pool) {
+  for (const auto& record : positions) {
+    if (string_pool.at(record[1]) == "switch") {
+      return record[3];
+    }
+  }
+  ADD_FAILURE() << "no switch record";
+  return 0;
+}
+
+// An outlined call site whose line had a candidate set keeps that set: the
+// switch case points at a record whose provenance entry names the candidates,
+// not at a fresh copy merged with nothing captured.
+TEST_F(PositionMapTrailerTest, an_outlined_slot_keeps_its_candidate_set) {
+  auto path = map_path("outlined-leaf-set");
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  auto slot = pos(20);
+  auto first = pos(21);
+  auto second = pos(22);
+  manager->record_candidates(slot.get(), {first.get(), second.get()});
+  ASSERT_NE(slot->alt_id(), 0u);
+  std::vector<DexPosition*> provenance;
+  auto pattern_id = manager->make_pattern({slot.get()}, &provenance);
+  auto other_slot = pos(30);
+  auto other_pattern_id = manager->make_pattern({other_slot.get()});
+  auto switch_id = manager->make_switch({
+      {pattern_id, slot.get(), provenance.at(0)},
+      {other_pattern_id, other_slot.get(), nullptr},
+  });
+
+  auto pattern_position = manager->make_pattern_position(pattern_id);
+  auto other_pattern_position =
+      manager->make_pattern_position(other_pattern_id);
+  auto switch_position = manager->make_switch_position(switch_id);
+  RealPositionMapper mapper(path);
+  mapper.position_to_line(pattern_position.get());
+  mapper.position_to_line(other_pattern_position.get());
+  mapper.position_to_line(switch_position.get());
+  mapper.write_map();
+
+  auto bytes = read_file(path);
+  auto parsed = parse(bytes);
+  auto read = read_provenance(bytes);
+  ASSERT_EQ(read.trailer.magic, position_map::kTrailerMagic);
+  auto count_index = switch_count_index(parsed.positions, parsed.string_pool);
+  auto target = case_target(parsed.positions, parsed.string_pool, count_index,
+                            pattern_id);
+  EXPECT_EQ(parsed.positions.at(target)[3], 20u);
+  const auto* entry = provenance_of(read.entries, target);
+  ASSERT_NE(entry, nullptr);
+  ASSERT_NE(entry->alt_record_index, 0u);
+  EXPECT_EQ(candidate_lines(parsed.positions, *entry),
+            (std::vector<uint32_t>{21, 22}));
+
+  auto other_target = case_target(parsed.positions, parsed.string_pool,
+                                  count_index, other_pattern_id);
+  EXPECT_EQ(provenance_of(read.entries, other_target), nullptr);
+}
+
+// Only the inlined caller frame of an outlined call site was ambiguous. The
+// leaf still names one line, and the caller's set stays on the caller's record.
+TEST_F(PositionMapTrailerTest,
+       an_ambiguous_caller_of_an_outlined_slot_keeps_its_set_there) {
+  auto path = map_path("outlined-caller-set");
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  auto caller = pos(100);
+  auto other_caller = pos(110);
+  manager->record_candidates(caller.get(), {other_caller.get()});
+  ASSERT_NE(caller->alt_id(), 0u);
+  auto slot = pos(20);
+  slot->parent = caller.get();
+  std::vector<DexPosition*> provenance;
+  auto pattern_id = manager->make_pattern({slot.get()}, &provenance);
+  ASSERT_NE(provenance.at(0), nullptr);
+  auto other_slot = pos(30);
+  auto other_pattern_id = manager->make_pattern({other_slot.get()});
+  auto switch_id = manager->make_switch({
+      {pattern_id, slot.get(), provenance.at(0)},
+      {other_pattern_id, other_slot.get(), nullptr},
+  });
+
+  auto pattern_position = manager->make_pattern_position(pattern_id);
+  auto other_pattern_position =
+      manager->make_pattern_position(other_pattern_id);
+  auto switch_position = manager->make_switch_position(switch_id);
+  RealPositionMapper mapper(path);
+  mapper.position_to_line(pattern_position.get());
+  mapper.position_to_line(other_pattern_position.get());
+  mapper.position_to_line(switch_position.get());
+  mapper.write_map();
+
+  auto bytes = read_file(path);
+  auto parsed = parse(bytes);
+  auto read = read_provenance(bytes);
+  ASSERT_EQ(read.trailer.magic, position_map::kTrailerMagic);
+  auto count_index = switch_count_index(parsed.positions, parsed.string_pool);
+  auto leaf = case_target(parsed.positions, parsed.string_pool, count_index,
+                          pattern_id);
+  EXPECT_EQ(parsed.positions.at(leaf)[3], 20u);
+  EXPECT_EQ(provenance_of(read.entries, leaf), nullptr);
+  ASSERT_NE(parsed.positions.at(leaf)[4], 0u);
+  auto caller_record = parsed.positions.at(leaf)[4] - 1;
+  EXPECT_EQ(parsed.positions.at(caller_record)[3], 100u);
+  const auto* entry = provenance_of(read.entries, caller_record);
+  ASSERT_NE(entry, nullptr);
+  ASSERT_NE(entry->alt_record_index, 0u);
+  EXPECT_EQ(candidate_lines(parsed.positions, *entry),
+            (std::vector<uint32_t>{110}));
+}
+
+// Two outlined methods share one pattern id because their call sites hold the
+// same lines, but only one call site's line had a candidate set. Each switch
+// keeps what its own call site knew.
+TEST_F(PositionMapTrailerTest,
+       call_sites_sharing_a_pattern_keep_their_own_provenance) {
+  auto path = map_path("outlined-shared-pattern");
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  auto ambiguous_slot = pos(20);
+  auto candidate = pos(21);
+  manager->record_candidates(ambiguous_slot.get(), {candidate.get()});
+  auto clean_slot = pos(20);
+  std::vector<DexPosition*> ambiguous_provenance;
+  auto pattern_id =
+      manager->make_pattern({ambiguous_slot.get()}, &ambiguous_provenance);
+  std::vector<DexPosition*> clean_provenance;
+  ASSERT_EQ(manager->make_pattern({clean_slot.get()}, &clean_provenance),
+            pattern_id);
+  ASSERT_NE(ambiguous_provenance.at(0), nullptr);
+  ASSERT_EQ(clean_provenance.at(0), nullptr);
+  auto first_other = pos(30);
+  auto first_other_id = manager->make_pattern({first_other.get()});
+  auto second_other = pos(31);
+  auto second_other_id = manager->make_pattern({second_other.get()});
+  auto ambiguous_switch = manager->make_switch({
+      {pattern_id, ambiguous_slot.get(), ambiguous_provenance.at(0)},
+      {first_other_id, first_other.get(), nullptr},
+  });
+  auto clean_switch = manager->make_switch({
+      {pattern_id, clean_slot.get(), clean_provenance.at(0)},
+      {second_other_id, second_other.get(), nullptr},
+  });
+
+  std::vector<std::unique_ptr<DexPosition>> code_positions;
+  for (auto id : {pattern_id, first_other_id, second_other_id}) {
+    code_positions.push_back(manager->make_pattern_position(id));
+  }
+  auto ambiguous_switch_position =
+      manager->make_switch_position(ambiguous_switch);
+  auto clean_switch_position = manager->make_switch_position(clean_switch);
+  RealPositionMapper mapper(path);
+  for (auto& position : code_positions) {
+    mapper.position_to_line(position.get());
+  }
+  auto ambiguous_index =
+      mapper.position_to_line(ambiguous_switch_position.get()) - 1;
+  auto clean_index = mapper.position_to_line(clean_switch_position.get()) - 1;
+  mapper.write_map();
+
+  auto bytes = read_file(path);
+  auto parsed = parse(bytes);
+  auto read = read_provenance(bytes);
+  ASSERT_EQ(read.trailer.magic, position_map::kTrailerMagic);
+  auto ambiguous_target =
+      case_target(parsed.positions, parsed.string_pool,
+                  parsed.positions.at(ambiguous_index)[3], pattern_id);
+  auto clean_target =
+      case_target(parsed.positions, parsed.string_pool,
+                  parsed.positions.at(clean_index)[3], pattern_id);
+  EXPECT_NE(ambiguous_target, clean_target);
+  EXPECT_EQ(parsed.positions.at(ambiguous_target)[3], 20u);
+  EXPECT_EQ(parsed.positions.at(clean_target)[3], 20u);
+  const auto* entry = provenance_of(read.entries, ambiguous_target);
+  ASSERT_NE(entry, nullptr);
+  EXPECT_EQ(candidate_lines(parsed.positions, *entry),
+            (std::vector<uint32_t>{21}));
+  EXPECT_EQ(provenance_of(read.entries, clean_target), nullptr);
+}
+
+// Two occurrences of one outlined method share a slot. What the method knows
+// about it is everything either occurrence knew, level by level.
+TEST_F(PositionMapTrailerTest, joining_slot_provenance_unions_each_level) {
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  auto first = pos(20);
+  auto first_candidate = pos(21);
+  manager->record_candidates(first.get(), {first_candidate.get()});
+  auto second = pos(20);
+  auto second_candidate = pos(22);
+  manager->record_candidates(second.get(), {second_candidate.get()});
+  auto clean = pos(20);
+  auto uncaptured = pos(20);
+  uncaptured->mark_unreliable();
+  std::vector<DexPosition*> provenance;
+  for (auto* slot :
+       {first.get(), second.get(), clean.get(), uncaptured.get()}) {
+    std::vector<DexPosition*> slot_provenance;
+    manager->make_pattern({slot}, &slot_provenance);
+    provenance.push_back(slot_provenance.at(0));
+  }
+
+  auto* joined = manager->join_slot_provenance(provenance[0], provenance[1]);
+  ASSERT_NE(joined, nullptr);
+  ASSERT_NE(joined->alt_id(), 0u);
+  EXPECT_EQ(member_lines(manager->get_alt_set(joined->alt_id())),
+            (std::vector<uint32_t>{21, 22}));
+  EXPECT_EQ(manager->join_slot_provenance(provenance[0], provenance[2]),
+            provenance[0]);
+  EXPECT_EQ(manager->join_slot_provenance(provenance[2], provenance[2]),
+            nullptr);
+  auto* absorbed = manager->join_slot_provenance(provenance[0], provenance[3]);
+  ASSERT_NE(absorbed, nullptr);
+  EXPECT_TRUE(absorbed->is_unreliable());
+  EXPECT_EQ(absorbed->alt_id(), 0u);
 }
 
 std::unique_ptr<DexPosition> caller_pos(uint32_t line) {

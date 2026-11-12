@@ -205,13 +205,15 @@ class Analyzer final : public BaseIRAnalyzer<ConstructorAnalysisEnvironment> {
       auto param_value = current_state->get_params().get(src);
       auto may_be_first_param =
           !param_value.get_constant() || *param_value.get_constant();
+      auto is_first_param = param_value.get_constant().value_or(false);
       if (!may_be_first_param) {
         continue;
       }
       if (opcode::is_an_iput(opcode) && src_idx == 1) {
         auto* field_ref = insn->get_field();
         DexField* field = resolve_field(field_ref, FieldSearch::Instance);
-        if (field != nullptr && field->get_class() == m_declaring_type) {
+        if (field != nullptr && field->get_class() == m_declaring_type &&
+            is_first_param) {
           if (!current_state->get_read_unwritten_fields().contains(field)) {
             current_state->add_written_unread_field(field);
           }

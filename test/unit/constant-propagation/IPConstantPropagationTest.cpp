@@ -8,6 +8,7 @@
 #include "IPConstantPropagation.h"
 
 #include <signal.h>
+#include <tuple>
 
 #include <boost/algorithm/string/replace.hpp>
 #include <gtest/gtest.h>
@@ -16,6 +17,7 @@
 #include "ConstantPropagationRuntimeAssert.h"
 #include "Creators.h"
 #include "DebugUtils.h"
+#include "DefinitelyAssignedIFields.h"
 #include "DexUtil.h"
 #include "IPConstantPropagationAnalysis.h"
 #include "IRAssembler.h"
@@ -65,6 +67,95 @@ static DexStoresVector make_simple_stores(const Scope& scope) {
   store.add_classes(scope);
   return DexStoresVector({store});
 }
+
+class ConstructorReceiverJoinTest
+    : public InterproceduralConstantPropagationTest,
+      public ::testing::WithParamInterface<std::tuple<bool, bool>> {};
+
+TEST_P(ConstructorReceiverJoinTest, onlyDefiniteThisStoresInitializeField) {
+  const auto [final_field, other_receiver] = GetParam();
+  ClassCreator creator(DexType::make_type("LFoo;"));
+  creator.set_super(type::java_lang_Object());
+  auto* field =
+      DexField::make_field("LFoo;.f:I")
+          ->make_concrete(final_field ? ACC_PUBLIC | ACC_FINAL : ACC_PUBLIC);
+  creator.add_field(field);
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+      (
+        (load-param-object v0)
+        (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+        (const v1 7)
+        (iput v1 v0 "LFoo;.f:I")
+        (return-void)
+      )
+    )
+  )");
+  ctor->rstate.set_root();
+  creator.add_method(ctor);
+  auto* joined_ctor = assembler::method_from_string(
+      R"((method (public constructor) "LFoo;.<init>:(LFoo;Z)V"
+        (
+          (load-param-object v0)
+          (load-param-object v1)
+          (load-param v2)
+          (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+          (if-eqz v2 :other)
+          (move-object v3 v0)
+          (goto :join)
+          (:other)
+          (move-object v3 )" +
+      std::string(other_receiver ? "v1" : "v0") + R"()
+          (:join)
+          (const v4 7)
+          (iput v4 v3 "LFoo;.f:I")
+          (return-void)
+        )
+      ))");
+  joined_ctor->rstate.set_root();
+  creator.add_method(joined_ctor);
+  const std::string reader_body = R"((
+    (load-param-object v0)
+    (iget v0 "LFoo;.f:I")
+    (move-result-pseudo v1)
+    (return v1)
+  ))";
+  auto* reader = assembler::method_from_string(
+      R"((method (public static) "LFoo;.read:(LFoo;)I" )" + reader_body + ")");
+  reader->rstate.set_root();
+  creator.add_method(reader);
+  Scope scope{creator.create()};
+  walk::code(scope, [](DexMethod*, IRCode& code) {
+    code.build_cfg();
+    code.cfg().calculate_exit_block();
+  });
+  auto assigned =
+      definitely_assigned_ifields::get_definitely_assigned_ifields(scope);
+  EXPECT_EQ(assigned.count(field) != 0u, !other_receiver);
+
+  PassImpl::Config config;
+  config.max_heap_analysis_iterations = 3;
+  config.use_multiple_callee_callgraph = true;
+  PassImpl(config).run(make_simple_stores(scope), conf);
+  auto expected =
+      assembler::ircode_from_string(other_receiver ? reader_body : R"((
+        (load-param-object v0)
+        (const v1 7)
+        (return v1)
+      ))");
+  reader->get_code()->clear_cfg();
+  EXPECT_CODE_EQ(reader->get_code(), expected.get());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ReceiverAliases,
+    ConstructorReceiverJoinTest,
+    ::testing::Combine(::testing::Bool(), ::testing::Bool()),
+    [](const auto& info) {
+      return std::string(std::get<0>(info.param) ? "generated_final_"
+                                                 : "java_nonfinal_") +
+             (std::get<1>(info.param) ? "this_or_other" : "both_this");
+    });
 
 TEST_F(InterproceduralConstantPropagationTest,
        constructorUpdatesStaticFieldInClinit) {

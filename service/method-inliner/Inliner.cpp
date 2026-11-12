@@ -1618,7 +1618,7 @@ InlinedCost MultiMethodInliner::get_inlined_cost(
       }
     }
     if (insn->has_type()) {
-      const auto* type = type::get_element_type_if_array(insn->get_type());
+      const auto* type = type::make_element_type_if_array(insn->get_type());
       auto* cls = type_class(type);
       if ((cls != nullptr) && !cls->is_external()) {
         other_refs_set.insert(type);

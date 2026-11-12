@@ -181,8 +181,8 @@ const DexType* find_common_array_type(const DexType* l, const DexType* r) {
   uint32_t r_dim = type::get_array_level(r);
 
   bool has_primitive = false;
-  auto* l_elem_type = type::get_array_element_type(l);
-  auto* r_elem_type = type::get_array_element_type(r);
+  auto* l_elem_type = type::make_array_element_type(l);
+  auto* r_elem_type = type::make_array_element_type(r);
   if (type::is_primitive(l_elem_type) || type::is_primitive(r_elem_type)) {
     has_primitive = true;
   }

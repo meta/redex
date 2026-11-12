@@ -164,7 +164,7 @@ void update_code_type_refs(
         continue;
       }
       auto* const ref_type = insn->get_type();
-      const auto* type = type::get_element_type_if_array(ref_type);
+      const auto* type = type::make_element_type_if_array(ref_type);
       if (mergeable_to_merger.count(type) == 0) {
         continue;
       }

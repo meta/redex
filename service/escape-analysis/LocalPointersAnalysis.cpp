@@ -282,7 +282,7 @@ void escape_heap_referenced_objects(const IRInstruction* insn,
     env->set_may_escape(insn->src(0), insn);
   } else if (op == OPCODE_FILLED_NEW_ARRAY &&
              !type::is_primitive(
-                 type::get_array_component_type(insn->get_type()))) {
+                 type::make_array_component_type(insn->get_type()))) {
     for (size_t i = 0; i < insn->srcs_size(); ++i) {
       env->set_may_escape(insn->src(i), insn);
     }

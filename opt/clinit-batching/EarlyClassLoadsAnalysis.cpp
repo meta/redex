@@ -249,7 +249,7 @@ void collect_loaded_classes(IRInstruction* insn,
     // FILLED_NEW_ARRAY: the array element class is loaded
     const auto* arr_type = insn->get_type();
     if (arr_type != nullptr) {
-      const auto* elem_type = type::get_element_type_if_array(arr_type);
+      const auto* elem_type = type::make_element_type_if_array(arr_type);
       if (elem_type != nullptr) {
         cls = type_class(elem_type);
       }

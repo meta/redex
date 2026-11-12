@@ -929,7 +929,7 @@ const DexType* OutlinerTypeAnalysis::get_result_type_helper(
     auto& env = m_type_environments->at(insn);
     auto dex_type = env.get_dex_type(insn->src(0));
     return (dex_type && type::is_array(*dex_type))
-               ? type::get_array_component_type(*dex_type)
+               ? type::make_array_component_type(*dex_type)
                : nullptr;
   }
   case OPCODE_INVOKE_VIRTUAL:
@@ -1125,7 +1125,7 @@ const DexType* OutlinerTypeAnalysis::get_type_demand(IRInstruction* insn,
     return type::_int();
 
   case OPCODE_FILLED_NEW_ARRAY:
-    return type::get_array_component_type(insn->get_type());
+    return type::make_array_component_type(insn->get_type());
 
   case OPCODE_CMPL_FLOAT:
   case OPCODE_CMPG_FLOAT:
@@ -1225,7 +1225,7 @@ const DexType* OutlinerTypeAnalysis::get_type_demand(IRInstruction* insn,
       auto dex_type = env.get_dex_type(insn->src(1));
       return (dex_type && type::is_array(*dex_type))
                  ? primitive_put_value_demand(
-                       type::get_array_component_type(*dex_type))
+                       type::make_array_component_type(*dex_type))
                  : nullptr;
     }
     case OPCODE_APUT_BOOLEAN:

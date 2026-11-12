@@ -295,7 +295,7 @@ FieldArrayValues RClassReader::analyze_clinit(
         auto* field_def = insn->get_field()->as_def();
         always_assert(type::is_array(field_type));
         const DexType* element_type =
-            type::get_array_component_type(field_type);
+            type::make_array_component_type(field_type);
         always_assert_log(type::is_int(element_type),
                           "R clinit array are expected to be [I. Got %s",
                           SHOW(field_type));

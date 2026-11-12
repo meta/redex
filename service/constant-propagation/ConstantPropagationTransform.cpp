@@ -1554,7 +1554,7 @@ bool Transform::has_problematic_return(cfg::ControlFlowGraph& cfg,
   // a type that's unavailable/external, or defined in a different store.
   auto declaring_class_idx = xstores->get_store_idx(declaring_type);
   auto is_problematic_return_type = [&](const DexType* t, IRInstruction* insn) {
-    t = type::get_element_type_if_array(t);
+    t = type::make_element_type_if_array(t);
     if (type_class_internal(t) == nullptr) {
       // An unavailable or external class
       TRACE(CONSTP, 2,
@@ -1617,7 +1617,7 @@ bool Transform::has_problematic_return(cfg::ControlFlowGraph& cfg,
             auto dex_type = type_environment.get_dex_type(def->src(1));
             if (dex_type && type::is_array(*dex_type) &&
                 is_problematic_return_type(
-                    type::get_array_component_type(*dex_type), def)) {
+                    type::make_array_component_type(*dex_type), def)) {
               return true;
             }
           } else {

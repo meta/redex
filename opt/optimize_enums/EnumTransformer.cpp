@@ -205,7 +205,7 @@ struct EnumUtil {
     uint32_t level = type::get_array_level(type);
     const DexType* elem_type = type;
     if (level != 0u) {
-      elem_type = type::get_array_element_type(type);
+      elem_type = type::make_array_element_type(type);
     }
     if (enum_attributes_map.count(elem_type) != 0u) {
       return level != 0u ? type::make_array_type(INTEGER_TYPE, level)
@@ -1096,7 +1096,7 @@ class CodeTransformer final {
   }
 
   bool is_a_candidate(const DexType* type) const {
-    const auto* elem_type = type::get_element_type_if_array(type);
+    const auto* elem_type = type::make_element_type_if_array(type);
     return m_enum_attributes_map.count(elem_type) != 0u;
   }
 

@@ -22,7 +22,7 @@ const DexType* check_current_instance(const ConstTypeHashSet& types,
                                       IRInstruction* insn) {
   const DexType* type = nullptr;
   if (insn->has_type()) {
-    type = type::get_element_type_if_array(insn->get_type());
+    type = type::make_element_type_if_array(insn->get_type());
   } else if (insn->has_method()) {
     type = insn->get_method()->get_class();
   } else if (insn->has_field()) {

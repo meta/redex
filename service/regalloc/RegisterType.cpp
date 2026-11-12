@@ -552,7 +552,7 @@ RegisterType src_reg_type(const IRInstruction* insn, vreg_t i) {
   case OPCODE_NEW_ARRAY:
     return RegisterType::NORMAL;
   case OPCODE_FILLED_NEW_ARRAY:
-    return type::is_primitive(type::get_array_component_type(insn->get_type()))
+    return type::is_primitive(type::make_array_component_type(insn->get_type()))
                ? RegisterType::NORMAL
                : RegisterType::OBJECT;
   case IOPCODE_LOAD_PARAM:

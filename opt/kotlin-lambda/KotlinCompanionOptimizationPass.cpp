@@ -806,7 +806,7 @@ void filter_untrackable_usages(
           if (!type::is_array(*dex_type)) {
             break;
           }
-          from = type_class(type::get_array_component_type(*dex_type));
+          from = type_class(type::make_array_component_type(*dex_type));
         } else {
           from = type_class(*dex_type);
         }

@@ -46,7 +46,7 @@ DexMethod* find_dollar_values(DexClass* cls) {
     }
     auto* rtype = proto->get_rtype();
     if (!type::is_array(rtype) ||
-        type::get_array_component_type(rtype) != cls->get_type()) {
+        type::make_array_component_type(rtype) != cls->get_type()) {
       continue;
     }
     return dm;

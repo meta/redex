@@ -587,7 +587,7 @@ class Analyzer final : public BaseIRAnalyzer<AbstractObjectEnvironment> {
       if (array_object) {
         const auto* type = array_object->dex_type;
         if ((type != nullptr) && type::is_array(type)) {
-          auto* const etype = type::get_array_component_type(type);
+          auto* const etype = type::make_array_component_type(type);
           update_non_string_input(current_state, insn, etype);
           break;
         }
@@ -662,7 +662,7 @@ class Analyzer final : public BaseIRAnalyzer<AbstractObjectEnvironment> {
     case OPCODE_NEW_ARRAY: {
       const auto* array_type = insn->get_type();
       always_assert(type::is_array(array_type));
-      auto* component_type = type::get_array_component_type(array_type);
+      auto* component_type = type::make_array_component_type(array_type);
       if (component_type == type::java_lang_Class()) {
         const auto aobj =
             current_state->get_abstract_obj(insn->src(0)).get_object();
@@ -687,7 +687,7 @@ class Analyzer final : public BaseIRAnalyzer<AbstractObjectEnvironment> {
     case OPCODE_FILLED_NEW_ARRAY: {
       const auto* array_type = insn->get_type();
       always_assert(type::is_array(array_type));
-      auto* component_type = type::get_array_component_type(array_type);
+      auto* component_type = type::make_array_component_type(array_type);
       AbstractObject aobj(AbstractObjectKind::OBJECT, insn->get_type());
       if (component_type == type::java_lang_Class()) {
         auto arg_count = insn->srcs_size();

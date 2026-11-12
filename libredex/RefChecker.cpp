@@ -165,7 +165,7 @@ bool RefChecker::check_code_refs(const CodeRefs& code_refs) const {
 }
 
 bool RefChecker::check_type_internal(const DexType* type) const {
-  type = type::get_element_type_if_array(type);
+  type = type::make_element_type_if_array(type);
   if (type::is_primitive(type)) {
     return true;
   }

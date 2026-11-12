@@ -1206,9 +1206,9 @@ SharedState::SharedState(
       type::java_lang_Float(),   type::java_lang_Double()};
 
   for (const auto* type : boxing_types) {
-    const auto* box_method = type::get_value_of_method_for_type(type);
-    const auto* unbox_method = type::get_unboxing_method_for_type(type);
-    const auto* abs_method = type::get_Number_unboxing_method_for_type(type);
+    const auto* box_method = type::make_value_of_method_for_type(type);
+    const auto* unbox_method = type::make_unboxing_method_for_type(type);
+    const auto* abs_method = type::make_Number_unboxing_method_for_type(type);
     m_boxing_map.insert({box_method, unbox_method});
     m_abstract_map.insert({unbox_method, abs_method});
   }

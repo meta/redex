@@ -1540,7 +1540,7 @@ class DedupBlocksImpl {
           maybe_array_of_object = true;
         } else if (type::is_array(*dex_type)) {
           maybe_array = true;
-          if (type::is_object(type::get_array_component_type(*dex_type))) {
+          if (type::is_object(type::make_array_component_type(*dex_type))) {
             maybe_array_of_object = true;
           }
         }

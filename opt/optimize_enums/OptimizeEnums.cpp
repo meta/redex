@@ -563,7 +563,7 @@ class OptimizeEnums {
       // not.
       for (auto& ifield : cls->get_ifields()) {
         types_used_as_instance_fields.insert(
-            type::get_element_type_if_array(ifield->get_type()));
+            type::make_element_type_if_array(ifield->get_type()));
       }
     });
 

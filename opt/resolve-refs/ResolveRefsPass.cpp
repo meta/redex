@@ -154,7 +154,7 @@ bool is_array_clone(IRInstruction* insn) {
   auto* mref = insn->get_method();
   auto* type = mref->get_class();
   return type::is_array(type) && mref->get_name()->str() == "clone" &&
-         !type::is_primitive(type::get_array_element_type(type));
+         !type::is_primitive(type::make_array_element_type(type));
 }
 
 void try_desuperify(const DexMethod* caller,

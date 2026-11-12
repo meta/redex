@@ -90,7 +90,7 @@ TypeSet collect_reflected_mergeables(
 
     const DexType* reflected_type = nullptr;
     if (aobj && aobj->is_class() && (aobj->get_dex_type() != nullptr)) {
-      reflected_type = type::get_element_type_if_array(aobj->get_dex_type());
+      reflected_type = type::make_element_type_if_array(aobj->get_dex_type());
     }
     if (reflected_type == nullptr ||
         merging_spec->merging_targets.count(reflected_type) == 0) {

@@ -161,7 +161,7 @@ TypeSet MergeabilityChecker::exclude_unsupported_bytecode_refs_for(
       continue;
     }
 
-    const auto* type = type::get_element_type_if_array(insn->get_type());
+    const auto* type = type::make_element_type_if_array(insn->get_type());
     if (m_spec.merging_targets.count(type) > 0) {
       if (m_track_use_of_reflection) {
         // Always track the const-class usages.
@@ -291,7 +291,7 @@ void MergeabilityChecker::exclude_static_fields(TypeSet& non_mergeables) {
   walk::fields(m_scope, [&non_mergeables, this](DexField* field) {
     if (m_spec.merging_targets.count(field->get_class()) != 0u) {
       if (is_static(field)) {
-        const auto* rtype = type::get_element_type_if_array(field->get_type());
+        const auto* rtype = type::make_element_type_if_array(field->get_type());
         if (!type::is_primitive(rtype) && rtype != string_type) {
           // If the type is either non-primitive or a list of
           // non-primitive types (excluding Strings), then exclude it as
@@ -353,7 +353,7 @@ void MergeabilityChecker::collect_referenced_mergeable_types(
   switch (ev->evtype()) {
   case DEVT_TYPE: {
     const auto* type_ev = dynamic_cast<const DexEncodedValueType*>(ev);
-    const auto* type = type::get_element_type_if_array(type_ev->type());
+    const auto* type = type::make_element_type_if_array(type_ev->type());
     maybe_insert(type);
     break;
   }
@@ -362,14 +362,14 @@ void MergeabilityChecker::collect_referenced_mergeable_types(
     auto* method = method_ev->method();
     if (method != nullptr) {
       // Check containing class
-      maybe_insert(type::get_element_type_if_array(method->get_class()));
+      maybe_insert(type::make_element_type_if_array(method->get_class()));
       // Check return type and parameter types
       auto* proto = method->get_proto();
       if (proto != nullptr) {
-        maybe_insert(type::get_element_type_if_array(proto->get_rtype()));
+        maybe_insert(type::make_element_type_if_array(proto->get_rtype()));
         if (auto* args = proto->get_args()) {
           for (const auto* arg_type : *args) {
-            maybe_insert(type::get_element_type_if_array(arg_type));
+            maybe_insert(type::make_element_type_if_array(arg_type));
           }
         }
       }
@@ -381,9 +381,9 @@ void MergeabilityChecker::collect_referenced_mergeable_types(
     auto* field = field_ev->field();
     if (field != nullptr) {
       // Check containing class
-      maybe_insert(type::get_element_type_if_array(field->get_class()));
+      maybe_insert(type::make_element_type_if_array(field->get_class()));
       // Check field type
-      maybe_insert(type::get_element_type_if_array(field->get_type()));
+      maybe_insert(type::make_element_type_if_array(field->get_type()));
     }
     break;
   }

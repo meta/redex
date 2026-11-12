@@ -179,7 +179,7 @@ PackagePrivatePreprocessorPass::Stats analyze_class(
     std::mutex* illegal_internal_accesses_stream_mutex) {
   PackagePrivatePreprocessorPass::Stats stats;
   auto visit_type = [&](const DexType* type) {
-    type = type::get_element_type_if_array(type);
+    type = type::make_element_type_if_array(type);
     if (type::is_primitive(type)) {
       return;
     }

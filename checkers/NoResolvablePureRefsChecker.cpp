@@ -20,7 +20,7 @@
 namespace {
 
 bool is_type_defined(const DexType* type) {
-  const auto* type_ref = type::get_element_type_if_array(type);
+  const auto* type_ref = type::make_element_type_if_array(type);
   if (!type::is_object(type_ref)) {
     return true;
   }
@@ -34,7 +34,7 @@ bool is_type_defined(const DexType* type) {
 bool is_array_clone(const DexMethodRef* mref) {
   auto* type = mref->get_class();
   if ((type == nullptr) || !type::is_array(type) ||
-      type::is_primitive(type::get_array_element_type(type))) {
+      type::is_primitive(type::make_array_element_type(type))) {
     return false;
   }
   return mref->get_name()->str() == "clone" &&

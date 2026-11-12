@@ -40,7 +40,7 @@ bool need_analyze(const DexMethod* method,
   method->gather_types(types);
   for (const DexType* t : types) {
     if (type::is_array(t)) {
-      t = type::get_array_element_type(t);
+      t = type::make_array_element_type(t);
     }
     if (candidate_enums.count_unsafe(t) != 0u) {
       return true;
@@ -204,7 +204,7 @@ class EnumUpcastDetector {
     EnumTypes elem_types = env->get(insn->src(0));
     UnorderedSet<const DexType*> acceptable_elem_types;
     for (const DexType* type : array_types.elements()) {
-      const DexType* elem = type::get_array_element_type(type);
+      const DexType* elem = type::make_array_element_type(type);
       if ((elem != nullptr) && !type::is_primitive(elem)) {
         acceptable_elem_types.insert(elem); // An array of one type of objects.
       }
@@ -390,7 +390,7 @@ class EnumUpcastDetector {
     if (type == nullptr) {
       return false;
     }
-    type = type::get_element_type_if_array(type);
+    type = type::make_element_type_if_array(type);
     return m_candidate_enums->count_unsafe(type) != 0u;
   }
 
@@ -428,7 +428,7 @@ class EnumUpcastDetector {
     } else {
       for (const auto* possible_type : types.elements()) {
         auto* const possible_elem_type =
-            type::get_array_component_type(possible_type);
+            type::make_array_component_type(possible_type);
         if (m_config->support_kt_19_enum_entries &&
             method::is_clinit(m_method) &&
             m_method->get_class() == possible_elem_type &&
@@ -464,7 +464,7 @@ class EnumUpcastDetector {
   void reject(const IRInstruction* insn,
               const DexType* type,
               UnsafeType reason = UnsafeType::kUsage) const {
-    type = type::get_element_type_if_array(type);
+    type = type::make_element_type_if_array(type);
     if (m_candidate_enums->count_unsafe(type) != 0u) {
       m_reject_fn(type, reason);
       if (traceEnabled(ENUM, 9)) {
@@ -591,7 +591,7 @@ void EnumFixpointIterator::analyze_instruction(const IRInstruction* insn,
       EnumTypes types;
       EnumTypes array_types = env->get(insn->src(0));
       for (const auto* const array_type : array_types.elements()) {
-        auto* const type = type::get_array_element_type(array_type);
+        auto* const type = type::make_array_element_type(array_type);
         if ((type != nullptr) && !type::is_primitive(type)) {
           types.add(type);
         }
@@ -671,7 +671,7 @@ void reject_enums_for_colliding_constructors(
           ctor->get_proto()->get_args()->end()};
       for (size_t i = 0; i < param_types.size(); i++) {
         auto* base_type = const_cast<DexType*>(
-            type::get_element_type_if_array(param_types[i]));
+            type::make_element_type_if_array(param_types[i]));
         if (candidate_enums->count(base_type) != 0u) {
           transforming_enums.insert(base_type);
           param_types[i] = type::make_array_type(
@@ -793,7 +793,7 @@ void reject_unsafe_enums(
           }
         }
         auto* type = const_cast<DexType*>(
-            type::get_element_type_if_array(field->get_type()));
+            type::make_element_type_if_array(field->get_type()));
         if (candidate_enums->count_unsafe(type) != 0u) {
           rejected_enums.insert(type);
           reject_fn(type, UnsafeType::kUsageUnrenamableFieldType);
@@ -819,7 +819,7 @@ void reject_unsafe_enums(
       method->get_proto()->gather_types(types);
       for (const auto* type : types) {
         auto* elem_type =
-            const_cast<DexType*>(type::get_element_type_if_array(type));
+            const_cast<DexType*>(type::make_element_type_if_array(type));
         if (candidate_enums->count_unsafe(elem_type) != 0u) {
           TRACE(ENUM, 5,
                 "Rejecting %s due to !can_rename or usage from annotation",
@@ -889,7 +889,7 @@ bool is_enum_values(const DexMethodRef* method) {
   if (!proto->get_args()->empty()) {
     return false;
   }
-  return type::get_array_component_type(proto->get_rtype()) ==
+  return type::make_array_component_type(proto->get_rtype()) ==
          method->get_class();
 }
 

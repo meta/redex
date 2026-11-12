@@ -686,7 +686,7 @@ std::pair<bool, const DexType*> Breadcrumbs::is_illegal_cross_store(
  * null if the type reference is defined or external.
  */
 const DexType* Breadcrumbs::check_type(const DexType* type) {
-  const auto* type_ref = type::get_element_type_if_array(type);
+  const auto* type_ref = type::make_element_type_if_array(type);
   const auto& cls = type_class(type_ref);
   if (cls == nullptr) {
     return nullptr;

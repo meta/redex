@@ -82,14 +82,14 @@ void EnumAnalyzeGeneratedMethods::process_instruction(
     break;
   case OPCODE_CHECK_CAST:
   case OPCODE_CONST_CLASS: {
-    const auto* type = type::get_element_type_if_array(insn->get_type());
+    const auto* type = type::make_element_type_if_array(insn->get_type());
     if (m_candidate_types.count(type) != 0u) {
       TRACE(ENUM, 4, "reject enum %s for using class type", SHOW(type));
       m_candidate_types.erase(type);
     }
   } break;
   case OPCODE_FILLED_NEW_ARRAY: {
-    auto* base_type = type::get_array_element_type(insn->get_type());
+    auto* base_type = type::make_array_element_type(insn->get_type());
     always_assert(base_type);
     for (size_t src_id = 1; src_id < insn->srcs_size(); src_id++) {
       const EnumTypes elem_types = env->get(insn->src(src_id));
@@ -101,19 +101,19 @@ void EnumAnalyzeGeneratedMethods::process_instruction(
     const EnumTypes array_types = env->get(insn->src(1));
     for (const DexType* escaping_type : array_types.elements()) {
       const auto* base_escaping_type =
-          type::get_element_type_if_array(escaping_type);
+          type::make_element_type_if_array(escaping_type);
       reject_if_unsafe(base_escaping_type, elem_types, insn);
     }
   } break;
   case OPCODE_IPUT_OBJECT:
   case OPCODE_SPUT_OBJECT: {
     const auto* type =
-        type::get_element_type_if_array(insn->get_field()->get_type());
+        type::make_element_type_if_array(insn->get_field()->get_type());
     reject_if_unsafe(type, env->get(insn->src(0)), insn);
   } break;
   case OPCODE_RETURN_OBJECT: {
     const auto* return_type =
-        type::get_element_type_if_array(method->get_proto()->get_rtype());
+        type::make_element_type_if_array(method->get_proto()->get_rtype());
     reject_if_unsafe(return_type, env->get(insn->src(0)), insn);
   } break;
   default:
@@ -171,7 +171,7 @@ void EnumAnalyzeGeneratedMethods::process_invocation(
   const DexTypeList* parameters = proto->get_args();
   while (param_id < parameters->size()) {
     const EnumTypes possible_types = env->get(insn->src(arg_id));
-    reject_if_unsafe(type::get_element_type_if_array(parameters->at(param_id)),
+    reject_if_unsafe(type::make_element_type_if_array(parameters->at(param_id)),
                      possible_types, insn);
     param_id++;
     arg_id++;
@@ -218,7 +218,7 @@ void EnumAnalyzeGeneratedMethods::reject_if_unsafe(
     const EnumTypes& possible_types,
     const IRInstruction* insn) {
   for (const DexType* possible_type : possible_types.elements()) {
-    const auto* type = type::get_element_type_if_array(possible_type);
+    const auto* type = type::make_element_type_if_array(possible_type);
     if (expected_type != type && (m_candidate_types.count(type) != 0u)) {
       TRACE(ENUM, 4, "reject enum %s for upcasting to %s in %s", SHOW(type),
             SHOW(expected_type), SHOW(insn));

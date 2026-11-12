@@ -148,7 +148,7 @@ void gather_complete_referenced_annos(
   }
   auto process = [&](DexType* t) {
     auto* effective_type =
-        const_cast<DexType*>(type::get_element_type_if_array(t));
+        const_cast<DexType*>(type::make_element_type_if_array(t));
     gather_complete_referenced_annos(initial_referenced_annos, effective_type,
                                      result);
   };

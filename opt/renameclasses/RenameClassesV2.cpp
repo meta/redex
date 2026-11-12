@@ -366,7 +366,7 @@ RenameClassesPassV2::build_dont_rename_native_bindings(Scope& scope) {
         dont_rename_native_bindings.insert(rtype);
         for (const auto* ptype : *proto->get_args()) {
           dont_rename_native_bindings.insert(
-              type::get_element_type_if_array(ptype));
+              type::make_element_type_if_array(ptype));
         }
       }
     }
@@ -378,7 +378,7 @@ RenameClassesPassV2::build_dont_rename_native_bindings(Scope& scope) {
         dont_rename_native_bindings.insert(rtype);
         for (const auto* ptype : *proto->get_args()) {
           dont_rename_native_bindings.insert(
-              type::get_element_type_if_array(ptype));
+              type::make_element_type_if_array(ptype));
         }
       }
     }

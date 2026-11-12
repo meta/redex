@@ -1057,7 +1057,7 @@ void push_callee_arg(EnumUtilsCache& enum_utils_cache,
     } else {
       always_assert(object->jvm_cached_singleton);
       const auto& attribute = only(object->attributes);
-      auto* valueOf = type::get_value_of_method_for_type(object->type);
+      auto* valueOf = type::make_value_of_method_for_type(object->type);
       const auto* valueOf_arg_type = valueOf->get_proto()->get_args()->at(0);
       auto tmp = method_creator->make_local(valueOf_arg_type);
       const auto& signed_value2 =

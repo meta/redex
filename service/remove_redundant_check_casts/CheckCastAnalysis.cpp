@@ -144,7 +144,7 @@ const DexType* CheckCastAnalysis::get_type_demand(IRInstruction* insn,
     not_reached();
 
   case OPCODE_FILLED_NEW_ARRAY:
-    return type::get_array_component_type(insn->get_type());
+    return type::make_array_component_type(insn->get_type());
 
   case OPCODE_RETURN_OBJECT:
     return m_rtype;
@@ -255,7 +255,7 @@ const DexType* CheckCastAnalysis::get_type_demand(IRInstruction* insn,
 // This function is conservative and returns false if type_class is missing.
 // A type is "interfacy" if it's an interface, or an array of an interface.
 static bool is_not_interfacy(const DexType* type) {
-  auto* cls = type_class(type::get_element_type_if_array(type));
+  auto* cls = type_class(type::make_element_type_if_array(type));
   return (cls != nullptr) && !is_interface(cls);
 }
 
@@ -263,7 +263,7 @@ static bool is_not_interfacy(const DexType* type) {
 // of arrays. (However, it does not consider interfaces in a special way.)
 static const DexType* weaken_type(const DexType* type) {
   if (type::is_array(type)) {
-    auto* element_type = type::get_array_element_type(type);
+    auto* element_type = type::make_array_element_type(type);
     if (!type::is_primitive(element_type)) {
       const auto* weakened_element_type = weaken_type(element_type);
       if (weakened_element_type != nullptr) {
@@ -323,7 +323,7 @@ const DexType* CheckCastAnalysis::weaken_to_demand(
   // explicitly mentioned (in the demand set), as they might refer to a type
   // that's only available on a particular Android platform.
   auto is_safe = [&](const DexType* t) {
-    const auto* u = type::is_array(t) ? type::get_array_element_type(t) : t;
+    const auto* u = type::is_array(t) ? type::make_array_element_type(t) : t;
     auto* cls = type_class(u);
     return (cls != nullptr) &&
            (!cls->is_external() || (demands.count(t) != 0u));

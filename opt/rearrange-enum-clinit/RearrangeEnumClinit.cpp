@@ -173,7 +173,7 @@ struct Rearranger {
       case OPCODE_SGET_OBJECT: {
         auto* f = insn->get_field();
         if (f->get_class() == values_method->get_class() &&
-            type::get_element_type_if_array(f->get_type()) == f->get_class()) {
+            type::make_element_type_if_array(f->get_type()) == f->get_class()) {
           return f;
         }
         return nullptr;
@@ -426,7 +426,7 @@ struct Rearranger {
     if (array_size_definition == nullptr ||
         array_size_definition->opcode() != OPCODE_CONST ||
         array_size_definition->get_literal() < 0 ||
-        type::get_array_component_type(array->get_type()) != m->get_class() ||
+        type::make_array_component_type(array->get_type()) != m->get_class() ||
         insn_map.find(array_size_definition) == insn_map.end()) {
       failure_reason = FailureReason::UnsupportedArraySizeOrType;
       return false;

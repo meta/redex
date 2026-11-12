@@ -437,7 +437,7 @@ bool LocalArrayAnalyzer::analyze_filled_new_array(const IRInstruction* insn,
                                                   ConstantEnvironment* env) {
   auto array_size = insn->srcs_size();
   const DexType* element_type =
-      type::get_array_component_type(insn->get_type());
+      type::make_array_component_type(insn->get_type());
   if (type::is_integral(element_type)) {
     env->new_heap_value(RESULT_REGISTER, insn,
                         ConstantValueArrayDomain(array_size));
@@ -1477,7 +1477,7 @@ bool NewObjectAnalyzer::analyze_instance_of(
   if (obj_type == nullptr) {
     return false;
   }
-  auto* cls = type_class(type::get_element_type_if_array(obj_type));
+  auto* cls = type_class(type::make_element_type_if_array(obj_type));
   if ((cls == nullptr) ||
       (cls->is_external() && obj_type != insn->get_type())) {
     return false;
@@ -1581,8 +1581,8 @@ ImmutableAttributeAnalyzerState::ImmutableAttributeAnalyzerState() {
       BoxedTypeInfo{type::java_lang_Float(), 0, 0},
       BoxedTypeInfo{type::java_lang_Double(), 0, 0}};
   for (auto& bti : boxed_type_infos) {
-    auto* valueOf = type::get_value_of_method_for_type(bti.type);
-    auto* getter_method = type::get_unboxing_method_for_type(bti.type);
+    auto* valueOf = type::make_value_of_method_for_type(bti.type);
+    auto* getter_method = type::make_unboxing_method_for_type(bti.type);
     if ((valueOf != nullptr) && (getter_method != nullptr) &&
         valueOf->is_def() && getter_method->is_def()) {
       add_initializer(valueOf->as_def(), getter_method->as_def())

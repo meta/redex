@@ -180,8 +180,8 @@ bool check_is_assignable_from(const DexType* from,
     if (type::get_array_level(from) != type::get_array_level(to)) {
       return false;
     }
-    auto* efrom = type::get_array_element_type(from);
-    auto* eto = type::get_array_element_type(to);
+    auto* efrom = type::make_array_element_type(from);
+    auto* eto = type::make_array_element_type(to);
     return check_cast_helper(efrom, eto);
   }
   if (!strict) {
@@ -1175,7 +1175,7 @@ void assume_array(const DexType* array_type, const Fn& fn) {
   if (!type::is_array(array_type)) {
     Throw().oss << "Expected  " << *array_type << " to be an array type\n";
   }
-  fn(type::get_array_component_type(array_type));
+  fn(type::make_array_component_type(array_type));
 }
 
 template <typename Fn>
@@ -1304,7 +1304,7 @@ void IRTypeChecker::check_instruction(IRInstruction* insn,
   }
   case OPCODE_FILLED_NEW_ARRAY: {
     const DexType* element_type =
-        type::get_array_component_type(insn->get_type());
+        type::make_array_component_type(insn->get_type());
     // We assume that structural constraints on the bytecode are satisfied,
     // i.e., the type is indeed an array type.
     always_assert(element_type != nullptr);
@@ -1664,7 +1664,7 @@ void IRTypeChecker::check_instruction(IRInstruction* insn,
         auto src = insn->src(src_idx);
         assume_reference(current_state, src);
         assume_assignable(current_state->get_dex_type(src),
-                          type::get_array_element_type(arg_types->at(0)));
+                          type::make_array_element_type(arg_types->at(0)));
       }
     } else {
       for (const DexType* arg_type : *arg_types) {

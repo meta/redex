@@ -31,9 +31,9 @@ struct ImmutableTest : public ConstantPropagationTest {
                                            type::java_lang_Character()};
     for (auto& type : boxed_types) {
       auto* valueOf =
-          dynamic_cast<DexMethod*>(type::get_value_of_method_for_type(type));
+          dynamic_cast<DexMethod*>(type::make_value_of_method_for_type(type));
       auto* getter_method =
-          dynamic_cast<DexMethod*>(type::get_unboxing_method_for_type(type));
+          dynamic_cast<DexMethod*>(type::make_unboxing_method_for_type(type));
       // The intValue of integer is initialized through the static invocation.
       m_immut_analyzer_state.add_initializer(valueOf, getter_method)
           .set_src_id_of_attr(0)

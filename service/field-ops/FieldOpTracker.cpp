@@ -171,7 +171,7 @@ class WritesAnalyzer {
           const auto& array_type = type_env.get_dex_type(insn->src(1));
           std::optional<const DexType*> component_type;
           if (array_type && type::is_array(*array_type)) {
-            component_type = type::get_array_component_type(*array_type);
+            component_type = type::make_array_component_type(*array_type);
           }
           if (!has_lifetime(insn->src(0), component_type)) {
             continue;
@@ -275,7 +275,7 @@ class WritesAnalyzer {
     case OPCODE_NEW_ARRAY:
       return false;
     case OPCODE_FILLED_NEW_ARRAY: {
-      auto* component_type = type::get_array_component_type(insn->get_type());
+      auto* component_type = type::make_array_component_type(insn->get_type());
       return insn->srcs_size() > 0 && has_lifetime(component_type);
     }
     case OPCODE_NEW_INSTANCE:

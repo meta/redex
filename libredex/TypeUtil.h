@@ -154,7 +154,7 @@ uint32_t get_array_level(const DexType* type);
  * [LFoo; -> LFoo;
  * [[LFoo; -> [LFoo;
  */
-DexType* get_array_component_type(const DexType* type);
+DexType* make_array_component_type(const DexType* type);
 
 /**
  * An array's component type may also be an array. Recursively unwrapping these
@@ -168,7 +168,7 @@ DexType* get_array_component_type(const DexType* type);
  * The terms "component type" and "element type" are defined in the JLS:
  * https://docs.oracle.com/javase/specs/jls/se7/html/jls-10.html
  */
-DexType* get_array_element_type(const DexType* type);
+DexType* make_array_element_type(const DexType* type);
 
 /**
  * Return the element type of a given array type or the type itself if it's not
@@ -178,7 +178,7 @@ DexType* get_array_element_type(const DexType* type);
  *   [java.lang.String -> java.lang.String
  *   java.lang.Integer -> java.lang.Integer
  */
-const DexType* get_element_type_if_array(const DexType* type);
+const DexType* make_element_type_if_array(const DexType* type);
 
 /**
  * Return the (level 1) array type of a given type.
@@ -200,16 +200,16 @@ DexType* make_array_type(const DexType* type, uint32_t level);
  */
 DexType* get_boxed_reference_type(const DexType* type);
 
-DexMethodRef* get_unboxing_method_for_type(const DexType* type);
+DexMethodRef* make_unboxing_method_for_type(const DexType* type);
 
 /* Takes a reference type, returns the Number(i.e. abstract) method of its
  * corresponding unboxing method. Notes: this is only used for detecting
  * boxing/unboxing pattern in CSE. Once we can resolve Ljava/lang/Number;.* to
  * its proper impls in each callsite, this function can be removed.
  */
-DexMethodRef* get_Number_unboxing_method_for_type(const DexType* type);
+DexMethodRef* make_Number_unboxing_method_for_type(const DexType* type);
 
-DexMethodRef* get_value_of_method_for_type(const DexType* type);
+DexMethodRef* make_value_of_method_for_type(const DexType* type);
 
 /**
  * Return the basic datatype of given DexType.

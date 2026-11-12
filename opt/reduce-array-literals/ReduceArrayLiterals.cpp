@@ -503,7 +503,7 @@ void ReduceArrayLiterals::patch() {
     }
 
     const auto* type = new_array_insn->get_type();
-    auto* element_type = type::get_array_component_type(type);
+    auto* element_type = type::make_array_component_type(type);
 
     if (has_left_out_aputs(du_chains, new_array_insn, aput_insns)) {
       continue;
@@ -700,7 +700,7 @@ size_t ReduceArrayLiterals::patch_new_array_chunk(
   // most check-cast instructions will get eliminated again by the
   // remove-reundant-check-casts pass
 
-  auto* component_type = type::get_array_component_type(type);
+  auto* component_type = type::make_array_component_type(type);
   bool is_component_type_primitive = type::is_primitive(component_type);
   for (size_t index = chunk_start; index < chunk_end; index++) {
     const IRInstruction* aput_insn = aput_insns[index];

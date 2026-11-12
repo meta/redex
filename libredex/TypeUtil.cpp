@@ -160,21 +160,21 @@ bool is_java_lang_object_array(const DexType* type) {
   if (!is_array(type)) {
     return false;
   }
-  return get_array_component_type(type) == java_lang_Object();
+  return make_array_component_type(type) == java_lang_Object();
 }
 
 bool is_enum_array(const DexType* type) {
   if (!is_array(type)) {
     return false;
   }
-  return get_array_component_type(type) == java_lang_Enum();
+  return make_array_component_type(type) == java_lang_Enum();
 }
 
 bool is_reference_array(const DexType* type) {
   if (!is_array(type)) {
     return false;
   }
-  auto* ctype = get_array_component_type(type);
+  auto* ctype = make_array_component_type(type);
   return !is_primitive(ctype);
 }
 
@@ -255,8 +255,8 @@ bool check_cast(const DexType* type, const DexType* base_type) {
   }
   if (type != nullptr && is_array(type)) {
     if (base_type != nullptr && is_array(base_type)) {
-      auto* component_type = get_array_component_type(type);
-      auto* component_base_type = get_array_component_type(base_type);
+      auto* component_type = make_array_component_type(type);
+      auto* component_base_type = make_array_component_type(base_type);
       if (!is_primitive(component_type) && !is_primitive(component_base_type) &&
           check_cast(component_type, component_base_type)) {
         return true;
@@ -309,7 +309,7 @@ uint32_t get_array_level(const DexType* type) {
   return level;
 }
 
-DexType* get_array_component_type(const DexType* type) {
+DexType* make_array_component_type(const DexType* type) {
   if (!is_array(type)) {
     return nullptr;
   }
@@ -318,7 +318,7 @@ DexType* get_array_component_type(const DexType* type) {
   return DexType::make_type(name);
 }
 
-DexType* get_array_element_type(const DexType* type) {
+DexType* make_array_element_type(const DexType* type) {
   if (!is_array(type)) {
     return nullptr;
   }
@@ -329,9 +329,9 @@ DexType* get_array_element_type(const DexType* type) {
   return DexType::make_type(name);
 }
 
-const DexType* get_element_type_if_array(const DexType* type) {
+const DexType* make_element_type_if_array(const DexType* type) {
   if (is_array(type)) {
-    return get_array_element_type(type);
+    return make_array_element_type(type);
   }
   return type;
 }
@@ -380,7 +380,7 @@ DexType* get_boxed_reference_type(const DexType* type) {
 }
 
 // Takes a reference type, returns its corresponding unboxing method
-DexMethodRef* get_unboxing_method_for_type(const DexType* type) {
+DexMethodRef* make_unboxing_method_for_type(const DexType* type) {
   if (type == type::java_lang_Boolean()) {
     return DexMethod::make_method("Ljava/lang/Boolean;.booleanValue:()Z");
   } else if (type == type::java_lang_Byte()) {
@@ -401,7 +401,7 @@ DexMethodRef* get_unboxing_method_for_type(const DexType* type) {
   return nullptr;
 }
 
-DexMethodRef* get_Number_unboxing_method_for_type(const DexType* type) {
+DexMethodRef* make_Number_unboxing_method_for_type(const DexType* type) {
   if (type == type::java_lang_Boolean()) {
     return DexMethod::make_method("Ljava/lang/Number;.booleanValue:()Z");
   } else if (type == type::java_lang_Byte()) {
@@ -423,7 +423,7 @@ DexMethodRef* get_Number_unboxing_method_for_type(const DexType* type) {
 }
 
 // Take a reference type, returns its valueOf function
-DexMethodRef* get_value_of_method_for_type(const DexType* type) {
+DexMethodRef* make_value_of_method_for_type(const DexType* type) {
   if (type == type::java_lang_Boolean()) {
     return DexMethod::make_method(
         "Ljava/lang/Boolean;.valueOf:(Z)Ljava/lang/Boolean;");
@@ -662,8 +662,8 @@ bool is_min_sdk_acceptable(const DexType* source_type,
                            const DexType* target_type,
                            const api::AndroidSDK& api) {
   // For arrays, this is really about the element types.
-  source_type = type::get_element_type_if_array(source_type);
-  target_type = type::get_element_type_if_array(target_type);
+  source_type = type::make_element_type_if_array(source_type);
+  target_type = type::make_element_type_if_array(target_type);
 
   // Early cutout: always accept target-type = Object.
   if (target_type == type::java_lang_Object()) {

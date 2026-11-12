@@ -368,13 +368,13 @@ void TransitiveClosureMarkerWorker::push(const Parent* parent,
 template <class Parent>
 void TransitiveClosureMarkerWorker::push(const Parent* parent,
                                          const DexType* type) {
-  type = type::get_element_type_if_array(type);
+  type = type::make_element_type_if_array(type);
   push(parent, type_class(type));
 }
 
 void TransitiveClosureMarkerWorker::push(const DexMethodRef* parent,
                                          const DexType* type) {
-  type = type::get_element_type_if_array(type);
+  type = type::make_element_type_if_array(type);
   push(parent, type_class(type));
 }
 
@@ -2631,7 +2631,7 @@ class RemovedEdgeRecorder {
               const SourceReferences& refs) const {
     UnorderedSet<ReachableObject, ReachableObjectHash> targets;
     for (const auto* type : refs.types) {
-      const auto* cls = type_class(type::get_element_type_if_array(type));
+      const auto* cls = type_class(type::make_element_type_if_array(type));
       if (cls != owner && m_removed.is_removed(cls)) {
         targets.insert(ReachableObject(cls));
       }

@@ -236,7 +236,7 @@ const DexType* get_type_demand(DexType* method_rtype, const Use& use) {
     always_assert(use.src_index == 0);
     return type::java_lang_Throwable();
   case OPCODE_FILLED_NEW_ARRAY:
-    return type::get_array_component_type(use.insn->get_type());
+    return type::make_array_component_type(use.insn->get_type());
   case OPCODE_INVOKE_POLYMORPHIC:
     // The call site's prototype decides what the arguments must be, and Redex
     // does not keep it for invoke-polymorphic.

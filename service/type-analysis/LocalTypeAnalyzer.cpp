@@ -96,7 +96,7 @@ bool RegisterTypeAnalyzer::analyze_aget(const IRInstruction* insn,
 
   always_assert_log(type::is_array(*array_type), "Wrong array type %s in %s",
                     SHOW(*array_type), SHOW(insn));
-  auto* const ctype = type::get_array_component_type(*array_type);
+  auto* const ctype = type::make_array_component_type(*array_type);
   env->set(RESULT_REGISTER, DexTypeDomain::create_nullable(ctype));
   return true;
 }

@@ -322,7 +322,7 @@ TypeDemand ConstantUses::get_type_demand(IRInstruction* insn,
     return TypeDemand::Int;
 
   case OPCODE_FILLED_NEW_ARRAY: {
-    DexType* component_type = type::get_array_component_type(insn->get_type());
+    DexType* component_type = type::make_array_component_type(insn->get_type());
     return get_type_demand(component_type);
   }
   case OPCODE_CMPL_FLOAT:
@@ -474,7 +474,7 @@ TypeDemand ConstantUses::get_type_demand(IRInstruction* insn,
               dex_type ? SHOW(dex_type) : "(unknown dex type)");
         if (dex_type && type::is_array(*dex_type)) {
           auto type_demand =
-              get_type_demand(type::get_array_component_type(*dex_type));
+              get_type_demand(type::make_array_component_type(*dex_type));
           always_assert(insn->opcode() != OPCODE_APUT ||
                         (type_demand == TypeDemand::Error ||
                          type_demand == TypeDemand::Int ||

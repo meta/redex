@@ -301,17 +301,20 @@ void add_startup_class_methods(const std::vector<std::string>& interdexorder,
   // only insertion path that can put a code-less method into a
   // BaselineProfile. <clinit> and @NeverCompile still have code, so the
   // full predicate is applied rather than just a code check.
-  walk::code(
+  InsertOnlyConcurrentSet<const DexMethod*> compilable;
+  walk::parallel::code(
       coldstart_classes,
-      [baseline_profile, flags, huge_method_max](DexMethod* method, IRCode&) {
-        if (uncompilable_reason(method, huge_method_max) !=
+      [&compilable, huge_method_max](DexMethod* method, IRCode&) {
+        if (uncompilable_reason(method, huge_method_max) ==
             UncompilableReason::kNone) {
-          return;
-        }
-        if (baseline_profile->methods.emplace(method, flags).second) {
-          ++baseline_profile->startup_class_methods;
+          compilable.insert(method);
         }
       });
+  for (const auto* method : UnorderedIterable(compilable)) {
+    if (baseline_profile->methods.emplace(method, flags).second) {
+      ++baseline_profile->startup_class_methods;
+    }
+  }
 }
 
 } // namespace

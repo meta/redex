@@ -208,6 +208,7 @@ libredex_la_SOURCES = \
 	libredex/PassManager.cpp \
 	libredex/PassRegistry.cpp \
 	libredex/PluginRegistry.cpp \
+	libredex/PositionAmbiguity.cpp \
 	service/points-to-semantics/PointsToSemantics.cpp \
 	service/points-to-semantics/PointsToSemanticsUtils.cpp \
 	libredex/PrintSeeds.cpp \

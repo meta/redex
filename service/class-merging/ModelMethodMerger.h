@@ -9,6 +9,7 @@
 
 #include <optional>
 
+#include "DeterministicContainers.h"
 #include "DexClass.h"
 #include "IRInstruction.h"
 #include "MergerType.h"
@@ -107,6 +108,8 @@ class ModelMethodMerger {
   TypeToMethodMap m_method_dedup_map;
 
   ModelStats m_stats;
+  // Victims already joined into each surviving dispatch target.
+  UnorderedMap<DexMethod*, UnorderedSet<DexMethod*>> m_already_joined;
 
   void merge_ctors();
   void dedup_non_ctor_non_virt_methods();
@@ -123,7 +126,13 @@ class ModelMethodMerger {
       UnorderedMap<DexMethod*, DexMethod*>& old_to_new_callee);
 
   std::map<SwitchIndices, DexMethod*> get_dedupped_indices_map(
-      const std::vector<DexMethod*>& targets);
+      const std::vector<DexMethod*>& targets,
+      UnorderedMap<DexMethod*, MethodOrderedSet>* groups = nullptr);
+
+  // Joins each retained dispatch target's throwing positions with those of the
+  // methods it now stands for, while every one of them still holds its code.
+  void join_ambiguous_positions(
+      const UnorderedMap<DexMethod*, MethodOrderedSet>& groups);
 
   DexType* get_merger_type(DexType* mergeable);
 

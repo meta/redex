@@ -17,6 +17,7 @@
 #include "MethodDedup.h"
 #include "MethodReference.h"
 #include "Mutators.h"
+#include "PositionAmbiguity.h"
 #include "Resolver.h"
 #include "Show.h"
 #include "SwitchDispatch.h"
@@ -363,13 +364,16 @@ dispatch::DispatchMethod ModelMethodMerger::create_dispatch_method(
   // Setup switch cases
   // The MethodBlocks are to be initialized by switch_op() based on their
   // corresponding keys in the map.
-  auto indices_to_callee = get_dedupped_indices_map(targets);
+  UnorderedMap<DexMethod*, MethodOrderedSet> groups;
+  auto indices_to_callee = get_dedupped_indices_map(targets, &groups);
+  join_ambiguous_positions(groups);
   m_stats.m_num_vmethods_dedupped += targets.size() - indices_to_callee.size();
   return create_virtual_dispatch(spec, indices_to_callee);
 }
 
 std::map<SwitchIndices, DexMethod*> ModelMethodMerger::get_dedupped_indices_map(
-    const std::vector<DexMethod*>& targets) {
+    const std::vector<DexMethod*>& targets,
+    UnorderedMap<DexMethod*, MethodOrderedSet>* groups) {
   always_assert(!targets.empty());
   std::map<SwitchIndices, DexMethod*> indices_to_callee;
   // Find equivalent methods.
@@ -382,6 +386,9 @@ std::map<SwitchIndices, DexMethod*> ModelMethodMerger::get_dedupped_indices_map(
       switch_indices.emplace(m_type_tags->get_type_tag(meth->get_class()));
     }
     indices_to_callee[switch_indices] = *duplicate.begin();
+    if (groups != nullptr) {
+      (*groups)[*duplicate.begin()] = duplicate;
+    }
   }
 
   TRACE(CLMG, 9, "---- SwitchIndices map ---");
@@ -391,6 +398,20 @@ std::map<SwitchIndices, DexMethod*> ModelMethodMerger::get_dedupped_indices_map(
     TRACE(CLMG, 9, "indices %s callee %s", SHOW(indices), SHOW(callee));
   }
   return indices_to_callee;
+}
+
+void ModelMethodMerger::join_ambiguous_positions(
+    const UnorderedMap<DexMethod*, MethodOrderedSet>& groups) {
+  for (const auto& [survivor, group] : UnorderedIterable(groups)) {
+    if (group.size() <= 1) {
+      continue;
+    }
+    // A target can be retained again by a later dispatch, bringing methods the
+    // earlier one did not stand for.
+    positions::join_new_throwing_positions(survivor, group,
+                                           &m_already_joined[survivor],
+                                           &m_stats.m_position_join_stats);
+  }
 }
 
 DexType* ModelMethodMerger::get_merger_type(DexType* mergeable) {
@@ -686,7 +707,9 @@ void ModelMethodMerger::merge_ctors() {
           nullptr, // overridden_meth
           get_ctor_type_tag_param_idx(pass_type_tag_param, ctor_proto),
           m_model_spec.keep_debug_info};
-      auto indices_to_callee = get_dedupped_indices_map(ctors);
+      UnorderedMap<DexMethod*, MethodOrderedSet> ctor_groups;
+      auto indices_to_callee = get_dedupped_indices_map(ctors, &ctor_groups);
+      join_ambiguous_positions(ctor_groups);
       if (indices_to_callee.size() > 1) {
         always_assert_log(
             m_model_spec.has_type_tag(),
@@ -791,7 +814,7 @@ void ModelMethodMerger::dedup_non_ctor_non_virt_methods() {
         std::in_place);
     m_stats.m_num_static_non_virt_dedupped += method_dedup::dedup_methods(
         m_scope, to_dedup, m_model_spec.dedup_fill_in_stack_trace, replacements,
-        new_to_old);
+        new_to_old, &m_stats.m_position_join_stats);
     // Relocate the remainders.
     std::set<DexMethod*, dexmethods_comparator> to_relocate(
         replacements.begin(), replacements.end());

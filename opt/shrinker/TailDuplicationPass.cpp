@@ -123,7 +123,9 @@ std::vector<cfg::Block*> get_ordered_blocks(const cfg::ControlFlowGraph& cfg) {
   return blocks;
 }
 
-using baseline_profiles::is_compiled;
+using baseline_profiles::compute_dex2oat_facts;
+using baseline_profiles::dex2oat_compiles;
+using baseline_profiles::flags_request_compilation;
 
 } // namespace
 
@@ -240,6 +242,7 @@ void TailDuplicationPass::run_pass(DexStoresVector& stores,
 
   auto baseline_profile =
       baseline_profiles::get_default_baseline_profile(scope, conf);
+  const auto huge_method_max = baseline_profiles::get_huge_method_max(conf);
 
   int min_sdk = mgr.get_redex_options().min_sdk;
   shrinker::Shrinker shrinker(stores, scope, init_classes_with_side_effects,
@@ -252,17 +255,21 @@ void TailDuplicationPass::run_pass(DexStoresVector& stores,
     if (method->rstate.no_optimizations()) {
       return;
     }
-    if (!is_compiled(baseline_profile, method)) {
-      return;
-    }
-
     if (!source_blocks::is_hot(code.cfg().entry_block())) {
       return;
     }
-
-    auto code_units = code.estimate_code_units();
-    code_units += code.cfg().get_size_adjustment();
-    if (code_units > assessments::HUGE_METHOD_THRESHOLD / 4) {
+    // The flags first, so that only entries that ask for compilation pay for
+    // the size, which the threshold below then reuses.
+    auto it = baseline_profile.methods.find(method);
+    if (it == baseline_profile.methods.end() ||
+        !flags_request_compilation(it->second)) {
+      return;
+    }
+    auto facts = compute_dex2oat_facts(method, huge_method_max);
+    if (!dex2oat_compiles(it->second, facts)) {
+      return;
+    }
+    if (facts.code_units > assessments::HUGE_METHOD_THRESHOLD / 4) {
       // This transformation could double the code size. Let's make sure we are
       // getting nowhere near "huge" territory.
       return;

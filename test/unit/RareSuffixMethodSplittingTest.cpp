@@ -744,7 +744,9 @@ TEST_F(RareSuffixMethodSplittingTest, compilesTheSplitOfAHotTail) {
   Scope scope{type_class(m->get_class())};
   auto baseline_profile =
       baseline_profiles::get_default_baseline_profile(scope, *m_conf);
-  EXPECT_TRUE(baseline_profiles::is_compiled(baseline_profile, split));
+  EXPECT_TRUE(baseline_profiles::dex2oat_compiles(
+      baseline_profile, split,
+      baseline_profiles::get_huge_method_max(*m_conf)));
   auto* code = m->get_code();
   if (code->cfg_built()) {
     code->clear_cfg();

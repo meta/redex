@@ -16,6 +16,7 @@
 #include "Creators.h"
 #include "DexAccess.h"
 #include "DexClass.h"
+#include "GlobalConfig.h"
 #include "IRAssembler.h"
 #include "MethodProfiles.h"
 #include "RedexTest.h"
@@ -189,7 +190,7 @@ TEST_F(CallsiteNeverInlineCloningTest, MixedHotnessClonesAndRedirects) {
       compiled({callee, hot_caller, cold_caller, cold_caller2});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.mixed_hotness_callees, 1u);
   EXPECT_EQ(stats.clones_created, 1u);
@@ -280,7 +281,7 @@ TEST_F(CallsiteNeverInlineCloningTest, MultipleColdCallsitesAllRedirected) {
       compiled({callee, hot_caller, cold_caller1, cold_caller2});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.mixed_hotness_callees, 1u);
   EXPECT_EQ(stats.clones_created, 1u);
@@ -317,7 +318,7 @@ TEST_F(CallsiteNeverInlineCloningTest, AllColdCalleeIsNotCloned) {
   auto baseline_profile = compiled({callee, cold_caller});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
   EXPECT_EQ(stats.clones_created, 0u);
@@ -356,7 +357,7 @@ TEST_F(CallsiteNeverInlineCloningTest, UncompiledCallerContributesNoEdges) {
   baseline_profiles::BaselineProfile empty_baseline_profile;
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, empty_baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.callers_not_compiled, 3u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -391,7 +392,7 @@ TEST_F(CallsiteNeverInlineCloningTest, MissingSourceBlockIsConservativelyHot) {
   auto baseline_profile = compiled({callee, caller});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
   EXPECT_EQ(stats.clones_created, 0u);
@@ -486,7 +487,7 @@ TEST_F(CallsiteNeverInlineCloningTest, NonFinalNonTrueVirtualCalleeIsCloned) {
       compiled({callee, hot_caller, cold_caller, cold_caller2});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.mixed_hotness_callees, 1u);
   EXPECT_EQ(stats.clones_created, 1u);
@@ -583,7 +584,7 @@ TEST_F(CallsiteNeverInlineCloningTest, TrueVirtualOverriddenCalleeIsNotCloned) {
   auto baseline_profile = compiled({callee, hot_caller, cold_caller});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
   EXPECT_EQ(stats.clones_created, 0u);
@@ -693,7 +694,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
       compiled({callee, hot_caller, cold_caller, cold_caller2});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.mixed_hotness_callees, 1u);
   EXPECT_EQ(stats.clones_created, 1u);
@@ -766,7 +767,7 @@ TEST_F(CallsiteNeverInlineCloningTest, InvokeSuperIsNeverRedirected) {
   auto baseline_profile = compiled({callee, hot_caller, cold_caller});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_GE(stats.invokes_super_opcode, 2u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -805,7 +806,7 @@ TEST_F(CallsiteNeverInlineCloningTest, BlocklistedCalleeIsNotCloned) {
   config.blocklist.emplace_back("LFoo;");
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, config, /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.invokes_blocklisted_callee, 2u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -842,7 +843,7 @@ TEST_F(CallsiteNeverInlineCloningTest, NoOptimizationsCalleeIsNotCloned) {
   auto baseline_profile = compiled({callee, hot_caller, cold_caller});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.invokes_no_optimizations_callee, 2u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -882,7 +883,7 @@ TEST_F(CallsiteNeverInlineCloningTest, NoOutliningCalleeIsNotCloned) {
   auto baseline_profile = compiled({callee, hot_caller, cold_caller});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.invokes_no_outlining_callee, 2u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -930,7 +931,7 @@ TEST_F(CallsiteNeverInlineCloningTest, DontInlineOnlyCalleeIsCloned) {
       compiled({callee, hot_caller, cold_caller, cold_caller2});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.invokes_no_outlining_callee, 0u);
   EXPECT_EQ(stats.clones_created, 1u);
@@ -983,7 +984,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
       compiled({callee, hot_caller, cold_caller, cold_caller2});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.invokes_non_renamable_callee_class, 0u);
   EXPECT_EQ(stats.clones_created, 1u);
@@ -1026,7 +1027,7 @@ TEST_F(CallsiteNeverInlineCloningTest, NonRenamableCalleeClassIsNotCloned) {
   auto baseline_profile = compiled({callee, hot_caller, cold_caller});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.invokes_non_renamable_callee_class, 2u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -1063,7 +1064,7 @@ TEST_F(CallsiteNeverInlineCloningTest, NoOptimizationsCallerIsSkippedEntirely) {
   auto baseline_profile = compiled({callee, hot_caller, cold_caller});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.callers_no_optimizations, 1u);
   // With its only cold call site now invisible to this pass, `callee` never
@@ -1117,7 +1118,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
   auto baseline_profile = compiled({callee, hot_caller, cold_caller});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.invokes_callsite_and_callee_both_have_catch, 1u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -1160,7 +1161,7 @@ TEST_F(CallsiteNeverInlineCloningTest, TooSmallCalleeIsNotCloned) {
   config.min_callee_instructions = 100;
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, config, /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.callees_too_small, 1u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -1275,7 +1276,7 @@ TEST_F(CallsiteNeverInlineCloningTest, CostModelRejectsBelowMinColdCallsites) {
   Scope scope{fx.cls};
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, profitability_config(), /* iteration */ 0, compile_fixture(fx),
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.mixed_hotness_callees, 1u);
   EXPECT_EQ(stats.rejected_insufficient_cold_callsites, 1u);
@@ -1290,7 +1291,7 @@ TEST_F(CallsiteNeverInlineCloningTest, CostModelRejectsBelowMinHotCallsites) {
   config.min_hot_callsites = 2;
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, config, /* iteration */ 0, compile_fixture(fx),
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.rejected_insufficient_hot_callsites, 1u);
   EXPECT_EQ(stats.clones_created, 0u);
@@ -1306,7 +1307,7 @@ TEST_F(CallsiteNeverInlineCloningTest, CostModelAcceptsWithDefaultsAtScale) {
   Scope scope{fx.cls};
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, profitability_config(), /* iteration */ 0, compile_fixture(fx),
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.clones_created, 1u);
   EXPECT_EQ(stats.cold_callsites_redirected, 4u);
@@ -1330,7 +1331,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
   config.min_estimated_oat_code_units_saved = 1000000;
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, config, /* iteration */ 0, compile_fixture(fx),
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.rejected_insufficient_estimated_savings, 1u);
   EXPECT_EQ(stats.clones_created, 0u);
@@ -1344,7 +1345,7 @@ TEST_F(CallsiteNeverInlineCloningTest, CostModelRejectsNonPositiveNet) {
   config.method_ref_cost = 1000000;
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, config, /* iteration */ 0, compile_fixture(fx),
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.rejected_non_positive_net, 1u);
   EXPECT_EQ(stats.clones_created, 0u);
@@ -1358,7 +1359,7 @@ TEST_F(CallsiteNeverInlineCloningTest, EstimateOnlyMutatesNothing) {
   size_t methods_before = fx.cls->get_all_methods().size();
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, config, /* iteration */ 0, compile_fixture(fx),
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   // The model ran and reports what it WOULD have done...
   EXPECT_EQ(stats.selected_candidates, 1u);
@@ -1400,7 +1401,8 @@ TEST_F(CallsiteNeverInlineCloningTest,
   }
 
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
-      scope, config, /* iteration */ 0, bp, empty_method_profiles());
+      scope, config, /* iteration */ 0, bp,
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.mixed_hotness_callees, 2u);
   EXPECT_EQ(stats.clones_created, 1u);
@@ -1426,7 +1428,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
   config.max_total_cloned_code_units = 1;
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, config, /* iteration */ 0, compile_fixture(fx),
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.rejected_cap_max_total_cloned_code_units, 1u);
   EXPECT_EQ(stats.clones_created, 0u);
@@ -1551,7 +1553,8 @@ TEST_F(CallsiteNeverInlineCloningTest,
       /* num_cold_caller_classes */ 2, /* cold_callers_per_class */ 2);
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       cross_class_fixture_scope(fx), profitability_config(), /* iteration */ 0,
-      compile_cross_class_fixture(fx), empty_method_profiles());
+      compile_cross_class_fixture(fx),
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.clones_created, 1u);
   // 1 for the clone's own definition + 2 distinct cold-caller classes.
@@ -1579,13 +1582,15 @@ TEST_F(CallsiteNeverInlineCloningTest,
   auto narrow_stats =
       CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
           Scope{narrow.cls}, config, /* iteration */ 0, compile_fixture(narrow),
+          baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX,
           empty_method_profiles());
   EXPECT_EQ(narrow_stats.clones_created, 1u);
   EXPECT_EQ(narrow_stats.total_estimated_method_refs, 2u);
 
   auto wide_stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       cross_class_fixture_scope(wide), config, /* iteration */ 0,
-      compile_cross_class_fixture(wide), empty_method_profiles());
+      compile_cross_class_fixture(wide),
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
   EXPECT_EQ(wide_stats.clones_created, 0u);
   EXPECT_EQ(wide_stats.rejected_non_positive_net, 1u);
 }
@@ -1660,7 +1665,7 @@ TEST_F(CallsiteNeverInlineCloningTest, InitCalleeIsNeverCloned) {
   auto baseline_profile = compiled({ctor, hot_caller, cold_caller});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.invokes_init_callee, 2u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -1700,7 +1705,7 @@ TEST_F(CallsiteNeverInlineCloningTest, ClinitCalleeIsNeverCloned) {
   auto baseline_profile = compiled({clinit, hot_caller, cold_caller});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.invokes_init_callee, 2u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -1756,7 +1761,7 @@ TEST_F(CallsiteNeverInlineCloningTest, InvokeInterfaceIsNeverRedirected) {
   auto baseline_profile = compiled({callee, hot_caller, cold_caller});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_GE(stats.invokes_interface_opcode, 2u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -1852,7 +1857,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
       compiled({callee, hot_caller, cold_caller, cold_caller2});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.mixed_hotness_callees, 1u);
   EXPECT_EQ(stats.clones_created, 1u);
@@ -1907,7 +1912,7 @@ TEST_F(CallsiteNeverInlineCloningTest, AlreadyNeverInlineCalleeIsNotCloned) {
   auto baseline_profile = compiled({callee, hot_caller, cold_caller});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.invokes_already_never_inline_callee, 2u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -1951,7 +1956,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
   config.max_caller_instructions = 3;
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, config, /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.callers_too_many_instructions, 1u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -1994,7 +1999,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
   auto config = test_config();
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, config, /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.callees_too_small, 1u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -2040,7 +2045,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
   config.blocklist.emplace_back("LFoo;");
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, config, /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.invokes_blocklisted_callee, 2u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -2113,7 +2118,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
   config.blocklist.emplace_back("Lcom/blocked/");
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, config, /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   // Blocked via the deobfuscated name -- the raw name ("LA<n>;") would never
   // have matched this prefix.
@@ -2172,7 +2177,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
   config.method_ref_cost = 0;
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, config, /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
   EXPECT_EQ(stats.clones_created, 0u);
@@ -2255,7 +2260,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
   auto baseline_profile = compiled({callee, hot_caller, cold_caller});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.invokes_external_or_no_code_callee, 2u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -2304,7 +2309,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
   auto baseline_profile = compiled({callee, hot_caller, cold_caller});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_GE(stats.invokes_throw_adjacent, 1u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
@@ -2369,7 +2374,7 @@ TEST_F(CallsiteNeverInlineCloningTest, GeneratedNameUsesStableIdentity) {
       compiled({callee, hot_caller, cold_caller, cold_caller2});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.clones_created, 1u);
   auto* clone = find_invoked_method(cold_caller);
@@ -2462,7 +2467,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
                                     cold_ba2, hot_ah, cold_ah1, cold_ah2});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.clones_created, 2u);
   auto* clone_ah = find_invoked_method(cold_ah1);
@@ -2548,7 +2553,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
       compiled({x, b, y_hot, y_cold1, y_cold2, z_hot, z_cold});
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, test_config(), /* iteration */ 0, baseline_profile,
-      empty_method_profiles());
+      baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, empty_method_profiles());
 
   EXPECT_EQ(stats.mixed_hotness_callees, 2u);
   EXPECT_EQ(stats.clones_created, 2u);

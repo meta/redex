@@ -22,6 +22,7 @@
 
 namespace baseline_profiles {
 struct BaselineProfile;
+struct Dex2oatFacts;
 } // namespace baseline_profiles
 
 namespace method_profiles {
@@ -139,8 +140,12 @@ CallsiteWalkCounts walk_callsites(const Scope& scope,
 
 // The call sites at which a baseline-compiled caller may inline its callee,
 // each classified as hot or not, per callee: the walk above over callers
-// `baseline_profiles::is_compiled` accepts, following every forwarder. A site
+// dex2oat compiles (`baseline_profiles::dex2oat_compiles` with the entry's
+// flags and the method's `dex2oat_facts`), following every forwarder. A site
 // is hot when its callee is compiled and both appear thresholds hold.
+// `dex2oat_facts` must hold every method of `baseline_profile`; it is computed
+// up front because computing a method's size may simplify its CFG, which must
+// not happen while the walk reads that CFG from another thread.
 //
 // The analysis behind `ArtProfileWriterPass`'s `@NeverInline` annotations,
 // shared so that a pass predicting those annotations cannot drift from it.
@@ -148,6 +153,9 @@ CallsiteWalkCounts walk_callsites(const Scope& scope,
 struct HotCallsites {
   HotCallsites(const Scope& scope,
                const baseline_profiles::BaselineProfile& baseline_profile,
+               const InsertOnlyConcurrentMap<DexMethod*,
+                                             baseline_profiles::Dex2oatFacts>&
+                   dex2oat_facts,
                const method_profiles::MethodProfiles& method_profiles,
                const HotCallsiteThresholds& thresholds);
 

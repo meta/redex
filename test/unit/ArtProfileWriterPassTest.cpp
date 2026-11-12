@@ -244,7 +244,7 @@ Fixture make_fixture(size_t code_units,
   return Fixture{callee, {hot_caller, cold_caller}, std::move(stores)};
 }
 
-// Makes `is_compiled` true for `methods`.
+// Makes `dex2oat_compiles` true for `methods`.
 void mark_compiled(ConfigFiles& conf, const std::vector<DexMethod*>& methods) {
   UnorderedMap<const DexMethodRef*, method_profiles::Stats> manual_hot_stats;
   for (auto* m : methods) {

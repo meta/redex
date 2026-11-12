@@ -307,7 +307,8 @@ TEST_F(VirtualMergingTest, DedupPreservesOverrideProfile) {
       config.get_method_profiles(),
       /* coldstart_classes */ {},
       baseline_profiles::get_huge_method_max(config));
-  EXPECT_TRUE(baseline_profiles::is_compiled(baseline, ancestor));
+  EXPECT_TRUE(baseline_profiles::dex2oat_compiles(
+      baseline, ancestor, baseline_profiles::get_huge_method_max(config)));
 }
 
 TEST_F(VirtualMergingTest, Armv7HardLimitSkipsLateMerge) {

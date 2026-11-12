@@ -179,9 +179,16 @@ CallsiteWalkCounts walk_callsites(const Scope& scope,
 HotCallsites::HotCallsites(
     const Scope& scope,
     const baseline_profiles::BaselineProfile& baseline_profile,
+    const InsertOnlyConcurrentMap<DexMethod*, baseline_profiles::Dex2oatFacts>&
+        dex2oat_facts,
     const method_profiles::MethodProfiles& method_profiles,
     const HotCallsiteThresholds& thresholds) {
-  using baseline_profiles::is_compiled;
+  auto compiled = [&](DexMethod* method) {
+    auto it = baseline_profile.methods.find(method);
+    return it != baseline_profile.methods.end() &&
+           baseline_profiles::dex2oat_compiles(it->second,
+                                               dex2oat_facts.at(method));
+  };
 
   auto method_profile_appears = [&](DexMethod* method, float appear_threshold) {
     for (const auto& p : method_profiles.all_interactions()) {
@@ -194,7 +201,7 @@ HotCallsites::HotCallsites(
     return false;
   };
   auto is_sufficiently_hot = [&](cfg::Block* block, DexMethod* callee) {
-    if (!is_compiled(baseline_profile, callee)) {
+    if (!compiled(callee)) {
       return false;
     }
     if (thresholds.hot_block_appear_threshold >= 0 &&
@@ -214,10 +221,7 @@ HotCallsites::HotCallsites(
   const auto counts = walk_callsites(
       scope,
       CallsiteWalk{
-          .caller_compiled =
-              [&](DexMethod* caller) {
-                return is_compiled(baseline_profile, caller);
-              },
+          .caller_compiled = compiled,
           .max_caller_instructions = thresholds.max_caller_instructions,
           .max_caller_registers = thresholds.max_caller_registers,
           .visit_callers_over_register_bound = false,

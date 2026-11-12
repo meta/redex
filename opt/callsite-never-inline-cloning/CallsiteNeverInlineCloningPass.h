@@ -343,6 +343,7 @@ app's config; it is unconditionally disabled by default in `module_core.refig`.
       const Config& config,
       size_t iteration,
       const baseline_profiles::BaselineProfile& baseline_profile,
+      uint32_t huge_method_max,
       const method_profiles::MethodProfiles& method_profiles);
 
  private:

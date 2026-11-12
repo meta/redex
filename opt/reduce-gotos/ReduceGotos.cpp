@@ -71,7 +71,7 @@ constexpr const char* METRIC_INVERTED_CONDITIONAL_BRANCHES =
 constexpr const char* METRIC_NUM_GOTOS_REPLACED_WITH_THROWS =
     "num_gotos_replaced_with_throws";
 
-using baseline_profiles::is_compiled;
+using baseline_profiles::dex2oat_compiles;
 
 } // namespace
 
@@ -638,6 +638,7 @@ void ReduceGotosPass::run_pass(DexStoresVector& stores,
           ? std::make_optional<baseline_profiles::BaselineProfile>(
                 baseline_profiles::get_default_baseline_profile(scope, conf))
           : std::nullopt;
+  const auto huge_method_max = baseline_profiles::get_huge_method_max(conf);
 
   // Sourced from the global rather than a pass option: the same apportionment
   // is needed in shared services with several owners (const-prop's Transform
@@ -649,14 +650,17 @@ void ReduceGotosPass::run_pass(DexStoresVector& stores,
   const bool split_source_block_counts = g_redex->preserve_count_integrity;
 
   Stats stats = walk::parallel::methods<Stats>(
-      scope, [&baseline_profile, split_source_block_counts](DexMethod* method) {
+      scope,
+      [&baseline_profile, huge_method_max,
+       split_source_block_counts](DexMethod* method) {
         auto* const code = method->get_code();
         if ((code == nullptr) || method->rstate.no_optimizations()) {
           return Stats{};
         }
 
         auto for_performance =
-            baseline_profile && is_compiled(*baseline_profile, method);
+            baseline_profile &&
+            dex2oat_compiles(*baseline_profile, method, huge_method_max);
 
         Stats local_stats = ReduceGotosPass::process_code(
             code, for_performance, split_source_block_counts);

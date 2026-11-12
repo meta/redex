@@ -17,6 +17,7 @@
 #include "Debug.h"
 #include "DexClass.h"
 #include "DexUtil.h"
+#include "GlobalConfig.h"
 #include "IRAssembler.h"
 #include "IRCode.h"
 #include "IRList.h"
@@ -811,7 +812,8 @@ TEST_F(ObjectEscapeAnalysisTest, expandedMethodKeepsForcedCompilation) {
   baseline_profiles::BaselineProfile before;
   baseline_profiles::apply_forced_method_flags(
       {type_class(source->get_class())}, &before);
-  ASSERT_TRUE(baseline_profiles::is_compiled(before, source));
+  ASSERT_TRUE(baseline_profiles::dex2oat_compiles(
+      before, source, baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX));
 
   run();
 
@@ -836,7 +838,8 @@ TEST_F(ObjectEscapeAnalysisTest, expandedMethodKeepsForcedCompilation) {
   baseline_profiles::BaselineProfile after;
   baseline_profiles::apply_forced_method_flags(
       {type_class(expanded->get_class())}, &after);
-  EXPECT_TRUE(baseline_profiles::is_compiled(after, expanded));
+  EXPECT_TRUE(baseline_profiles::dex2oat_compiles(
+      after, expanded, baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX));
   EXPECT_FALSE(expanded->rstate.force_startup_in_baseline_profile());
 }
 
@@ -861,7 +864,8 @@ TEST_F(ObjectEscapeAnalysisTest, expandedCtorKeepsForcedHotAndStartup) {
   baseline_profiles::BaselineProfile profile;
   baseline_profiles::apply_forced_method_flags(
       {type_class(expanded->get_class())}, &profile);
-  EXPECT_TRUE(baseline_profiles::is_compiled(profile, expanded));
+  EXPECT_TRUE(baseline_profiles::dex2oat_compiles(
+      profile, expanded, baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX));
   EXPECT_TRUE(expanded->rstate.force_startup_in_baseline_profile());
 }
 

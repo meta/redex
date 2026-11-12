@@ -12,6 +12,7 @@
 #include "BaselineProfile.h"
 #include "Creators.h"
 #include "DexClass.h"
+#include "GlobalConfig.h"
 #include "HotCallsites.h"
 #include "IRAssembler.h"
 #include "IRCode.h"
@@ -93,8 +94,16 @@ TEST_F(HotCallsitesTest, ClassifiesCompiledCallersSites) {
   profile.methods[hot_caller].hot = true;
   profile.methods[cold_caller].hot = true;
   profile.methods[callee].hot = true;
+  InsertOnlyConcurrentMap<DexMethod*, baseline_profiles::Dex2oatFacts>
+      dex2oat_facts;
+  for (auto* m : {hot_caller, cold_caller, callee}) {
+    dex2oat_facts.emplace(
+        m,
+        baseline_profiles::compute_dex2oat_facts(
+            m, baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX));
+  }
   method_profiles::MethodProfiles method_profiles;
-  nia::HotCallsites callsites(scope, profile, method_profiles,
+  nia::HotCallsites callsites(scope, profile, dex2oat_facts, method_profiles,
                               thresholds(/*hot_block_appear_threshold=*/50));
 
   EXPECT_EQ(callsites.hot_callsite_counts.load(callee), 2u);

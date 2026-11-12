@@ -182,6 +182,15 @@ TEST_F(BaselineProfileTest, huge_method_gate_is_strictly_greater_than) {
   // The same method passes once the gate is raised above it.
   EXPECT_EQ(bp::uncompilable_reason(over_limit, /* huge_method_max */ 11),
             bp::UncompilableReason::kNone);
+  // `compute_dex2oat_facts` gives the same answers, with the size it compared.
+  auto at_limit_facts =
+      bp::compute_dex2oat_facts(at_limit, /* huge_method_max */ 10);
+  EXPECT_EQ(at_limit_facts.reason, bp::UncompilableReason::kNone);
+  EXPECT_EQ(at_limit_facts.code_units, bp::dex2oat_code_units(at_limit));
+  auto over_limit_facts =
+      bp::compute_dex2oat_facts(over_limit, /* huge_method_max */ 10);
+  EXPECT_EQ(over_limit_facts.reason, bp::UncompilableReason::kHugeMethod);
+  EXPECT_EQ(over_limit_facts.code_units, bp::dex2oat_code_units(over_limit));
 }
 
 // Pins the constant the gate defaults to. ART's kDefaultHugeMethodThreshold is
@@ -572,4 +581,33 @@ TEST_F(BaselineProfileTest, startup_classes_only_in_profiles_redex_writes) {
       scope(), configs, method_profiles::MethodProfiles{},
       {show(method->get_class())}, bp::DEFAULT_ART_HUGE_METHOD_MAX);
   EXPECT_EQ(profile.methods.count(method), 0);
+}
+
+TEST_F(BaselineProfileTest, dex2oat_compiles_requested_compilable_methods) {
+  auto* hot = create_method("hot", ACC_PUBLIC | ACC_STATIC, 3);
+  auto* startup = create_method("startup", ACC_PUBLIC | ACC_STATIC, 3);
+  auto* post_startup = create_method("post", ACC_PUBLIC | ACC_STATIC, 3);
+  auto* clinit = create_method("<clinit>", ACC_STATIC | ACC_CONSTRUCTOR, 3);
+  auto* huge = create_method("huge", ACC_PUBLIC | ACC_STATIC, 11);
+  auto* absent = create_method("absent", ACC_PUBLIC | ACC_STATIC, 3);
+  bp::BaselineProfile profile;
+  profile.methods[hot].hot = true;
+  profile.methods[startup].startup = true;
+  profile.methods[post_startup].post_startup = true;
+  profile.methods[clinit].hot = true;
+  profile.methods[huge].hot = true;
+  EXPECT_TRUE(bp::dex2oat_compiles(profile, hot, 10));
+  EXPECT_TRUE(bp::dex2oat_compiles(profile, startup, 10));
+  EXPECT_FALSE(bp::dex2oat_compiles(profile, post_startup, 10));
+  EXPECT_FALSE(bp::dex2oat_compiles(profile, clinit, 10));
+  EXPECT_FALSE(bp::dex2oat_compiles(profile, huge, 10));
+  EXPECT_FALSE(bp::dex2oat_compiles(profile, absent, 10));
+  // The same from flags and already computed facts.
+  EXPECT_TRUE(bp::dex2oat_compiles(profile.methods.at(startup),
+                                   bp::compute_dex2oat_facts(startup, 10)));
+  EXPECT_FALSE(
+      bp::dex2oat_compiles(profile.methods.at(post_startup),
+                           bp::compute_dex2oat_facts(post_startup, 10)));
+  EXPECT_FALSE(bp::dex2oat_compiles(profile.methods.at(huge),
+                                    bp::compute_dex2oat_facts(huge, 10)));
 }

@@ -324,7 +324,8 @@ TEST_F(ClassMergingHotColdGroupingTest, DedupTransfersProfilesToSurvivor) {
   auto baseline = baseline_profiles::get_default_baseline_profile(
       build_class_scope(stores), {{"default", {}}}, conf.get_method_profiles(),
       /* coldstart_classes */ {}, baseline_profiles::get_huge_method_max(conf));
-  EXPECT_TRUE(baseline_profiles::is_compiled(baseline, a_value));
+  EXPECT_TRUE(baseline_profiles::dex2oat_compiles(
+      baseline, a_value, baseline_profiles::get_huge_method_max(conf)));
 }
 
 TEST_F(ClassMergingHotColdGroupingTest, NoHotMethodIsCold) {

@@ -127,7 +127,8 @@ TEST_F(SingleImplTest, MovedDefaultMethodKeepsProfile) {
       build_class_scope(stores), profile_configs, config.get_method_profiles(),
       /* coldstart_classes */ {},
       baseline_profiles::get_huge_method_max(config));
-  ASSERT_TRUE(baseline_profiles::is_compiled(before, source));
+  ASSERT_TRUE(baseline_profiles::dex2oat_compiles(
+      before, source, baseline_profiles::get_huge_method_max(config)));
   SingleImplPass pass;
   PassManager manager({&pass}, config);
   manager.run_passes(stores, config);
@@ -142,5 +143,6 @@ TEST_F(SingleImplTest, MovedDefaultMethodKeepsProfile) {
       build_class_scope(stores), profile_configs, config.get_method_profiles(),
       /* coldstart_classes */ {},
       baseline_profiles::get_huge_method_max(config));
-  EXPECT_TRUE(baseline_profiles::is_compiled(after, target));
+  EXPECT_TRUE(baseline_profiles::dex2oat_compiles(
+      after, target, baseline_profiles::get_huge_method_max(config)));
 }

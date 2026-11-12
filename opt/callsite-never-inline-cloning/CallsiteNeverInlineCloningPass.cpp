@@ -61,6 +61,10 @@ struct CalleeFacts {
   bool non_renamable_class;
   bool already_never_inline;
   bool blocklisted;
+  // Whether dex2oat compiles the method. Computed here, by the thread that owns
+  // the method, because `dex2oat_compiles` may simplify the method's CFG, and
+  // the caller walk reads callees' CFGs.
+  bool compiled;
 };
 
 // A shape-eligible candidate, carrying the profitability-model inputs and
@@ -122,8 +126,8 @@ std::string_view blocklist_name_of(const DexClass* cls) {
 using Config = CallsiteNeverInlineCloningPass::Config;
 using Stats = CallsiteNeverInlineCloningPass::Stats;
 
-// Everything computed about callees in one dedicated, read-only pass over
-// `scope`, before any call-site classification runs.
+// Everything computed about callees in one dedicated pass over `scope`, before
+// any call-site classification runs.
 struct CalleeContext {
   InsertOnlyConcurrentMap<DexMethod*, CalleeFacts> facts;
   // An invoke-virtual's resolved callee is an exact-dispatch target if it is
@@ -137,7 +141,7 @@ struct CalleeContext {
 };
 
 // Builds the method-override graph once for the whole run, and precomputes, in
-// a dedicated read-only walk, the per-callee facts
+// a dedicated walk, the per-callee facts
 // `collect_callsite_profiles`'s caller walk needs -- so that walk (which
 // runs one thread per class, all concurrently) never has to dereference some
 // OTHER method's CFG, or repeat a per-callee check, to get them.
@@ -146,7 +150,10 @@ struct CalleeContext {
 // built: `PassManager` establishes that invariant for every real pass run,
 // and `clone_mixed_hotness_callees`'s own doc comment states the same
 // requirement for direct (e.g. test) callers.
-CalleeContext collect_callee_facts(const Scope& scope, const Config& config) {
+CalleeContext collect_callee_facts(const Scope& scope,
+                                   const Config& config,
+                                   const BaselineProfile& baseline_profile,
+                                   uint32_t huge_method_max) {
   CalleeContext ctx;
 
   auto mog = method_override_graph::build_graph(scope);
@@ -155,6 +162,7 @@ CalleeContext collect_callee_facts(const Scope& scope, const Config& config) {
 
   walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {
     redex_assert(code.cfg_built());
+    bool compiled = dex2oat_compiles(baseline_profile, method, huge_method_max);
     bool has_catch = false;
     for (auto* block : code.cfg().blocks()) {
       if (block->is_catch()) {
@@ -182,7 +190,7 @@ CalleeContext collect_callee_facts(const Scope& scope, const Config& config) {
             !can_rename(type_class(method->get_class())),
             has_anno(method,
                      type::dalvik_annotation_optimization_NeverInline()),
-            blocklisted});
+            blocklisted, compiled});
   });
 
   return ctx;
@@ -215,13 +223,14 @@ struct CallsiteProfile {
 CallsiteProfile collect_callsite_profiles(
     const Scope& scope,
     const Config& config,
-    const BaselineProfile& baseline_profile,
     const method_profiles::MethodProfiles& method_profiles,
     const CalleeContext& callee_context) {
   CallsiteProfile profile;
 
-  auto is_sufficiently_hot = [&](cfg::Block* block, DexMethod* callee) {
-    if (!is_compiled(baseline_profile, callee)) {
+  auto is_sufficiently_hot = [&](cfg::Block* block,
+                                 DexMethod* callee,
+                                 const CalleeFacts& callee_facts) {
+    if (!callee_facts.compiled) {
       return false;
     }
     if (config.hot_block_appear_threshold >= 0 &&
@@ -259,7 +268,7 @@ CallsiteProfile collect_callsite_profiles(
             local_stats.callers_no_optimizations++;
             return;
           }
-          if (!is_compiled(baseline_profile, caller)) {
+          if (!callee_context.facts.at(caller).compiled) {
             local_stats.callers_not_compiled++;
             return;
           }
@@ -336,7 +345,7 @@ CallsiteProfile collect_callsite_profiles(
                   local_stats.invokes_callsite_and_callee_both_have_catch++;
                   return;
                 }
-                if (is_sufficiently_hot(block, callee)) {
+                if (is_sufficiently_hot(block, callee, *facts)) {
                   profile.hot_callsite_counts.fetch_add(callee, 1);
                 } else {
                   profile.cold_callsites.update(
@@ -681,10 +690,12 @@ CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
     const Config& config,
     size_t iteration,
     const BaselineProfile& baseline_profile,
+    uint32_t huge_method_max,
     const method_profiles::MethodProfiles& method_profiles) {
-  auto callee_context = collect_callee_facts(scope, config);
-  auto callsite_profile = collect_callsite_profiles(
-      scope, config, baseline_profile, method_profiles, callee_context);
+  auto callee_context =
+      collect_callee_facts(scope, config, baseline_profile, huge_method_max);
+  auto callsite_profile =
+      collect_callsite_profiles(scope, config, method_profiles, callee_context);
   auto ranked_candidates = rank_and_cap_candidates(
       config, iteration, callee_context, callsite_profile);
 
@@ -713,9 +724,9 @@ void CallsiteNeverInlineCloningPass::run_pass(DexStoresVector& stores,
   auto scope = build_class_scope(stores);
   auto baseline_profile =
       baseline_profiles::get_default_baseline_profile(scope, conf);
-  auto stats =
-      clone_mixed_hotness_callees(scope, m_config, m_iteration,
-                                  baseline_profile, conf.get_method_profiles());
+  auto stats = clone_mixed_hotness_callees(
+      scope, m_config, m_iteration, baseline_profile,
+      baseline_profiles::get_huge_method_max(conf), conf.get_method_profiles());
   m_iteration++;
 
   TRACE(CNIC, 1, "Population (mixed-hotness, shape-eligible): %zu",

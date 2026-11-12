@@ -46,12 +46,6 @@ struct BaselineProfile {
   void transitively_close_classes(const Scope& scope);
 };
 
-// Only "hot" methods are AOT-compiled by dex2oat; a <clinit> never is.
-bool is_compiled(const DexMethod* method, const MethodFlags& flags);
-
-bool is_compiled(const BaselineProfile& baseline_profile,
-                 const DexMethod* method);
-
 // Applies every method's forced H/S bits to this materialized profile,
 // inserting entries as needed and preserving other flags. These bits encode a
 // single whole-program structural decision and therefore are not conditional
@@ -116,12 +110,37 @@ uint32_t dex2oat_code_units_before_unreachable_lowering(DexMethod* method);
 UncompilableReason uncompilable_reason(DexMethod* method,
                                        uint32_t huge_method_max);
 
+// A method's `dex2oat_code_units` and `uncompilable_reason`, for callers that
+// need both. Computing the size may simplify the method's CFG, so never compute
+// this for a method another thread is reading.
+struct Dex2oatFacts {
+  uint32_t code_units{0};
+  UncompilableReason reason{UncompilableReason::kNone};
+};
+
+Dex2oatFacts compute_dex2oat_facts(DexMethod* method, uint32_t huge_method_max);
+
 // Whether the profile flags ask dex2oat to compile this entry:
 //   IsHotMethod() || (!IsLowMemoryMode() && IsStartupMethod())
 // (compiler_driver.cc ShouldCompileBasedOnProfile, android17-release). We model
 // the non-low-memory device, which is what these profiles target; on a low-RAM
 // device the startup term drops out and the true count is lower.
 bool flags_request_compilation(const MethodFlags& flags);
+
+// Whether dex2oat compiles `method` with `baseline_profile`, as modelled by
+// `flags_request_compilation` and `uncompilable_reason` above, with their
+// caveats: the profile flags request it, and none of the modelled gates keeps
+// dex2oat from compiling the method.
+//
+// The size gate sees the method's code as it is now, so the answer is final
+// only once no later pass changes the method. Computing the size may simplify
+// the method's CFG, so never ask about a method another thread is reading.
+bool dex2oat_compiles(const BaselineProfile& baseline_profile,
+                      DexMethod* method,
+                      uint32_t huge_method_max);
+
+// The same for a method whose profile entry has `flags`.
+bool dex2oat_compiles(const MethodFlags& flags, const Dex2oatFacts& facts);
 
 struct TopOffSelection {
   // Which methods to add. The SET is deterministic; the order within it is

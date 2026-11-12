@@ -27,10 +27,6 @@
 
 namespace baseline_profiles {
 
-bool is_compiled(const DexMethod* method, const MethodFlags& flags) {
-  return flags.hot && !method::is_clinit(method);
-}
-
 uint32_t get_huge_method_max(const ConfigFiles& conf) {
   const auto& global_config = conf.get_global_config();
   // A config whose global section was never parsed has no "dex2oat" entry;
@@ -79,8 +75,10 @@ uint32_t dex2oat_code_units_before_unreachable_lowering(DexMethod* method) {
          lowered_unreachable_extra_code_units() * unreachables;
 }
 
-UncompilableReason uncompilable_reason(DexMethod* method,
-                                       uint32_t huge_method_max) {
+namespace {
+
+// Every gate of `uncompilable_reason` except the size gate.
+UncompilableReason size_independent_uncompilable_reason(DexMethod* method) {
   if (method->get_code() == nullptr || is_abstract(method) ||
       is_native(method)) {
     return UncompilableReason::kNoCode;
@@ -95,10 +93,30 @@ UncompilableReason uncompilable_reason(DexMethod* method,
   if (has_anno(method, type::dalvik_annotation_optimization_NeverCompile())) {
     return UncompilableReason::kNeverCompile;
   }
-  if (dex2oat_code_units(method) > huge_method_max) {
+  return UncompilableReason::kNone;
+}
+
+} // namespace
+
+UncompilableReason uncompilable_reason(DexMethod* method,
+                                       uint32_t huge_method_max) {
+  auto reason = size_independent_uncompilable_reason(method);
+  if (reason == UncompilableReason::kNone &&
+      dex2oat_code_units(method) > huge_method_max) {
     return UncompilableReason::kHugeMethod;
   }
-  return UncompilableReason::kNone;
+  return reason;
+}
+
+Dex2oatFacts compute_dex2oat_facts(DexMethod* method,
+                                   uint32_t huge_method_max) {
+  Dex2oatFacts facts{dex2oat_code_units(method),
+                     size_independent_uncompilable_reason(method)};
+  if (facts.reason == UncompilableReason::kNone &&
+      facts.code_units > huge_method_max) {
+    facts.reason = UncompilableReason::kHugeMethod;
+  }
+  return facts;
 }
 
 bool flags_request_compilation(const MethodFlags& flags) {
@@ -238,11 +256,21 @@ TopOffSelection select_smallest_topoff_methods(
   return selection;
 }
 
-bool is_compiled(const BaselineProfile& baseline_profile,
-                 const DexMethod* method) {
+bool dex2oat_compiles(const BaselineProfile& baseline_profile,
+                      DexMethod* method,
+                      uint32_t huge_method_max) {
   auto it = baseline_profile.methods.find(method);
+  // Testing the flags first skips the size gate for entries that do not ask
+  // for compilation.
   return it != baseline_profile.methods.end() &&
-         is_compiled(method, it->second);
+         flags_request_compilation(it->second) &&
+         uncompilable_reason(method, huge_method_max) ==
+             UncompilableReason::kNone;
+}
+
+bool dex2oat_compiles(const MethodFlags& flags, const Dex2oatFacts& facts) {
+  return flags_request_compilation(flags) &&
+         facts.reason == UncompilableReason::kNone;
 }
 
 size_t apply_forced_method_flags(const Scope& scope, BaselineProfile* profile) {

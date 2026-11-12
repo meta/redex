@@ -224,6 +224,28 @@ void RareSuffixMethodSplittingPass::run_pass(DexStoresVector& stores,
       baseline_profiles::get_baseline_profiles(
           scope, conf, /* method_refs_without_def */ nullptr,
           /* apply_forced_flags */ false);
+  // What dex2oat's gates say about every method of either profile, computed
+  // once per method, in one parallel walk, because computing the size can
+  // simplify the method's CFG, which must not happen while the call-site walks
+  // below read that CFG from another thread.
+  const auto huge_method_max = baseline_profiles::get_huge_method_max(conf);
+  InsertOnlyConcurrentMap<DexMethod*, baseline_profiles::Dex2oatFacts>
+      dex2oat_facts;
+  walk::parallel::methods(scope, [&](DexMethod* method) {
+    if (baseline_profile.methods.count(method) == 0 &&
+        writer_profile.methods.count(method) == 0) {
+      return;
+    }
+    dex2oat_facts.emplace(method, baseline_profiles::compute_dex2oat_facts(
+                                      method, huge_method_max));
+  });
+  const auto compiled = [&](const baseline_profiles::BaselineProfile& profile,
+                            DexMethod* method) {
+    auto it = profile.methods.find(method);
+    return it != profile.methods.end() &&
+           baseline_profiles::dex2oat_compiles(it->second,
+                                               dex2oat_facts.at(method));
+  };
   const never_inline_analysis::HotCallsiteThresholds thresholds{
       .hot_block_appear_threshold = writer.hot_block_appear_threshold,
       .hot_method_appear_threshold = writer.hot_method_appear_threshold,
@@ -231,7 +253,7 @@ void RareSuffixMethodSplittingPass::run_pass(DexStoresVector& stores,
       .max_caller_registers = std::numeric_limits<size_t>::max(),
   };
   const never_inline_analysis::HotCallsites callsites(
-      scope, writer_profile, method_profiles, thresholds);
+      scope, writer_profile, dex2oat_facts, method_profiles, thresholds);
 
   // ArtProfileWriterPass's never-compile selection drops methods from the
   // default profile it writes, when that profile is the final one, and
@@ -264,7 +286,7 @@ void RareSuffixMethodSplittingPass::run_pass(DexStoresVector& stores,
             .caller_compiled =
                 [&](DexMethod* caller) {
                   return never_compiled.count(caller) != 0u &&
-                         baseline_profiles::is_compiled(writer_profile, caller);
+                         compiled(writer_profile, caller);
                 },
             .max_caller_instructions = thresholds.max_caller_instructions,
             .max_caller_registers = thresholds.max_caller_registers,
@@ -294,8 +316,7 @@ void RareSuffixMethodSplittingPass::run_pass(DexStoresVector& stores,
           const never_inline_analysis::CalleeShape& shape) -> size_t {
     auto* method = const_cast<DexMethod*>(m);
     const size_t own =
-        baseline_profiles::is_compiled(baseline_profile, method) &&
-                never_compiled.count(method) == 0u
+        compiled(baseline_profile, method) && never_compiled.count(method) == 0u
             ? 1
             : 0;
     if (writer.attach_annotations &&

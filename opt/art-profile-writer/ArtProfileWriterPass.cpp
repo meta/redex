@@ -49,7 +49,6 @@ const std::string STORE_FENCE_HELPER_NAME = "Lredex/$StoreFenceHelper;";
 // libredex/BaselineProfile.h.
 using baseline_profiles::dex2oat_code_units;
 using baseline_profiles::flags_request_compilation;
-using baseline_profiles::uncompilable_reason;
 using baseline_profiles::UncompilableReason;
 
 // The HRF spelling the baseline-profile post-processor expects:
@@ -61,14 +60,14 @@ std::string hrf_descriptor(const DexMethod* method) {
   return descriptor;
 }
 
-// NOTE: `baseline_profiles::is_compiled` is a deliberate under-approximation,
-// kept because the never_inline analysis has been tuned against it. It
-// ignores the startup flag and the no-code / @NeverCompile gates. For
-// profile-health reporting use `uncompilable_reason` and
-// `flags_request_compilation` above, which model dex2oat exactly; the gap
-// between the two is reported as
-// `profile_<name>_compiled_legacy_overcount`.
-using baseline_profiles::is_compiled;
+using baseline_profiles::dex2oat_compiles;
+
+// What dex2oat's gates say about each profiled method. The pass computes this
+// once per method, in one parallel walk, because computing the size can
+// simplify the method's CFG, which must not happen while another thread reads
+// that CFG, as the never-inline analysis's caller walk does with its callees.
+using Dex2oatFactsMap =
+    InsertOnlyConcurrentMap<DexMethod*, baseline_profiles::Dex2oatFacts>;
 
 // Eligibility bounds for the never-inline analysis. Each shadows a threshold
 // inside ART's own inliner, and each default is a deliberate margin over ART's
@@ -94,6 +93,7 @@ void never_inline(bool attach_annotations,
                   const MinHotCallsitesThresholds& min_hot_callsites_thresholds,
                   const Scope& scope,
                   const baseline_profiles::BaselineProfile& baseline_profile,
+                  const Dex2oatFactsMap& dex2oat_facts,
                   PassManager& mgr,
                   const method_profiles::MethodProfiles& method_profiles) {
   DexAnnotationSet anno_set;
@@ -102,7 +102,7 @@ void never_inline(bool attach_annotations,
       DexAnnotationVisibility::DAV_BUILD));
 
   never_inline_analysis::HotCallsites hot_callsites(
-      scope, baseline_profile, method_profiles,
+      scope, baseline_profile, dex2oat_facts, method_profiles,
       never_inline_analysis::HotCallsiteThresholds{
           .hot_block_appear_threshold = hot_block_appear_threshold,
           .hot_method_appear_threshold = hot_method_appear_threshold,
@@ -405,6 +405,8 @@ struct WriteMethodsConfig {
   // Padding with one of them would reinstate what that analysis just decided
   // against, so they are barred from the candidate pool.
   const UnorderedSet<const DexMethod*>* never_compiled{nullptr};
+  // Required: what dex2oat's gates say about every method of the profile.
+  const Dex2oatFactsMap* dex2oat_facts{nullptr};
 };
 
 // What write_classes() actually emitted, so the caller can report it.
@@ -587,6 +589,7 @@ MethodWriteStats write_methods(
   MethodWriteStats stats;
   always_assert(config.root_types != nullptr);
   const auto& root_types = *config.root_types;
+  always_assert(config.dex2oat_facts != nullptr);
 
   // Walking the root store rather than the whole scope is what keeps module
   // entries out of the file: the binary converter resolves the profile against
@@ -636,8 +639,7 @@ MethodWriteStats write_methods(
       flags_ss << flags;
       ++stats.by_flags[flags_ss.str()];
 
-      size_t code_units = dex2oat_code_units(method);
-      auto reason = uncompilable_reason(method, config.huge_method_max);
+      const auto& [code_units, reason] = config.dex2oat_facts->at(method);
       bool wanted = flags_request_compilation(flags);
 
       switch (reason) {
@@ -905,13 +907,32 @@ void ArtProfileWriterPass::run_pass(DexStoresVector& stores,
     }
   }
 
+  Dex2oatFactsMap dex2oat_facts;
+  auto in_some_profile = [&](const DexMethod* method) {
+    auto in = [method](const baseline_profiles::BaselineProfile& profile) {
+      return profile.methods.count(method) != 0;
+    };
+    return in(manual_profile) ||
+           (never_inline_profile && in(*never_inline_profile)) ||
+           unordered_any_of(baseline_profiles,
+                            [&](const auto& p) { return in(p.second); });
+  };
+  walk::parallel::methods(scope, [&](DexMethod* method) {
+    if (!in_some_profile(method)) {
+      return;
+    }
+    dex2oat_facts.emplace(method, baseline_profiles::compute_dex2oat_facts(
+                                      method, huge_method_max));
+  });
+
   // Reported per profile below, in gather_metrics.
   UnorderedMap<std::string, MethodWriteStats> method_write_stats;
   UnorderedMap<std::string, ClassWriteStats> class_write_stats;
 
   WriteMethodsConfig write_config{.huge_method_max = huge_method_max,
                                   .root_types = &root_types,
-                                  .never_compiled = &never_compiled};
+                                  .never_compiled = &never_compiled,
+                                  .dex2oat_facts = &dex2oat_facts};
   for (const auto& entry : UnorderedIterable(baseline_profiles)) {
     const auto& bp_name = entry.first;
     const auto& bp = entry.second;
@@ -966,7 +987,7 @@ void ArtProfileWriterPass::run_pass(DexStoresVector& stores,
       method_classes.insert(method->get_class());
       auto ecu = code.estimate_code_units();
       code_units += ecu;
-      if (is_compiled(method, it->second)) {
+      if (dex2oat_compiles(it->second, dex2oat_facts.at(method))) {
         compiled_methods++;
         size_t cold = 0;
         std::array<size_t, APPEAR100_BUCKETS + 1> hot_by_appear100{0};
@@ -1206,13 +1227,6 @@ void ArtProfileWriterPass::run_pass(DexStoresVector& stores,
         mgr.set_metric(prefix + "entries_flags_" + suffix,
                        it == s.by_flags.end() ? 0 : it->second);
       }
-
-      // How far the legacy is_compiled() predicate is from modelling dex2oat.
-      // Non-zero means the never_inline analysis is working off a wrong idea
-      // of what gets compiled.
-      int64_t legacy = static_cast<int64_t>(compiled_methods.load());
-      mgr.set_metric(prefix + "compiled_legacy_overcount",
-                     legacy - static_cast<int64_t>(upstream_compilable));
     }
 
     auto cws_it = class_write_stats.find(bp_name);
@@ -1276,7 +1290,7 @@ void ArtProfileWriterPass::run_pass(DexStoresVector& stores,
           .min_hot_callsites = m_never_inline_min_hot_callsites,
           .min_code_units = m_never_inline_min_hot_callsites_min_code_units,
       },
-      scope, *never_inline_profile, mgr, method_profiles);
+      scope, *never_inline_profile, dex2oat_facts, mgr, method_profiles);
 }
 
 static ArtProfileWriterPass s_pass;

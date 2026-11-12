@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "ConcurrentContainers.h"
+#include "DeterministicContainers.h"
 #include "DexStore.h"
 #include "MethodClosures.h"
 #include "MethodSplittingConfig.h"
@@ -96,8 +97,7 @@ struct SplittableClosure {
     if (switch_block != nullptr) {
       return switch_block->id();
     }
-    always_assert(closures.size() == 1);
-    return closures.front()->target->id();
+    return only(closures)->target->id();
   }
 
   // Head-block ids in `closures` order.

@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "Debug.h"
+#include "DeterministicContainers.h"
 #include "DexDefs.h"
 #include "DexLoader.h"
 #include "DexOutput.h"
@@ -74,8 +75,7 @@ class IODITest : public ::testing::Test {
     Json::Value conf_obj = Json::nullValue;
     ConfigFiles dummy_cfg(conf_obj);
 
-    always_assert(stores.size() == 1);
-    auto& store = stores[0];
+    auto& store = only(stores);
     auto& dexen = store.get_dexen();
     always_assert(dexen.size() == 1);
 

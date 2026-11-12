@@ -14,6 +14,7 @@
 #include "ConstantPropagationAnalysis.h"
 #include "ConstantPropagationWholeProgramState.h"
 #include "Debug.h"
+#include "DeterministicContainers.h"
 #include "Lazy.h"
 #include "LiveRange.h"
 #include "RedexContext.h"
@@ -94,9 +95,8 @@ extract_object_with_attr_value(const ConstantValue& value) {
   if (obj_or_none != std::nullopt &&
       obj_or_none->get_constant() != std::nullopt) {
     auto object = *obj_or_none->get_constant();
-    always_assert(object.attributes.size() == 1);
     auto signed_value =
-        object.attributes.front().value.maybe_get<SignedConstantDomain>();
+        only(object.attributes).value.maybe_get<SignedConstantDomain>();
     if (signed_value && signed_value.value().get_constant() != std::nullopt) {
       auto primitive_value = *signed_value.value().get_constant();
       return std::pair<const DexType*, int64_t>(object.type, primitive_value);

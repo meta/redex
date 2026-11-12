@@ -19,6 +19,7 @@
 #include "ClosureAggregator.h"
 #include "ConcurrentContainers.h"
 #include "Debug.h"
+#include "DeterministicContainers.h"
 #include "InstructionLowering.h"
 #include "Lazy.h"
 #include "Liveness.h"
@@ -101,8 +102,7 @@ struct ScoredClosure {
     if (switch_block != nullptr) {
       return switch_block->id();
     }
-    always_assert(closures.size() == 1);
-    return closures.front()->target->id();
+    return only(closures)->target->id();
   }
 };
 
@@ -726,8 +726,7 @@ std::optional<CandidateFate> evaluate_candidate(ScoredClosure& sc,
     first_insn = sc.switch_block->get_last_insn()->insn;
     live_in.insert(first_insn->src(0));
   } else {
-    always_assert(sc.closures.size() == 1);
-    const auto* c = sc.closures.front();
+    const auto* c = only(sc.closures);
     auto it = c->target->get_first_insn();
     if (it == c->target->end()) {
       return CandidateFate::Evaluation_EmptyHead;

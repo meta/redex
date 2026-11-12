@@ -521,9 +521,7 @@ void ResourceValueMergingPass::apply_additions_to_style_graph(
 
     // There should only be one style resource per resource ID based on the fact
     // that optimizations only occur on unambiguous styles.
-    always_assert(style_resources.size() == 1);
-
-    auto& style_resource = style_resources[0];
+    auto& style_resource = only(style_resources);
     for (const auto& [attr_id, value] : UnorderedIterable(attr_map)) {
       style_resource.attributes.insert({attr_id, value});
     }
@@ -540,9 +538,7 @@ void ResourceValueMergingPass::apply_removals_to_style_graph(
 
     auto& style_resources = style_it->second;
 
-    always_assert(style_resources.size() == 1);
-
-    auto& style_resource = style_resources[0];
+    auto& style_resource = only(style_resources);
 
     for (const auto& attr_id : UnorderedIterable(attr_ids)) {
       auto attr_it = style_resource.attributes.find(attr_id);

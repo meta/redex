@@ -12,6 +12,7 @@
 #include "CFGMutation.h"
 #include "ControlFlow.h"
 #include "Debug.h"
+#include "DeterministicContainers.h"
 #include "DexUtil.h"
 #include "GraphUtil.h"
 #include "IRCode.h"
@@ -358,8 +359,7 @@ void LocalDce::normalize_new_instances(cfg::ControlFlowGraph& cfg) {
         // base constructor invocation
         continue;
       }
-      always_assert(defs.size() == 1);
-      IRInstruction* old_new_instance_insn = *defs.elements().begin();
+      IRInstruction* old_new_instance_insn = only(defs.elements());
       auto* type = old_new_instance_insn->get_type();
       always_assert(type::is_subclass(init_declaring_type, type));
       if (last_insn != end &&

@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "DeterministicContainers.h"
 #include "DexAnnotation.h"
 #include "DexClass.h"
 
@@ -82,8 +83,7 @@ class LevelChecker {
         if (elems.empty()) {
           return -1;
         }
-        always_assert(elems.size() == 1);
-        const DexAnnotationElement& api_elem = elems[0];
+        const DexAnnotationElement& api_elem = only(elems);
         always_assert(api_elem.string == DexString::get_string("api") ||
                       api_elem.string == DexString::get_string("value"));
         const auto& value = api_elem.encoded_value;

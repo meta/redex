@@ -1282,9 +1282,9 @@ class RootMethodReducer {
         auto* callee = resolve_invoke_inlinable_callee(
             m_method_override_graph, uses_insn, m_method, m_callees_cache,
             [&_src_indices = src_indices]() {
-              always_assert(_src_indices.size() == 1);
-              always_assert(unordered_any(_src_indices)->first == 0);
-              return unordered_any(_src_indices)->second;
+              const auto& src_index_and_type = only(_src_indices);
+              always_assert(src_index_and_type.first == 0);
+              return src_index_and_type.second;
             });
         always_assert(callee);
         always_assert(callee->is_concrete());
@@ -1301,8 +1301,7 @@ class RootMethodReducer {
                 ->invokes_not_inlinable_callee_expansion_needs_receiver_cast++;
             return false;
           }
-          always_assert(src_indices.size() == 1);
-          invokes_to_expand.emplace(uses_insn, *unordered_any(src_indices));
+          invokes_to_expand.emplace(uses_insn, only(src_indices));
           continue;
         }
 

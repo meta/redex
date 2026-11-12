@@ -1641,9 +1641,8 @@ class EnumTransformer final {
                            DexMethodRef* kt_enum_entries_factory) {
     auto* code = clinit->get_code();
     auto ctors = enum_cls->get_ctors();
-    always_assert(ctors.size() == 1);
+    auto* ctor = only(ctors);
     side_effects::InvokeToSummaryMap summaries;
-    auto* ctor = ctors[0];
     auto& cfg = code->cfg();
     auto ii = InstructionIterable(cfg);
     cfg::CFGMutation m(cfg);

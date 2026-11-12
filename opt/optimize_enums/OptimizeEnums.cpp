@@ -312,8 +312,7 @@ DexMethod* get_java_enum_ctor() {
   DexClass* java_enum_cls = type_class(java_enum_type);
   const std::vector<DexMethod*>& java_enum_ctors = java_enum_cls->get_ctors();
 
-  always_assert(java_enum_ctors.size() == 1);
-  return java_enum_ctors.at(0);
+  return only(java_enum_ctors);
 }
 
 class OptimizeEnums {

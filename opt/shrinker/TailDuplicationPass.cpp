@@ -13,6 +13,7 @@
 #include "ConfigFiles.h"
 #include "Debug.h"
 #include "DedupBlocks.h"
+#include "DeterministicContainers.h"
 #include "DexAssessments.h"
 #include "DexUtil.h"
 #include "InitClassesWithSideEffects.h"
@@ -89,8 +90,7 @@ bool make_hot_tail_unique(cfg::ControlFlowGraph& cfg,
     }
   }
   cfg.set_edge_target(succ, target_copy);
-  always_assert(target_copy->preds().size() == 1);
-  always_assert(target_copy->preds().front() == succ);
+  always_assert(only(target_copy->preds()) == succ);
   always_assert(target->preds().size() + 1 == target_preds);
   return true;
 }

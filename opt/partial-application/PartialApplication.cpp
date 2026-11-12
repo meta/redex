@@ -161,12 +161,11 @@ DexField* try_get_enum_utils_f_field(EnumUtilsCache& cache,
                                      const ObjectWithImmutAttr& object) {
   // This matches EnumUtilsFieldAnalyzer::analyze_sget.
   always_assert(object.jvm_cached_singleton);
-  always_assert(object.attributes.size() == 1);
+  const auto& attribute = only(object.attributes);
   if (object.type != type::java_lang_Integer()) {
     return nullptr;
   }
-  const auto& signed_value =
-      object.attributes.front().value.get<SignedConstantDomain>();
+  const auto& signed_value = attribute.value.get<SignedConstantDomain>();
   auto c = signed_value.get_constant();
   always_assert(c);
   return *cache
@@ -345,9 +344,8 @@ bool filter(const RefChecker& ref_checker,
             try_get_enum_utils_f_field(enum_utils_cache, *object)) {
       return ref_checker.check_field(field);
     } else {
-      always_assert(object->attributes.size() == 1);
       const auto& signed_value2 =
-          object->attributes.front().value.maybe_get<SignedConstantDomain>();
+          only(object->attributes).value.maybe_get<SignedConstantDomain>();
       always_assert(signed_value2);
       return filter(ref_checker, enum_utils_cache, *signed_value2);
     }
@@ -458,9 +456,8 @@ class CalleeInvocationSelector {
         return static_cast<int16_t>(m_cost_config.const_obj_or_none_cost_1);
       } else {
         always_assert(object->jvm_cached_singleton);
-        always_assert(object->attributes.size() == 1);
         const auto& signed_value2 =
-            object->attributes.front().value.maybe_get<SignedConstantDomain>();
+            only(object->attributes).value.maybe_get<SignedConstantDomain>();
         always_assert(signed_value2);
         return static_cast<int16_t>(m_cost_config.const_obj_or_none_cost_2 +
                                     const_value_cost(*signed_value2));
@@ -1059,12 +1056,12 @@ void push_callee_arg(EnumUtilsCache& enum_utils_cache,
       callee_args->push_back(tmp);
     } else {
       always_assert(object->jvm_cached_singleton);
-      always_assert(object->attributes.size() == 1);
+      const auto& attribute = only(object->attributes);
       auto* valueOf = type::get_value_of_method_for_type(object->type);
       const auto* valueOf_arg_type = valueOf->get_proto()->get_args()->at(0);
       auto tmp = method_creator->make_local(valueOf_arg_type);
       const auto& signed_value2 =
-          object->attributes.front().value.maybe_get<SignedConstantDomain>();
+          attribute.value.maybe_get<SignedConstantDomain>();
       always_assert(signed_value2);
       auto c = signed_value2->get_constant();
       always_assert(c);

@@ -1893,8 +1893,7 @@ bool EnumUtilsFieldAnalyzer::analyze_sget(
     return false;
   }
   const auto& initializers = it->second;
-  always_assert(initializers.size() == 1);
-  const auto& initializer = initializers.front();
+  const auto& initializer = only(initializers);
   always_assert(initializer->insn_src_id_of_attr == 0);
 
   const auto name = field->str();

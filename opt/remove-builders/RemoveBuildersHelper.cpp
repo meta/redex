@@ -12,6 +12,7 @@
 #include "ControlFlow.h"
 #include "Dataflow.h"
 #include "Debug.h"
+#include "DeterministicContainers.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
 #include "Show.h"
@@ -545,8 +546,7 @@ bool remove_builder(DexMethod* method, DexClass* builder) {
               return false;
             }
 
-            always_assert(iput_insns.size() == 1);
-            const IRInstruction* iput_insn = *unordered_any(iput_insns);
+            const IRInstruction* iput_insn = only(iput_insns);
 
             // Check if we already have a value for it.
             if (move_replacements.find(iput_insn) != move_replacements.end()) {

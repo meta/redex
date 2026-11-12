@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "Debug.h"
+#include "DeterministicContainers.h"
 #include "Show.h"
 #include "Trace.h"
 
@@ -28,8 +29,7 @@ const DexEncodedValue* parse_anno_value_helper(const DexAnnotationSet* anno_set,
     TRACE(ANNO, 9, "   anno %s", SHOW(anno));
     const auto& elems = anno->anno_elems();
     if (elem_str.empty()) {
-      always_assert(elems.size() == 1);
-      const auto& elem = elems[0];
+      const auto& elem = only(elems);
       always_assert(elem.encoded_value->evtype() == type);
       auto val = elem.encoded_value->value();
       TRACE(ANNO, 9, " parsed annotation value: %" PRIu64, val);

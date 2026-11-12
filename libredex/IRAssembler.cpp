@@ -139,8 +139,7 @@ s_expr to_s_expr(const IRInstruction* insn, const LabelRefs& label_refs) {
       s_exprs.emplace_back(label_exprs);
     } else {
       // (if-eqz v0 :a)
-      always_assert(label_strs.size() == 1);
-      s_exprs.emplace_back(label_strs[0]);
+      s_exprs.emplace_back(only(label_strs));
     }
   }
   return s_expr(s_exprs);

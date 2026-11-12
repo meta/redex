@@ -13,6 +13,7 @@
 #include "AnnotationSignatureParser.h"
 #include "BinarySerialization.h"
 #include "Debug.h"
+#include "DeterministicContainers.h"
 #include "DexAnnotation.h"
 #include "DexUtil.h"
 #include "MethodUtil.h"
@@ -789,8 +790,7 @@ MethodReferencesGatherer::get_returning_dependency(
     }
   } else if (opcode::is_invoke_super(op) &&
              !refs->invoke_super_targets.empty()) {
-    always_assert(refs->invoke_super_targets.size() == 1);
-    const auto* super_method = *unordered_any(refs->invoke_super_targets);
+    const auto* super_method = only(refs->invoke_super_targets);
     always_assert(super_method->is_virtual());
     always_assert(!super_method->is_external());
     if (!is_abstract(super_method) && !is_method_returning(super_method)) {

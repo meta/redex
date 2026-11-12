@@ -15,6 +15,7 @@
 #include "ClassHierarchy.h"
 #include "CppUtil.h"
 #include "Debug.h"
+#include "DeterministicContainers.h"
 #include "RedexContext.h"
 #include "Show.h"
 #include "Timer.h"
@@ -150,8 +151,7 @@ class GraphBuilder {
         if (implemented_set.empty()) {
           continue;
         }
-        always_assert(implemented_set.size() == 1);
-        const auto* implementation = *implemented_set.begin();
+        const auto* implementation = only(implemented_set);
         unimplemented_implementations.emplace_back(ms_pair.second,
                                                    implementation);
       }

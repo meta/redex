@@ -1622,8 +1622,7 @@ ControlFlowGraph::primary_instruction_of_move_result_for_type_check(
   auto* block = it.block();
   if (block->get_first_insn()->insn == move_result_insn) {
     const auto& preds = block->preds();
-    always_assert(preds.size() == 1);
-    auto* previous_block = preds.front()->src();
+    auto* previous_block = only(preds)->src();
     auto res = previous_block->to_cfg_instruction_iterator(
         previous_block->get_last_insn());
     return res;
@@ -1641,8 +1640,7 @@ cfg::InstructionIterator ControlFlowGraph::primary_instruction_of_move_result(
   auto* block = it.block();
   if (block->get_first_insn()->insn == move_result_insn) {
     const auto& preds = block->preds();
-    always_assert(preds.size() == 1);
-    auto* previous_block = preds.front()->src();
+    auto* previous_block = only(preds)->src();
     auto res = previous_block->to_cfg_instruction_iterator(
         previous_block->get_last_insn());
     auto* insn = res->insn;
@@ -2686,13 +2684,11 @@ void ControlFlowGraph::merge_blocks(Block* pred, Block* succ) {
   };
   {
     const auto& forwards = get_succ_edges_if(pred, not_throws);
-    always_assert(forwards.size() == 1);
-    auto* forward_edge = forwards[0];
+    auto* forward_edge = only(forwards);
     always_assert(forward_edge->target() == succ);
     always_assert(forward_edge->type() == EDGE_GOTO);
     const auto& reverses = succ->preds();
-    always_assert(reverses.size() == 1);
-    auto* reverse_edge = reverses[0];
+    auto* reverse_edge = only(reverses);
     always_assert(forward_edge == reverse_edge);
   }
 
@@ -3072,8 +3068,7 @@ uint32_t ControlFlowGraph::remove_blocks(const std::vector<Block*>& blocks) {
 
   for (auto* block : blocks) {
     if (block == entry_block()) {
-      always_assert(block->succs().size() == 1);
-      set_entry_block(block->succs()[0]->target());
+      set_entry_block(only(block->succs())->target());
     }
     if (block == exit_block()) {
       set_exit_block(nullptr);

@@ -49,6 +49,7 @@
 #include "CppUtil.h"
 #include "Debug.h"
 #include "DedupVirtualMethods.h"
+#include "DeterministicContainers.h"
 #include "GlobalConfig.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
@@ -1256,8 +1257,7 @@ VirtualMergingStats apply_ordering(
           cfg::Block* block = overridden_cfg.entry_block();
           while (block->get_first_insn() == block->end()) {
             const auto& succs = block->succs();
-            always_assert(succs.size() == 1);
-            const auto& out = succs[0];
+            const auto& out = only(succs);
             always_assert(out->type() == cfg::EDGE_GOTO);
             block = out->target();
           }

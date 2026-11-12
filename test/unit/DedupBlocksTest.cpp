@@ -1834,6 +1834,59 @@ TEST_F(DedupBlocksTest, dont_dedup_redex_unreachable_create_and_throw) {
   EXPECT_CODE_EQ(expected_code.get(), code);
 }
 
+// Any method declared to return com.redex.UnreachableException is a throw
+// helper, whatever its name, so two of its call sites that differ only in
+// their positions stay apart.
+TEST_F(DedupBlocksTest, dont_dedup_methods_returning_unreachable_exception) {
+  auto input_code = assembler::ircode_from_string(R"(
+    (
+      (const-string "name")
+      (move-result-pseudo-object v2)
+      (const v1 1)
+      (if-eqz v1 :lbl)
+
+      (.pos:dbg_0 "LFoo;.caller:()V" "Foo.java" 10)
+      (invoke-static (v2) "LFoo;.a:(Ljava/lang/String;)Lcom/redex/UnreachableException;")
+      (move-result-object v0)
+      (throw v0)
+
+      (:lbl)
+      (.pos:dbg_1 "LFoo;.caller:()V" "Foo.java" 20)
+      (invoke-static (v2) "LFoo;.a:(Ljava/lang/String;)Lcom/redex/UnreachableException;")
+      (move-result-object v0)
+      (throw v0)
+    )
+  )");
+  auto* method =
+      get_fresh_method("dont_dedup_methods_returning_unreachable_exception");
+  method->set_code(std::move(input_code));
+  auto* code = method->get_code();
+
+  run_dedup_blocks();
+
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const-string "name")
+      (move-result-pseudo-object v2)
+      (const v1 1)
+      (if-eqz v1 :lbl)
+
+      (.pos:dbg_0 "LFoo;.caller:()V" "Foo.java" 10)
+      (invoke-static (v2) "LFoo;.a:(Ljava/lang/String;)Lcom/redex/UnreachableException;")
+      (move-result-object v0)
+      (throw v0)
+
+      (:lbl)
+      (.pos:dbg_1 "LFoo;.caller:()V" "Foo.java" 20)
+      (invoke-static (v2) "LFoo;.a:(Ljava/lang/String;)Lcom/redex/UnreachableException;")
+      (move-result-object v0)
+      (throw v0)
+    )
+  )");
+
+  EXPECT_CODE_EQ(expected_code.get(), code);
+}
+
 // Don't dedup invocations to methods marked as dont-inline
 TEST_F(DedupBlocksTest, dont_dedup_dont_inline) {
   auto callee_code = assembler::ircode_from_string(R"(

@@ -279,19 +279,19 @@ bool needs_pos(const IRList::iterator& begin, const IRList::iterator& end) {
 
 namespace dedup_blocks_impl {
 
-// Returns the deobfuscated class descriptor for a method ref, surviving
+// Returns the deobfuscated class descriptor for a type, surviving
 // RenameClassesPass (which mutates DexType names in place). Falls back to the
 // current type name when no deobfuscated name is available (e.g. before rename
 // passes run, or for types that were not renamed).
-static std::string_view get_deobfuscated_class_name(const DexMethodRef* m) {
-  auto* cls_def = type_class(m->get_class());
+static std::string_view get_deobfuscated_class_name(const DexType* type) {
+  auto* cls_def = type_class(type);
   if (cls_def != nullptr) {
     auto deob = cls_def->get_deobfuscated_name_or_empty();
     if (!deob.empty()) {
       return deob;
     }
   }
-  return m->get_class()->str();
+  return type->str();
 }
 
 // Returns true if this invoke-static targets a helper method whose body
@@ -306,21 +306,27 @@ static std::string_view get_deobfuscated_class_name(const DexMethodRef* m) {
 // Known producers:
 //   - kotlin.jvm.internal.Intrinsics.throw* -- Kotlin compiler (!!,
 //     lateinit, contract, parameter null-checks).
-//   - com.redex.UnreachableException.createAndThrow -- Redex synthetic.
+//   - Redex methods declared to return com.redex.UnreachableException, such as
+//     its synthetic createAndThrow, recognized by that return type.
 static bool check_throw_helper_names(std::string_view cls_name,
                                      std::string_view method_name) {
-  if (cls_name == "Lkotlin/jvm/internal/Intrinsics;" &&
-      method_name.starts_with("throw")) {
-    return true;
-  }
-  if (cls_name == "Lcom/redex/UnreachableException;" &&
-      method_name == "createAndThrow") {
-    return true;
-  }
-  return false;
+  return cls_name == "Lkotlin/jvm/internal/Intrinsics;" &&
+         method_name.starts_with("throw");
+}
+
+// Whether `m` is declared to return com.redex.UnreachableException, which
+// Redex declares only for methods that cannot return normally, such as
+// createAndThrow. Compares the class's deobfuscated name, which the DexClass
+// constructor sets, so renaming does not affect the check.
+static bool returns_unreachable_exception(const DexMethodRef* m) {
+  return get_deobfuscated_class_name(m->get_proto()->get_rtype()) ==
+         "Lcom/redex/UnreachableException;";
 }
 
 static bool is_throw_delegating_helper(const DexMethodRef* m) {
+  if (returns_unreachable_exception(m)) {
+    return true;
+  }
   // Try the def's fully-deobfuscated name first (works after both
   // RenameClassesPass + ObfuscatePass; set on method defs including
   // external methods loaded from JARs like kotlin-stdlib).
@@ -332,26 +338,20 @@ static bool is_throw_delegating_helper(const DexMethodRef* m) {
   if (def != nullptr) {
     auto deob = def->get_deobfuscated_name_or_empty();
     if (!deob.empty()) {
-      if (deob.find("Lkotlin/jvm/internal/Intrinsics;.throw") !=
-          std::string_view::npos) {
-        return true;
-      }
-      if (deob.find("Lcom/redex/UnreachableException;.createAndThrow:") !=
-          std::string_view::npos) {
-        return true;
-      }
-      return false;
+      return deob.find("Lkotlin/jvm/internal/Intrinsics;.throw") !=
+             std::string_view::npos;
     }
     // Def exists but has no deobfuscated name (pre-rename). Use the def's
     // simple deobfuscated name for the method part.
     auto simple = def->get_simple_deobfuscated_name();
     if (!simple.empty()) {
-      return check_throw_helper_names(get_deobfuscated_class_name(m), simple);
+      return check_throw_helper_names(
+          get_deobfuscated_class_name(m->get_class()), simple);
     }
   }
   // Final fallback: deobfuscated class name + current method name.
   // Only correct before ObfuscatePass renames method names.
-  auto cls_name = get_deobfuscated_class_name(m);
+  auto cls_name = get_deobfuscated_class_name(m->get_class());
   const auto* name = m->get_name();
   if (name == nullptr) {
     return false;

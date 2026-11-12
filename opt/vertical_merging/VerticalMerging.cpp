@@ -9,6 +9,7 @@
 
 #include "AtomicStatCounter.h"
 #include "ClassHierarchy.h"
+#include "ConcurrentContainers.h"
 #include "ConfigFiles.h"
 #include "ControlFlow.h"
 #include "Debug.h"
@@ -63,27 +64,28 @@ bool is_internal_def(DexMethodRef* method) {
  * type is mergeable.
  */
 enum DontMergeState { kConditional, kStrict };
+// `record_dont_merge_state` relies on these being the only two states: every
+// raise is to `kStrict`, so concurrent raises cannot store a lower state.
+static_assert(kConditional == 0 && kStrict == 1);
 
-void record_dont_merge_element_state(
-    const DexType* type,
-    DontMergeState state,
-    UnorderedMap<const DexType*, DontMergeState>* dont_merge_status) {
-  auto [it, emplaced] = dont_merge_status->emplace(type, state);
-  if (!emplaced && it->second < state) {
-    it->second = state;
-  }
-}
+using DontMergeStatus = AtomicMap<const DexType*, DontMergeState>;
 
-void record_dont_merge_state(
-    const DexType* type,
-    DontMergeState state,
-    UnorderedMap<const DexType*, DontMergeState>* dont_merge_status) {
+/**
+ * Thread-safe. The state of a type only ever rises to kStrict, so the store
+ * cannot lose a concurrent kStrict.
+ */
+void record_dont_merge_state(const DexType* type,
+                             DontMergeState state,
+                             DontMergeStatus* dont_merge_status) {
   const auto* element_type = type::get_element_type_if_array(type);
   if (element_type == nullptr) {
     // No class can be defined for a type that does not exist.
     return;
   }
-  record_dont_merge_element_state(element_type, state, dont_merge_status);
+  auto [current, emplaced] = dont_merge_status->emplace(element_type, state);
+  if (!emplaced && *current < state) {
+    current->store(state);
+  }
 }
 
 struct TypeLikeStringStats {
@@ -92,10 +94,9 @@ struct TypeLikeStringStats {
   size_t static_field_refs{0};
 };
 
-size_t record_type_like_strings(
-    const std::vector<const DexString*>& strings,
-    bool record_type_like_string_refs,
-    UnorderedMap<const DexType*, DontMergeState>* dont_merge_status) {
+size_t record_type_like_strings(const std::vector<const DexString*>& strings,
+                                bool record_type_like_string_refs,
+                                DontMergeStatus* dont_merge_status) {
   size_t refs{0};
   for (const auto* string : strings) {
     auto* type = java_names::get_element_type_from_external_name(string->str());
@@ -114,11 +115,10 @@ size_t record_type_like_strings(
  * Check child class and parent class's DontMergeState and decide which class
  * should be merged into which class, or not merge at all.
  */
-void check_dont_merge_list(
-    const UnorderedMap<const DexType*, DontMergeState>& dont_merge_status,
-    DexClass* child_cls,
-    DexClass* parent_cls,
-    ClassMap* mergeable_to_merger) {
+void check_dont_merge_list(const DontMergeStatus& dont_merge_status,
+                           DexClass* child_cls,
+                           DexClass* parent_cls,
+                           ClassMap* mergeable_to_merger) {
   const auto& find_parent = dont_merge_status.find(parent_cls->get_type());
   const auto& find_child = dont_merge_status.find(child_cls->get_type());
   const auto& find_end = dont_merge_status.end();
@@ -305,26 +305,25 @@ void handle_invoke_init(
  *      in any don't merge state.
  *   6. Classes are not throwable.
  */
-ClassMap collect_can_merge(
-    const Scope& scope,
-    const XStoreRefs& xstores,
-    const UnorderedMap<const DexType*, DontMergeState>& dont_merge_status,
-    size_t* num_single_extend_pairs) {
+ClassMap collect_can_merge(const Scope& scope,
+                           const ClassHierarchy& ch,
+                           const XStoreRefs& xstores,
+                           const DontMergeStatus& dont_merge_status,
+                           size_t* num_single_extend_pairs) {
   ClassMap mergeable_to_merger;
-  ClassHierarchy ch = build_type_hierarchy(scope);
   auto throwables = get_all_children(ch, type::java_lang_Throwable());
   *num_single_extend_pairs = 0;
   for (DexClass* cls : scope) {
     if ((cls != nullptr) && !cls->is_external() && !is_interface(cls) &&
-        can_delete(cls) && can_rename(cls) &&
-        (throwables.count(cls->get_type()) == 0u)) {
+        can_delete(cls) && can_rename(cls)) {
       DexType* cls_type = cls->get_type();
       const auto& children_types = get_children(ch, cls_type);
       if (children_types.size() != 1) {
         continue;
       }
       const DexType* child_type = *children_types.begin();
-      if (throwables.count(child_type) != 0u) {
+      if ((throwables.count(cls_type) != 0u) ||
+          (throwables.count(child_type) != 0u)) {
         continue;
       }
       if (!get_children(ch, child_type).empty()) {
@@ -349,14 +348,13 @@ ClassMap collect_can_merge(
   return mergeable_to_merger;
 }
 
-size_t record_annotation(
-    const Scope& scope,
-    bool record_type_like_string_refs,
-    UnorderedMap<const DexType*, DontMergeState>* dont_merge_status) {
-  size_t type_like_string_refs{0};
+size_t record_annotation(const Scope& scope,
+                         bool record_type_like_string_refs,
+                         DontMergeStatus* dont_merge_status) {
+  AtomicStatCounter<size_t> type_like_string_refs{0};
   // Remove class if it is the type of an annotation.
   // TODO(suree404): Merge the classes even though it appears in annotation?
-  walk::annotations(scope, [&](DexAnnotation* anno) {
+  walk::parallel::annotations(scope, [&](DexAnnotation* anno) {
     std::vector<const DexType*> types_in_anno;
     anno->gather_types(types_in_anno);
     for (const auto& type : types_in_anno) {
@@ -371,7 +369,7 @@ size_t record_annotation(
     type_like_string_refs += record_type_like_strings(
         strings_in_anno, record_type_like_string_refs, dont_merge_status);
   });
-  return type_like_string_refs;
+  return type_like_string_refs.load();
 }
 
 /**
@@ -380,30 +378,14 @@ size_t record_annotation(
  * When ResolveRefsPass runs before the pass, the step should not drop many
  * mergeables.
  */
-size_t record_code_reference(
-    const Scope& scope,
-    bool record_type_like_string_refs,
-    UnorderedMap<const DexType*, DontMergeState>* dont_merge_status) {
+size_t record_code_reference(const Scope& scope,
+                             bool record_type_like_string_refs,
+                             DontMergeStatus* dont_merge_status) {
   AtomicStatCounter<size_t> type_like_string_refs{0};
-  ConcurrentMap<const DexType*, DontMergeState> deferred_records;
-  auto deferred_record_dont_merge_state =
-      [&deferred_records](const DexType* type, DontMergeState state) {
-        type = type::get_element_type_if_array(type);
-        if (type == nullptr) {
-          // No class can be defined for a type that does not exist.
-          return;
-        }
-        deferred_records.update(type, [state](auto*, auto& v, auto exists) {
-          if (!exists || state > v) {
-            v = state;
-          }
-        });
-      };
   walk::parallel::opcodes(
       scope,
-      [&deferred_record_dont_merge_state, &type_like_string_refs,
-       record_type_like_string_refs](DexMethod* /*method*/,
-                                     IRInstruction* insn) {
+      [dont_merge_status, &type_like_string_refs, record_type_like_string_refs](
+          DexMethod* /*method*/, IRInstruction* insn) {
         if (insn->has_type()) {
           const auto* type = type::get_element_type_if_array(insn->get_type());
           if (type == nullptr) {
@@ -413,14 +395,14 @@ size_t record_code_reference(
             // We don't want to merge class if either merger or
             // mergeable was ever accessed in instance_of to prevent
             // semantic error.
-            deferred_record_dont_merge_state(type, kStrict);
+            record_dont_merge_state(type, kStrict, dont_merge_status);
             return;
           } else {
             DexClass* cls = type_class(type);
             if ((cls != nullptr) && !is_abstract(cls)) {
               // If a type is referenced and not an abstract type then
               // add it to don't use this type as mergeable.
-              deferred_record_dont_merge_state(type, kConditional);
+              record_dont_merge_state(type, kConditional, dont_merge_status);
               TRACE(VMERGE, 9, "dont_merge %s as mergeable for type usage: %s",
                     SHOW(type), SHOW(insn));
             }
@@ -431,7 +413,7 @@ size_t record_code_reference(
           if (type != nullptr) {
             type_like_string_refs++;
             if (record_type_like_string_refs) {
-              deferred_record_dont_merge_state(type, kStrict);
+              record_dont_merge_state(type, kStrict, dont_merge_status);
               TRACE(VMERGE, 9,
                     "dont_merge %s for type-like string reference: %s",
                     SHOW(type), SHOW(insn));
@@ -449,13 +431,14 @@ size_t record_code_reference(
               // merge it as we need the field and this field can't be renamed
               // if having collision.
               // TODO(suree404): can improve.
-              deferred_record_dont_merge_state(field->get_class(), kStrict);
-              deferred_record_dont_merge_state(insn->get_field()->get_class(),
-                                               kStrict);
+              record_dont_merge_state(field->get_class(), kStrict,
+                                      dont_merge_status);
+              record_dont_merge_state(insn->get_field()->get_class(), kStrict,
+                                      dont_merge_status);
             }
           } else {
-            deferred_record_dont_merge_state(insn->get_field()->get_class(),
-                                             kConditional);
+            record_dont_merge_state(insn->get_field()->get_class(),
+                                    kConditional, dont_merge_status);
           }
         } else if (insn->has_method()) {
           auto* callee_ref = insn->get_method();
@@ -464,13 +447,15 @@ size_t record_code_reference(
             return;
           }
           if (!is_internal_def(callee_ref)) {
-            deferred_record_dont_merge_state(callee_ref->get_class(), kStrict);
+            record_dont_merge_state(callee_ref->get_class(), kStrict,
+                                    dont_merge_status);
             TRACE(VMERGE, 9, "dont_merge %s for pure ref %s",
                   SHOW(callee_ref->get_class()), SHOW(callee_ref));
             DexMethod* callee =
                 resolve_method_deprecated(callee_ref, MethodSearch::Any);
             if (callee != nullptr) {
-              deferred_record_dont_merge_state(callee->get_class(), kStrict);
+              record_dont_merge_state(callee->get_class(), kStrict,
+                                      dont_merge_status);
               TRACE(VMERGE, 9,
                     "dont_merge %s for it may be invoked as a pure ref %s",
                     SHOW(callee->get_class()), SHOW(callee_ref));
@@ -478,9 +463,6 @@ size_t record_code_reference(
           }
         }
       });
-  for (auto [type, state] : UnorderedIterable(deferred_records)) {
-    record_dont_merge_element_state(type, state, dont_merge_status);
-  }
   return type_like_string_refs.load();
 }
 
@@ -489,10 +471,9 @@ size_t record_code_reference(
  * Record a type as don't merge as a mergeable if it's used in a such method's
  * signature.
  */
-void record_method_signature(
-    const Scope& scope,
-    UnorderedMap<const DexType*, DontMergeState>* dont_merge_status) {
-  walk::methods(scope, [&](DexMethod* method) {
+void record_method_signature(const Scope& scope,
+                             DontMergeStatus* dont_merge_status) {
+  walk::parallel::methods(scope, [&](DexMethod* method) {
     if (is_native(method) || !can_rename(method)) {
       DexProto* proto = method->get_proto();
       record_dont_merge_state(proto->get_rtype(), kConditional,
@@ -505,10 +486,9 @@ void record_method_signature(
   });
 }
 
-void record_blocklist(
-    const Scope& scope,
-    UnorderedMap<const DexType*, DontMergeState>* dont_merge_status,
-    const std::vector<std::string>& blocklist) {
+void record_blocklist(const Scope& scope,
+                      DontMergeStatus* dont_merge_status,
+                      const std::vector<std::string>& blocklist) {
   if (blocklist.empty()) {
     return;
   }
@@ -536,11 +516,10 @@ void record_blocklist(
  * fields into a class that is not recognized as an R class. So a pair is never
  * merged when either class is an R class.
  */
-void record_r_classes(
-    const Scope& scope,
-    const resources::RClassReader& r_class_reader,
-    UnorderedMap<const DexType*, DontMergeState>* dont_merge_status) {
-  walk::classes(scope, [&](DexClass* cls) {
+void record_r_classes(const Scope& scope,
+                      const resources::RClassReader& r_class_reader,
+                      DontMergeStatus* dont_merge_status) {
+  walk::parallel::classes(scope, [&](DexClass* cls) {
     if (r_class_reader.has_r_class_name(cls)) {
       record_dont_merge_state(cls->get_type(), kStrict, dont_merge_status);
     }
@@ -553,10 +532,9 @@ void record_r_classes(
  * untouched, so neither its class nor any type it mentions in its signature,
  * code or annotations may take part in a merge.
  */
-void record_no_optimizations(
-    const Scope& scope,
-    UnorderedMap<const DexType*, DontMergeState>* dont_merge_status) {
-  walk::methods(scope, [&](DexMethod* method) {
+void record_no_optimizations(const Scope& scope,
+                             DontMergeStatus* dont_merge_status) {
+  walk::parallel::methods(scope, [&](DexMethod* method) {
     if (!method->rstate.no_optimizations()) {
       return;
     }
@@ -614,12 +592,11 @@ void remove_unrenamable_collisions(ClassMap* mergeable_to_merger) {
  * Don't merge a class if it is a field's type and this field can't be
  * renamed, of if it appeared in a field value.
  */
-size_t record_field_reference(
-    const Scope& scope,
-    bool record_type_like_string_refs,
-    UnorderedMap<const DexType*, DontMergeState>* dont_merge_status) {
-  size_t type_like_string_refs{0};
-  walk::fields(scope, [&](DexField* field) {
+size_t record_field_reference(const Scope& scope,
+                              bool record_type_like_string_refs,
+                              DontMergeStatus* dont_merge_status) {
+  AtomicStatCounter<size_t> type_like_string_refs{0};
+  walk::parallel::fields(scope, [&](DexField* field) {
     if (auto* value = field->get_static_value()) {
       std::vector<const DexString*> strings;
       value->gather_strings(strings);
@@ -642,7 +619,7 @@ size_t record_field_reference(
                               dont_merge_status);
     }
   });
-  return type_like_string_refs;
+  return type_like_string_refs.load();
 }
 
 TypeLikeStringStats record_referenced(
@@ -650,7 +627,7 @@ TypeLikeStringStats record_referenced(
     const std::vector<std::string>& blocklist,
     const resources::RClassReader& r_class_reader,
     bool record_type_like_string_refs,
-    UnorderedMap<const DexType*, DontMergeState>* dont_merge_status) {
+    DontMergeStatus* dont_merge_status) {
   TypeLikeStringStats stats;
   stats.annotation_refs =
       record_annotation(scope, record_type_like_string_refs, dont_merge_status);
@@ -753,6 +730,20 @@ void update_implements(DexClass* from_cls, DexClass* to_cls) {
 
   auto* implements = DexTypeList::make_type_list(std::move(deque));
   to_cls->set_interfaces(implements);
+}
+
+/**
+ * Bring `ch` up to date after the merges, so that it matches
+ * `build_type_hierarchy` of the resulting scope.
+ */
+void update_type_hierarchy(const ClassMap& mergeable_to_merger,
+                           ClassHierarchy* ch) {
+  for (const auto& [mergeable, merger] :
+       UnorderedIterable(mergeable_to_merger)) {
+    (*ch)[mergeable->get_super_class()].erase(mergeable->get_type());
+    ch->erase(mergeable->get_type());
+    (*ch)[merger->get_super_class()].insert(merger->get_type());
+  }
 }
 
 void remove_merged(Scope& scope, const ClassMap& mergeable_to_merger) {
@@ -1071,29 +1062,31 @@ void VerticalMergingPass::merge_classes(const Scope& scope,
   update_references(scope, update_map, methodref_update_map);
 }
 
-size_t VerticalMergingPass::merge_round(DexStoresVector& stores,
-                                        ConfigFiles& conf,
-                                        PassManager& mgr,
-                                        bool first_round) {
-  auto scope = build_class_scope(stores);
-
-  UnorderedMap<const DexType*, DontMergeState> dont_merge_status;
-  resources::RClassReader r_class_reader(conf.get_global_config());
+size_t VerticalMergingPass::merge_round(
+    Scope& scope,
+    const XStoreRefs& xstores,
+    ClassHierarchy* ch,
+    const resources::RClassReader& r_class_reader,
+    PassManager& mgr,
+    bool first_round) {
+  DontMergeStatus dont_merge_status;
   auto type_like_string_stats =
       record_referenced(scope, m_blocklist, r_class_reader,
                         !m_unsafe_ignore_type_like_strings, &dont_merge_status);
-  XStoreRefs xstores(stores, conf.normal_primary_dex());
   size_t num_single_extend;
-  auto mergeable_to_merger =
-      collect_can_merge(scope, xstores, dont_merge_status, &num_single_extend);
+  auto mergeable_to_merger = collect_can_merge(
+      scope, *ch, xstores, dont_merge_status, &num_single_extend);
 
   remove_both_have_clinit(&mergeable_to_merger);
   remove_unrenamable_collisions(&mergeable_to_merger);
   resolve_virtual_calls_to_merger(scope, mergeable_to_merger);
 
   merge_classes(scope, mergeable_to_merger);
+  update_type_hierarchy(mergeable_to_merger, ch);
   remove_merged(scope, mergeable_to_merger);
-  post_dexen_changes(scope, stores);
+  if (slow_invariants_debug) {
+    always_assert(*ch == build_type_hierarchy(scope));
+  }
   if (first_round) {
     mgr.set_metric("num_single_extend", num_single_extend);
     mgr.set_metric("num_type_like_string_annotation_refs",
@@ -1109,14 +1102,21 @@ size_t VerticalMergingPass::merge_round(DexStoresVector& stores,
 void VerticalMergingPass::run_pass(DexStoresVector& stores,
                                    ConfigFiles& conf,
                                    PassManager& mgr) {
-  size_t round_merged = merge_round(stores, conf, mgr, /* first_round */ true);
+  auto scope = build_class_scope(stores);
+  XStoreRefs xstores(stores, conf.normal_primary_dex());
+  auto ch = build_type_hierarchy(scope);
+  resources::RClassReader r_class_reader(conf.get_global_config());
+  size_t round_merged = merge_round(scope, xstores, &ch, r_class_reader, mgr,
+                                    /* first_round */ true);
   size_t num_merged = round_merged;
   size_t num_rounds = 1;
   while (m_merge_whole_chains && round_merged > 0) {
-    round_merged = merge_round(stores, conf, mgr, /* first_round */ false);
+    round_merged = merge_round(scope, xstores, &ch, r_class_reader, mgr,
+                               /* first_round */ false);
     num_merged += round_merged;
     num_rounds++;
   }
+  post_dexen_changes(scope, stores);
   mgr.set_metric("num_merged", num_merged);
   mgr.set_metric("num_rounds", num_rounds);
 }

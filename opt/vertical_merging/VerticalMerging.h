@@ -7,9 +7,16 @@
 
 #pragma once
 
+#include "ClassHierarchy.h"
 #include "DeterministicContainers.h"
 #include "DexClass.h"
 #include "Pass.h"
+
+class XStoreRefs;
+
+namespace resources {
+class RClassReader;
+} // namespace resources
 
 /**
  * Merge classes vertically. (see below situation)
@@ -48,7 +55,12 @@ class VerticalMergingPass : public Pass {
   void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
 
  private:
-  size_t merge_round(DexStoresVector&, ConfigFiles&, PassManager&, bool);
+  size_t merge_round(Scope&,
+                     const XStoreRefs&,
+                     ClassHierarchy*,
+                     const resources::RClassReader&,
+                     PassManager&,
+                     bool);
   void merge_classes(const Scope&, const UnorderedMap<DexClass*, DexClass*>&);
 
   void move_methods(DexClass*,

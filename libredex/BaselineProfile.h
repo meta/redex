@@ -9,6 +9,9 @@
 
 #include <stdint.h>
 
+#include <string>
+#include <vector>
+
 #include "BaselineProfileConfig.h"
 #include "DeterministicContainers.h"
 #include "DexClass.h"
@@ -31,6 +34,10 @@ struct BaselineProfile {
   // For output purposes. DO NOT USE DIRECTLY.
   UnorderedSet<std::string> unmatched_classes;
   size_t mark{0};
+  // What include_all_startup_classes added: the classes that were not in the
+  // profile before, and how many methods.
+  UnorderedSet<const DexClass*> startup_classes;
+  size_t startup_class_methods{0};
 
   void load_classes(const Scope& scope,
                     const ConfigFiles& config,
@@ -164,12 +171,27 @@ TopOffSelection select_smallest_topoff_methods(
 // BaselineProfile> The first is the default profile that will be fed into the
 // baseline profile driver as a manual input. The second is a mapping of config
 // name to final baseline profile for every baseline profile that redex is
-// generating. Forced method flags are applied unless explicitly deferred.
+// generating. A generated profile whose config sets include_all_startup_classes
+// also holds the classes named in `coldstart_classes` up to the
+// "ColdStart20PctEnd" marker, and their methods that dex2oat can compile (with
+// `huge_method_max`) as hot. Forced method flags are applied unless explicitly
+// deferred.
 std::tuple<BaselineProfile, UnorderedMap<std::string, BaselineProfile>>
 get_baseline_profiles(
     const Scope& scope,
     const UnorderedMap<std::string, BaselineProfileConfig>& configs,
     const method_profiles::MethodProfiles& method_profiles,
+    const std::vector<std::string>& coldstart_classes,
+    uint32_t huge_method_max,
+    UnorderedSet<const DexMethodRef*>* method_refs_without_def = nullptr,
+    bool apply_forced_flags = true);
+
+// get_baseline_profiles with the build's configs, method profiles, cold-start
+// classes and huge-method limit.
+std::tuple<BaselineProfile, UnorderedMap<std::string, BaselineProfile>>
+get_baseline_profiles(
+    const Scope& scope,
+    ConfigFiles& conf,
     UnorderedSet<const DexMethodRef*>* method_refs_without_def = nullptr,
     bool apply_forced_flags = true);
 
@@ -177,7 +199,10 @@ BaselineProfile get_default_baseline_profile(
     const Scope& scope,
     const UnorderedMap<std::string, BaselineProfileConfig>& configs,
     const method_profiles::MethodProfiles& method_profiles,
-    UnorderedSet<const DexMethodRef*>* method_refs_without_def = nullptr,
-    bool apply_forced_flags = true);
+    const std::vector<std::string>& coldstart_classes,
+    uint32_t huge_method_max);
+
+BaselineProfile get_default_baseline_profile(const Scope& scope,
+                                             ConfigFiles& conf);
 
 } // namespace baseline_profiles

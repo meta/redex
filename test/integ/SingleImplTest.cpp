@@ -117,14 +117,16 @@ TEST_F(SingleImplTest, MovedDefaultMethodKeepsProfile) {
   ConfigFiles config(config_json);
   config.parse_global_config();
   config.get_method_profiles() = std::move(stale_profiles);
-  config.get_method_profiles().set_method_stats(
-      method_profiles::COLD_START, source, {100, 20, 50, 0});
+  config.get_method_profiles().set_method_stats(method_profiles::COLD_START,
+                                                source, {100, 20, 50, 0});
   baseline_profiles::BaselineProfileConfig profile_config;
   profile_config.interaction_configs[method_profiles::COLD_START] = {};
   baseline_profiles::BaselineProfileConfigMap profile_configs{
       {"default", profile_config}};
   auto before = baseline_profiles::get_default_baseline_profile(
-      build_class_scope(stores), profile_configs, config.get_method_profiles());
+      build_class_scope(stores), profile_configs, config.get_method_profiles(),
+      /* coldstart_classes */ {},
+      baseline_profiles::get_huge_method_max(config));
   ASSERT_TRUE(baseline_profiles::is_compiled(before, source));
   SingleImplPass pass;
   PassManager manager({&pass}, config);
@@ -137,6 +139,8 @@ TEST_F(SingleImplTest, MovedDefaultMethodKeepsProfile) {
   ASSERT_NE(target, source);
   ASSERT_EQ(target, old_override);
   auto after = baseline_profiles::get_default_baseline_profile(
-      build_class_scope(stores), profile_configs, config.get_method_profiles());
+      build_class_scope(stores), profile_configs, config.get_method_profiles(),
+      /* coldstart_classes */ {},
+      baseline_profiles::get_huge_method_max(config));
   EXPECT_TRUE(baseline_profiles::is_compiled(after, target));
 }

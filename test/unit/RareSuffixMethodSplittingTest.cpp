@@ -742,9 +742,8 @@ TEST_F(RareSuffixMethodSplittingTest, compilesTheSplitOfAHotTail) {
   }
   ASSERT_NE(split, nullptr);
   Scope scope{type_class(m->get_class())};
-  auto baseline_profile = baseline_profiles::get_default_baseline_profile(
-      scope, m_conf->get_baseline_profile_configs(),
-      m_conf->get_method_profiles());
+  auto baseline_profile =
+      baseline_profiles::get_default_baseline_profile(scope, *m_conf);
   EXPECT_TRUE(baseline_profiles::is_compiled(baseline_profile, split));
   auto* code = m->get_code();
   if (code->cfg_built()) {

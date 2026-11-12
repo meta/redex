@@ -210,8 +210,8 @@ void RareSuffixMethodSplittingPass::run_pass(DexStoresVector& stores,
   auto scope = build_class_scope(stores);
   const auto& method_profiles = conf.get_method_profiles();
   // The profile that compiles the method itself.
-  auto baseline_profile = baseline_profiles::get_default_baseline_profile(
-      scope, conf.get_baseline_profile_configs(), method_profiles);
+  auto baseline_profile =
+      baseline_profiles::get_default_baseline_profile(scope, conf);
 
   // ART inlines a method at each call site in a compiled caller within its
   // budgets, unless ArtProfileWriterPass, which runs later, annotates the
@@ -222,8 +222,7 @@ void RareSuffixMethodSplittingPass::run_pass(DexStoresVector& stores,
   const auto writer = read_writer_config(conf);
   auto [writer_profile, final_profiles] =
       baseline_profiles::get_baseline_profiles(
-          scope, conf.get_baseline_profile_configs(), method_profiles,
-          /* method_refs_without_def */ nullptr,
+          scope, conf, /* method_refs_without_def */ nullptr,
           /* apply_forced_flags */ false);
   const never_inline_analysis::HotCallsiteThresholds thresholds{
       .hot_block_appear_threshold = writer.hot_block_appear_threshold,

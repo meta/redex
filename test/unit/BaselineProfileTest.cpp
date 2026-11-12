@@ -477,3 +477,99 @@ TEST_F(BaselineProfileTest,
             bp::dex2oat_code_units(method) +
                 2 * bp::lowered_unreachable_extra_code_units());
 }
+
+namespace {
+
+// Builds the profiles of one config that sets include_all_startup_classes.
+std::tuple<bp::BaselineProfile, UnorderedMap<std::string, bp::BaselineProfile>>
+get_profiles_with_startup_classes(
+    const Scope& scope,
+    const std::string& config_name,
+    bool use_final_redex_generated_profile,
+    const std::vector<std::string>& coldstart_classes,
+    uint32_t huge_method_max = bp::DEFAULT_ART_HUGE_METHOD_MAX,
+    const method_profiles::MethodProfiles& method_profiles = {}) {
+  bp::BaselineProfileConfig config{};
+  config.options.include_all_startup_classes = true;
+  config.options.use_final_redex_generated_profile =
+      use_final_redex_generated_profile;
+  bp::BaselineProfileConfigMap configs{{config_name, config}};
+  return bp::get_baseline_profiles(scope, configs, method_profiles,
+                                   coldstart_classes, huge_method_max);
+}
+
+} // namespace
+
+TEST_F(BaselineProfileTest, startup_classes_up_to_the_marker) {
+  auto* first = create_method("first", ACC_PUBLIC | ACC_STATIC, 3);
+  auto* second = create_method("second", ACC_PUBLIC | ACC_STATIC, 3);
+  auto* after = create_method("after", ACC_PUBLIC | ACC_STATIC, 3);
+  auto [_, profiles] = get_profiles_with_startup_classes(
+      scope(), "betamap", /* use_final_redex_generated_profile */ true,
+      {show(first->get_class()), "LUnknown;", show(second->get_class()),
+       "LColdStart20PctEnd;", show(after->get_class())});
+  const auto& profile = profiles.at("betamap");
+  EXPECT_EQ(profile.startup_class_methods, 2);
+  EXPECT_TRUE(profile.methods.at(first).hot);
+  EXPECT_FALSE(profile.methods.at(first).startup);
+  EXPECT_TRUE(profile.methods.at(second).hot);
+  EXPECT_EQ(profile.methods.count(after), 0);
+  EXPECT_EQ(profile.classes.count(type_class(first->get_class())), 1);
+  EXPECT_EQ(profile.classes.count(type_class(after->get_class())), 0);
+  EXPECT_EQ(profile.startup_classes.size(), 2);
+}
+
+TEST_F(BaselineProfileTest, startup_classes_skip_uncompilable_methods) {
+  auto* clinit = create_method("<clinit>", ACC_STATIC | ACC_CONSTRUCTOR, 3);
+  auto* never = create_method("never", ACC_PUBLIC | ACC_STATIC, 3,
+                              /* never_compile */ true);
+  auto* huge = create_method("huge", ACC_PUBLIC | ACC_STATIC, 11);
+  auto* fits = create_method("fits", ACC_PUBLIC | ACC_STATIC, 10);
+  auto [_, profiles] = get_profiles_with_startup_classes(
+      scope(), "betamap", /* use_final_redex_generated_profile */ true,
+      {show(clinit->get_class()), show(never->get_class()),
+       show(huge->get_class()), show(fits->get_class())},
+      /* huge_method_max */ 10);
+  const auto& profile = profiles.at("betamap");
+  EXPECT_EQ(profile.startup_class_methods, 1);
+  EXPECT_EQ(profile.methods.count(fits), 1);
+  EXPECT_EQ(profile.methods.size(), 1);
+  EXPECT_EQ(profile.classes.size(), 4);
+}
+
+TEST_F(BaselineProfileTest, startup_classes_keep_existing_flags) {
+  auto* method = create_method("startup", ACC_PUBLIC | ACC_STATIC, 3);
+  auto method_profiles = method_profiles::MethodProfiles::initialize(
+      "manual_startup", {{method, method_profiles::Stats{}}});
+  auto [_, profiles] = get_profiles_with_startup_classes(
+      scope(), "betamap", /* use_final_redex_generated_profile */ true,
+      {show(method->get_class())}, bp::DEFAULT_ART_HUGE_METHOD_MAX,
+      method_profiles);
+  const auto& profile = profiles.at("betamap");
+  EXPECT_EQ(profile.startup_class_methods, 0);
+  EXPECT_FALSE(profile.methods.at(method).hot);
+  EXPECT_TRUE(profile.methods.at(method).startup);
+}
+
+TEST_F(BaselineProfileTest, startup_classes_only_in_profiles_redex_writes) {
+  // The default profile gets the startup classes only when Redex writes it,
+  // that is, with use_final_redex_generated_profile.
+  auto* method = create_method("m", ACC_PUBLIC | ACC_STATIC, 3);
+  for (bool use_final : {true, false}) {
+    SCOPED_TRACE(use_final);
+    auto [default_profile, profiles] = get_profiles_with_startup_classes(
+        scope(), bp::DEFAULT_BASELINE_PROFILE_CONFIG_NAME, use_final,
+        {show(method->get_class())});
+    EXPECT_EQ(default_profile.methods.count(method), use_final ? 1 : 0);
+    EXPECT_EQ(profiles.size(), use_final ? 1 : 0);
+  }
+  // A config without include_all_startup_classes gets none.
+  bp::BaselineProfileConfig config{};
+  config.options.use_final_redex_generated_profile = true;
+  bp::BaselineProfileConfigMap configs{
+      {bp::DEFAULT_BASELINE_PROFILE_CONFIG_NAME, config}};
+  auto profile = bp::get_default_baseline_profile(
+      scope(), configs, method_profiles::MethodProfiles{},
+      {show(method->get_class())}, bp::DEFAULT_ART_HUGE_METHOD_MAX);
+  EXPECT_EQ(profile.methods.count(method), 0);
+}

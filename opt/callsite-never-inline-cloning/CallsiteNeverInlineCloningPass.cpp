@@ -711,8 +711,8 @@ void CallsiteNeverInlineCloningPass::run_pass(DexStoresVector& stores,
   }
 
   auto scope = build_class_scope(stores);
-  auto baseline_profile = baseline_profiles::get_default_baseline_profile(
-      scope, conf.get_baseline_profile_configs(), conf.get_method_profiles());
+  auto baseline_profile =
+      baseline_profiles::get_default_baseline_profile(scope, conf);
   auto stats =
       clone_mixed_hotness_callees(scope, m_config, m_iteration,
                                   baseline_profile, conf.get_method_profiles());

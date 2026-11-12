@@ -907,9 +907,8 @@ void run_inliner(
 
   auto baseline_profile =
       baseline_profile_guided
-          ? std::make_optional(baseline_profiles::get_default_baseline_profile(
-                scope, conf.get_baseline_profile_configs(),
-                conf.get_method_profiles()))
+          ? std::make_optional(
+                baseline_profiles::get_default_baseline_profile(scope, conf))
           : std::nullopt;
 
   ConcurrentMethodResolverDeprecated concurrent_method_resolver;

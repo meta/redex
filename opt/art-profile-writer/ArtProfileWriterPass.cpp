@@ -775,17 +775,22 @@ void ArtProfileWriterPass::run_pass(DexStoresVector& stores,
   auto root_types = get_root_store_types(stores);
 
   auto baseline_profiles_tuple = baseline_profiles::get_baseline_profiles(
-      scope,
-      conf.get_baseline_profile_configs(),
-      method_profiles,
-      &method_refs_without_def,
-      false /* apply_forced_flags */);
+      scope, conf, &method_refs_without_def, false /* apply_forced_flags */);
   auto& baseline_profiles = std::get<1>(baseline_profiles_tuple);
   auto& manual_profile = std::get<0>(baseline_profiles_tuple);
 
-  // Load classes from input.
-  manual_profile.load_classes(scope, conf, "manual");
-  manual_profile.mark = manual_profile.classes.size();
+  // Load classes from input. `mark` counts them without the startup classes
+  // that get_baseline_profiles added.
+  auto load_classes = [&](baseline_profiles::BaselineProfile& profile,
+                          const std::string& bp_name) {
+    for (const auto* cls : UnorderedIterable(profile.startup_classes)) {
+      profile.classes.erase(cls);
+    }
+    profile.load_classes(scope, conf, bp_name);
+    profile.mark = profile.classes.size();
+    insert_unordered_iterable(profile.classes, profile.startup_classes);
+  };
+  load_classes(manual_profile, "manual");
   // Only configs that get_baseline_profiles actually generated a profile for
   // are of interest here. It deliberately omits the default config when
   // use_final_redex_generated_profile is false, and looking that config up with
@@ -793,8 +798,7 @@ void ArtProfileWriterPass::run_pass(DexStoresVector& stores,
   // and shadows the preprocessed one.
   for (auto& [config_name, baseline_profile] :
        UnorderedIterable(baseline_profiles)) {
-    baseline_profile.load_classes(scope, conf, config_name);
-    baseline_profile.mark = baseline_profile.classes.size();
+    load_classes(baseline_profile, config_name);
   }
 
   auto add_class = [&](DexClass* cls) {
@@ -819,49 +823,9 @@ void ArtProfileWriterPass::run_pass(DexStoresVector& stores,
       continue;
     }
     if (baseline_profile_config.options.include_all_startup_classes) {
-      const std::vector<std::string>& interdexorder =
-          conf.get_coldstart_classes();
-      std::vector<DexClass*> coldstart_classes;
-      auto& baseline_profile = baseline_profiles_it->second;
-      for (const auto& entry : interdexorder) {
-        // Limit to just the 20% cold start set
-        if (entry.find("ColdStart20PctEnd") != std::string::npos) {
-          break;
-        }
-
-        DexType* type = DexType::get_type(entry);
-        if (type != nullptr) {
-          auto* coldstart_class = type_class(type);
-          if (coldstart_class != nullptr) {
-            coldstart_classes.push_back(coldstart_class);
-            baseline_profile.classes.insert(coldstart_class);
-          }
-        }
-      }
-
-      baseline_profiles::MethodFlags flags;
-      flags.hot = true;
-      flags.startup = false;
-      // walk::code, not walk::methods: the latter also visits abstract and
-      // native methods, which have no code for dex2oat to compile. This is the
-      // only insertion path that can put a code-less method into a
-      // BaselineProfile. <clinit> and @NeverCompile still have code, so the
-      // full predicate is applied rather than just a code check.
-      size_t inserted = 0;
-      walk::code(coldstart_classes,
-                 [&baseline_profile, &inserted, flags,
-                  huge_method_max](DexMethod* method, IRCode&) {
-                   if (uncompilable_reason(method, huge_method_max) !=
-                       UncompilableReason::kNone) {
-                     return;
-                   }
-                   if (baseline_profile.methods.emplace(method, flags).second) {
-                     ++inserted;
-                   }
-                 });
       mgr.incr_metric(std::string("profile_") + config_name +
                           "_from_include_all_startup_classes",
-                      inserted);
+                      baseline_profiles_it->second.startup_class_methods);
     }
   }
 

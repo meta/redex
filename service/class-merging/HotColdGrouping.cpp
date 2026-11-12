@@ -15,8 +15,8 @@ namespace class_merging {
 
 UnorderedSet<const DexMethod*> get_hot_methods(const Scope& scope,
                                                ConfigFiles& conf) {
-  auto baseline_profile = baseline_profiles::get_default_baseline_profile(
-      scope, conf.get_baseline_profile_configs(), conf.get_method_profiles());
+  auto baseline_profile =
+      baseline_profiles::get_default_baseline_profile(scope, conf);
   UnorderedSet<const DexMethod*> hot_methods;
   for (auto&& [method, flags] : UnorderedIterable(baseline_profile.methods)) {
     if (flags.hot) {

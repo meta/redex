@@ -58,7 +58,9 @@ void ClinitOutlinePass::run_pass(DexStoresVector& stores,
       {baseline_profiles::DEFAULT_BASELINE_PROFILE_CONFIG_NAME,
        baseline_profile_config}};
   auto baseline_profile = baseline_profiles::get_default_baseline_profile(
-      scope, bp_conf_map, conf.get_method_profiles());
+      scope, bp_conf_map, conf.get_method_profiles(),
+      conf.get_coldstart_classes(),
+      baseline_profiles::get_huge_method_max(conf));
 
   std::atomic<size_t> affected_final_fields{0};
   InsertOnlyConcurrentMap<DexMethod*, DexMethod*> outlined_clinits;

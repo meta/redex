@@ -364,8 +364,7 @@ void Exporter::capture_pre_lowering(DexStoresVector& stores,
   m_baseline_available = !conf.get_baseline_profile_configs().empty();
   baseline_profiles::BaselineProfile baseline;
   if (m_baseline_available) {
-    baseline = baseline_profiles::get_default_baseline_profile(
-        scope, conf.get_baseline_profile_configs(), mp);
+    baseline = baseline_profiles::get_default_baseline_profile(scope, conf);
   }
 
   // Method -> callers xref. complete_call_graph folds MethodOverrideGraph

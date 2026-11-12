@@ -269,16 +269,80 @@ size_t apply_forced_method_flags(const Scope& scope, BaselineProfile* profile) {
   return changed;
 }
 
+namespace {
+
+void add_startup_class_methods(const std::vector<std::string>& interdexorder,
+                               uint32_t huge_method_max,
+                               BaselineProfile* baseline_profile) {
+  std::vector<DexClass*> coldstart_classes;
+  for (const auto& entry : interdexorder) {
+    // Limit to just the 20% cold start set
+    if (entry.find("ColdStart20PctEnd") != std::string::npos) {
+      break;
+    }
+
+    DexType* type = DexType::get_type(entry);
+    if (type != nullptr) {
+      auto* coldstart_class = type_class(type);
+      if (coldstart_class != nullptr) {
+        coldstart_classes.push_back(coldstart_class);
+        if (baseline_profile->classes.insert(coldstart_class).second) {
+          baseline_profile->startup_classes.insert(coldstart_class);
+        }
+      }
+    }
+  }
+
+  MethodFlags flags;
+  flags.hot = true;
+  flags.startup = false;
+  // walk::code, not walk::methods: the latter also visits abstract and
+  // native methods, which have no code for dex2oat to compile. This is the
+  // only insertion path that can put a code-less method into a
+  // BaselineProfile. <clinit> and @NeverCompile still have code, so the
+  // full predicate is applied rather than just a code check.
+  walk::code(
+      coldstart_classes,
+      [baseline_profile, flags, huge_method_max](DexMethod* method, IRCode&) {
+        if (uncompilable_reason(method, huge_method_max) !=
+            UncompilableReason::kNone) {
+          return;
+        }
+        if (baseline_profile->methods.emplace(method, flags).second) {
+          ++baseline_profile->startup_class_methods;
+        }
+      });
+}
+
+} // namespace
+
 BaselineProfile get_default_baseline_profile(
     const Scope& scope,
     const UnorderedMap<std::string, BaselineProfileConfig>& configs,
     const method_profiles::MethodProfiles& method_profiles,
+    const std::vector<std::string>& coldstart_classes,
+    uint32_t huge_method_max) {
+  auto [baseline_profile, _] = get_baseline_profiles(
+      scope, configs, method_profiles, coldstart_classes, huge_method_max);
+  return baseline_profile;
+}
+
+BaselineProfile get_default_baseline_profile(const Scope& scope,
+                                             ConfigFiles& conf) {
+  auto [baseline_profile, _] = get_baseline_profiles(scope, conf);
+  return baseline_profile;
+}
+
+std::tuple<BaselineProfile, UnorderedMap<std::string, BaselineProfile>>
+get_baseline_profiles(
+    const Scope& scope,
+    ConfigFiles& conf,
     UnorderedSet<const DexMethodRef*>* method_refs_without_def,
     bool apply_forced_flags) {
-  auto [baseline_profile, _] =
-      get_baseline_profiles(scope, configs, method_profiles,
-                            method_refs_without_def, apply_forced_flags);
-  return baseline_profile;
+  return get_baseline_profiles(
+      scope, conf.get_baseline_profile_configs(), conf.get_method_profiles(),
+      conf.get_coldstart_classes(), get_huge_method_max(conf),
+      method_refs_without_def, apply_forced_flags);
 }
 
 std::tuple<BaselineProfile, UnorderedMap<std::string, BaselineProfile>>
@@ -286,6 +350,8 @@ get_baseline_profiles(
     const Scope& scope,
     const UnorderedMap<std::string, BaselineProfileConfig>& configs,
     const method_profiles::MethodProfiles& method_profiles,
+    const std::vector<std::string>& coldstart_classes,
+    uint32_t huge_method_max,
     UnorderedSet<const DexMethodRef*>* method_refs_without_def,
     bool apply_forced_flags) {
   UnorderedSet<const DexMethodRef*> method_candidates;
@@ -399,6 +465,9 @@ get_baseline_profiles(
     }
     if (config_name != DEFAULT_BASELINE_PROFILE_CONFIG_NAME ||
         config.options.use_final_redex_generated_profile) {
+      if (config.options.include_all_startup_classes) {
+        add_startup_class_methods(coldstart_classes, huge_method_max, &res);
+      }
       baseline_profiles[config_name] = res;
     }
     if (config_name == DEFAULT_BASELINE_PROFILE_CONFIG_NAME) {

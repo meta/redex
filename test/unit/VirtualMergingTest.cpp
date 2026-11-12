@@ -304,7 +304,9 @@ TEST_F(VirtualMergingTest, DedupPreservesOverrideProfile) {
   auto baseline = baseline_profiles::get_default_baseline_profile(
       build_class_scope(stores),
       {{"default", {}}},
-      config.get_method_profiles());
+      config.get_method_profiles(),
+      /* coldstart_classes */ {},
+      baseline_profiles::get_huge_method_max(config));
   EXPECT_TRUE(baseline_profiles::is_compiled(baseline, ancestor));
 }
 

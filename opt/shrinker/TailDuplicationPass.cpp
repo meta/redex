@@ -238,8 +238,8 @@ void TailDuplicationPass::run_pass(DexStoresVector& stores,
   init_classes::InitClassesWithSideEffects init_classes_with_side_effects(
       scope, conf.create_init_class_insns());
 
-  auto baseline_profile = baseline_profiles::get_default_baseline_profile(
-      scope, conf.get_baseline_profile_configs(), conf.get_method_profiles());
+  auto baseline_profile =
+      baseline_profiles::get_default_baseline_profile(scope, conf);
 
   int min_sdk = mgr.get_redex_options().min_sdk;
   shrinker::Shrinker shrinker(stores, scope, init_classes_with_side_effects,

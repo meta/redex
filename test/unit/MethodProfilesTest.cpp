@@ -13,6 +13,7 @@
 
 #include "BaselineProfile.h"
 #include "Creators.h"
+#include "GlobalConfig.h"
 #include "RedexTest.h"
 #include "TypeUtil.h"
 
@@ -102,7 +103,8 @@ class MethodProfilesTest : public RedexTest {
         profiles.derive_stats(target, sources);
       }
       auto profile = baseline_profiles::get_default_baseline_profile(
-          scope, configs, profiles);
+          scope, configs, profiles, /* coldstart_classes */ {},
+          baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX);
       auto it = profile.methods.find(target);
       ASSERT_NE(it, profile.methods.end());
       EXPECT_TRUE(it->second.hot);

@@ -544,7 +544,9 @@ ClinitBatchingPass::identify_candidate_clinits(const Scope& scope,
       {baseline_profiles::DEFAULT_BASELINE_PROFILE_CONFIG_NAME,
        std::move(baseline_profile_config)}};
   auto baseline_profile = baseline_profiles::get_default_baseline_profile(
-      scope, bp_conf_map, conf.get_method_profiles());
+      scope, bp_conf_map, conf.get_method_profiles(),
+      conf.get_coldstart_classes(),
+      baseline_profiles::get_huge_method_max(conf));
 
   // Track statistics
   std::atomic<size_t> excluded_not_hot{0};

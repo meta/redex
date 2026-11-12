@@ -179,8 +179,8 @@ void MethodSplittingPass::run_pass(DexStoresVector& stores,
                                    ConfigFiles& conf,
                                    PassManager& mgr) {
   auto scope = build_class_scope(stores);
-  auto baseline_profile = baseline_profiles::get_default_baseline_profile(
-      scope, conf.get_baseline_profile_configs(), conf.get_method_profiles());
+  auto baseline_profile =
+      baseline_profiles::get_default_baseline_profile(scope, conf);
   InsertOnlyConcurrentSet<const DexMethod*> concurrent_hot_methods;
   for (auto&& [method, flags] : UnorderedIterable(baseline_profile.methods)) {
     if (flags.hot) {

@@ -275,6 +275,10 @@ TEST_F(NeverInlineEligibilityTest, CallerInlineBudget) {
             CallerBudget::kTooManyInstructions);
   EXPECT_EQ(never_inline_analysis::caller_inline_budget(10, 5, 10, 4),
             CallerBudget::kTooManyRegisters);
+  EXPECT_EQ(never_inline_analysis::caller_inline_instruction_budget(10, 10),
+            CallerBudget::kWithin);
+  EXPECT_EQ(never_inline_analysis::caller_inline_instruction_budget(11, 10),
+            CallerBudget::kTooManyInstructions);
 }
 
 TEST_F(NeverInlineEligibilityTest, ExactVirtualsAreThoseNothingOverrides) {

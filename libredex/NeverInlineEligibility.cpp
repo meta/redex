@@ -136,12 +136,20 @@ Shape never_inline_shape(DexMethod* method) {
   return Shape::kEligible;
 }
 
+CallerBudget caller_inline_instruction_budget(size_t instructions,
+                                              size_t max_instructions) {
+  return instructions > max_instructions ? CallerBudget::kTooManyInstructions
+                                         : CallerBudget::kWithin;
+}
+
 CallerBudget caller_inline_budget(size_t instructions,
                                   size_t registers,
                                   size_t max_instructions,
                                   size_t max_registers) {
-  if (instructions > max_instructions) {
-    return CallerBudget::kTooManyInstructions;
+  auto instruction_budget =
+      caller_inline_instruction_budget(instructions, max_instructions);
+  if (instruction_budget != CallerBudget::kWithin) {
+    return instruction_budget;
   }
   if (registers > max_registers) {
     return CallerBudget::kTooManyRegisters;

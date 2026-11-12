@@ -122,6 +122,11 @@ enum class CallerBudget {
   kTooManyRegisters,
 };
 
+// Instruction-only screening for passes that run before register allocation.
+// This is not a prediction of the caller's final allocated register frame.
+CallerBudget caller_inline_instruction_budget(size_t instructions,
+                                              size_t max_instructions);
+
 // Whether a caller with `instructions` IR instructions and `registers`
 // registers is within the budgets ART inlines into.
 CallerBudget caller_inline_budget(size_t instructions,

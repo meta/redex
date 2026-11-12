@@ -1298,6 +1298,41 @@ struct CandidateInfo {
   size_t count{0};
 };
 
+// What the occurrences of ONE outlined method know about each slot of a
+// registered pattern beyond its identity: the provenance snapshot
+// `make_pattern` reports per slot, or null. Pattern ids are content-interned
+// and shared between outlined methods, so this cannot live beside the pattern:
+// it belongs to the registration that observed it.
+using PatternSlotProvenance = UnorderedMap<uint32_t, std::vector<DexPosition*>>;
+
+DexPosition* slot_provenance(const PatternSlotProvenance& slots,
+                             uint32_t pattern_id,
+                             size_t position_index) {
+  auto it = slots.find(pattern_id);
+  if (it == slots.end() || position_index >= it->second.size()) {
+    return nullptr;
+  }
+  return it->second[position_index];
+}
+
+// Folds one registration's observations into what the outlined method has seen
+// across its own occurrences so far.
+void merge_slot_provenance(PatternSlotProvenance* slots,
+                           uint32_t pattern_id,
+                           const std::vector<DexPosition*>& observed) {
+  always_assert(slots != nullptr);
+  auto [it, emplaced] = slots->emplace(pattern_id, observed);
+  if (emplaced) {
+    return;
+  }
+  auto& recorded = it->second;
+  always_assert(recorded.size() == observed.size());
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  for (size_t i = 0; i < recorded.size(); ++i) {
+    recorded[i] = manager->join_slot_provenance(recorded[i], observed[i]);
+  }
+}
+
 // We keep track of outlined methods that reside in earlier dexes of the current
 // store. Order vector is used for keeping the track of the order of each
 // candidate stored.
@@ -1306,6 +1341,7 @@ struct ReusableOutlinedMethods {
     const DexStore* store;
     DexMethod* method;
     std::set<uint32_t> pattern_ids;
+    PatternSlotProvenance slot_provenance;
   };
   UnorderedMap<Candidate, std::deque<OutlinedMethod>, CandidateHasher> map;
   std::vector<Candidate> order;
@@ -1431,7 +1467,9 @@ static DexMethod* find_reusable_method(
     return nullptr;
   }
   DexMethod* helper_class_method{nullptr};
-  for (auto&& [other_store, method, _] : it->second) {
+  for (const auto& outlined : it->second) {
+    const auto* other_store = outlined.store;
+    auto* method = outlined.method;
     if (store != other_store && (store_dependencies.count(other_store) == 0u)) {
       continue;
     }
@@ -1714,14 +1752,16 @@ class OutlinedMethodCreator {
 
   // Gets the set of unique dbg-position patterns.
   std::set<uint32_t> get_outlined_dbg_positions_patterns(
-      const Candidate& c, const CandidateInfo& ci) {
+      const Candidate& c,
+      const CandidateInfo& ci,
+      PatternSlotProvenance* slots) {
+    always_assert(slots != nullptr);
     std::set<uint32_t> pattern_ids;
-    add_outlined_dbg_position_patterns(c, ci, &pattern_ids);
+    add_outlined_dbg_position_patterns(c, ci, &pattern_ids, slots);
     always_assert(!pattern_ids.empty());
     if (!m_config.full_dbg_positions) {
-      // Find the "best" representative set of debug position, that is the one
-      // which provides most detail, i.e. has the highest number of unique debug
-      // positions
+      // Keep the most detailed pattern for display, but do not let that choice
+      // erase disagreements with the other occurrences it represents.
       uint32_t best_pattern_id = *pattern_ids.begin();
       size_t best_unique_positions{0};
       auto* manager = g_redex->get_position_pattern_switch_manager();
@@ -1736,6 +1776,37 @@ class OutlinedMethodCreator {
           best_unique_positions = unique_positions.size();
         }
       }
+      const auto& best_pattern = all_managed_patterns.at(best_pattern_id);
+      std::vector<DexPosition*> selected(best_pattern.size(), nullptr);
+      for (size_t i = 0; i < best_pattern.size(); ++i) {
+        // Every occurrence's slot is joined into the kept one level by level,
+        // so a level where an occurrence names a different place is merged
+        // with a site nobody captured, and the levels where it names the same
+        // place keep what it knew.
+        DexPosition* joined = best_pattern.at(i);
+        bool every_occurrence_has_the_slot = true;
+        for (auto pattern_id : pattern_ids) {
+          const auto& pattern = all_managed_patterns.at(pattern_id);
+          if (pattern.size() != best_pattern.size()) {
+            every_occurrence_has_the_slot = false;
+            continue;
+          }
+          auto* observed = slot_provenance(*slots, pattern_id, i);
+          auto* next = manager->join_slot_provenance(
+              joined, observed != nullptr ? observed : pattern.at(i));
+          if (next != nullptr) {
+            joined = next;
+          }
+        }
+        if (!every_occurrence_has_the_slot) {
+          joined = manager->mark_slot_uncaptured(joined);
+        }
+        selected.at(i) = joined != best_pattern.at(i) ? joined : nullptr;
+      }
+      // The discarded patterns are not this method's any more, and the slots
+      // kept are the selection's own verdict rather than any registration's.
+      slots->clear();
+      slots->emplace(best_pattern_id, std::move(selected));
       return {best_pattern_id};
     }
     return pattern_ids;
@@ -1755,7 +1826,9 @@ class OutlinedMethodCreator {
   // Infers outlined pattern ids.
   void add_outlined_dbg_position_patterns(const Candidate& c,
                                           const CandidateInfo& ci,
-                                          std::set<uint32_t>* pattern_ids) {
+                                          std::set<uint32_t>* pattern_ids,
+                                          PatternSlotProvenance* slots) {
+    always_assert(slots != nullptr);
     auto* manager = g_redex->get_position_pattern_switch_manager();
     // Order methods to make sure we get deterministic pattern-ids.
     auto ordered_methods =
@@ -1766,7 +1839,9 @@ class OutlinedMethodCreator {
         // if the current method is reused then the call site
         // didn't have the pattern id. Need to create and add pattern_id
         auto positions = get_outlined_dbg_positions(c, cml, method);
-        auto pattern_id = manager->make_pattern(positions);
+        std::vector<DexPosition*> provenance;
+        auto pattern_id = manager->make_pattern(positions, &provenance);
+        merge_slot_provenance(slots, pattern_id, provenance);
         if (m_config.full_dbg_positions) {
           m_call_site_pattern_ids.emplace(cml.first_insn, pattern_id);
         }
@@ -1779,7 +1854,8 @@ class OutlinedMethodCreator {
   DexMethod* create_outlined_method(const Candidate& c,
                                     const CandidateInfo& ci,
                                     const DexType* host_class,
-                                    std::set<uint32_t>* pattern_ids) {
+                                    std::set<uint32_t>* pattern_ids,
+                                    PatternSlotProvenance* slots) {
     const auto* name =
         m_method_name_generator.get_name(c, m_config.obfuscate_method_names);
     DexTypeList::ContainerType arg_types;
@@ -1793,7 +1869,7 @@ class OutlinedMethodCreator {
     auto* outlined_method = DexMethod::make_method(host_class, name, proto)
                                 ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
     // get pattern ids
-    *pattern_ids = get_outlined_dbg_positions_patterns(c, ci);
+    *pattern_ids = get_outlined_dbg_positions_patterns(c, ci, slots);
     always_assert(!(*pattern_ids).empty());
     // not setting method body here
     outlined_method->set_deobfuscated_name(show(outlined_method));
@@ -2386,7 +2462,7 @@ bool outline_candidate(const Config& config,
                          return p.method == outlined_method;
                        });
       outlined_method_creator->add_outlined_dbg_position_patterns(
-          c, ci, &it->pattern_ids);
+          c, ci, &it->pattern_ids, &it->slot_provenance);
     }
     (*num_reused_methods)++;
 
@@ -2415,11 +2491,13 @@ bool outline_candidate(const Config& config,
       host_class_selector->create_next_outlined_class();
     }
     std::set<uint32_t> position_pattern_ids;
+    PatternSlotProvenance slot_provenance;
     outlined_method = outlined_method_creator->create_outlined_method(
-        c, ci, host_class, &position_pattern_ids);
+        c, ci, host_class, &position_pattern_ids, &slot_provenance);
     outlined_methods->order.push_back(c);
-    outlined_methods->map[c].push_back(
-        {store, outlined_method, position_pattern_ids});
+    outlined_methods->map[c].push_back({store, outlined_method,
+                                        position_pattern_ids,
+                                        std::move(slot_provenance)});
     auto& methods = (*newly_outlined_methods)[outlined_method];
     for (const auto& p : UnorderedIterable(ci.methods)) {
       methods.push_back(p.first);
@@ -2866,7 +2944,8 @@ class OutlinedMethodBodySetter {
   std::unique_ptr<IRCode> get_outlined_code(
       DexMethod* outlined_method,
       const Candidate& c,
-      const std::set<uint32_t>& current_pattern_ids) {
+      const std::set<uint32_t>& current_pattern_ids,
+      const PatternSlotProvenance& slots) {
     auto* manager = g_redex->get_position_pattern_switch_manager();
     std::map<uint32_t, const PositionPattern*> current_patterns;
     bool any_positions = false;
@@ -2906,12 +2985,13 @@ class OutlinedMethodBodySetter {
     };
     size_t dbg_positions_idx = 0;
     walk = [this, manager, &code, &current_patterns, any_positions, &walk, &c,
-            &get_or_add_cloned_dbg_position,
+            &get_or_add_cloned_dbg_position, &slots,
             &dbg_positions_idx](const CandidateNode& cn) {
       m_outlined_method_nodes++;
-      UnorderedMap<uint32_t, DexPosition*> last_dbg_poses;
+      UnorderedMap<uint32_t, std::pair<DexPosition*, DexPosition*>>
+          last_dbg_poses;
       for (auto& p : current_patterns) {
-        last_dbg_poses.emplace(p.first, nullptr);
+        last_dbg_poses.emplace(p.first, std::make_pair(nullptr, nullptr));
       }
       for (const auto& ci : cn.insns) {
         if (!opcode::is_a_move_result_pseudo(ci.core.opcode) && any_positions) {
@@ -2922,20 +3002,32 @@ class OutlinedMethodBodySetter {
             auto& pattern = p.second;
             DexPosition* dbg_pos =
                 pattern->empty() ? nullptr : pattern->at(dbg_positions_idx);
-            position_switch.push_back({pattern_id, dbg_pos});
-            auto& last_dbg_pos = last_dbg_poses.at(pattern_id);
-            if (dbg_pos != last_dbg_pos) {
+            auto* provenance =
+                pattern->empty()
+                    ? nullptr
+                    : slot_provenance(slots, pattern_id, dbg_positions_idx);
+            position_switch.push_back({pattern_id, dbg_pos, provenance});
+            // A slot that keeps the same position but changes provenance
+            // still needs a new entry, or its instructions would inherit the
+            // previous slot's.
+            auto& [last_dbg_pos, last_provenance] =
+                last_dbg_poses.at(pattern_id);
+            if (dbg_pos != last_dbg_pos || provenance != last_provenance) {
               always_assert(dbg_pos);
               any_changed = true;
               last_dbg_pos = dbg_pos;
+              last_provenance = provenance;
             }
           }
           if (any_changed) {
             if (current_patterns.size() == 1) {
               // Always push a new leaf: the cache would return an earlier
               // leaf without a position entry, leaving the instructions
-              // under whatever position came last.
-              auto* dbg_pos = position_switch.front().position;
+              // under whatever position came last. A slot with provenance
+              // gets a clone of its provenance snapshot -- each level's
+              // candidate set or mark copies with it; its callers come from
+              // the snapshot too, so a caller's set survives.
+              auto* dbg_pos = position_switch.front().emitted_position();
               auto cloned_dbg_pos = std::make_unique<DexPosition>(*dbg_pos);
               if (dbg_pos->parent != nullptr) {
                 cloned_dbg_pos->parent =
@@ -3023,8 +3115,8 @@ class OutlinedMethodBodySetter {
       auto& front = c_outlined_methods.front();
       auto& outlined_method = front.method;
       always_assert(!front.pattern_ids.empty());
-      outlined_method->set_code(
-          get_outlined_code(outlined_method, c, front.pattern_ids));
+      outlined_method->set_code(get_outlined_code(
+          outlined_method, c, front.pattern_ids, front.slot_provenance));
       change_visibility(outlined_method->get_code(),
                         outlined_method->get_class(), outlined_method);
       outlined_method->get_code()->build_cfg();

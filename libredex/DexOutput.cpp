@@ -2684,11 +2684,8 @@ void write_pg_mapping(const std::string& filename, DexClasses* classes) {
     if (type != nullptr) {
       if (type::is_array(type)) {
         const auto* type_str = type->c_str();
-        int dim = 0;
-        while (type_str[dim] == '[') {
-          dim++;
-        }
-        const DexType* inner_type = DexType::get_type(&type_str[dim]);
+        uint32_t dim = type::get_array_level(type);
+        const DexType* inner_type = type::get_array_element_type(type);
         DexClass* inner_cls =
             inner_type != nullptr ? type_class(inner_type) : nullptr;
         std::string result;
@@ -2700,7 +2697,7 @@ void write_pg_mapping(const std::string& filename, DexClasses* classes) {
           result = java_names::internal_to_external(&type_str[dim]);
         }
         result.reserve(result.size() + static_cast<size_t>(2 * dim));
-        for (int i = 0; i < dim; ++i) {
+        for (uint32_t i = 0; i < dim; ++i) {
           result += "[]";
         }
         return result;

@@ -37,6 +37,7 @@
 #include "IROpcode.h"
 #include "ShowCFG.h"
 #include "StringBuilder.h"
+#include "TypeUtil.h"
 
 namespace {
 
@@ -149,7 +150,7 @@ std::string show_type(const DexType* t, bool deobfuscated) {
           return str_copy(name);
         } else if (name[0] == '[') {
           std::ostringstream ss;
-          ss << '[' << self(self, DexType::get_type(name.substr(1)));
+          ss << '[' << self(self, type::get_array_component_type(t));
           return ss.str();
         }
         return str_copy(name);

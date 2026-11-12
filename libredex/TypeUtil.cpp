@@ -156,6 +156,24 @@ bool is_object(const DexType* type) {
   return (sig == 'L') || (sig == '[');
 }
 
+namespace {
+
+std::string_view array_component_name(const DexType* array_type) {
+  std::string_view name = array_type->get_name()->str();
+  return name.substr(1);
+}
+
+std::string_view array_element_name(const DexType* array_type) {
+  std::string_view name = array_type->get_name()->str();
+  auto element_pos = name.find_first_not_of('[');
+  always_assert_log(element_pos != std::string_view::npos,
+                    "Array type without an element type: %s",
+                    array_type->c_str());
+  return name.substr(element_pos);
+}
+
+} // namespace
+
 bool is_java_lang_object_array(const DexType* type) {
   if (!is_array(type)) {
     return false;
@@ -313,25 +331,40 @@ DexType* make_array_component_type(const DexType* type) {
   if (!is_array(type)) {
     return nullptr;
   }
-  const auto* name = type->get_name()->c_str();
-  name++;
-  return DexType::make_type(name);
+  return DexType::make_type(array_component_name(type));
+}
+
+DexType* get_array_component_type(const DexType* type) {
+  if (!is_array(type)) {
+    return nullptr;
+  }
+  return DexType::get_type(array_component_name(type));
 }
 
 DexType* make_array_element_type(const DexType* type) {
   if (!is_array(type)) {
     return nullptr;
   }
-  const auto* name = type->get_name()->c_str();
-  while (*name == '[') {
-    name++;
+  return DexType::make_type(array_element_name(type));
+}
+
+DexType* get_array_element_type(const DexType* type) {
+  if (!is_array(type)) {
+    return nullptr;
   }
-  return DexType::make_type(name);
+  return DexType::get_type(array_element_name(type));
 }
 
 const DexType* make_element_type_if_array(const DexType* type) {
   if (is_array(type)) {
     return make_array_element_type(type);
+  }
+  return type;
+}
+
+const DexType* get_element_type_if_array(const DexType* type) {
+  if (is_array(type)) {
+    return get_array_element_type(type);
   }
   return type;
 }

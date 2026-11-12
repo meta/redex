@@ -173,3 +173,38 @@ TEST_F(TypeUtilTest, same_package_sub_package) {
   EXPECT_FALSE(same_package(DexType::make_type("Ljava/lang/Object;"),
                             DexType::make_type("Ljava/lang/reflect/Method;")));
 }
+
+TEST_F(TypeUtilTest, array_lookups_return_existing_types) {
+  using namespace type;
+
+  auto* object = DexType::make_type("Ljava/lang/Object;");
+  auto* array = DexType::make_type("[Ljava/lang/Object;");
+  auto* nested = DexType::make_type("[[Ljava/lang/Object;");
+
+  EXPECT_EQ(get_array_component_type(array), object);
+  EXPECT_EQ(get_array_component_type(nested), array);
+  EXPECT_EQ(get_array_element_type(nested), object);
+  EXPECT_EQ(get_element_type_if_array(nested), object);
+}
+
+TEST_F(TypeUtilTest, array_lookups_do_not_create_types) {
+  using namespace type;
+
+  auto* nested = DexType::make_type("[[Lmissing/T;");
+
+  EXPECT_EQ(get_array_component_type(nested), nullptr);
+  EXPECT_EQ(get_array_element_type(nested), nullptr);
+  EXPECT_EQ(get_element_type_if_array(nested), nullptr);
+  EXPECT_EQ(DexType::get_type("[Lmissing/T;"), nullptr);
+  EXPECT_EQ(DexType::get_type("Lmissing/T;"), nullptr);
+}
+
+TEST_F(TypeUtilTest, array_lookups_on_non_array_types) {
+  using namespace type;
+
+  auto* object = DexType::make_type("Ljava/lang/Object;");
+
+  EXPECT_EQ(get_array_component_type(object), nullptr);
+  EXPECT_EQ(get_array_element_type(object), nullptr);
+  EXPECT_EQ(get_element_type_if_array(object), object);
+}

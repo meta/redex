@@ -157,6 +157,12 @@ uint32_t get_array_level(const DexType* type);
 DexType* make_array_component_type(const DexType* type);
 
 /**
+ * Like `make_array_component_type`, but returns null instead of creating the
+ * component type when it does not exist yet.
+ */
+DexType* get_array_component_type(const DexType* type);
+
+/**
  * An array's component type may also be an array. Recursively unwrapping these
  * array types will give us the element type. E.g.:
  *
@@ -171,6 +177,12 @@ DexType* make_array_component_type(const DexType* type);
 DexType* make_array_element_type(const DexType* type);
 
 /**
+ * Like `make_array_element_type`, but returns null instead of creating the
+ * element type when it does not exist yet.
+ */
+DexType* get_array_element_type(const DexType* type);
+
+/**
  * Return the element type of a given array type or the type itself if it's not
  * an array.
  *
@@ -179,6 +191,12 @@ DexType* make_array_element_type(const DexType* type);
  *   java.lang.Integer -> java.lang.Integer
  */
 const DexType* make_element_type_if_array(const DexType* type);
+
+/**
+ * Like `make_element_type_if_array`, but returns null instead of creating the
+ * element type of an array when it does not exist yet.
+ */
+const DexType* get_element_type_if_array(const DexType* type);
 
 /**
  * Return the (level 1) array type of a given type.

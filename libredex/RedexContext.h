@@ -522,6 +522,7 @@ struct RedexContext {
       s_location_map;
 
   // DexPositionSwitch and DexPositionPattern
+  std::once_flag m_position_pattern_switch_manager_once;
   PositionPatternSwitchManager* m_position_pattern_switch_manager{nullptr};
 
   // Type-to-class map

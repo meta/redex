@@ -5,8 +5,11 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <algorithm>
 #include <fstream>
+#include <functional>
 #include <limits>
+#include <tuple>
 #include <type_traits>
 
 #include "ConcurrentContainers.h"
@@ -14,6 +17,7 @@
 #include "DexClass.h"
 #include "DexPosition.h"
 #include "DexUtil.h"
+#include "PositionJoin.h"
 #include "RedexContext.h"
 #include "Show.h"
 #include "Trace.h"
@@ -39,6 +43,14 @@ void DexPosition::bind(const DexString* method_, const DexString* file_) {
 
 void DexPosition::bind(const DexString* method_) { this->method = method_; }
 
+void DexPosition::set_alt_id(uint32_t alt_id) {
+  always_assert(alt_id != 0);
+  always_assert_log(alt_id <= max_alt_id(),
+                    "alt-set id %u exceeds the %u encodable in DexPosition",
+                    alt_id, max_alt_id());
+  m_prov =
+      (alt_id << kProvenanceBits) | (m_prov & kProvenanceMask) | kUnreliableBit;
+}
 bool DexPosition::operator==(const DexPosition& that) const {
   return method == that.method && file == that.file && line == that.line &&
          (parent == that.parent ||
@@ -64,15 +76,22 @@ std::unique_ptr<DexPosition> DexPosition::make_synthetic_entry_position(
   return std::make_unique<DexPosition>(method_str, source, 0);
 }
 
+std::unique_ptr<DexPosition> DexPosition::make_synthetic_position(
+    const DexString* method_name) {
+  return std::make_unique<DexPosition>(
+      method_name, DexString::make_string("UnknownSource"), 0);
+}
+
 PositionPatternSwitchManager::PositionPatternSwitchManager()
     : m_pattern_string(DexString::make_string("Lredex/$Position;.pattern:()V")),
       m_switch_string(DexString::make_string("Lredex/$Position;.switch:()V")),
-      m_unknown_source_string(DexString::make_string("UnknownSource")) {}
+      m_unknown_source_string(DexString::make_string("UnknownSource")),
+      m_redex_generated_string(DexString::make_string("RedexGenerated")) {}
 
 DexPosition* PositionPatternSwitchManager::internalize(DexPosition* pos) {
   always_assert(pos);
   // An interned position is its own hash key, so it must never be mutated
-  // afterwards -- and `process_pattern_switch_positions` does rewrite the line
+  // afterwards -- and `process_position_alternatives` does rewrite the line
   // of every switch position it emits. That is safe only because a pattern or
   // switch position never reaches here, which is what this checks. Enabling
   // CAN_OUTLINED_METHOD_INVOKE_OUTLINED_METHOD is what would break it.
@@ -94,6 +113,38 @@ DexPosition* PositionPatternSwitchManager::internalize(DexPosition* pos) {
   return m_positions.insert_unsafe(probe).first;
 }
 
+DexPosition* PositionPatternSwitchManager::snapshot_candidate(
+    const DexPosition* pos, bool clear_own_provenance) {
+  always_assert(pos);
+  always_assert_log(!is_pattern_position(pos) && !is_switch_position(pos),
+                    "snapshotting a synthetic pattern/switch position");
+  DexPosition snapshot(*pos);
+  if (clear_own_provenance) {
+    snapshot.clear_provenance();
+  }
+  if (pos->parent != nullptr) {
+    snapshot.parent = snapshot_candidate(pos->parent);
+  }
+  return m_candidate_positions.insert_unsafe(snapshot).first;
+}
+
+// A fileless position (a class without a SourceFile attribute) names no site,
+// and the line map cannot emit it as a candidate record. The `RedexGenerated`
+// position at the start of a method Redex created (an outlined or split-out
+// method, a `MethodCreator` method) names no source method. Pattern and switch
+// positions are wire records whose lines are ids. Any of these anywhere in the
+// inlining chain disqualifies the chain.
+bool PositionPatternSwitchManager::names_no_source(
+    const DexPosition* pos) const {
+  for (; pos != nullptr; pos = pos->parent) {
+    if (pos->file == nullptr || pos->file == m_redex_generated_string ||
+        is_pattern_position(pos) || is_switch_position(pos)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 uint32_t PositionPatternSwitchManager::make_pattern(
     PositionPattern pos_pattern) {
   for (auto& pos : pos_pattern) {
@@ -109,17 +160,234 @@ uint32_t PositionPatternSwitchManager::make_pattern(
 }
 
 uint32_t PositionPatternSwitchManager::make_switch(PositionSwitch pos_switch) {
-  for (auto& c : pos_switch) {
-    always_assert(c.position);
-    always_assert(c.position->file);
-    c.position = internalize(c.position);
+  return make_alternatives(PositionAlternatives{
+      PositionAlternativesSelection::ByPattern, std::move(pos_switch)});
+}
+
+uint32_t PositionPatternSwitchManager::make_alternatives(
+    PositionAlternatives alternatives) {
+  const bool by_pattern =
+      alternatives.selection == PositionAlternativesSelection::ByPattern;
+  for (auto& alternative : alternatives.entries) {
+    always_assert(alternative.position);
+    always_assert(alternative.position->file);
+    always_assert_log(
+        alternative.pattern_id.has_value() == by_pattern,
+        "a ByPattern alternative needs a discriminator and an All alternative "
+        "has none");
+    if (!by_pattern) {
+      alternative.position = snapshot_candidate(alternative.position);
+      continue;
+    }
+    alternative.position = internalize(alternative.position);
   }
-  auto it = m_switches_map.find(pos_switch);
-  if (it == m_switches_map.end()) {
-    it = m_switches_map.emplace(pos_switch, m_switches.size()).first;
-    m_switches.push_back(std::move(pos_switch));
+  std::lock_guard<std::mutex> lock(m_registration_mutex);
+  auto it = m_alternatives_map.find(alternatives);
+  if (it == m_alternatives_map.end()) {
+    it = m_alternatives_map.emplace(alternatives, m_alternatives.size()).first;
+    m_alternatives.push_back(std::move(alternatives));
   }
   return it->second;
+}
+
+namespace {
+
+struct PositionNodeKey {
+  std::string_view file;
+  uint32_t line;
+  std::string_view method;
+
+  bool operator==(const PositionNodeKey& other) const {
+    return std::tie(file, line, method) ==
+           std::tie(other.file, other.line, other.method);
+  }
+  bool operator<(const PositionNodeKey& other) const {
+    return std::tie(file, line, method) <
+           std::tie(other.file, other.line, other.method);
+  }
+};
+using PositionKey = std::vector<PositionNodeKey>;
+
+// Method, file and line at every level of a position's inlining chain.
+PositionKey position_key(const DexPosition* pos) {
+  PositionKey key;
+  for (; pos != nullptr; pos = pos->parent) {
+    key.push_back(PositionNodeKey{
+        pos->file == nullptr ? std::string_view() : pos->file->str(), pos->line,
+        pos->method == nullptr ? std::string_view() : pos->method->str()});
+  }
+  return key;
+}
+
+} // namespace
+
+PositionPattern PositionPatternSwitchManager::canonical_members(
+    const std::vector<DexPosition*>& members) {
+  std::vector<std::pair<PositionKey, DexPosition*>> keyed;
+  keyed.reserve(members.size());
+  for (auto* member : members) {
+    keyed.emplace_back(position_key(member), member);
+  }
+  std::sort(keyed.begin(), keyed.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  PositionPattern result;
+  result.reserve(keyed.size());
+  for (size_t i = 0; i < keyed.size();) {
+    auto* member = keyed[i].second;
+    size_t end = i + 1;
+    // The join is commutative, so the order of equal keys does not matter.
+    for (; end < keyed.size() && keyed[end].first == keyed[i].first; ++end) {
+      if (keyed[end].second != member) {
+        member = join_chains(member, keyed[end].second);
+      }
+    }
+    result.push_back(member);
+    i = end;
+  }
+  return result;
+}
+
+DexPosition* PositionPatternSwitchManager::join_chains(
+    const DexPosition* kept, const DexPosition* other) {
+  always_assert(kept);
+  DexPosition joined(*kept);
+  if (kept->parent != nullptr) {
+    joined.parent =
+        join_chains(kept->parent, other == nullptr ? nullptr : other->parent);
+  }
+  // A level `other` does not have, or has with callers `kept` does not show,
+  // is a different place too.
+  const bool same_place = other != nullptr && other->method == kept->method &&
+                          other->file == kept->file &&
+                          other->line == kept->line &&
+                          (kept->parent != nullptr || other->parent == nullptr);
+  auto uncaptured = [](const DexPosition* pos) {
+    return pos->is_unreliable() && pos->alt_id() == 0;
+  };
+  if (!same_place || uncaptured(kept) || uncaptured(other)) {
+    joined.mark_unreliable_without_candidates();
+  } else if (other->alt_id() != 0 && other->alt_id() != kept->alt_id()) {
+    if (kept->alt_id() == 0) {
+      joined.m_prov = other->m_prov;
+    } else {
+      auto members = get_alt_set(kept->alt_id()).members;
+      const auto& more = get_alt_set(other->alt_id()).members;
+      members.insert(members.end(), more.begin(), more.end());
+      joined.set_alt_id(register_alt_set(canonical_members(members)));
+    }
+  }
+  return m_candidate_positions.insert_unsafe(joined).first;
+}
+
+positions::FidelityChange PositionPatternSwitchManager::record_candidates(
+    DexPosition* survivor, const std::vector<const DexPosition*>& candidates) {
+  always_assert(survivor != nullptr);
+  std::lock_guard<std::mutex> survivor_lock(survivor_mutex(survivor));
+
+  // Absorbing: a survivor that already stands for a site nobody captured can
+  // never present a complete set again, and there is no partial encoding.
+  if (survivor->is_unreliable() && survivor->alt_id() == 0) {
+    return positions::FidelityChange::Unchanged;
+  }
+  // Every path below that changes the survivor leaves it unreliable.
+  const auto change = survivor->is_unreliable()
+                          ? positions::FidelityChange::Unchanged
+                          : positions::FidelityChange::BecameUnreliable;
+
+  // Merging with nothing nameable is itself a loss of fidelity, so an empty
+  // request is a report of an uncaptured site rather than a no-op.
+  auto names_nothing = [&](const DexPosition* candidate) {
+    return candidate == nullptr || names_no_source(candidate) ||
+           (candidate->is_unreliable() && candidate->alt_id() == 0);
+  };
+  if (candidates.empty() ||
+      std::any_of(candidates.begin(), candidates.end(), names_nothing)) {
+    survivor->mark_unreliable_without_candidates();
+    return change;
+  }
+
+  // The places the candidates stand for. A candidate is its own place -- its
+  // provenance is not, since whatever set it carried is added here as well.
+  // Candidate snapshots preserve provenance further up the chain immutably; the
+  // ordinary interner clears it because it is not part of source identity.
+  std::vector<DexPosition*> sites;
+  sites.reserve(candidates.size());
+  for (const auto* candidate : candidates) {
+    sites.push_back(
+        snapshot_candidate(candidate, /* clear_own_provenance */ true));
+    if (auto alt_id = candidate->alt_id()) {
+      const auto& inherited = get_alt_set(alt_id);
+      sites.insert(sites.end(), inherited.members.begin(),
+                   inherited.members.end());
+    }
+  }
+  // The survivor already presents its own place, so a copy of it is not
+  // another place. What the copies know about its callers can be more than the
+  // survivor's own callers say, and those are shared with other code, so the
+  // survivor's place then joins the set itself, its callers joined level by
+  // level with every copy's.
+  std::vector<DexPosition*> other_places;
+  other_places.reserve(sites.size());
+  DexPosition* callers = nullptr;
+  for (auto* site : sites) {
+    if (!(*site == *survivor)) {
+      other_places.push_back(site);
+    } else if (survivor->parent != nullptr) {
+      callers = join_chains(callers != nullptr ? callers : survivor->parent,
+                            site->parent);
+    }
+  }
+  sites = std::move(other_places);
+  if (callers != nullptr &&
+      !same_position_and_provenance(*callers, *survivor->parent)) {
+    DexPosition own_place(*survivor);
+    own_place.clear_provenance();
+    own_place.parent = callers;
+    sites.push_back(m_candidate_positions.insert_unsafe(own_place).first);
+  }
+  if (sites.empty()) {
+    // Nothing beyond what the survivor already presents, and nothing went
+    // uncaptured, so the survivor makes exactly the claim it made before.
+    return positions::FidelityChange::Unchanged;
+  }
+
+  // Preserve the complete membership, not only the capped records. Otherwise a
+  // later unique member cannot be distinguished from one dropped by the cap.
+  if (auto alt_id = survivor->alt_id()) {
+    const auto& inherited = get_alt_set(alt_id);
+    sites.insert(sites.end(), inherited.members.begin(),
+                 inherited.members.end());
+  }
+  survivor->set_alt_id(register_alt_set(canonical_members(sites)));
+  return change;
+}
+
+uint32_t PositionPatternSwitchManager::register_alt_set(
+    PositionPattern members) {
+  std::vector<PositionAlternative> entries;
+  entries.reserve(std::min(members.size(), kMaxCandidates));
+  for (auto* member : members) {
+    if (entries.size() == kMaxCandidates) {
+      break;
+    }
+    entries.push_back(PositionAlternative{std::nullopt, member});
+  }
+  auto alternatives_id = make_alternatives(PositionAlternatives{
+      PositionAlternativesSelection::All, std::move(entries)});
+
+  const size_t members_hash = boost::hash_range(members.begin(), members.end());
+  std::lock_guard<std::mutex> lock(m_registration_mutex);
+  auto it = m_alt_set_ids.find(AltSetMembersKey{members_hash, &members});
+  if (it == m_alt_set_ids.end()) {
+    auto alt_set = std::make_unique<const AltSet>(
+        AltSet{alternatives_id, std::move(members)});
+    it = m_alt_set_ids
+             .emplace(AltSetMembersKey{members_hash, &alt_set->members},
+                      static_cast<uint32_t>(m_alt_sets.size()))
+             .first;
+    m_alt_sets.push_back(std::move(alt_set));
+  }
+  return it->second + 1;
 }
 
 std::unique_ptr<DexPosition>
@@ -131,7 +399,7 @@ PositionPatternSwitchManager::make_pattern_position(uint32_t pattern_id) const {
 
 std::unique_ptr<DexPosition> PositionPatternSwitchManager::make_switch_position(
     uint32_t switch_id) const {
-  always_assert(switch_id < m_switches.size());
+  always_assert(switch_id < m_alternatives.size());
   return std::make_unique<DexPosition>(m_switch_string, m_unknown_source_string,
                                        switch_id);
 }
@@ -167,23 +435,36 @@ void RealPositionMapper::write_map() {
   }
 }
 
-void RealPositionMapper::process_pattern_switch_positions() {
+void RealPositionMapper::process_position_alternatives() {
   auto* manager = g_redex->get_position_pattern_switch_manager();
   if (manager->empty()) {
     return;
   }
 
-  // First. we find all reachable patterns, switches and cases.
-  auto switches = manager->get_switches();
-  ConcurrentMap<uint32_t, std::vector<PositionCase>> reachable_patterns;
-  InsertOnlyConcurrentSet<uint32_t> reachable_switches;
+  // Registration is complete before map writing starts, so this snapshot stays
+  // immutable while the parallel reachability walk reads it.
+  auto alternatives = manager->get_alternatives();
+  // First, we find all reachable patterns, switches, cases and candidate sets.
+  ConcurrentMap<uint32_t, std::vector<PositionAlternative>> reachable_patterns;
+  InsertOnlyConcurrentSet<uint32_t> reachable_alternatives;
   InsertOnlyConcurrentSet<DexPosition*> visited;
   std::function<void(DexPosition*)> visit;
   visit = [&](DexPosition* pos) {
     always_assert(pos);
     for (; (pos != nullptr) && visited.insert(pos).second; pos = pos->parent) {
+      if (pos->alt_id() != 0) {
+        const auto& alt_set = manager->get_alt_set(pos->alt_id());
+        if (reachable_alternatives.insert(alt_set.alternatives_id).second) {
+          const auto& group = alternatives.at(alt_set.alternatives_id);
+          always_assert(group.selection == PositionAlternativesSelection::All);
+          for (const auto& entry : group.entries) {
+            visit(entry.position);
+          }
+        }
+      }
+
       if (manager->is_pattern_position(pos)) {
-        std::vector<PositionCase> cases;
+        std::vector<PositionAlternative> cases;
         reachable_patterns.update(pos->line,
                                   [&](auto, auto& pending, bool exists) {
                                     if (exists) {
@@ -194,10 +475,14 @@ void RealPositionMapper::process_pattern_switch_positions() {
           visit(c.position);
         }
       } else if (manager->is_switch_position(pos)) {
-        if (reachable_switches.insert(pos->line).second) {
-          for (auto& c : switches.at(pos->line)) {
+        if (reachable_alternatives.insert(pos->line).second) {
+          const auto& group = alternatives.at(pos->line);
+          always_assert(group.selection ==
+                        PositionAlternativesSelection::ByPattern);
+          for (const auto& c : group.entries) {
+            always_assert(c.pattern_id.has_value());
             bool pattern_reachable = false;
-            reachable_patterns.update(c.pattern_id,
+            reachable_patterns.update(*c.pattern_id,
                                       [&](auto, auto& pending, bool exists) {
                                         if (exists && pending.empty()) {
                                           pattern_reachable = true;
@@ -222,32 +507,23 @@ void RealPositionMapper::process_pattern_switch_positions() {
       DexString::make_string("Lredex/$Position;.case:()V");
   const auto* unknown_source_string = DexString::make_string("UnknownSource");
 
-  // Second, we encode the switches and cases via extra positions.
-  // For example, at some start line, we'll create 3 consecutive entries such
-  // as the following, where 12345 and 54321 are pattern-ids.
-  //
-  // ...
-  // 23: (some actual position)
-  // ...
-  // 42: (some actual position)
-  // ...
-  // 101: method Lredex/$Position;.count:()V, line 2 (no parent)
-  // 102: method Lredex/$Position;.case:()V, line 12345, parent 23
-  // 103: method Lredex/$Position;.case:()V, line 54321, parent 42
-  UnorderedMap<uint32_t, uint32_t> switch_line_map;
-  for (uint32_t switch_id = 0; switch_id < switches.size(); ++switch_id) {
-    if (reachable_switches.count(switch_id) == 0u) {
+  UnorderedMap<uint32_t, uint32_t> alternatives_line_map;
+  for (uint32_t alternatives_id = 0; alternatives_id < alternatives.size();
+       ++alternatives_id) {
+    if (reachable_alternatives.count(alternatives_id) == 0u) {
       continue;
     }
-    // We go over cases once to make sure all referenced positions are
-    // registered and fully initialized. Note that only positions with a valid
-    // file are considered.
-    std::vector<PositionCase> reachable_cases;
-    for (auto& c : switches.at(switch_id)) {
-      if (reachable_patterns.count(c.pattern_id) == 0u) {
+    const auto& group = alternatives.at(alternatives_id);
+    const bool by_pattern =
+        group.selection == PositionAlternativesSelection::ByPattern;
+    std::vector<PositionAlternative> reachable_entries;
+    for (const auto& entry : group.entries) {
+      always_assert(entry.pattern_id.has_value() == by_pattern);
+      if (by_pattern && reachable_patterns.count(*entry.pattern_id) == 0u) {
         continue;
       }
-      for (auto* pos = c.position; (pos != nullptr) && (pos->file != nullptr);
+      for (auto* pos = entry.position;
+           (pos != nullptr) && (pos->file != nullptr);
            pos = pos->parent) {
         auto [it, emplaced] = m_pos_line_map.emplace(pos, m_positions.size());
         if (emplaced) {
@@ -256,51 +532,43 @@ void RealPositionMapper::process_pattern_switch_positions() {
           always_assert(it->second != -1);
         }
       }
-      reachable_cases.push_back(c);
+      reachable_entries.push_back(entry);
     }
-    // Sort cases by pattern-id, so that we can later do a binary search when
-    // finding a matching pattern-id
-    std::sort(reachable_cases.begin(), reachable_cases.end(),
-              [](const PositionCase& a, const PositionCase& b) {
-                return a.pattern_id < b.pattern_id;
-              });
-    // We emit a first entry holding the count
-    switch_line_map.emplace(switch_id, m_positions.size());
+    if (by_pattern) {
+      std::sort(reachable_entries.begin(), reachable_entries.end(),
+                [](const PositionAlternative& a, const PositionAlternative& b) {
+                  return *a.pattern_id < *b.pattern_id;
+                });
+    }
+
+    alternatives_line_map.emplace(alternatives_id, m_positions.size());
     {
       auto* count_pos = new DexPosition(count_string, unknown_source_string,
-                                        reachable_cases.size());
+                                        reachable_entries.size());
       m_owned_auxiliary_positions.emplace_back(count_pos);
       add_position(count_pos);
     }
-    // Then we emit consecutive list of cases
-    for (auto& c : reachable_cases) {
+    for (const auto& entry : reachable_entries) {
       auto* case_pos =
-          new DexPosition(case_string, unknown_source_string, c.pattern_id);
+          new DexPosition(case_string, unknown_source_string,
+                          by_pattern ? *entry.pattern_id : uint32_t{0});
       m_owned_auxiliary_positions.emplace_back(case_pos);
-      always_assert(c.position);
-      always_assert(c.position->file);
-      case_pos->parent = c.position;
+      always_assert(entry.position);
+      always_assert(entry.position->file);
+      case_pos->parent = entry.position;
       add_position(case_pos);
     }
   }
 
-  // Finally, we rewrite all switch positions to reference the emitted case
-  // lists. For the above example, if the case-list for some switch_id was
-  // emitted starting at line 101, then we'll update the referencing position to
-  //
-  // (some line): method Lredex/$Position;.switch:()V, line 101
-  //
-  // Note that the callsite remains unchanged, still referencing the pattern-id,
-  // e.g.
-  //
-  // (some line): method Lredex/$Position;.pattern:()V, line 12345
-  //
-  // TODO: Should we undo this when we are done writing the map?
+  // Only outliner switch positions carry an alternatives id in their line;
+  // candidate sets are referenced from the trailer instead.
   for (auto* pos : m_positions) {
     if (manager->is_switch_position(pos)) {
-      pos->line = switch_line_map.at(pos->line);
+      pos->line = alternatives_line_map.at(pos->line);
     }
   }
+
+  m_alternatives_record_indices = std::move(alternatives_line_map);
 }
 
 uint32_t RealPositionMapper::size() const { return m_positions.size(); }
@@ -319,7 +587,7 @@ void RealPositionMapper::write_map_v2() {
     }
   }
 
-  process_pattern_switch_positions();
+  process_position_alternatives();
 
   /*
    * Map file layout:
@@ -328,7 +596,8 @@ void RealPositionMapper::write_map_v2() {
    * string_pool_size (4 bytes)
    * string_pool[string_pool_size]
    * positions_size (4 bytes)
-   * positions[positions_size]
+   * positions[positions_size] -- the positions code refers to, followed by
+   *   the `count`/`case` records of outliner switches and candidate sets
    * optionally, the provenance trailer -- see `namespace position_map`. Known
    * count-driven readers stop after the declared positions array and ignore the
    * optional suffix.
@@ -492,13 +761,41 @@ void RealPositionMapper::write_provenance_trailer(std::ofstream& ofs) {
   std::vector<position_map::ProvenanceEntry> entries;
   for (size_t idx = 0; idx < m_positions.size(); ++idx) {
     auto* pos = m_positions[idx];
+    always_assert(idx <= std::numeric_limits<uint32_t>::max());
     if (!pos->is_unreliable()) {
       continue;
     }
-    always_assert(idx <= std::numeric_limits<uint32_t>::max());
-    entries.push_back(position_map::ProvenanceEntry{static_cast<uint32_t>(idx),
-                                                    /* alt_record_index */ 0,
-                                                    /* total_candidates */ 0});
+
+    uint32_t alt_record_index = 0;
+    uint32_t total_candidates = 0;
+    if (pos->alt_id() != 0) {
+      const auto& alt_set =
+          g_redex->get_position_pattern_switch_manager()->get_alt_set(
+              pos->alt_id());
+      auto it = m_alternatives_record_indices.find(alt_set.alternatives_id);
+      // A dangling index would be silent: the entry would point into the
+      // positions array at whatever record happens to sit there. This is the
+      // check that the seeding above actually reached this set.
+      always_assert_log(it != m_alternatives_record_indices.end(),
+                        "alt set %u for position record %zu has no emitted "
+                        "candidate records",
+                        pos->alt_id(), idx);
+      alt_record_index = it->second;
+      // Index 0 is always one of the positions registered from code, because
+      // candidate records are appended only here, after all of those. So 0 can
+      // never be a real candidate record, which is what lets it mean "the sites
+      // this line stands for were not captured".
+      always_assert(alt_record_index != 0);
+      // Only reported when the list was actually cut down. Otherwise the reader
+      // can count the records it was given, and saying so again would put a
+      // second copy of the same number on every ambiguous row.
+      total_candidates = alt_set.total_candidates() >
+                                 PositionPatternSwitchManager::kMaxCandidates
+                             ? alt_set.total_candidates()
+                             : 0;
+    }
+    entries.push_back(position_map::ProvenanceEntry{
+        static_cast<uint32_t>(idx), alt_record_index, total_candidates});
   }
 
   if (entries.empty()) {

@@ -1577,9 +1577,11 @@ void VirtualMergingPass::run_pass(DexStoresVector& stores,
   bool update_method_profiles_stats;
   conf.get_json_config().get("update_method_profiles_stats", false,
                              update_method_profiles_stats);
+  positions::JoinStats dedup_position_stats;
   auto dedupped = dedup_vmethods::dedup(
       stores,
-      update_method_profiles_stats ? &conf.get_method_profiles() : nullptr);
+      update_method_profiles_stats ? &conf.get_method_profiles() : nullptr,
+      &dedup_position_stats);
 
   const api::AndroidSDK* min_sdk_api{nullptr};
   int32_t min_sdk = mgr.get_redex_options().min_sdk;
@@ -1606,6 +1608,12 @@ void VirtualMergingPass::run_pass(DexStoresVector& stores,
   vm.flush();
 
   mgr.incr_metric(METRIC_DEDUPPED_VIRTUAL_METHODS, dedupped);
+  mgr.incr_metric(positions::metrics::kMarkedUnreliable,
+                  dedup_position_stats.marked_unreliable);
+  mgr.incr_metric(positions::metrics::kNotRecorded,
+                  dedup_position_stats.not_recorded);
+  mgr.incr_metric(positions::metrics::kMergedWithoutCorrespondence,
+                  dedup_position_stats.merged_without_correspondence);
   mgr.incr_metric(METRIC_INVOKE_SUPER_METHODS, stats.invoke_super_methods);
   mgr.incr_metric(METRIC_INVOKE_SUPER_UNRESOLVED_METHOD_REFS,
                   stats.invoke_super_unresolved_method_refs);

@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "PositionJoin.h"
+
 namespace method_profiles {
 class MethodProfiles;
 } // namespace method_profiles
@@ -33,7 +35,8 @@ using DexStoresVector = std::vector<DexStore>;
  */
 namespace dedup_vmethods {
 uint32_t dedup(const DexStoresVector& stores,
-               method_profiles::MethodProfiles* method_profiles = nullptr);
+               method_profiles::MethodProfiles* method_profiles = nullptr,
+               positions::JoinStats* join_stats = nullptr);
 
 // Whether `method` may be removed in favor of an identical implementation in
 // a superclass: small code without invoke-super, renamable, not a root, and

@@ -32,6 +32,9 @@ class P {
   protected int non_public_method() {
     return 1;
   }
+  public Object throwing_method() {
+    return new Object();
+  }
 }
 
 class C1 extends P {}
@@ -60,6 +63,10 @@ class C2 extends P {
   @Duplication
   public int method() {
     return 0;
+  }
+  @Duplication
+  public Object throwing_method() {
+    return new Object();
   }
   // This is not deduplicated but its access flag should be public after the transformation.
   @Publicized
@@ -95,5 +102,58 @@ class C21D extends C2D {
   @Duplication
   public int method() {
     return 0;
+  }
+}
+
+class InvokeSuperA {
+  protected Object throwing_method() {
+    return new Object();
+  }
+}
+
+class InvokeSuperB extends InvokeSuperA {
+  @Override
+  protected Object throwing_method() {
+    return new Object();
+  }
+}
+
+class InvokeSuperC extends InvokeSuperB {
+  @Duplication
+  @Override
+  public Object throwing_method() {
+    return new Object();
+  }
+
+  public Object call_super() {
+    return super.throwing_method();
+  }
+}
+
+class InvokeSuperCaller {
+  public Object call(InvokeSuperC value) {
+    return value.throwing_method();
+  }
+}
+
+class OutOfOrderA {
+  public Object throwing_method() {
+    return new Object();
+  }
+}
+
+class OutOfOrderB extends OutOfOrderA {
+  @Duplication
+  @Override
+  public Object throwing_method() {
+    return new Object();
+  }
+}
+
+class OutOfOrderC extends OutOfOrderB {
+  @Duplication
+  @Override
+  public Object throwing_method() {
+    return new Object();
   }
 }

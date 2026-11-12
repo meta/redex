@@ -38,9 +38,7 @@ class TypeSystem {
     return empty_vec;
   }
 
-  ClassHierarchy m_hierarchy;
-  InterfaceMap m_interface_map;
-  ClassHierarchy m_intf_children;
+  SubtypeMaps m_subtypes;
   InstanceOfTable m_instanceof_table;
   TypeToTypeSet m_interfaces;
 
@@ -52,8 +50,9 @@ class TypeSystem {
    * The type must be a class (not an interface).
    */
   const TypeSet& get_children(const DexType* type) const {
-    const auto& children = m_hierarchy.find(type);
-    return children != m_hierarchy.end() ? children->second : get_empty_set();
+    const auto& children = m_subtypes.subclasses.find(type);
+    return children != m_subtypes.subclasses.end() ? children->second
+                                                   : get_empty_set();
   }
 
   /**
@@ -61,7 +60,7 @@ class TypeSystem {
    * The type must be a class (not an interface).
    */
   void get_all_children(const DexType* type, TypeSet& children) const {
-    return ::get_all_children(m_hierarchy, type, children);
+    return ::get_all_children(m_subtypes.subclasses, type, children);
   }
 
   /**
@@ -130,8 +129,8 @@ class TypeSystem {
    * or an interface DAG.
    */
   bool implements(const DexType* cls, const DexType* intf) const {
-    const auto& implementors = m_interface_map.find(intf);
-    if (implementors == m_interface_map.end()) {
+    const auto& implementors = m_subtypes.implementors.find(intf);
+    if (implementors == m_subtypes.implementors.end()) {
       return false;
     }
     return implementors->second.count(cls) > 0;
@@ -145,8 +144,8 @@ class TypeSystem {
    * interface will be included in the returning set.
    */
   const TypeSet& get_implementors(const DexType* intf) const {
-    const auto& implementors = m_interface_map.find(intf);
-    if (implementors == m_interface_map.end()) {
+    const auto& implementors = m_subtypes.implementors.find(intf);
+    if (implementors == m_subtypes.implementors.end()) {
       return get_empty_set();
     }
     return implementors->second;
@@ -166,8 +165,8 @@ class TypeSystem {
    * The type must be an interface (not a class).
    */
   const TypeSet& get_interface_children(const DexType* intf) const {
-    const auto& children = m_intf_children.find(intf);
-    if (children == m_intf_children.end()) {
+    const auto& children = m_subtypes.subinterfaces.find(intf);
+    if (children == m_subtypes.subinterfaces.end()) {
       return get_empty_set();
     }
     return children->second;
@@ -191,7 +190,15 @@ class TypeSystem {
    * Its lifetime is tied to that of the TypeSystem, as such it should not
    * exceed it.
    */
-  const ClassHierarchy& get_class_hierarchy() const { return m_hierarchy; }
+  const ClassHierarchy& get_class_hierarchy() const {
+    return m_subtypes.subclasses;
+  }
+
+  /**
+   * Return the SubtypeMaps known when building the type system, with the same
+   * lifetime as get_class_hierarchy().
+   */
+  const SubtypeMaps& get_subtype_maps() const { return m_subtypes; }
 
  private:
   void make_instanceof_interfaces_table();

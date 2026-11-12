@@ -47,18 +47,16 @@ namespace {
 
 // The instanceof/interface tables are rooted at java.lang.Object and assume it
 // resolves to a DexClass, so make sure it does.
-ClassHierarchy build_hierarchy_with_object(const Scope& scope) {
+SubtypeMaps build_subtype_maps_with_object(const Scope& scope) {
   // No-op when Object already resolves.
   create_object_class();
-  return build_type_hierarchy(scope);
+  return build_subtype_maps(scope);
 }
 
 } // namespace
 
 TypeSystem::TypeSystem(const Scope& scope)
-    : m_hierarchy(build_hierarchy_with_object(scope)),
-      m_interface_map(build_interface_map(m_hierarchy)),
-      m_intf_children(build_interface_children(scope)) {
+    : m_subtypes(build_subtype_maps_with_object(scope)) {
   make_instanceof_interfaces_table();
 }
 
@@ -108,7 +106,7 @@ TypeSet TypeSystem::get_local_interfaces(const TypeSet& classes) {
 
 void TypeSystem::make_instanceof_interfaces_table() {
   TypeVector no_parents;
-  for (const auto& children_it : UnorderedIterable(m_hierarchy)) {
+  for (const auto& children_it : UnorderedIterable(m_subtypes.subclasses)) {
     const auto* const parent = children_it.first;
     auto* const parent_cls = type_class(parent);
     if (parent_cls != nullptr) {
@@ -118,7 +116,7 @@ void TypeSystem::make_instanceof_interfaces_table() {
   }
   no_parents.emplace_back(type::java_lang_Object());
   for (const auto& root : no_parents) {
-    make_instanceof_table(m_instanceof_table, m_hierarchy, root);
+    make_instanceof_table(m_instanceof_table, m_subtypes.subclasses, root);
   }
   for (const auto& root : no_parents) {
     make_interfaces_table(root);
@@ -142,8 +140,8 @@ void TypeSystem::make_interfaces_table(const DexType* type) {
     }
   }
 
-  const auto& children = m_hierarchy.find(type);
-  if (children == m_hierarchy.end()) {
+  const auto& children = m_subtypes.subclasses.find(type);
+  if (children == m_subtypes.subclasses.end()) {
     return;
   }
   for (const auto& child : children->second) {

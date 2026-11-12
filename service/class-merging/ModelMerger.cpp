@@ -397,7 +397,7 @@ void update_instance_of_no_type_tag(
 
 void update_refs_to_mergeable_types(
     const Scope& scope,
-    const ClassHierarchy& parent_to_children,
+    const SubtypeMaps& subtype_maps,
     const std::vector<const MergerType*>& mergers,
     const UnorderedMap<const DexType*, DexType*>& mergeable_to_merger,
     const TypeTags& type_tags,
@@ -410,7 +410,7 @@ void update_refs_to_mergeable_types(
   type_reference::update_method_signature_type_references(
       scope,
       mergeable_to_merger,
-      parent_to_children,
+      subtype_maps,
       std::optional<
           std::reference_wrapper<UnorderedMap<DexMethod*, std::string>>>(
           method_debug_map));
@@ -640,10 +640,9 @@ std::vector<DexClass*> ModelMerger::merge_model(
   auto type_tag_fields = get_type_tag_fields(to_materialize, input_has_type_tag,
                                              model_spec.generate_type_tag());
   UnorderedMap<DexMethod*, std::string> method_debug_map;
-  const auto& parent_to_children =
-      model.get_type_system().get_class_hierarchy();
+  const auto& subtype_maps = model.get_type_system().get_subtype_maps();
   update_refs_to_mergeable_types(
-      scope, parent_to_children, to_materialize, mergeable_to_merger, type_tags,
+      scope, subtype_maps, to_materialize, mergeable_to_merger, type_tags,
       type_tag_fields, method_debug_map, model_spec.has_type_tag(),
       m_is_intra_dex_merging);
   trim_method_debug_map(mergeable_to_merger, method_debug_map);

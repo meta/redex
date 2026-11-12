@@ -11,6 +11,7 @@
 
 #include "Creators.h"
 #include "DexClass.h"
+#include "IRAssembler.h"
 #include "RedexTest.h"
 
 using namespace type_reference;
@@ -109,4 +110,58 @@ TEST_F(TypeReferenceTest, update_field_type_references) {
   EXPECT_EQ(f_e3->get_type(),
             type::make_array_type(
                 type::make_array_type(type::make_array_type(type::_int()))));
+}
+
+// The default method `I.m(<intf_arg>)` and the overload `X.m(<class_arg>)`,
+// where `X` implements `I`, after `old` becomes `LN;`.
+std::pair<DexMethod*, DexMethod*> update_default_method_and_overload(
+    const char* intf_arg, const char* class_arg, const char* old) {
+  auto make_method = [](const std::string& signature) {
+    auto* method =
+        DexMethod::make_method(signature)->make_concrete(ACC_PUBLIC, true);
+    method->set_code(assembler::ircode_from_string(R"((
+      (load-param-object v0)
+      (load-param-object v1)
+      (return-void)
+    ))"));
+    return method;
+  };
+  ClassCreator intf_creator(DexType::make_type("LI;"));
+  intf_creator.set_super(type::java_lang_Object());
+  intf_creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  auto* default_method = make_method(std::string("LI;.m:(") + intf_arg + ")V");
+  intf_creator.add_method(default_method);
+  auto* intf = intf_creator.create();
+
+  ClassCreator x_creator(DexType::make_type("LX;"));
+  x_creator.set_super(type::java_lang_Object());
+  x_creator.add_interface(intf->get_type());
+  auto* overload = make_method(std::string("LX;.m:(") + class_arg + ")V");
+  x_creator.add_method(overload);
+  auto* x = x_creator.create();
+
+  Scope scope{intf, x};
+  UnorderedMap<const DexType*, DexType*> old_to_new{
+      {DexType::make_type(old), DexType::make_type("LN;")}};
+  update_method_signature_type_references(scope, old_to_new,
+                                          build_subtype_maps(scope));
+  return {default_method, overload};
+}
+
+TEST_F(TypeReferenceTest, keeps_overload_apart_from_default_method) {
+  // `X.m(N)` would override `I.m(N)`.
+  auto [default_method, overload] =
+      update_default_method_and_overload("LN;", "LB;", "LB;");
+  EXPECT_EQ(overload->get_proto()->get_args()->at(0),
+            DexType::make_type("LN;"));
+  EXPECT_NE(default_method->get_name(), overload->get_name());
+}
+
+TEST_F(TypeReferenceTest, keeps_default_method_apart_from_overload) {
+  // `I.m(N)` would be overridden by `X.m(N)`.
+  auto [default_method, overload] =
+      update_default_method_and_overload("LA;", "LN;", "LA;");
+  EXPECT_EQ(default_method->get_proto()->get_args()->at(0),
+            DexType::make_type("LN;"));
+  EXPECT_NE(default_method->get_name(), overload->get_name());
 }

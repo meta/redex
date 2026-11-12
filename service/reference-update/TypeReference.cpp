@@ -166,22 +166,13 @@ DexProto* get_new_proto(const DexProto* proto,
  * same signatures after the updating and we will never break virtual scopes.
  */
 void update_vmethods_group_one_type_ref(const VMethodGroup& group,
-                                        const ClassHierarchy& ch) {
+                                        const SubtypeMaps& subtype_maps) {
   auto* proto = (*unordered_any(group.methods))->get_proto();
   auto* new_proto =
       get_new_proto(proto, group.old_type_ref, group.new_type_ref);
   bool need_rename = false;
   for (auto* method : UnorderedIterable(group.methods)) {
-    // if collision in the same container or in the hierarchy.
-    auto collision =
-        (DexMethod::get_method(
-             method->get_class(), method->get_name(), new_proto) != nullptr) ||
-        (find_collision(ch,
-                        method->get_name(),
-                        new_proto,
-                        type_class(method->get_class()),
-                        method->is_virtual()) != nullptr);
-    if (collision) {
+    if (has_signature_collision(subtype_maps, method, new_proto)) {
       need_rename = true;
       break;
     }
@@ -512,7 +503,7 @@ DexProto* get_new_proto(
 void update_method_signature_type_references(
     const Scope& scope,
     const UnorderedMap<const DexType*, DexType*>& old_to_new,
-    const ClassHierarchy& ch,
+    const SubtypeMaps& subtype_maps,
     std::optional<std::reference_wrapper<UnorderedMap<DexMethod*, std::string>>>
         method_debug_map) {
   // Virtual methods.
@@ -573,7 +564,7 @@ void update_method_signature_type_references(
   // Update virtual methods group by group.
   for (auto& key_and_group : vmethods_groups) {
     auto& group = key_and_group.second;
-    update_vmethods_group_one_type_ref(group, ch);
+    update_vmethods_group_one_type_ref(group, subtype_maps);
   }
 
   // Ensure that no method references left that still refer old types.

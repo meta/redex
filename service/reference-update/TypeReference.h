@@ -90,7 +90,7 @@ DexProto* get_new_proto(
 void update_method_signature_type_references(
     const Scope& scope,
     const UnorderedMap<const DexType*, DexType*>& old_to_new,
-    const ClassHierarchy& ch,
+    const SubtypeMaps& subtype_maps,
     std::optional<std::reference_wrapper<UnorderedMap<DexMethod*, std::string>>>
         method_debug_map = std::nullopt);
 

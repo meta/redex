@@ -48,6 +48,11 @@ class RClassReader {
   bool is_r_class(const DexClass* cls) const;
   bool is_r_class(const DexFieldRef* field_ref) const;
 
+  // Whether `cls` is named like an R class: a configured customized R class or
+  // an Android build tooling R inner class. Unlike `is_r_class`, this does not
+  // validate the class's structure.
+  bool has_r_class_name(const DexClass* cls) const;
+
   // For a given class, analyze the clinit and return information about array
   // fields and the values inside that array. Takes a known state of other
   // classes and returns new information (which presumably would then be used to

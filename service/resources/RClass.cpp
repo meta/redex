@@ -248,6 +248,11 @@ bool RClassReader::is_r_class(const DexClass* cls) const {
   return false;
 }
 
+bool RClassReader::has_r_class_name(const DexClass* cls) const {
+  return is_customized_resource_class(cls, m_global_resources_config) ||
+         is_non_customized_r_class(cls);
+}
+
 bool RClassReader::is_r_class(const DexFieldRef* field_ref) const {
   auto* field_cls = type_class(field_ref->get_class());
   if (field_cls == nullptr) {

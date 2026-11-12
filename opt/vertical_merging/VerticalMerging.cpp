@@ -18,6 +18,7 @@
 #include "EditableCfgAdapter.h"
 #include "IROpcode.h"
 #include "PassManager.h"
+#include "RClass.h"
 #include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
@@ -529,6 +530,24 @@ void record_blocklist(
 }
 
 /**
+ * The resource passes find R classes by name and accept only static fields, a
+ * simple <clinit> and a zero-argument constructor. Merging would give an R
+ * class the other class's constructor with an added dummy parameter, or move R
+ * fields into a class that is not recognized as an R class. So a pair is never
+ * merged when either class is an R class.
+ */
+void record_r_classes(
+    const Scope& scope,
+    const resources::RClassReader& r_class_reader,
+    UnorderedMap<const DexType*, DontMergeState>* dont_merge_status) {
+  walk::classes(scope, [&](DexClass* cls) {
+    if (r_class_reader.has_r_class_name(cls)) {
+      record_dont_merge_state(cls->get_type(), kStrict, dont_merge_status);
+    }
+  });
+}
+
+/**
  * Remove pair of classes from merging if they both have clinit function.
  */
 void remove_both_have_clinit(ClassMap* mergeable_to_merger) {
@@ -608,6 +627,7 @@ size_t record_field_reference(
 TypeLikeStringStats record_referenced(
     const Scope& scope,
     const std::vector<std::string>& blocklist,
+    const resources::RClassReader& r_class_reader,
     bool record_type_like_string_refs,
     UnorderedMap<const DexType*, DontMergeState>* dont_merge_status) {
   TypeLikeStringStats stats;
@@ -619,6 +639,7 @@ TypeLikeStringStats record_referenced(
       scope, record_type_like_string_refs, dont_merge_status);
   record_method_signature(scope, dont_merge_status);
   record_blocklist(scope, dont_merge_status, blocklist);
+  record_r_classes(scope, r_class_reader, dont_merge_status);
   return stats;
 }
 
@@ -1034,9 +1055,10 @@ void VerticalMergingPass::run_pass(DexStoresVector& stores,
   auto scope = build_class_scope(stores);
 
   UnorderedMap<const DexType*, DontMergeState> dont_merge_status;
+  resources::RClassReader r_class_reader(conf.get_global_config());
   auto type_like_string_stats =
-      record_referenced(scope, m_blocklist, !m_unsafe_ignore_type_like_strings,
-                        &dont_merge_status);
+      record_referenced(scope, m_blocklist, r_class_reader,
+                        !m_unsafe_ignore_type_like_strings, &dont_merge_status);
   XStoreRefs xstores(stores, conf.normal_primary_dex());
   size_t num_single_extend;
   auto mergeable_to_merger =

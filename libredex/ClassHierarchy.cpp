@@ -9,43 +9,12 @@
 
 #include "Debug.h"
 #include "RedexContext.h"
-#include "Resolver.h"
 #include "Show.h"
 #include "TypeUtil.h"
 
 namespace {
 
 static const TypeSet empty_set{};
-
-inline bool match(const DexString* name,
-                  const DexProto* proto,
-                  const DexMethod* cls_meth) {
-  return name == cls_meth->get_name() && proto == cls_meth->get_proto();
-}
-
-DexMethod* check_vmethods(const DexString* name,
-                          const DexProto* proto,
-                          const DexType* type) {
-  const DexClass* cls = type_class(type);
-  for (const auto& method : cls->get_vmethods()) {
-    if (match(name, proto, method)) {
-      return method;
-    }
-  }
-  return nullptr;
-}
-
-DexMethod* check_dmethods(const DexString* name,
-                          const DexProto* proto,
-                          const DexType* type) {
-  const DexClass* cls = type_class(type);
-  for (const auto& method : cls->get_dmethods()) {
-    if (match(name, proto, method)) {
-      return method;
-    }
-  }
-  return nullptr;
-}
 
 /**
  * Creates an entry from a parent to a child class.
@@ -241,50 +210,4 @@ void get_all_implementors(const Scope& scope,
       cur = type_class(cur->get_super_class());
     }
   }
-}
-
-DexMethod* find_collision_excepting(const ClassHierarchy& ch,
-                                    const DexMethod* except,
-                                    const DexString* name,
-                                    const DexProto* proto,
-                                    const DexClass* cls,
-                                    bool is_virtual,
-                                    bool check_direct) {
-  for (const auto& method : cls->get_dmethods()) {
-    if (match(name, proto, method) && method != except) {
-      return method;
-    }
-  }
-  for (const auto& method : cls->get_vmethods()) {
-    if (match(name, proto, method) && method != except) {
-      return method;
-    }
-  }
-  if (!is_virtual) {
-    return nullptr;
-  }
-
-  auto* super = type_class(cls->get_super_class());
-  if (super != nullptr) {
-    auto* method = resolve_virtual_deprecated(super, name, proto);
-    if ((method != nullptr) && method != except) {
-      return method;
-    }
-  }
-
-  TypeSet children;
-  get_all_children(ch, cls->get_type(), children);
-  for (const auto& child : children) {
-    auto* vmethod = check_vmethods(name, proto, child);
-    if ((vmethod != nullptr) && vmethod != except) {
-      return vmethod;
-    }
-    if (check_direct) {
-      auto* dmethod = check_dmethods(name, proto, child);
-      if ((dmethod != nullptr) && dmethod != except) {
-        return dmethod;
-      }
-    }
-  }
-  return nullptr;
 }

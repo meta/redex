@@ -129,32 +129,3 @@ inline void get_all_children_or_implementors(
     get_all_children(ch, base_class->get_type(), children_or_implementors);
   }
 }
-
-/**
- * Like find_collision, but don't report a match on `except`.
- */
-DexMethod* find_collision_excepting(const ClassHierarchy& ch,
-                                    const DexMethod* except,
-                                    const DexString* name,
-                                    const DexProto* proto,
-                                    const DexClass* cls,
-                                    bool is_virtual,
-                                    bool check_direct);
-
-/**
- * Given a name and a proto find a possible collision with methods with
- * the same name and proto.
- * The search is performed in the vmethods or dmethods space according to
- * the is_virtual argument.
- * When searching in the virtual methods space the search is performed up and
- * down the hierarchy chain. When in the direct method space only the current
- * class is searched.
- */
-inline DexMethod* find_collision(const ClassHierarchy& ch,
-                                 const DexString* name,
-                                 const DexProto* proto,
-                                 const DexClass* cls,
-                                 bool is_virtual) {
-  return find_collision_excepting(ch, nullptr, name, proto, cls, is_virtual,
-                                  false);
-}

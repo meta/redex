@@ -11,8 +11,10 @@
 #include "Debug.h"
 #include "DexStore.h"
 #include "ModelMethodMerger.h"
+#include "RefChecker.h"
 #include "Show.h"
 #include "Trace.h"
+#include "TypeUtil.h"
 
 using namespace class_merging;
 
@@ -41,6 +43,26 @@ std::string_view get_merger_package_name(const DexType* root_type) {
     }
   }
   return pkg_name;
+}
+
+bool can_preserve_field_type(const DexType* field_type,
+                             const DexType* parent,
+                             const RefChecker& ref_checker) {
+  if (!ref_checker.check_type(field_type)) {
+    return false;
+  }
+  const auto* element_type = type::get_element_type_if_array(field_type);
+  if (type::is_primitive(element_type)) {
+    return true;
+  }
+  const auto* cls = type_class(element_type);
+  if (cls == nullptr) {
+    return false;
+  }
+  const auto access = get_visibility(cls);
+  return access == ACC_PUBLIC ||
+         (access == 0 && type::get_package_name(element_type) ==
+                             get_merger_package_name(parent));
 }
 
 } // namespace
@@ -101,14 +123,23 @@ DexClass* create_class(const DexType* type,
   return cls;
 }
 
-std::vector<DexField*> create_merger_fields(const DexType* owner,
-                                            const FieldsMap& fields_map) {
+std::vector<DexField*> create_merger_fields(
+    const DexType* owner,
+    const FieldsMap& fields_map,
+    const DexType* parent,
+    const RefChecker& ref_checker,
+    bool preserve_unanimous_field_types) {
   always_assert_log(!fields_map.empty(), "No field map for merger %s",
                     SHOW(owner));
   const std::vector<DexField*>& mergeable_fields =
       unordered_any(fields_map)->second;
   std::vector<DexAccessFlags> access_flags(mergeable_fields.size(),
                                            ACC_PUBLIC | ACC_FINAL);
+  std::vector<const DexType*> common_types;
+  if (preserve_unanimous_field_types) {
+    common_types.resize(mergeable_fields.size());
+  }
+  bool first_class = true;
   for (const auto& [type, fields] : UnorderedIterable(fields_map)) {
     always_assert_log(fields.size() == mergeable_fields.size(),
                       "Mismatched field map for %s in merger %s", SHOW(type),
@@ -118,12 +149,28 @@ std::vector<DexField*> create_merger_fields(const DexType* owner,
       always_assert_log(field != nullptr && field->is_def(),
                         "Invalid field at slot %zu for %s in merger %s", i,
                         SHOW(type), SHOW(owner));
+      if (preserve_unanimous_field_types) {
+        if (first_class) {
+          common_types.at(i) = field->get_type();
+        } else if (common_types.at(i) != field->get_type()) {
+          common_types.at(i) = nullptr;
+        }
+      }
       if (is_volatile(field)) {
         access_flags.at(i) |= ACC_VOLATILE;
       }
       if (!is_final(field) || is_volatile(field)) {
         access_flags.at(i) = access_flags.at(i) & ~ACC_FINAL;
       }
+    }
+    first_class = false;
+  }
+  for (auto*& type : common_types) {
+    if (type != nullptr &&
+        (type::is_primitive(type) || type == type::java_lang_Object() ||
+         type == type::java_lang_String() ||
+         !can_preserve_field_type(type, parent, ref_checker))) {
+      type = nullptr;
     }
   }
 
@@ -157,7 +204,11 @@ std::vector<DexField*> create_merger_fields(const DexType* owner,
       } else {
         char t = type::type_shorty(type);
         always_assert(t == 'L' || t == '[');
-        type = type::java_lang_Object();
+        if (preserve_unanimous_field_types && common_types.at(cnt) != nullptr) {
+          type = common_types.at(cnt);
+        } else {
+          type = type::java_lang_Object();
+        }
         name = "l";
       }
     }

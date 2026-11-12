@@ -13,6 +13,8 @@
 #include "IRInstruction.h"
 #include "MergerType.h"
 
+class RefChecker;
+
 namespace class_merging {
 
 struct ModelSpec;
@@ -20,8 +22,12 @@ struct ModelSpec;
 constexpr const char* INTERNAL_TYPE_TAG_FIELD_NAME = "$t";
 constexpr const char* EXTERNAL_TYPE_TAG_FIELD_NAME = "mTypeTag";
 
-std::vector<DexField*> create_merger_fields(const DexType* owner,
-                                            const FieldsMap& fields_map);
+std::vector<DexField*> create_merger_fields(
+    const DexType* owner,
+    const FieldsMap& fields_map,
+    const DexType* parent,
+    const RefChecker& ref_checker,
+    bool preserve_unanimous_field_types);
 
 void cook_merger_fields_lookup(
     const std::vector<DexField*>& new_fields,

@@ -44,6 +44,9 @@ void IntraDexClassMergingPass::bind_config() {
     m_merging_spec.max_count = std::optional<size_t>(max_count);
   }
   bind("use_stable_shape_names", false, m_merging_spec.use_stable_shape_names);
+  bind("preserve_unanimous_field_types", false,
+       m_merging_spec.preserve_unanimous_field_types,
+       "Keep unanimous reference slot types when they are safe to reference.");
   bind("mergeability_checks_use_of_const_class", false,
        m_merging_spec.mergeability_checks_use_of_const_class);
   std::string interdex_grouping;

@@ -147,8 +147,8 @@ ModelStats merge_model(const TypeSystem& type_system,
     update_method_profiles_stats = false;
   }
   ModelMerger mm(is_intra_dex);
-  auto merger_classes =
-      mm.merge_model(scope, stores, conf, model, update_method_profiles_stats);
+  auto merger_classes = mm.merge_model(
+      scope, stores, conf, model, update_method_profiles_stats, *refchecker);
   positions::JoinStats ctor_join_stats;
   auto num_dedupped =
       method_dedup::dedup_constructors(merger_classes, scope, &ctor_join_stats);

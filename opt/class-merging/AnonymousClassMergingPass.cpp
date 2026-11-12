@@ -44,6 +44,9 @@ void AnonymousClassMergingPass::bind_config() {
        m_max_count,
        "Maximum mergeable class count per merging group");
   bind("use_stable_shape_names", false, m_merging_spec.use_stable_shape_names);
+  bind("preserve_unanimous_field_types", false,
+       m_merging_spec.preserve_unanimous_field_types,
+       "Keep unanimous reference slot types when they are safe to reference.");
   std::string interdex_grouping;
   bind("interdex_grouping", "non-ordered-set", interdex_grouping);
   // Inferring_mode is "class-loads" by default.

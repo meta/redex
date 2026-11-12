@@ -148,6 +148,7 @@ struct ModelSpec {
   InterDexGroupingConfig interdex_config{InterDexGroupingType::DISABLED};
   // Splits each group into hot and cold mergeables, after the InterDex split.
   bool hot_cold_grouping{false};
+  bool preserve_unanimous_field_types{false};
   // whether to perform class merging on the primary dex.
   bool include_primary_dex{false};
   // Process @MethodMeta annotations
@@ -231,6 +232,7 @@ struct ModelStats {
   uint32_t m_num_classes_merged = 0;
   uint32_t m_num_merged_volatile_fields = 0;
   uint32_t m_num_merged_final_fields = 0;
+  uint32_t m_num_typed_merger_fields = 0;
   uint32_t m_num_generated_classes = 0;
   uint32_t m_num_ctor_dedupped = 0;
   uint32_t m_num_static_non_virt_dedupped = 0;

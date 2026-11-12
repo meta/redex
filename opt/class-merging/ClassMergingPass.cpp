@@ -134,6 +134,9 @@ void ClassMergingPass::bind_config() {
   bind("use_stable_shape_names", false, use_stable_shape_names);
   bool skip_anonymous_classes;
   bind("skip_anonymous_classes", false, skip_anonymous_classes);
+  bool preserve_unanimous_field_types;
+  bind("preserve_unanimous_field_types", false, preserve_unanimous_field_types,
+       "Keep unanimous reference slot types when they are safe to reference.");
   bool update_method_profiles_stats;
   bind("update_method_profiles_stats", true, update_method_profiles_stats,
        "Whether to update method profiles stats for merged methods.");
@@ -151,7 +154,8 @@ void ClassMergingPass::bind_config() {
                        interdex_grouping_inferring_mode =
                            std::move(interdex_grouping_inferring_mode),
                        process_method_meta, skip_anonymous_classes,
-                       use_stable_shape_names, update_method_profiles_stats] {
+                       preserve_unanimous_field_types, use_stable_shape_names,
+                       update_method_profiles_stats] {
     if (max_num_dispatch_target > 0) {
       m_max_num_dispatch_target =
           std::optional<size_t>(static_cast<size_t>(max_num_dispatch_target));
@@ -262,6 +266,7 @@ void ClassMergingPass::bind_config() {
       model.max_num_dispatch_target = m_max_num_dispatch_target;
       model.use_stable_shape_names = use_stable_shape_names;
       model.skip_anonymous_classes = skip_anonymous_classes;
+      model.preserve_unanimous_field_types = preserve_unanimous_field_types;
       model.update_method_profiles_stats = update_method_profiles_stats;
       // Assume config based models are all generated code.
       model_spec.get("is_generated_code", true, model.is_generated_code);

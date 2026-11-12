@@ -22,6 +22,7 @@
 #include "TypeTagUtils.h"
 #include "Walkers.h"
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 
@@ -522,10 +523,15 @@ namespace class_merging {
 const std::vector<DexField*> ModelMerger::empty_fields =
     std::vector<DexField*>();
 
-void ModelMerger::update_merger_fields(const MergerType& merger) {
-  auto merger_fields = merger.has_fields()
-                           ? create_merger_fields(merger.type, merger.field_map)
-                           : empty_fields;
+void ModelMerger::update_merger_fields(const MergerType& merger,
+                                       const DexType* parent,
+                                       const RefChecker& ref_checker,
+                                       bool preserve_unanimous_field_types) {
+  auto merger_fields =
+      merger.has_fields()
+          ? create_merger_fields(merger.type, merger.field_map, parent,
+                                 ref_checker, preserve_unanimous_field_types)
+          : empty_fields;
   m_merger_fields[merger.type] = merger_fields;
 }
 
@@ -545,7 +551,8 @@ std::vector<DexClass*> ModelMerger::merge_model(
     DexStoresVector& stores,
     ConfigFiles& conf,
     Model& model,
-    bool update_method_profiles_stats) {
+    bool update_method_profiles_stats,
+    const RefChecker& ref_checker) {
   Timer t("merge_model");
   std::vector<const MergerType*> to_materialize;
   std::vector<DexClass*> merger_classes;
@@ -565,9 +572,11 @@ std::vector<DexClass*> ModelMerger::merge_model(
                       "Shape type %s already names a class",
                       SHOW(merger.type));
 
-    update_merger_fields(merger);
+    const auto* parent = model.get_parent(merger.type);
+    update_merger_fields(merger, parent, ref_checker,
+                         model_spec.preserve_unanimous_field_types);
     cls = create_merger_class(merger.type,
-                              model.get_parent(merger.type),
+                              parent,
                               m_merger_fields.at(merger.type),
                               intfs,
                               model_spec.generate_type_tag(),
@@ -617,6 +626,14 @@ std::vector<DexClass*> ModelMerger::merge_model(
   // Merging transformations.
   UnorderedMap<const DexType*, DexType*> mergeable_to_merger;
   for (const auto* merger : to_materialize) {
+    const auto& fields = m_merger_fields.at(merger->type);
+    m_stats.m_num_typed_merger_fields +=
+        std::count_if(fields.begin(), fields.end(), [](const DexField* field) {
+          const auto* type = field->get_type();
+          return !type::is_primitive(type) &&
+                 type != type::java_lang_Object() &&
+                 type != type::java_lang_String();
+        });
     auto* type = const_cast<DexType*>(merger->type);
     for (const auto* mergeable : merger->mergeables) {
       auto* cls = type_class(mergeable);

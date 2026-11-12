@@ -1438,6 +1438,7 @@ ModelStats& ModelStats::operator+=(const ModelStats& stats) {
   m_num_classes_merged += stats.m_num_classes_merged;
   m_num_merged_volatile_fields += stats.m_num_merged_volatile_fields;
   m_num_merged_final_fields += stats.m_num_merged_final_fields;
+  m_num_typed_merger_fields += stats.m_num_typed_merger_fields;
   m_num_generated_classes += stats.m_num_generated_classes;
   m_num_ctor_dedupped += stats.m_num_ctor_dedupped;
   m_num_static_non_virt_dedupped += stats.m_num_static_non_virt_dedupped;
@@ -1485,6 +1486,7 @@ void ModelStats::update_redex_stats(const std::string& prefix,
 
   mgr.incr_metric(prefix + "_merger_class_generated", m_num_generated_classes);
   mgr.incr_metric(prefix + "_class_merged", m_num_classes_merged);
+  mgr.incr_metric(prefix + "_typed_merger_fields", m_num_typed_merger_fields);
   mgr.incr_metric(prefix + "_ctor_dedupped", m_num_ctor_dedupped);
   mgr.incr_metric(prefix + "_static_non_virt_dedupped",
                   m_num_static_non_virt_dedupped);

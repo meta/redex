@@ -35,7 +35,8 @@ class ModelMerger {
                                      DexStoresVector& stores,
                                      ConfigFiles& conf,
                                      Model& model,
-                                     bool update_method_profiles_stats);
+                                     bool update_method_profiles_stats,
+                                     const RefChecker& ref_checker);
 
   void increase_ctor_dedupped_stats(int64_t value) {
     m_stats.m_num_ctor_dedupped += value;
@@ -57,7 +58,10 @@ class ModelMerger {
   MergerFields m_merger_fields;
   const bool m_is_intra_dex_merging;
 
-  void update_merger_fields(const MergerType& merger);
+  void update_merger_fields(const MergerType& merger,
+                            const DexType* parent,
+                            const RefChecker& ref_checker,
+                            bool preserve_unanimous_field_types);
   void update_stats(const std::string& name,
                     const std::vector<const MergerType*>& mergers,
                     ModelMethodMerger& mm);

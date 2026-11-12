@@ -175,25 +175,21 @@ std::string_view array_element_name(const DexType* array_type) {
 } // namespace
 
 bool is_java_lang_object_array(const DexType* type) {
-  if (!is_array(type)) {
-    return false;
-  }
-  return make_array_component_type(type) == java_lang_Object();
+  return is_array(type) &&
+         array_component_name(type) == java_lang_Object()->str();
 }
 
 bool is_enum_array(const DexType* type) {
-  if (!is_array(type)) {
-    return false;
-  }
-  return make_array_component_type(type) == java_lang_Enum();
+  return is_array(type) &&
+         array_component_name(type) == java_lang_Enum()->str();
 }
 
 bool is_reference_array(const DexType* type) {
   if (!is_array(type)) {
     return false;
   }
-  auto* ctype = make_array_component_type(type);
-  return !is_primitive(ctype);
+  char component_sig = array_component_name(type)[0];
+  return (component_sig == 'L') || (component_sig == '[');
 }
 
 bool is_integral(const DexType* type) {

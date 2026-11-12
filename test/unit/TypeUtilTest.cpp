@@ -208,3 +208,29 @@ TEST_F(TypeUtilTest, array_lookups_on_non_array_types) {
   EXPECT_EQ(get_array_element_type(object), nullptr);
   EXPECT_EQ(get_element_type_if_array(object), object);
 }
+
+TEST_F(TypeUtilTest, array_checks_do_not_create_component_types) {
+  using namespace type;
+
+  auto* array = DexType::make_type("[Lmissing/T;");
+
+  EXPECT_FALSE(is_java_lang_object_array(array));
+  EXPECT_FALSE(is_enum_array(array));
+  EXPECT_TRUE(is_reference_array(array));
+  EXPECT_EQ(DexType::get_type("Lmissing/T;"), nullptr);
+}
+
+TEST_F(TypeUtilTest, array_checks) {
+  using namespace type;
+
+  EXPECT_TRUE(
+      is_java_lang_object_array(DexType::make_type("[Ljava/lang/Object;")));
+  EXPECT_FALSE(
+      is_java_lang_object_array(DexType::make_type("[[Ljava/lang/Object;")));
+  EXPECT_FALSE(is_java_lang_object_array(java_lang_Object()));
+  EXPECT_TRUE(is_enum_array(DexType::make_type("[Ljava/lang/Enum;")));
+  EXPECT_FALSE(is_enum_array(java_lang_Enum()));
+  EXPECT_TRUE(is_reference_array(DexType::make_type("[[I")));
+  EXPECT_FALSE(is_reference_array(DexType::make_type("[I")));
+  EXPECT_FALSE(is_reference_array(java_lang_Object()));
+}

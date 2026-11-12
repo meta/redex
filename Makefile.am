@@ -209,6 +209,7 @@ libredex_la_SOURCES = \
 	libredex/PassRegistry.cpp \
 	libredex/PluginRegistry.cpp \
 	libredex/PositionAmbiguity.cpp \
+	libredex/PositionJoin.cpp \
 	service/points-to-semantics/PointsToSemantics.cpp \
 	service/points-to-semantics/PointsToSemanticsUtils.cpp \
 	libredex/PrintSeeds.cpp \

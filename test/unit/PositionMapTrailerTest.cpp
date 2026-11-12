@@ -711,6 +711,32 @@ TEST_F(PositionMapTrailerTest,
 }
 
 TEST_F(PositionMapTrailerTest,
+       all_mode_emission_is_ordered_by_candidate_content) {
+  auto first_path = map_path("ordered-first");
+  auto second_path = map_path("ordered-second");
+  auto first_survivor = pos(10);
+  auto second_survivor = pos(10);
+  auto first_low = pos(20);
+  auto first_high = pos(30);
+  auto second_low = pos(20);
+  auto second_high = pos(30);
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  manager->record_candidates(first_survivor.get(),
+                             {first_low.get(), first_high.get()});
+  manager->record_candidates(second_survivor.get(),
+                             {second_high.get(), second_low.get()});
+
+  RealPositionMapper first_mapper(first_path);
+  first_mapper.position_to_line(first_survivor.get());
+  first_mapper.write_map();
+  RealPositionMapper second_mapper(second_path);
+  second_mapper.position_to_line(second_survivor.get());
+  second_mapper.write_map();
+
+  EXPECT_EQ(read_file(first_path), read_file(second_path));
+}
+
+TEST_F(PositionMapTrailerTest,
        candidate_sets_do_not_alias_pattern_selected_switches) {
   auto survivor = pos(10);
   auto first = pos(20);
@@ -797,6 +823,19 @@ TEST_F(PositionMapTrailerTest,
 
   auto generated = redex_generated();
   manager->record_candidates(survivor.get(), {generated.get()});
+
+  EXPECT_TRUE(survivor->is_unreliable());
+  EXPECT_EQ(survivor->alt_id(), 0u);
+}
+
+TEST_F(PositionMapTrailerTest, a_merge_with_no_victim_discards_the_set) {
+  auto survivor = pos(10);
+  auto first = pos(20);
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  manager->record_candidates(survivor.get(), {first.get()});
+  ASSERT_NE(survivor->alt_id(), 0u);
+
+  positions::mark_merged(survivor.get());
 
   EXPECT_TRUE(survivor->is_unreliable());
   EXPECT_EQ(survivor->alt_id(), 0u);

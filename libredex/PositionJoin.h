@@ -90,15 +90,14 @@ inline bool same_source_claim(const DexPosition* first,
  * Only the owned survivor leaf is marked. Parent pointers can be shared by
  * every frame beneath an inlined callsite, so this never mutates through those
  * aliases.
+ *
+ * Any candidate set the survivor carried is dropped, leaving it merged with
+ * sites nobody captured: without the folded site the set is no longer the
+ * complete membership, and the line map cannot express a partial one. Out of
+ * line because candidate sets belong to the manager, which hangs off
+ * `RedexContext`.
  */
-inline FidelityChange mark_merged(DexPosition* survivor) {
-  always_assert(survivor != nullptr);
-  if (survivor->is_unreliable()) {
-    return FidelityChange::Unchanged;
-  }
-  survivor->mark_unreliable();
-  return FidelityChange::BecameUnreliable;
-}
+FidelityChange mark_merged(DexPosition* survivor);
 
 // Accumulates merges and gaps using one vocabulary shared by every producer.
 struct JoinStats {

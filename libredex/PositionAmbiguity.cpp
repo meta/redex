@@ -7,7 +7,6 @@
 
 #include "PositionAmbiguity.h"
 
-#include <algorithm>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -19,6 +18,7 @@
 #include "DeterministicContainers.h"
 #include "DexClass.h"
 #include "IROpcode.h"
+#include "RedexContext.h"
 
 namespace positions {
 
@@ -107,8 +107,8 @@ void mark_or_count_gap(JoinStats* join_stats, DexPosition* survivor) {
 }
 
 // The victim positions folded into each surviving position, gathered across
-// all victims so that every surviving position is joined in one place. Kept in
-// the order the surviving positions are first seen, which is deterministic.
+// all victims so that every surviving position is recorded in one place. Kept
+// in the order the surviving positions are first seen, which is deterministic.
 class FoldedPositions {
  public:
   void add_or_count_gap(JoinStats* join_stats,
@@ -127,26 +127,33 @@ class FoldedPositions {
     m_folded.at(it->second).second.push_back(victim);
   }
 
-  // Every verdict is taken before anything is marked. A surviving position can
-  // be the inlined caller of another surviving position, and
-  // `same_source_claim` treats an unreliable caller as disagreeing, so marking
-  // as we go would let one mark from this join flip a later verdict that
-  // compared exact lines.
-  void join_all(JoinStats* join_stats) const {
-    std::vector<DexPosition*> disagreeing;
+  // Records, for each surviving position, every folded position that makes a
+  // different source claim, in one call. Recording victim by victim would
+  // register a growing set per victim, all of them retained.
+  //
+  // Every comparison is made, and every record worked out, before anything is
+  // recorded. A surviving position can be the inlined caller of another
+  // surviving position, and `same_source_claim` treats an unreliable caller as
+  // disagreeing, so recording as we go would let one record from this join
+  // flip a later comparison of exact lines.
+  void record_all(JoinStats* join_stats) const {
+    std::vector<std::pair<DexPosition*, std::vector<const DexPosition*>>>
+        records;
     for (const auto& [survivor, victims] : m_folded) {
-      const bool disagrees =
-          std::any_of(victims.begin(), victims.end(),
-                      [kept = survivor](const DexPosition* victim) {
-                        return !same_source_claim(kept, victim);
-                      });
-      if (disagrees) {
-        disagreeing.push_back(survivor);
+      std::vector<const DexPosition*> differing;
+      for (const auto* victim : victims) {
+        if (victim == nullptr || !same_source_claim(survivor, victim)) {
+          differing.push_back(victim);
+        }
+      }
+      if (!differing.empty()) {
+        records.emplace_back(survivor, std::move(differing));
       }
     }
-    for (auto* survivor : disagreeing) {
-      auto change = mark_merged(survivor);
-      if (join_stats != nullptr) {
+    auto changes = g_redex->get_position_pattern_switch_manager()
+                       ->record_candidates_jointly(records);
+    if (join_stats != nullptr) {
+      for (auto change : changes) {
         join_stats->account(change);
       }
     }
@@ -270,7 +277,7 @@ void join_throwing_positions(DexMethod* survivor,
       folded.add_or_count_gap(join_stats, position, victim_position);
     }
   }
-  folded.join_all(join_stats);
+  folded.record_all(join_stats);
 }
 
 void join_throwing_positions_by_member(DexMethod* survivor,
@@ -306,7 +313,7 @@ void join_throwing_positions_by_member(DexMethod* survivor,
       folded.add_or_count_gap(join_stats, position, victim_positions->at(key));
     }
   }
-  folded.join_all(join_stats);
+  folded.record_all(join_stats);
 }
 
 } // namespace positions

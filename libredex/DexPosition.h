@@ -305,6 +305,15 @@ class PositionPatternSwitchManager {
   positions::FidelityChange record_candidates(
       DexPosition* survivor, const std::vector<const DexPosition*>& candidates);
 
+  // `record_candidates` for several distinct survivors, each worked out from
+  // the positions as they stand before any of them changes. One survivor can
+  // be the inlined caller of another, and what a survivor records depends on
+  // its callers, so recording them one after another would let an earlier
+  // record change a later one. Returns each record's change, in order.
+  std::vector<positions::FidelityChange> record_candidates_jointly(
+      const std::vector<
+          std::pair<DexPosition*, std::vector<const DexPosition*>>>& records);
+
   // What an `alt_id` on a position refers to. Members are candidate snapshots
   // whose own level carries no provenance.
   struct AltSet {
@@ -402,12 +411,26 @@ class PositionPatternSwitchManager {
   // trace can be explained by. Line 0 still names its method.
   bool names_no_source(const DexPosition* pos) const;
   uint32_t make_alternatives(PositionAlternatives alternatives);
-  std::mutex& survivor_mutex(DexPosition* survivor) {
+  // What `record_candidates` makes of a survivor: whether it becomes
+  // unreliable, and its new provenance when it changes at all.
+  struct CandidateRecord {
+    bool became_unreliable{false};
+    std::optional<uint32_t> provenance;
+  };
+  // Changes no position. The caller holds the survivor's mutex.
+  CandidateRecord compute_candidate_record(
+      const DexPosition* survivor,
+      const std::vector<const DexPosition*>& candidates);
+  static void apply_candidate_record(DexPosition* survivor,
+                                     const CandidateRecord& record);
+  size_t survivor_stripe(const DexPosition* survivor) const {
     constexpr size_t kLockCount = 64;
     static_assert(kLockCount ==
                   std::tuple_size_v<decltype(m_survivor_mutexes)>);
-    return m_survivor_mutexes[(reinterpret_cast<uintptr_t>(survivor) >> 4) %
-                              kLockCount];
+    return (reinterpret_cast<uintptr_t>(survivor) >> 4) % kLockCount;
+  }
+  std::mutex& survivor_mutex(DexPosition* survivor) {
+    return m_survivor_mutexes[survivor_stripe(survivor)];
   }
 
   // The element IS the manager's immutable, identity-only copy of the position.

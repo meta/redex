@@ -9,7 +9,10 @@
 
 #include <algorithm>
 #include <optional>
+#include <utility>
 #include <vector>
+
+#include <boost/functional/hash.hpp>
 
 #include "ControlFlow.h"
 #include "Debug.h"
@@ -155,6 +158,76 @@ class FoldedPositions {
   UnorderedMap<DexPosition*, size_t> m_index;
 };
 
+// Folds a victim whose throwing instructions cannot be paired with the
+// survivor's: every surviving throwing position stands for it too, at a site
+// nobody can name.
+void fold_against_unnamed_sites(cfg::ControlFlowGraph& cfg,
+                                FoldedPositions* folded,
+                                JoinStats* join_stats) {
+  if (join_stats != nullptr) {
+    join_stats->count_uncorresponded();
+  }
+  for_each_throwing_position(cfg, [&](DexPosition* position) {
+    folded->add_or_count_gap(join_stats, position, nullptr);
+  });
+}
+
+// A throwing instruction's opcode and the member it refers to, which pairs it
+// with its counterpart in an equivalent body whose instructions are ordered
+// differently.
+using MemberKey = std::pair<IROpcode, const void*>;
+
+MemberKey member_key(const IRInstruction* insn) {
+  const void* member = nullptr;
+  if (insn->has_field()) {
+    member = insn->get_field();
+  } else if (insn->has_method()) {
+    member = insn->get_method();
+  } else if (insn->has_type()) {
+    member = insn->get_type();
+  }
+  return {insn->opcode(), member};
+}
+
+// The position governing each throwing instruction, keyed by `member_key`, in
+// instruction order.
+class MemberPositions {
+ public:
+  // Returns false if `key` is already present: two throwing instructions with
+  // one key cannot be paired by it.
+  bool add(MemberKey key, DexPosition* position) {
+    if (!m_index.emplace(key, m_entries.size()).second) {
+      return false;
+    }
+    m_entries.emplace_back(key, position);
+    return true;
+  }
+  bool contains(MemberKey key) const { return m_index.count(key) != 0; }
+  DexPosition* at(MemberKey key) const {
+    return m_entries.at(m_index.at(key)).second;
+  }
+  size_t size() const { return m_entries.size(); }
+  auto begin() const { return m_entries.begin(); }
+  auto end() const { return m_entries.end(); }
+
+ private:
+  std::vector<std::pair<MemberKey, DexPosition*>> m_entries;
+  UnorderedMap<MemberKey, size_t, boost::hash<MemberKey>> m_index;
+};
+
+std::optional<MemberPositions> throwing_positions_by_member(
+    cfg::ControlFlowGraph& cfg) {
+  MemberPositions result;
+  auto instructions = cfg::InstructionIterable(cfg);
+  for (auto it = instructions.begin(); it != instructions.end(); ++it) {
+    if (opcode::can_throw(it->insn->opcode()) &&
+        !result.add(member_key(it->insn), cfg.get_dbg_pos(it))) {
+      return std::nullopt;
+    }
+  }
+  return result;
+}
+
 } // namespace
 
 void mark_ambiguous_throwing_positions(DexMethod* survivor,
@@ -190,18 +263,47 @@ void join_throwing_positions(DexMethod* survivor,
       correspondence = paired_throwing_positions(cfg, victim_code->cfg());
     }
     if (!correspondence) {
-      if (join_stats != nullptr) {
-        join_stats->count_uncorresponded();
-      }
-      // Every surviving throwing position stands for this victim too, at a
-      // site nobody can name.
-      for_each_throwing_position(cfg, [&](DexPosition* position) {
-        folded.add_or_count_gap(join_stats, position, nullptr);
-      });
+      fold_against_unnamed_sites(cfg, &folded, join_stats);
       continue;
     }
     for (const auto& [position, victim_position] : *correspondence) {
       folded.add_or_count_gap(join_stats, position, victim_position);
+    }
+  }
+  folded.join_all(join_stats);
+}
+
+void join_throwing_positions_by_member(DexMethod* survivor,
+                                       const std::vector<DexMethod*>& victims,
+                                       JoinStats* join_stats) {
+  auto* code = survivor->get_code();
+  if (code == nullptr) {
+    return;
+  }
+  always_assert(code->cfg_built());
+  auto& cfg = code->cfg();
+  auto survivor_positions = throwing_positions_by_member(cfg);
+  FoldedPositions folded;
+  for (auto* victim : victims) {
+    auto* victim_code = victim->get_code();
+    std::optional<MemberPositions> victim_positions;
+    if (victim_code != nullptr) {
+      always_assert(victim_code->cfg_built());
+      victim_positions = throwing_positions_by_member(victim_code->cfg());
+    }
+    const bool paired =
+        survivor_positions && victim_positions &&
+        victim_positions->size() == survivor_positions->size() &&
+        std::all_of(survivor_positions->begin(), survivor_positions->end(),
+                    [&](const auto& entry) {
+                      return victim_positions->contains(entry.first);
+                    });
+    if (!paired) {
+      fold_against_unnamed_sites(cfg, &folded, join_stats);
+      continue;
+    }
+    for (const auto& [key, position] : *survivor_positions) {
+      folded.add_or_count_gap(join_stats, position, victim_positions->at(key));
     }
   }
   folded.join_all(join_stats);

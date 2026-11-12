@@ -40,6 +40,18 @@ void join_throwing_positions(DexMethod* survivor,
                              const std::vector<DexMethod*>& victims,
                              JoinStats* join_stats);
 
+// `join_throwing_positions` for victims that are equivalent to `survivor` but
+// not instruction-identical, such as normalized constructors that store the
+// same values in a different order. Throwing instructions are paired by opcode
+// and the member they refer to (field, method or type), which must be unique
+// among the throwing instructions of each body. A victim that cannot be paired
+// that way falls back to marking the whole survivor, counted as a merge
+// without correspondence. The CFGs of `survivor` and of every victim must be
+// built.
+void join_throwing_positions_by_member(DexMethod* survivor,
+                                       const std::vector<DexMethod*>& victims,
+                                       JoinStats* join_stats);
+
 // `join_throwing_positions` for the members of `group`, other than `survivor`,
 // that are not yet in `already_joined` -- the victims already joined into
 // `survivor` -- and adds them there. A survivor can be retained again by a

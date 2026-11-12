@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "PositionJoin.h"
+
 /**
  * A simple constructor only initializes some or all of the instance fields with
  * the arguments and calls the super constructor. Normalize these constructors
@@ -57,5 +59,6 @@ uint32_t estimate_deduplicatable_ctor_code_size(const DexClass* cls);
  * Deduplicate non-root constructors for each class and fix all the callsites.
  */
 size_t dedup_constructors(const std::vector<DexClass*>& classes,
-                          const std::vector<DexClass*>& scope);
+                          const std::vector<DexClass*>& scope,
+                          positions::JoinStats* join_stats = nullptr);
 } // namespace method_dedup

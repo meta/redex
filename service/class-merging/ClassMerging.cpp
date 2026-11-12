@@ -149,12 +149,15 @@ ModelStats merge_model(const TypeSystem& type_system,
   ModelMerger mm(is_intra_dex);
   auto merger_classes =
       mm.merge_model(scope, stores, conf, model, update_method_profiles_stats);
-  auto num_dedupped = method_dedup::dedup_constructors(merger_classes, scope);
+  positions::JoinStats ctor_join_stats;
+  auto num_dedupped =
+      method_dedup::dedup_constructors(merger_classes, scope, &ctor_join_stats);
   mm.increase_ctor_dedupped_stats(num_dedupped);
   stats += mm.get_model_stats();
   mgr.incr_metric("num_merged_volatile_fields",
                   stats.m_num_merged_volatile_fields);
   mgr.incr_metric("num_merged_final_fields", stats.m_num_merged_final_fields);
+  stats.m_position_join_stats += ctor_join_stats;
   stats.update_redex_stats(spec.class_name_prefix, mgr);
   return stats;
 }

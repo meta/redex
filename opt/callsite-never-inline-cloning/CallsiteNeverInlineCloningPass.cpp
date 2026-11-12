@@ -202,14 +202,15 @@ struct CallsiteProfile {
 //
 // This walk's per-caller/per-block classification (caller gates, catch
 // check, throw-adjacent skip, hot/cold split) intentionally mirrors
-// ArtProfileWriterPass::never_inline's own, for exactly the call sites this
-// pass itself ever resolves (an exact invoke-static/invoke-direct, or an
-// invoke-virtual to a non-true-virtual callee) -- not ArtProfileWriterPass's
+// ArtProfileWriterPass::never_inline's own, except for its register bound:
+// this pass runs before register allocation. The resolved call sites are an
+// exact invoke-static/invoke-direct, or an
+// invoke-virtual to a non-true-virtual callee -- not ArtProfileWriterPass's
 // full analysis, which is broader: it also chases a receiver-type map to
 // sometimes resolve an otherwise-ambiguous `invoke-virtual`, and follows a
 // forwarder-method chain (`is_simple`) to its ultimate callee. This pass
-// deliberately does neither, so the two passes classify identically only on
-// the narrower set of call sites this pass considers at all.
+// deliberately does neither, so the shared classification applies only to
+// that narrower set of call sites and may inspect different callers.
 // TODO(T226760922): consider factoring both into a common templated helper.
 CallsiteProfile collect_callsite_profiles(
     const Scope& scope,
@@ -263,17 +264,11 @@ CallsiteProfile collect_callsite_profiles(
             return;
           }
           auto& cfg = code.cfg();
-          switch (never_inline_analysis::caller_inline_budget(
-              code.count_opcodes(), cfg.get_registers_size(),
-              config.max_caller_instructions, config.max_caller_registers)) {
-          case never_inline_analysis::CallerBudget::kTooManyInstructions:
+          if (never_inline_analysis::caller_inline_instruction_budget(
+                  code.count_opcodes(), config.max_caller_instructions) ==
+              never_inline_analysis::CallerBudget::kTooManyInstructions) {
             local_stats.callers_too_many_instructions++;
             return;
-          case never_inline_analysis::CallerBudget::kTooManyRegisters:
-            local_stats.callers_too_many_registers++;
-            return;
-          case never_inline_analysis::CallerBudget::kWithin:
-            break;
           }
           auto skips = never_inline_analysis::for_each_exact_call_site(
               caller, cfg, callee_context.non_true_virtuals,
@@ -397,8 +392,8 @@ RankedCandidates rank_and_cap_candidates(
   // ever-inline" rejection, the reason this pass exists. Shape-eligibility
   // below reuses the facts precomputed by `collect_callee_facts`, which
   // called the exact same `never_inline_analysis::never_inline_eligibility`
-  // ArtProfileWriterPass calls for its own annotation decision, so a clone
-  // this pass creates is always one that later run is willing to annotate.
+  // ArtProfileWriterPass calls for its own body-shape decision. The writer
+  // still checks the allocated caller register frame at its later phase.
   auto candidate_callees = unordered_to_ordered_keys(
       callsite_profile.cold_callsites, compare_dexmethods);
   std::vector<DexMethod*> mixed_hotness_callees;
@@ -627,11 +622,6 @@ void CallsiteNeverInlineCloningPass::bind_config() {
        "Skip every call site inside a caller with more estimated "
        "instructions (`IRCode::count_opcodes`) than this. Shadows "
        "ArtProfileWriterPass's own `never_inline_max_caller_instructions`.");
-  bind("max_caller_registers", m_config.max_caller_registers,
-       m_config.max_caller_registers,
-       "Skip every call site inside a caller needing more registers than "
-       "this. Shadows ArtProfileWriterPass's own "
-       "`never_inline_max_caller_registers`.");
   bind("max_callee_code_units", m_config.max_callee_code_units,
        m_config.max_callee_code_units,
        "Do not clone a callee larger than this many estimated code units "
@@ -777,8 +767,6 @@ void CallsiteNeverInlineCloningPass::run_pass(DexStoresVector& stores,
   mgr.incr_metric("callers_not_compiled", stats.callers_not_compiled);
   mgr.incr_metric("callers_too_many_instructions",
                   stats.callers_too_many_instructions);
-  mgr.incr_metric("callers_too_many_registers",
-                  stats.callers_too_many_registers);
   mgr.incr_metric("invokes_super_opcode", stats.invokes_super_opcode);
   mgr.incr_metric("invokes_interface_opcode", stats.invokes_interface_opcode);
   mgr.incr_metric("invokes_unresolved", stats.invokes_unresolved);

@@ -16,6 +16,7 @@
 
 #include "ArtProfileWriterPass.h"
 #include "ConfigFiles.h"
+#include "ControlFlow.h"
 #include "Creators.h"
 #include "DeterministicContainers.h"
 #include "DexAccess.h"
@@ -312,6 +313,18 @@ TEST_F(ArtProfileWriterNeverInlineMinHotCallsitesTest,
       "never_inline_min_hot_callsites_LMinHotCallsites;.callee:(I)V");
   ASSERT_NE(it, metrics.end());
   EXPECT_EQ(it->second, kHotCallsites);
+}
+
+TEST_F(ArtProfileWriterNeverInlineMinHotCallsitesTest,
+       AllocatedCallerRegistersStillEnforceTheBudget) {
+  auto fx = make_fixture(kLargeCalleeCodeUnits, kHotCallsites, 2);
+  for (auto* caller : fx.callers) {
+    caller->get_code()->cfg().set_registers_size(33);
+  }
+  auto metrics = run_pass(fx, {.min_hot_callsites = kHotCallsites});
+  EXPECT_EQ(metrics.at("never_inline_callers_too_many_registers"), 2);
+  EXPECT_FALSE(
+      has_anno(fx.callee, type::dalvik_annotation_optimization_NeverInline()));
 }
 
 TEST_F(ArtProfileWriterNeverInlineMinHotCallsitesTest,

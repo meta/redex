@@ -7,14 +7,16 @@
 
 // Genuine two-pass proof: runs the actual, unmodified
 // `CallsiteNeverInlineCloningPass::run_pass` and
-// `ArtProfileWriterPass::run_pass` back to back through a real
-// `PassManager`/`ConfigFiles`, on a hand-built (no dexfile, no BUCK
-// def_integ_test) fixture -- so this fails if the clone ever stops reaching
+// `ArtProfileWriterPass::run_pass` through a real `PassManager`/`ConfigFiles`,
+// with register allocation between them in the register-budget cases, on a
+// hand-built (no dexfile, no BUCK def_integ_test) fixture -- so this fails if
+// the clone ever stops reaching
 // `ArtProfileWriterPass`'s own `hot_cold_callees` bucket, or if that pass's
 // own annotation logic ever starts vetoing it, not just if the two passes'
 // shape-eligibility checks (already covered by
 // `never_inline_analysis::never_inline_eligibility`'s own tests) disagree.
 
+#include <algorithm>
 #include <array>
 #include <fstream>
 #include <string>
@@ -24,6 +26,7 @@
 
 #include "ArtProfileWriterPass.h"
 #include "CallsiteNeverInlineCloningPass.h"
+#include "ControlFlow.h"
 #include "Creators.h"
 #include "DexAccess.h"
 #include "DexClass.h"
@@ -34,6 +37,7 @@
 #include "PassManager.h"
 #include "RedexTest.h"
 #include "RedexTestUtils.h"
+#include "RegAlloc.h"
 #include "Show.h"
 
 namespace {
@@ -77,7 +81,9 @@ struct MixedHotnessFixture {
   std::vector<DexStore> stores;
 };
 
-MixedHotnessFixture make_mixed_hotness_fixture() {
+MixedHotnessFixture make_mixed_hotness_fixture(size_t caller_registers = 0,
+                                               size_t hot_parameters = 0,
+                                               size_t cold_parameters = 0) {
   ClassCreator cc{DexType::make_type("LCnicE2e;")};
   cc.set_super(type::java_lang_Object());
 
@@ -100,26 +106,26 @@ MixedHotnessFixture make_mixed_hotness_fixture() {
   callee->get_code()->build_cfg();
   cc.add_method(callee);
 
-  auto* hot_caller =
-      DexMethod::make_method("LCnicE2e;.hot_caller:()V")
-          ->make_concrete(
-              ACC_PUBLIC | ACC_STATIC,
-              assembler::ircode_from_string(
-                  "(\n  (.src_block \"LCnicE2e;.hot_caller:()V\" 0 (1.0 100))\n"
-                  "  (invoke-static () \"LCnicE2e;.callee:()V\")\n"
-                  "  (return-void)\n)"),
-              false);
-  hot_caller->set_deobfuscated_name(show(hot_caller));
-  hot_caller->get_code()->build_cfg();
-  cc.add_method(hot_caller);
-
-  auto make_cold_caller = [&](const std::string& name) {
-    auto* m = DexMethod::make_method("LCnicE2e;." + name + ":()V")
+  std::string register_use;
+  if (caller_registers != 0) {
+    register_use =
+        "  (const v" + std::to_string(caller_registers - 1) + " 0)\n";
+  }
+  auto make_caller = [&](const std::string& name, const std::string& profile,
+                         size_t parameter_registers) {
+    std::string parameters;
+    for (size_t i = 0; i < parameter_registers; ++i) {
+      parameters += "  (load-param v" + std::to_string(i) + ")\n";
+    }
+    std::string caller_proto =
+        "(" + std::string(parameter_registers, 'I') + ")V";
+    std::string descriptor = "LCnicE2e;." + name + ":" + caller_proto;
+    auto* m = DexMethod::make_method(descriptor)
                   ->make_concrete(
                       ACC_PUBLIC | ACC_STATIC,
                       assembler::ircode_from_string(
-                          "(\n  (.src_block \"LCnicE2e;." + name +
-                          ":()V\" 0 (0 0))\n"
+                          "(\n" + parameters + "  (.src_block \"" + descriptor +
+                          "\" 0 " + profile + ")\n" + register_use +
                           "  (invoke-static () \"LCnicE2e;.callee:()V\")\n"
                           "  (return-void)\n)"),
                       false);
@@ -128,8 +134,9 @@ MixedHotnessFixture make_mixed_hotness_fixture() {
     cc.add_method(m);
     return m;
   };
-  auto* cold_caller1 = make_cold_caller("cold_caller1");
-  auto* cold_caller2 = make_cold_caller("cold_caller2");
+  auto* hot_caller = make_caller("hot_caller", "(1.0 100)", hot_parameters);
+  auto* cold_caller1 = make_caller("cold_caller1", "(0 0)", cold_parameters);
+  auto* cold_caller2 = make_caller("cold_caller2", "(0 0)", cold_parameters);
 
   DexStore store("classes");
   store.add_classes({cc.create()});
@@ -231,6 +238,17 @@ make_non_final_virtual_mixed_hotness_fixture() {
 
 class CallsiteNeverInlineCloningEndToEndTest : public RedexTest {};
 
+struct CallerRegisterCase {
+  size_t virtual_registers;
+  size_t hot_parameters;
+  size_t cold_parameters;
+  bool annotated;
+};
+
+class CallsiteNeverInlineCloningRegisterTest
+    : public CallsiteNeverInlineCloningEndToEndTest,
+      public ::testing::WithParamInterface<CallerRegisterCase> {};
+
 TEST_F(CallsiteNeverInlineCloningEndToEndTest, RejectsLegacyIRMetadataLayout) {
   auto tmp_dir = redex::make_tmp_dir("cnic_old_irmeta_%%%%%%%%");
   std::ofstream output(tmp_dir.path + "/irmeta.bin", std::ios::binary);
@@ -328,9 +346,19 @@ TEST_F(CallsiteNeverInlineCloningEndToEndTest,
   fx.callee->set_code(std::move(released));
 }
 
-TEST_F(CallsiteNeverInlineCloningEndToEndTest,
-       ArtProfileWriterAnnotatesOnlyTheClone) {
-  auto fx = make_mixed_hotness_fixture();
+TEST_P(CallsiteNeverInlineCloningRegisterTest,
+       CloningAndAnnotationUseTheirOwnRegisterPhase) {
+  const auto& c = GetParam();
+  auto fx = make_mixed_hotness_fixture(c.virtual_registers, c.hot_parameters,
+                                       c.cold_parameters);
+  std::vector<DexMethod*> callers{fx.hot_caller, fx.cold_caller1,
+                                  fx.cold_caller2};
+  for (auto* caller : callers) {
+    auto params =
+        caller == fx.hot_caller ? c.hot_parameters : c.cold_parameters;
+    ASSERT_EQ(caller->get_code()->cfg().get_registers_size(),
+              std::max(c.virtual_registers, params));
+  }
 
   // A permissive CallsiteNeverInlineCloningPass config (mirrors this pass's
   // own test suite's `test_config()`), and
@@ -357,34 +385,58 @@ TEST_F(CallsiteNeverInlineCloningEndToEndTest,
                 {fx.callee, fx.hot_caller, fx.cold_caller1, fx.cold_caller2});
 
   CallsiteNeverInlineCloningPass cnic_pass;
+  regalloc::RegAllocPass regalloc_pass;
   ArtProfileWriterPass apw_pass;
-  PassManager manager({&cnic_pass, &apw_pass}, conf, RedexOptions{});
+  PassManager manager({&cnic_pass, &regalloc_pass, &apw_pass}, conf,
+                      RedexOptions{});
   manager.run_passes(fx.stores, conf);
 
+  for (const auto& info : manager.get_pass_info()) {
+    if (info.pass == &apw_pass) {
+      EXPECT_EQ(
+          info.metrics.at("never_inline_callers_too_many_registers"),
+          (c.hot_parameters > 32 ? 1 : 0) + (c.cold_parameters > 32 ? 2 : 0));
+    }
+  }
   auto* never_inline_anno = type::dalvik_annotation_optimization_NeverInline();
+  for (auto* caller : callers) {
+    auto params =
+        caller == fx.hot_caller ? c.hot_parameters : c.cold_parameters;
+    EXPECT_GE(caller->get_code()->get_registers_size(), params);
+    if (params <= 32) {
+      EXPECT_LE(caller->get_code()->get_registers_size(), 32u);
+    } else {
+      EXPECT_GT(caller->get_code()->get_registers_size(), 32u);
+    }
+  }
 
-  // The hot caller still calls the original, and the original was never
-  // annotated: it still has a call site ArtProfileWriterPass could not
-  // prove cold (`hot_hot_callees`, in that pass's own terms), so its own
-  // never_inline() analysis skips it -- not because this test asserts
-  // shape-eligibility a second time, but because that is genuinely what the
-  // unmodified pass decided.
+  // The hot caller keeps calling the original; both cold callers are
+  // redirected, so the original has no eligible cold call site.
   EXPECT_EQ(find_invoked_method(fx.hot_caller), fx.callee);
   EXPECT_FALSE(has_anno(fx.callee, never_inline_anno));
 
-  // Both cold callers now call a clone -- and ArtProfileWriterPass, seeing
-  // that clone reached only from calls it cannot prove hot, actually
-  // attached `@NeverInline` to it.
+  // Both cold callers call a clone. The writer annotates it only if the
+  // callers' allocated frames pass its register budget.
   auto* clone = find_invoked_method(fx.cold_caller1);
   ASSERT_NE(clone, nullptr);
   EXPECT_NE(clone, fx.callee);
   EXPECT_EQ(find_invoked_method(fx.cold_caller2), clone);
-  EXPECT_TRUE(has_anno(clone, never_inline_anno));
+  EXPECT_EQ(has_anno(clone, never_inline_anno), c.annotated);
   EXPECT_TRUE(clone->rstate.force_hot_in_baseline_profile());
   EXPECT_FALSE(clone->rstate.force_startup_in_baseline_profile());
   EXPECT_TRUE(profile_has_hot_cnic_method(
       tmp_dir.path + "/meta/additional-baseline-profiles.list"));
 }
+
+INSTANTIATE_TEST_SUITE_P(VirtualCallerRegisters,
+                         CallsiteNeverInlineCloningRegisterTest,
+                         ::testing::Values(CallerRegisterCase{0, 0, 0, true},
+                                           CallerRegisterCase{32, 0, 0, true},
+                                           CallerRegisterCase{33, 0, 0, true},
+                                           CallerRegisterCase{128, 0, 0, true},
+                                           CallerRegisterCase{0, 32, 32, true},
+                                           CallerRegisterCase{0, 33, 33, false},
+                                           CallerRegisterCase{0, 33, 0, true}));
 
 TEST_F(CallsiteNeverInlineCloningEndToEndTest,
        ArtProfileWriterAloneNeverAnnotatesTheMixedHotnessOriginal) {

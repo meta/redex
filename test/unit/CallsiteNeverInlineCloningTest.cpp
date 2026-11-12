@@ -1960,7 +1960,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
 }
 
 TEST_F(CallsiteNeverInlineCloningTest,
-       CallerTooManyRegistersIsSkippedEntirely) {
+       CallerVirtualRegistersDoNotExcludeCallSites) {
   DexMethod *callee, *hot_caller, *cold_caller;
   auto* cls = create_class(
       {
@@ -1982,7 +1982,7 @@ TEST_F(CallsiteNeverInlineCloningTest,
                 (const v1 1)
                 (const v2 1)
                 (const v3 1)
-                (const v4 1)
+                (const v127 1)
                 (invoke-static () "LFoo;.callee:()V")
                 (return-void)
               ))"},
@@ -1992,13 +1992,11 @@ TEST_F(CallsiteNeverInlineCloningTest,
   Scope scope{cls};
   auto baseline_profile = compiled({callee, hot_caller, cold_caller});
   auto config = test_config();
-  // `hot_caller` needs 0 registers; `cold_caller` needs 5 (v0-v4).
-  config.max_caller_registers = 2;
   auto stats = CallsiteNeverInlineCloningPass::clone_mixed_hotness_callees(
       scope, config, /* iteration */ 0, baseline_profile,
       empty_method_profiles());
 
-  EXPECT_EQ(stats.callers_too_many_registers, 1u);
+  EXPECT_EQ(stats.callees_too_small, 1u);
   EXPECT_EQ(stats.mixed_hotness_callees, 0u);
   EXPECT_EQ(stats.clones_created, 0u);
   EXPECT_EQ(find_invoked_method(cold_caller), callee);

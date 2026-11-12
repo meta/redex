@@ -24,7 +24,6 @@ class CallsiteNeverInlineCloningPass : public Pass {
     size_t callers_no_optimizations{0};
     size_t callers_not_compiled{0};
     size_t callers_too_many_instructions{0};
-    size_t callers_too_many_registers{0};
     // Individual call sites skipped.
     size_t invokes_super_opcode{0};
     size_t invokes_interface_opcode{0};
@@ -85,7 +84,6 @@ class CallsiteNeverInlineCloningPass : public Pass {
       callers_no_optimizations += other.callers_no_optimizations;
       callers_not_compiled += other.callers_not_compiled;
       callers_too_many_instructions += other.callers_too_many_instructions;
-      callers_too_many_registers += other.callers_too_many_registers;
       invokes_super_opcode += other.invokes_super_opcode;
       invokes_interface_opcode += other.invokes_interface_opcode;
       invokes_unresolved += other.invokes_unresolved;
@@ -135,13 +133,9 @@ class CallsiteNeverInlineCloningPass : public Pass {
   };
 
   struct Config {
-    // Mirrors ArtProfileWriterPass's own never-inline eligibility thresholds
-    // (same defaults for max_callee_code_units/min_callee_instructions/
-    // max_caller_instructions/max_caller_registers, and the exact same
-    // shape-eligibility decision via `never_inline_analysis`), so that a
-    // callee this pass decides to clone away from is, by construction, one a
-    // later ArtProfileWriterPass run will actually be willing to annotate
-    // `@NeverInline`.
+    // Shares the callee shape and instruction thresholds with
+    // ArtProfileWriterPass. The writer checks allocated caller registers;
+    // this pass runs before allocation and cannot apply that bound yet.
     //
     // `hot_block_appear_threshold`/`hot_method_appear_threshold` default to
     // -1 (disabled), matching ArtProfileWriterPass's own global default: with
@@ -155,8 +149,6 @@ class CallsiteNeverInlineCloningPass : public Pass {
     float hot_method_appear_threshold{-1.0f};
     size_t max_caller_instructions{
         never_inline_analysis::kDefaultMaxCallerInstructions};
-    size_t max_caller_registers{
-        never_inline_analysis::kDefaultMaxCallerRegisters};
     uint32_t max_callee_code_units{40};
     size_t min_callee_instructions{4};
 
@@ -185,8 +177,10 @@ class CallsiteNeverInlineCloningPass : public Pass {
     //     dexes from the callee could need more than one, but never fewer
     //     than one per distinct class).
     // Every number above is an ESTIMATE computed ahead of InterDex, dex
-    // splitting, and any later shrinking pass -- a conservative signal for
-    // ranking and gating candidates, not a promised or measured byte count.
+    // splitting, and any later shrinking pass -- a signal for ranking
+    // potential copies, not a promised or measured byte count. Callers may
+    // remain over ART's register budget after allocation, leaving a clone
+    // without a NeverInline annotation.
     // Surviving candidates are then ranked by `estimated_net` descending
     // (ties broken by a stable, deterministic method ordering) and accepted
     // in that order until `max_total_clones` or `max_total_cloned_code_units`
@@ -287,7 +281,8 @@ resolve an otherwise-ambiguous `invoke-virtual`, and follows a forwarder
 chain to its ultimate callee; this pass deliberately does neither. Within
 that narrower set: only call sites inside a
 profiled-compiled caller are inspected at all; a caller over
-`max_caller_instructions`/`max_caller_registers` is skipped entirely; a call
+`max_caller_instructions` is skipped entirely. Registers here are virtual;
+`ArtProfileWriterPass` checks the allocated caller frame later. A call
 site whose containing block can throw into a callee that itself has a catch
 handler is skipped; an invoke immediately preceding an explicit `throw` at the
 end of its block, up to and including the first non-`<init>` one, is treated
@@ -295,10 +290,9 @@ as exception-construction noise, not a call site, and is skipped the same way
 `ArtProfileWriterPass` skips it. The callee shape-eligibility check itself
 (`never_inline_analysis::never_inline_eligibility`, in `libredex/`) is the
 exact same function `ArtProfileWriterPass` calls for its own annotation
-decision, factored out specifically so the two passes cannot drift apart: a
-callee this pass ever clones is, by construction, one a later
-`ArtProfileWriterPass` run is willing to annotate -- with one access-flag
-exception: `ArtProfileWriterPass`'s own virtual-callee eligibility check is
+decision. Passing these body-shape requirements does not guarantee an
+annotation: the writer still checks the allocated caller frames. Its
+virtual-callee eligibility check is
 narrower than this pass's own (`is_final(method) || is_final(class)`, not the
 broader non-true-virtual notion above), so a clone of a non-final,
 non-true-virtual callee is additionally marked `final`, matching
@@ -315,9 +309,10 @@ profitability model's thresholds (`min_hot_callsites`, `min_cold_callsites`,
 `method_ref_cost` charge scaled by the number of distinct classes the
 redirected cold call sites live in) -- see the `Config` fields' own doc
 strings for the exact formula -- and fits within the deterministic, net-ranked
-`max_total_clones`/`max_total_cloned_code_units` caps. Every number in that
-model is a conservative pre-InterDex estimate for ranking and gating, not a
-promised or measured byte count.
+`max_total_clones`/`max_total_cloned_code_units` caps. The model ranks
+potential inline copies before allocation; callers may remain over the
+register budget, leaving a clone without an annotation. Its numbers are not
+promised or measured byte counts.
 
 This pass produces no clone and rewrites no call site for a callee with only
 cold call sites (nothing to split away from), or for any program with no

@@ -143,7 +143,7 @@ CallerBudget caller_inline_instruction_budget(size_t instructions,
 }
 
 CallerBudget caller_inline_budget(size_t instructions,
-                                  size_t registers,
+                                  size_t allocated_registers,
                                   size_t max_instructions,
                                   size_t max_registers) {
   auto instruction_budget =
@@ -151,7 +151,7 @@ CallerBudget caller_inline_budget(size_t instructions,
   if (instruction_budget != CallerBudget::kWithin) {
     return instruction_budget;
   }
-  if (registers > max_registers) {
+  if (allocated_registers > max_registers) {
     return CallerBudget::kTooManyRegisters;
   }
   return CallerBudget::kWithin;

@@ -107,12 +107,14 @@ Ineligibility never_inline_eligibility(IRCode& code,
                                        uint32_t max_callee_code_units,
                                        size_t min_callee_instructions);
 
-// ART inlines into a caller only within these budgets. The instruction budget
+// Heuristic caller screening thresholds. The instruction budget
 // shadows ART's 1024-HIR caller budget, with a margin, but in a different
 // unit: HIR instructions are not IR opcodes (measured 1.83-1.99 HIR per
 // distinct dex pc, up to 3.60 on tiny methods), so it can land on either side
-// of 1024 HIR depending on the method. The register budget shadows ART's
-// 32-slot inlining environment budget, with no margin.
+// of 1024 HIR depending on the method. The register budget applies to the
+// allocated DEX register frame: ART starts with the root caller's frame and
+// adds inlinees along a nested inline chain. A pre-allocation virtual register
+// count is not that frame.
 inline constexpr size_t kDefaultMaxCallerInstructions = 1100;
 inline constexpr size_t kDefaultMaxCallerRegisters = 32;
 
@@ -127,10 +129,10 @@ enum class CallerBudget {
 CallerBudget caller_inline_instruction_budget(size_t instructions,
                                               size_t max_instructions);
 
-// Whether a caller with `instructions` IR instructions and `registers`
-// registers is within the budgets ART inlines into.
+// `allocated_registers` must count the caller's allocated DEX register frame,
+// not its virtual registers before allocation.
 CallerBudget caller_inline_budget(size_t instructions,
-                                  size_t registers,
+                                  size_t allocated_registers,
                                   size_t max_instructions,
                                   size_t max_registers);
 

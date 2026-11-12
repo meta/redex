@@ -7,6 +7,9 @@
 
 #include "Resolver.h"
 
+#include <algorithm>
+
+#include "ClassHierarchy.h"
 #include "Debug.h"
 #include "DeterministicContainers.h"
 
@@ -570,4 +573,49 @@ DexMethod* find_top_intf_impl(const DexClass* cls,
     cls = type_class(cls->get_super_class());
   }
   return top_impl;
+}
+
+bool has_signature_collision(const SubtypeMaps& subtype_maps,
+                             const DexMethod* method,
+                             const DexProto* new_proto) {
+  const auto* name = method->get_name();
+  const auto* type = method->get_class();
+  if (DexMethod::get_method(type, name, new_proto) != nullptr) {
+    return true;
+  }
+  if (!method->is_virtual()) {
+    // Static and private methods and constructors are neither inherited nor
+    // overridden, and references to them are resolved to their definitions.
+    return false;
+  }
+  TypeSet subtypes;
+  if (is_interface(type_class(type))) {
+    subtypes = get_all_implementors(subtype_maps.implementors, type);
+    get_all_children(subtype_maps.subinterfaces, type, subtypes);
+  } else {
+    get_all_children(subtype_maps.subclasses, type, subtypes);
+  }
+  subtypes.insert(type);
+  // MethodSearch::Virtual would also find interface methods, but its search for
+  // default methods asserts on interfaces without a definition, which inputs
+  // can have.
+  const auto inherits = [&](const DexClass* cls) {
+    if (resolve_method(cls, name, new_proto) != nullptr) {
+      return true;
+    }
+    for (; cls != nullptr; cls = type_class(cls->get_super_class())) {
+      for (const auto* intf : *cls->get_interfaces()) {
+        const auto* intf_cls = type_class(intf);
+        if (intf_cls != nullptr &&
+            resolve_method(intf_cls, name, new_proto,
+                           MethodSearch::Interface) != nullptr) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  return std::any_of(
+      subtypes.begin(), subtypes.end(),
+      [&](const DexType* subtype) { return inherits(type_class(subtype)); });
 }

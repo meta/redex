@@ -115,6 +115,25 @@ void build_interface_map(InterfaceMap& interfaces,
   }
 }
 
+void load_interface_children(ClassHierarchy& children, const DexClass* intf) {
+  for (const auto& super_intf : *intf->get_interfaces()) {
+    children[super_intf].insert(intf->get_type());
+    auto* const super_intf_cls = type_class(super_intf);
+    if (super_intf_cls != nullptr) {
+      load_interface_children(children, super_intf_cls);
+    }
+  }
+}
+
+void load_interface_children(ClassHierarchy& children) {
+  g_redex->walk_type_class([&](const DexType* /*type*/, const DexClass* cls) {
+    if (!cls->is_external() || !is_interface(cls)) {
+      return;
+    }
+    load_interface_children(children, cls);
+  });
+}
+
 } // namespace
 
 ClassHierarchy build_internal_type_hierarchy(const Scope& scope) {
@@ -155,6 +174,25 @@ InterfaceMap build_interface_map(const ClassHierarchy& hierarchy) {
     build_interface_map(interfaces, hierarchy, cls, implementors);
   }
   return interfaces;
+}
+
+ClassHierarchy build_interface_children(const Scope& scope) {
+  ClassHierarchy children;
+  for (const auto& cls : scope) {
+    if (!is_interface(cls)) {
+      continue;
+    }
+    load_interface_children(children, cls);
+  }
+  load_interface_children(children);
+  return children;
+}
+
+SubtypeMaps build_subtype_maps(const Scope& scope) {
+  auto subclasses = build_type_hierarchy(scope);
+  auto implementors = build_interface_map(subclasses);
+  return {std::move(subclasses), std::move(implementors),
+          build_interface_children(scope)};
 }
 
 const TypeSet& get_children(const ClassHierarchy& hierarchy,

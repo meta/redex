@@ -9,6 +9,8 @@
 
 #include "ExternalRefsManglingPass.h"
 
+struct SubtypeMaps;
+
 /**
  * A field or method being referenced by an instruction could be a pure `ref`.
  * In which, the ref points to a class where the field/method is not actually
@@ -71,10 +73,13 @@ class ResolveRefsPass : public ExternalRefsManglingPass {
                           const FieldSearch field_search,
                           impl::RefStats& stats);
   impl::RefStats resolve_refs(DexMethod* method);
-  impl::RefStats refine_virtual_callsites(const XStoreRefs& xstores,
-                                          DexMethod* method,
-                                          bool desuperify,
-                                          bool specialize_rtype);
+  // Collects return type specialization candidates if `rtype_subtype_maps`
+  // is not null.
+  impl::RefStats refine_virtual_callsites(
+      const XStoreRefs& xstores,
+      DexMethod* method,
+      bool desuperify,
+      const SubtypeMaps* rtype_subtype_maps);
   bool m_desuperify;
   bool m_specialize_rtype;
 };

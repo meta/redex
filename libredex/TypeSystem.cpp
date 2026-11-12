@@ -9,7 +9,6 @@
 
 #include "Debug.h"
 #include "DexUtil.h"
-#include "RedexContext.h"
 #include "TypeUtil.h"
 
 namespace {
@@ -42,35 +41,6 @@ void make_instanceof_table(InstanceOfTable& instance_of_table,
   }
 }
 
-void load_interface_children(ClassHierarchy& children, const DexClass* intf) {
-  for (const auto& super_intf : *intf->get_interfaces()) {
-    children[super_intf].insert(intf->get_type());
-    auto* const super_intf_cls = type_class(super_intf);
-    if (super_intf_cls != nullptr) {
-      load_interface_children(children, super_intf_cls);
-    }
-  }
-}
-
-void load_interface_children(ClassHierarchy& children) {
-  g_redex->walk_type_class([&](const DexType* /*type*/, const DexClass* cls) {
-    if (!cls->is_external() || !is_interface(cls)) {
-      return;
-    }
-    load_interface_children(children, cls);
-  });
-}
-
-void load_interface_children(const Scope& scope, ClassHierarchy& children) {
-  for (const auto& cls : scope) {
-    if (!is_interface(cls)) {
-      continue;
-    }
-    load_interface_children(children, cls);
-  }
-  load_interface_children(children);
-}
-
 } // namespace
 
 namespace {
@@ -87,8 +57,8 @@ ClassHierarchy build_hierarchy_with_object(const Scope& scope) {
 
 TypeSystem::TypeSystem(const Scope& scope)
     : m_hierarchy(build_hierarchy_with_object(scope)),
-      m_interface_map(build_interface_map(m_hierarchy)) {
-  load_interface_children(scope, m_intf_children);
+      m_interface_map(build_interface_map(m_hierarchy)),
+      m_intf_children(build_interface_children(scope)) {
   make_instanceof_interfaces_table();
 }
 

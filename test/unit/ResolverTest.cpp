@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include "ClassHierarchy.h"
 #include "Creators.h"
 #include "DexClass.h"
 #include "RedexTest.h"
@@ -446,4 +447,237 @@ TEST_F(ResolverTest, ResolveMethod) {
                   f_method, MethodSearch::InterfaceVirtual) == e_method);
   EXPECT_TRUE(resolve_method_deprecated(
                   g_method, MethodSearch::InterfaceVirtual) == e_method);
+}
+
+TEST_F(ResolverTest, HasSignatureCollision) {
+  auto* string_proto = DexProto::make_proto(type::java_lang_String(),
+                                            DexTypeList::make_type_list({}));
+  auto add_method = [](ClassCreator& creator, const std::string& signature,
+                       DexAccessFlags access, bool is_virtual) {
+    auto* method =
+        DexMethod::make_method(signature)->make_concrete(access, is_virtual);
+    creator.add_method(method);
+    return method;
+  };
+  auto make_interface = [&](const char* name, const char* method_name,
+                            DexAccessFlags access,
+                            const std::vector<DexClass*>& super_intfs) {
+    ClassCreator creator(DexType::make_type(name));
+    creator.set_super(type::java_lang_Object());
+    creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+    for (auto* super_intf : super_intfs) {
+      creator.add_interface(super_intf->get_type());
+    }
+    add_method(creator,
+               std::string(name) + "." + method_name + ":()Ljava/lang/String;",
+               access, true);
+    return creator.create();
+  };
+  const auto abstract = ACC_PUBLIC | ACC_ABSTRACT;
+  // `I` extends `I2`, which extends `I3` with a default method.
+  auto* deep_intf = make_interface("LI3;", "from_deep_default", ACC_PUBLIC, {});
+  auto* middle_intf =
+      make_interface("LI2;", "from_middle_interface", abstract, {deep_intf});
+  auto* intf = make_interface("LI;", "from_interface", abstract, {middle_intf});
+  // `Base` implements `J` without declaring its method.
+  auto* super_intf =
+      make_interface("LJ;", "from_super_interface", abstract, {});
+  // The subclass `D` implements `K`, which extends `K2`.
+  auto* sub_super_intf =
+      make_interface("LK2;", "from_subclass_super_interface", abstract, {});
+  auto* sub_intf = make_interface("LK;", "from_subclass_interface", abstract,
+                                  {sub_super_intf});
+
+  ClassCreator base_creator(DexType::make_type("LBase;"));
+  base_creator.set_super(type::java_lang_Object());
+  base_creator.add_interface(super_intf->get_type());
+  add_method(base_creator, "LBase;.inherited_static:()Ljava/lang/String;",
+             ACC_PUBLIC | ACC_STATIC, false);
+  add_method(base_creator, "LBase;.inherited_virtual:()Ljava/lang/String;",
+             ACC_PUBLIC, true);
+  add_method(base_creator, "LBase;.static_hidden:()Ljava/lang/String;",
+             ACC_PUBLIC | ACC_STATIC, false);
+  auto* base = base_creator.create();
+
+  ClassCreator creator(DexType::make_type("LC;"));
+  creator.set_super(base->get_type());
+  creator.add_interface(intf->get_type());
+  auto add_candidate = [&](const std::string& name) {
+    return add_method(creator, "LC;." + name + ":()Ljava/lang/Object;",
+                      ACC_PUBLIC, true);
+  };
+  auto add_static_candidate = [&](const std::string& name) {
+    return add_method(creator, "LC;." + name + ":()Ljava/lang/Object;",
+                      ACC_PUBLIC | ACC_STATIC, false);
+  };
+  auto* no_collision = add_candidate("no_collision");
+  auto* own = add_candidate("own");
+  add_method(creator, "LC;.own:()Ljava/lang/String;", ACC_PUBLIC | ACC_STATIC,
+             false);
+  auto* interned = add_candidate("interned");
+  DexMethod::make_method("LC;.interned:()Ljava/lang/String;");
+  auto* inherited_static = add_candidate("inherited_static");
+  auto* inherited_virtual = add_candidate("inherited_virtual");
+  auto* from_interface = add_candidate("from_interface");
+  auto* from_super_interface = add_candidate("from_super_interface");
+  auto* in_subclass = add_candidate("in_subclass");
+  auto* referenced_on_subclass = add_candidate("referenced_on_subclass");
+  auto* from_subclass_interface = add_candidate("from_subclass_interface");
+  auto* from_middle_interface = add_candidate("from_middle_interface");
+  auto* from_deep_default = add_candidate("from_deep_default");
+  auto* from_subclass_super_interface =
+      add_candidate("from_subclass_super_interface");
+  auto* static_own = add_static_candidate("static_own");
+  add_method(creator, "LC;.static_own:()Ljava/lang/String;",
+             ACC_PUBLIC | ACC_STATIC, false);
+  auto* static_hidden = add_static_candidate("static_hidden");
+  auto* static_in_subclass = add_static_candidate("static_in_subclass");
+  auto* cls = creator.create();
+
+  ClassCreator sub_creator(DexType::make_type("LD;"));
+  sub_creator.set_super(cls->get_type());
+  sub_creator.add_interface(sub_intf->get_type());
+  add_method(sub_creator, "LD;.in_subclass:()Ljava/lang/String;", ACC_PUBLIC,
+             true);
+  add_method(sub_creator, "LD;.static_in_subclass:()Ljava/lang/String;",
+             ACC_PUBLIC, true);
+  auto* sub = sub_creator.create();
+  DexMethod::make_method("LD;.referenced_on_subclass:()Ljava/lang/String;");
+
+  // Interface methods: `Impl` implements `L` and declares the new signature;
+  // `Derived` implements `L` and inherits it from `Unrelated`.
+  ClassCreator l_creator(DexType::make_type("LL;"));
+  l_creator.set_super(type::java_lang_Object());
+  l_creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  auto* in_implementor = add_method(
+      l_creator, "LL;.in_implementor:()Ljava/lang/Object;", abstract, true);
+  auto* inherited_by_implementor =
+      add_method(l_creator, "LL;.inherited_by_implementor:()Ljava/lang/Object;",
+                 abstract, true);
+  auto* l_intf = l_creator.create();
+  // `N` extends `M`, which declares the new signature; `N` has no implementor.
+  auto* m_intf = make_interface("LM;", "from_super_of_interface", abstract, {});
+  ClassCreator n_creator(DexType::make_type("LN;"));
+  n_creator.set_super(type::java_lang_Object());
+  n_creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  n_creator.add_interface(m_intf->get_type());
+  auto* from_super_of_interface =
+      add_method(n_creator, "LN;.from_super_of_interface:()Ljava/lang/Object;",
+                 abstract, true);
+  auto* n_intf = n_creator.create();
+  // `Q` extends `P` and declares the new signature.
+  ClassCreator p_creator(DexType::make_type("LP;"));
+  p_creator.set_super(type::java_lang_Object());
+  p_creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  auto* in_subinterface = add_method(
+      p_creator, "LP;.in_subinterface:()Ljava/lang/Object;", abstract, true);
+  auto* p_intf = p_creator.create();
+  auto* q_intf = make_interface("LQ;", "in_subinterface", abstract, {p_intf});
+  ClassCreator impl_creator(DexType::make_type("LImpl;"));
+  impl_creator.set_super(type::java_lang_Object());
+  impl_creator.add_interface(l_intf->get_type());
+  add_method(impl_creator, "LImpl;.in_implementor:()Ljava/lang/String;",
+             ACC_PUBLIC, true);
+  auto* impl = impl_creator.create();
+  ClassCreator unrelated_creator(DexType::make_type("LUnrelated;"));
+  unrelated_creator.set_super(type::java_lang_Object());
+  add_method(unrelated_creator,
+             "LUnrelated;.inherited_by_implementor:()Ljava/lang/String;",
+             ACC_PUBLIC, true);
+  auto* unrelated = unrelated_creator.create();
+  ClassCreator derived_creator(DexType::make_type("LDerived;"));
+  derived_creator.set_super(unrelated->get_type());
+  derived_creator.add_interface(l_intf->get_type());
+  auto* derived = derived_creator.create();
+
+  SubtypeMaps subtype_maps =
+      build_subtype_maps({base, cls, sub, l_intf, n_intf, p_intf, q_intf, impl,
+                          unrelated, derived});
+
+  EXPECT_FALSE(
+      has_signature_collision(subtype_maps, no_collision, string_proto));
+  EXPECT_TRUE(has_signature_collision(subtype_maps, own, string_proto));
+  // A reference on the method's own class holds the key it would take.
+  EXPECT_TRUE(has_signature_collision(subtype_maps, interned, string_proto));
+  EXPECT_TRUE(
+      has_signature_collision(subtype_maps, inherited_static, string_proto));
+  EXPECT_TRUE(
+      has_signature_collision(subtype_maps, inherited_virtual, string_proto));
+  EXPECT_TRUE(
+      has_signature_collision(subtype_maps, from_interface, string_proto));
+  EXPECT_TRUE(has_signature_collision(subtype_maps, from_super_interface,
+                                      string_proto));
+  EXPECT_TRUE(has_signature_collision(subtype_maps, in_subclass, string_proto));
+  // References are resolved to their definitions, so a reference that no
+  // definition backs does not count.
+  EXPECT_FALSE(has_signature_collision(subtype_maps, referenced_on_subclass,
+                                       string_proto));
+  EXPECT_TRUE(has_signature_collision(subtype_maps, from_subclass_interface,
+                                      string_proto));
+  EXPECT_TRUE(has_signature_collision(subtype_maps, from_middle_interface,
+                                      string_proto));
+  EXPECT_TRUE(
+      has_signature_collision(subtype_maps, from_deep_default, string_proto));
+  EXPECT_TRUE(has_signature_collision(
+      subtype_maps, from_subclass_super_interface, string_proto));
+  EXPECT_TRUE(
+      has_signature_collision(subtype_maps, in_implementor, string_proto));
+  EXPECT_TRUE(has_signature_collision(subtype_maps, inherited_by_implementor,
+                                      string_proto));
+  EXPECT_TRUE(has_signature_collision(subtype_maps, from_super_of_interface,
+                                      string_proto));
+  EXPECT_TRUE(
+      has_signature_collision(subtype_maps, in_subinterface, string_proto));
+  // Static methods are not inherited, so only their own class counts.
+  EXPECT_TRUE(has_signature_collision(subtype_maps, static_own, string_proto));
+  EXPECT_FALSE(
+      has_signature_collision(subtype_maps, static_hidden, string_proto));
+  EXPECT_FALSE(
+      has_signature_collision(subtype_maps, static_in_subclass, string_proto));
+}
+
+TEST_F(ResolverTest, HasSignatureCollisionForConstructors) {
+  // `Sub.<init>(I)` taking `(Impl)` collides only with a constructor of `Sub`
+  // itself, not with the ones of its superclass and subclass.
+  auto make_class = [](const char* name, DexType* super,
+                       const std::vector<const char*>& ctors) {
+    ClassCreator creator(DexType::make_type(name));
+    creator.set_super(super);
+    for (const auto* ctor : ctors) {
+      creator.add_method(
+          DexMethod::make_method(std::string(name) + ".<init>:" + ctor)
+              ->make_concrete(ACC_PUBLIC | ACC_CONSTRUCTOR, false));
+    }
+    return creator.create();
+  };
+  auto* base = make_class("LBase;", type::java_lang_Object(), {"(LImpl;)V"});
+  auto* sub = make_class("LSub;", base->get_type(), {"(LI;)V"});
+  auto* subsub = make_class("LSubSub;", sub->get_type(), {"(LImpl;)V"});
+  auto* other =
+      make_class("LOther;", type::java_lang_Object(), {"(LI;)V", "(LImpl;)V"});
+  SubtypeMaps subtype_maps = build_subtype_maps({base, sub, subsub, other});
+  auto* impl_proto = DexProto::make_proto(
+      type::_void(),
+      DexTypeList::make_type_list({DexType::make_type("LImpl;")}));
+
+  EXPECT_FALSE(has_signature_collision(
+      subtype_maps, sub->get_dmethods().front(), impl_proto));
+  auto* other_ctor = DexMethod::get_method("LOther;.<init>:(LI;)V")->as_def();
+  EXPECT_TRUE(has_signature_collision(subtype_maps, other_ctor, impl_proto));
+}
+
+TEST_F(ResolverTest, HasSignatureCollisionWithUndefinedInterface) {
+  // `C` implements `Undefined`, which has no definition.
+  ClassCreator creator(DexType::make_type("LC;"));
+  creator.set_super(type::java_lang_Object());
+  creator.add_interface(DexType::make_type("LUndefined;"));
+  auto* method = DexMethod::make_method("LC;.m:()Ljava/lang/Object;")
+                     ->make_concrete(ACC_PUBLIC, true);
+  creator.add_method(method);
+  auto* cls = creator.create();
+  auto* string_proto = DexProto::make_proto(type::java_lang_String(),
+                                            DexTypeList::make_type_list({}));
+
+  EXPECT_FALSE(
+      has_signature_collision(build_subtype_maps({cls}), method, string_proto));
 }

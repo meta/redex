@@ -7,7 +7,6 @@
 
 #include "SpecializeRtype.h"
 
-#include "ClassHierarchy.h"
 #include "ConcurrentContainers.h"
 #include "Debug.h"
 #include "DexTypeEnvironment.h"
@@ -67,39 +66,35 @@ bool is_safe_to_specialize(const DexMethod* meth) {
   return can_delete(meth) && can_rename(meth) && !is_native(meth);
 }
 
-bool can_update_rtype_for(DexMethod* meth, const DexProto* new_proto) {
+bool can_update_rtype_for(const SubtypeMaps& subtype_maps,
+                          DexMethod* meth,
+                          const DexProto* new_proto) {
   if (!is_safe_to_specialize(meth)) {
     return false;
   }
-  if (DexMethod::get_method(meth->get_class(), meth->get_name(), new_proto) !=
-      nullptr) {
+  if (has_signature_collision(subtype_maps, meth, new_proto)) {
     // Bail on collision.
     TRACE(RESO, 4, "specialize bail on proto collision w/ %s -> %s", SHOW(meth),
           SHOW(new_proto));
     return false;
   }
-  auto* resolved = resolve_method_deprecated(type_class(meth->get_class()),
-                                             meth->get_name(), new_proto);
-  if (resolved != nullptr) {
-    // Bail on virtual scope collision.
-    TRACE(RESO, 4, "specialize bail on virtual scope collision w/ %s",
-          SHOW(resolved));
-    return false;
-  }
   return true;
 }
 
-bool can_update_rtype_for(DexMethod* meth, const DexType* new_rtype) {
+bool can_update_rtype_for(const SubtypeMaps& subtype_maps,
+                          DexMethod* meth,
+                          const DexType* new_rtype) {
   DexProto* updated_proto =
       DexProto::make_proto(new_rtype, meth->get_proto()->get_args());
-  return can_update_rtype_for(meth, updated_proto);
+  return can_update_rtype_for(subtype_maps, meth, updated_proto);
 }
 
-bool can_update_rtype_for_list(const UnorderedBag<const DexMethod*>& meths,
+bool can_update_rtype_for_list(const SubtypeMaps& subtype_maps,
+                               const UnorderedBag<const DexMethod*>& meths,
                                const DexProto* new_proto) {
   for (const auto* m : UnorderedIterable(meths)) {
     auto* meth = const_cast<DexMethod*>(m);
-    if (!can_update_rtype_for(meth, new_proto)) {
+    if (!can_update_rtype_for(subtype_maps, meth, new_proto)) {
       return false;
     }
   }
@@ -127,13 +122,14 @@ bool share_common_overriddens_size(
   return true;
 }
 
-void update_rtype_for(DexMethod* meth,
+void update_rtype_for(const SubtypeMaps& subtype_maps,
+                      DexMethod* meth,
                       const DexType* new_rtype,
                       RtypeStats& stats,
                       bool rename_on_collision = false) {
   DexProto* updated_proto =
       DexProto::make_proto(new_rtype, meth->get_proto()->get_args());
-  if (!can_update_rtype_for(meth, updated_proto)) {
+  if (!can_update_rtype_for(subtype_maps, meth, updated_proto)) {
     return;
   }
 
@@ -154,7 +150,8 @@ void update_rtype_unsafe_for(DexMethod* meth,
   stats.num_rtype_specialized++;
 }
 
-bool update_rtype_for_list(const UnorderedBag<const DexMethod*>& meths,
+bool update_rtype_for_list(const SubtypeMaps& subtype_maps,
+                           const UnorderedBag<const DexMethod*>& meths,
                            const DexType* new_rtype,
                            RtypeStats& stats) {
   if (meths.empty()) {
@@ -165,7 +162,7 @@ bool update_rtype_for_list(const UnorderedBag<const DexMethod*>& meths,
 
   for (const auto* m : UnorderedIterable(meths)) {
     auto* meth = const_cast<DexMethod*>(m);
-    if (!can_update_rtype_for(meth, updated_proto)) {
+    if (!can_update_rtype_for(subtype_maps, meth, updated_proto)) {
       return false;
     }
   }
@@ -195,6 +192,7 @@ void RtypeCandidates::collect_inferred_rtype(
 void RtypeCandidates::collect_specializable_rtype(
     const api::AndroidSDK* min_sdk_api,
     const XStoreRefs& xstores,
+    const SubtypeMaps& subtype_maps,
     DexMethod* meth,
     const DexTypeDomain& rtype_domain) {
   if (rtype_domain.is_bottom() || rtype_domain.is_top()) {
@@ -225,7 +223,7 @@ void RtypeCandidates::collect_specializable_rtype(
   }
   // `better_rtype` is a subtype of the exsting `rtype`.
   if (type::check_cast(*better_rtype, rtype) &&
-      can_update_rtype_for(meth, *better_rtype)) {
+      can_update_rtype_for(subtype_maps, meth, *better_rtype)) {
     m_rtype_candidates.emplace(meth, *better_rtype);
   }
 }
@@ -297,6 +295,7 @@ void RtypeSpecialization::specialize_non_true_virtuals(
 }
 
 void RtypeSpecialization::specialize_true_virtuals(
+    const SubtypeMaps& subtype_maps,
     const method_override_graph::Graph& override_graph,
     DexMethod* meth,
     const DexType* better_rtype,
@@ -345,7 +344,7 @@ void RtypeSpecialization::specialize_true_virtuals(
     }
     if (global_overridings.size() > 1) {
       stats.num_rtype_specialized_virtual_1p++;
-      if (can_update_rtype_for(overridden, better_rtype) &&
+      if (can_update_rtype_for(subtype_maps, overridden, better_rtype) &&
           share_common_rtype_candidate(m_candidates, global_overridings,
                                        better_rtype) &&
           share_common_overriddens_size(override_graph, global_overridings)) {
@@ -353,7 +352,8 @@ void RtypeSpecialization::specialize_true_virtuals(
               SHOW(better_rtype));
         DexProto* updated_proto =
             DexProto::make_proto(better_rtype, meth->get_proto()->get_args());
-        if (can_update_rtype_for_list(global_overridings, updated_proto)) {
+        if (can_update_rtype_for_list(subtype_maps, global_overridings,
+                                      updated_proto)) {
           virtual_roots.emplace(overridden, better_rtype);
         }
       }
@@ -361,8 +361,8 @@ void RtypeSpecialization::specialize_true_virtuals(
     }
     TRACE(RESO, 3, "specialize virtual 1 overridden %s w/ rtype %s", SHOW(meth),
           SHOW(better_rtype));
-    if (can_update_rtype_for(overridden, better_rtype) &&
-        can_update_rtype_for(meth, better_rtype)) {
+    if (can_update_rtype_for(subtype_maps, overridden, better_rtype) &&
+        can_update_rtype_for(subtype_maps, meth, better_rtype)) {
       stats.num_rtype_specialized_virtual_1++;
       virtual_roots.emplace(overridden, better_rtype);
       TRACE(RESO, 3, "root virtual 1 overridden %s w/ rtype %s",
@@ -374,7 +374,8 @@ void RtypeSpecialization::specialize_true_virtuals(
   }
 }
 
-void RtypeSpecialization::specialize_rtypes(const Scope& scope) {
+void RtypeSpecialization::specialize_rtypes(const Scope& scope,
+                                            const SubtypeMaps& subtype_maps) {
   Timer t("specialize_rtype");
   const auto& override_graph = method_override_graph::build_graph(scope);
   InsertOnlyConcurrentMap<DexMethod*, const DexType*> virtual_roots;
@@ -397,8 +398,8 @@ void RtypeSpecialization::specialize_rtypes(const Scope& scope) {
           specialize_non_true_virtuals(*override_graph, meth, better_rtype,
                                        virtual_roots, m_stats);
         } else {
-          specialize_true_virtuals(*override_graph, meth, better_rtype,
-                                   virtual_roots, m_stats);
+          specialize_true_virtuals(subtype_maps, *override_graph, meth,
+                                   better_rtype, virtual_roots, m_stats);
         }
       };
 
@@ -412,7 +413,7 @@ void RtypeSpecialization::specialize_rtypes(const Scope& scope) {
       continue;
     }
     const auto* better_rtype = pair.second;
-    update_rtype_for(meth, better_rtype, m_stats);
+    update_rtype_for(subtype_maps, meth, better_rtype, m_stats);
     TRACE(RESO, 4, "specialize direct %s w/ rtype %s", SHOW(meth),
           SHOW(better_rtype));
     m_stats.num_rtype_specialized_direct++;
@@ -426,22 +427,17 @@ void RtypeSpecialization::specialize_rtypes(const Scope& scope) {
   }
   std::sort(virtuals_lst.begin(), virtuals_lst.end(), compare_dexmethods);
 
-  ClassHierarchy ch = build_type_hierarchy(scope);
   for (auto* root : virtuals_lst) {
     const auto* better_rtype = virtual_roots.at(root);
     const auto& overrides = method_override_graph::get_overriding_methods(
         *override_graph, root, true);
     auto* new_proto =
         DexProto::make_proto(better_rtype, root->get_proto()->get_args());
-    auto* cls = type_class(root->get_class());
-    if (find_collision(ch, root->get_name(), new_proto, cls,
-                       /* is_virtual */ true) != nullptr) {
-      TRACE(RESO, 4, "Bail on virtual collision %s w/ rtype %s", SHOW(root),
-            SHOW(better_rtype));
-      continue;
-    }
-    if (update_rtype_for_list(overrides, better_rtype, m_stats)) {
-      update_rtype_for(root, better_rtype, m_stats);
+    // Check the root before changing its overrides, so that a group is
+    // either changed as a whole or not at all.
+    if (can_update_rtype_for(subtype_maps, root, new_proto) &&
+        update_rtype_for_list(subtype_maps, overrides, better_rtype, m_stats)) {
+      update_rtype_unsafe_for(root, better_rtype, m_stats);
     }
   }
 }

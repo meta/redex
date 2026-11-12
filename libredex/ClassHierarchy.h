@@ -93,6 +93,27 @@ inline TypeSet get_all_implementors(const InterfaceMap& interfaces,
 }
 
 /**
+ * Map from each interface to the interfaces directly extending it, built from
+ * the interfaces in `scope` and all external interfaces.
+ */
+ClassHierarchy build_interface_children(const Scope& scope);
+
+/**
+ * The subtypes of every class and interface in a scope.
+ */
+struct SubtypeMaps {
+  // Each class to its direct subclasses, from build_type_hierarchy.
+  ClassHierarchy subclasses;
+  // Each interface to every class implementing it, from build_interface_map.
+  InterfaceMap implementors;
+  // Each interface to the interfaces directly extending it, from
+  // build_interface_children.
+  ClassHierarchy subinterfaces;
+};
+
+SubtypeMaps build_subtype_maps(const Scope& scope);
+
+/**
  * Helper to retrieve either the children of a concrete type or
  * all implementors of an interface.
  */

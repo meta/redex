@@ -10,6 +10,7 @@
 #include <optional>
 
 #include "ApiLevelChecker.h"
+#include "ClassHierarchy.h"
 #include "ConfigFiles.h"
 #include "ControlFlow.h"
 #include "Debug.h"
@@ -402,10 +403,11 @@ RefStats ResolveRefsPass::resolve_refs(DexMethod* method) {
   return stats;
 }
 
-RefStats ResolveRefsPass::refine_virtual_callsites(const XStoreRefs& xstores,
-                                                   DexMethod* method,
-                                                   bool desuperify,
-                                                   bool specialize_rtype) {
+RefStats ResolveRefsPass::refine_virtual_callsites(
+    const XStoreRefs& xstores,
+    DexMethod* method,
+    bool desuperify,
+    const SubtypeMaps* rtype_subtype_maps) {
   RefStats stats;
   if ((method == nullptr) || (method->get_code() == nullptr)) {
     return stats;
@@ -426,7 +428,7 @@ RefStats ResolveRefsPass::refine_virtual_callsites(const XStoreRefs& xstores,
     }
 
     auto opcode = insn->opcode();
-    if (specialize_rtype && opcode::is_return_object(opcode)) {
+    if (rtype_subtype_maps != nullptr && opcode::is_return_object(opcode)) {
       auto& env = envs.at(insn);
       auto inferred_rtype = env.get_type_domain(insn->src(0));
       stats.rtype_candidates.collect_inferred_rtype(method, inferred_rtype,
@@ -503,8 +505,10 @@ RefStats ResolveRefsPass::refine_virtual_callsites(const XStoreRefs& xstores,
     }
   }
 
-  stats.rtype_candidates.collect_specializable_rtype(m_min_sdk_api, xstores,
-                                                     method, rtype_domain);
+  if (rtype_subtype_maps != nullptr) {
+    stats.rtype_candidates.collect_specializable_rtype(
+        m_min_sdk_api, xstores, *rtype_subtype_maps, method, rtype_domain);
+  }
   return stats;
 }
 
@@ -514,11 +518,16 @@ void ResolveRefsPass::run_pass(DexStoresVector& stores,
   always_assert(m_min_sdk_api);
   Scope scope = build_class_scope(stores);
   XStoreRefs xstores(stores, conf.normal_primary_dex());
+  std::optional<SubtypeMaps> subtype_maps;
+  if (m_specialize_rtype) {
+    subtype_maps = build_subtype_maps(scope);
+  }
+  const auto* rtype_subtype_maps = subtype_maps ? &*subtype_maps : nullptr;
   impl::RefStats stats = walk::parallel::methods<impl::RefStats>(
-      scope, [this, &xstores](DexMethod* method) {
+      scope, [this, &xstores, rtype_subtype_maps](DexMethod* method) {
         auto local_stats = resolve_refs(method);
         local_stats += refine_virtual_callsites(xstores, method, m_desuperify,
-                                                m_specialize_rtype);
+                                                rtype_subtype_maps);
         return local_stats;
       });
   stats.print(&mgr);
@@ -527,7 +536,7 @@ void ResolveRefsPass::run_pass(DexStoresVector& stores,
     return;
   }
   RtypeSpecialization rs(stats.rtype_candidates.get_candidates(), xstores);
-  rs.specialize_rtypes(scope);
+  rs.specialize_rtypes(scope, *subtype_maps);
   rs.print_stats(&mgr);
 
   // Resolve virtual method refs again based on the new rtypes. But further
@@ -536,7 +545,7 @@ void ResolveRefsPass::run_pass(DexStoresVector& stores,
       walk::parallel::methods<impl::RefStats>(scope, [&](DexMethod* method) {
         auto local_stats =
             refine_virtual_callsites(xstores, method, false /* desuperfy */,
-                                     false /* specialize_rtype */);
+                                     nullptr /* rtype_subtype_maps */);
         return local_stats;
       });
   stats.print(&mgr);

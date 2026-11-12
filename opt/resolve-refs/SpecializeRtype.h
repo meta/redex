@@ -16,6 +16,7 @@
 #include "Resolver.h"
 
 class PassManager;
+struct SubtypeMaps;
 class DexTypeDomain;
 class XStoreRefs;
 
@@ -48,6 +49,7 @@ class RtypeCandidates final {
                               DexTypeDomain& curr_rtype);
   void collect_specializable_rtype(const api::AndroidSDK* min_sdk_api,
                                    const XStoreRefs& xstores,
+                                   const SubtypeMaps& subtype_maps,
                                    DexMethod* meth,
                                    const DexTypeDomain& rtype_domain);
   const MethodToInferredReturnType& get_candidates() {
@@ -69,7 +71,7 @@ class RtypeSpecialization final {
                                XStoreRefs xstores)
       : m_candidates(std::move(candidates)), m_xstores(std::move(xstores)) {}
 
-  void specialize_rtypes(const Scope& scope);
+  void specialize_rtypes(const Scope& scope, const SubtypeMaps& subtype_maps);
   void print_stats(PassManager* mgr) const { m_stats.print(mgr); }
 
  private:
@@ -85,6 +87,7 @@ class RtypeSpecialization final {
       RtypeStats& stats) const;
 
   void specialize_true_virtuals(
+      const SubtypeMaps& subtype_maps,
       const method_override_graph::Graph& override_graph,
       DexMethod* meth,
       const DexType* better_rtype,

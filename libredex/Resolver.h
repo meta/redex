@@ -16,6 +16,8 @@
 #include "IRInstruction.h"
 #include "Show.h"
 
+struct SubtypeMaps;
+
 /**
  * Type of search to perform.
  * These flags direct the way lookup if performed up the hierarchy more than
@@ -309,6 +311,26 @@ DexMethod* find_top_impl(const DexClass*, const DexString*, const DexProto*);
 DexMethod* find_top_intf_impl(const DexClass* cls,
                               const DexString* name,
                               const DexProto* proto);
+
+/**
+ * Whether `method` cannot take `new_proto` in place, keeping its class and
+ * name, because calls or overrides could then bind differently: a method with
+ * its name and `new_proto` is defined in its class, or, if `method` is
+ * virtual, in a subtype (a subclass, or a subinterface or a class implementing
+ * it if it is an interface), or in a class or interface that one of those
+ * inherits from, including interfaces it implements only through a superclass
+ * or a superinterface.
+ *
+ * Static and private methods and constructors are neither inherited nor
+ * overridden, so for them only their own class counts.
+ *
+ * Method references are assumed to be resolved to their definitions, so
+ * references with the new signature elsewhere do not count. One on the class
+ * of `method` does: `DexMethodRef::change` cannot take its key.
+ */
+bool has_signature_collision(const SubtypeMaps& subtype_maps,
+                             const DexMethod* method,
+                             const DexProto* new_proto);
 
 /**
  * Type of fields to resolve.

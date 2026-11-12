@@ -317,6 +317,14 @@ void DexOutputConfig::bind_config() {
        "segments are always kept in full.");
 }
 
+void Dex2oatConfig::bind_config() {
+  bind("huge_method_max", huge_method_max, huge_method_max,
+       "dex2oat does not compile a method with more code units than this. "
+       "Mirrors ART's `huge_method_threshold_`, whose default is 10000 and "
+       "which dex2oat applies with a strict `>`. Raise it beyond any real "
+       "method to disable the gate.");
+}
+
 void JarLoaderConfig::bind_config() {
   bind("legacy_mode", legacy_mode, legacy_mode);
   bind("allowed_prefixes", allowed_prefixes, allowed_prefixes);
@@ -454,6 +462,7 @@ GlobalConfigRegistry& GlobalConfig::default_registry() {
       register_as<ResourceConfig>("resources"),
       register_as<DexOutputConfig>("dex_output"),
       register_as<JarLoaderConfig>("jar_loader"),
+      register_as<Dex2oatConfig>("dex2oat"),
   };
   return registry;
 }

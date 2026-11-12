@@ -53,11 +53,9 @@ bool is_compiled(const BaselineProfile& baseline_profile,
 // changed.
 size_t apply_forced_method_flags(const Scope& scope, BaselineProfile* profile);
 
-// ART's default huge_method_threshold_ (art/compiler/driver/compiler_options.h,
-// kDefaultHugeMethodThreshold). dex2oat refuses a method STRICTLY larger than
-// this. Overridable on the dex2oat command line with --huge-method-max, which
-// no Android build of ours passes, so the default is what runs.
-constexpr uint32_t DEFAULT_ART_HUGE_METHOD_MAX = 10000;
+// The huge-method limit the build models dex2oat with,
+// `dex2oat.huge_method_max` in the global config.
+uint32_t get_huge_method_max(const ConfigFiles& conf);
 
 // ART's default inline_max_code_units_ (art/compiler/driver/compiler_options.h,
 // kDefaultInlineMaxCodeUnits). The optimizing compiler does not inline a
@@ -108,8 +106,8 @@ uint32_t lowered_unreachable_extra_code_units();
 // yet: what dex2oat sees once every `unreachable` is lowered.
 uint32_t dex2oat_code_units_before_unreachable_lowering(DexMethod* method);
 
-UncompilableReason uncompilable_reason(
-    DexMethod* method, uint32_t huge_method_max = DEFAULT_ART_HUGE_METHOD_MAX);
+UncompilableReason uncompilable_reason(DexMethod* method,
+                                       uint32_t huge_method_max);
 
 // Whether the profile flags ask dex2oat to compile this entry:
 //   IsHotMethod() || (!IsLowMemoryMode() && IsStartupMethod())
@@ -159,7 +157,7 @@ TopOffSelection select_smallest_topoff_methods(
     const Scope& candidate_scope,
     const BaselineProfile& baseline_profile,
     size_t count,
-    uint32_t huge_method_max = DEFAULT_ART_HUGE_METHOD_MAX,
+    uint32_t huge_method_max,
     const UnorderedSet<const DexMethod*>* excluded = nullptr);
 
 // Returns a tuple of BaselineProfile and UnorderedMap<std::string,

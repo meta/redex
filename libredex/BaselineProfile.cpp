@@ -17,6 +17,7 @@
 #include "ConfigFiles.h"
 #include "ControlFlow.h"
 #include "DexUtil.h"
+#include "GlobalConfig.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
 #include "MethodUtil.h"
@@ -28,6 +29,17 @@ namespace baseline_profiles {
 
 bool is_compiled(const DexMethod* method, const MethodFlags& flags) {
   return flags.hot && !method::is_clinit(method);
+}
+
+uint32_t get_huge_method_max(const ConfigFiles& conf) {
+  const auto& global_config = conf.get_global_config();
+  // A config whose global section was never parsed has no "dex2oat" entry;
+  // parsing an empty one would give the same default.
+  if (!global_config.has_config_by_name("dex2oat")) {
+    return DEFAULT_ART_HUGE_METHOD_MAX;
+  }
+  return global_config.get_config_by_name<Dex2oatConfig>("dex2oat")
+      ->huge_method_max;
 }
 
 uint32_t dex2oat_code_units(DexMethod* method) {

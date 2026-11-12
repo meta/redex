@@ -45,6 +45,5 @@ class ArtProfileWriterPass : public Pass {
   bool m_include_strings_lookup_class;
   std::optional<ReserveRefsInfoHandle> m_reserved_refs_handle;
   std::optional<bool> m_override_strip_classes;
-  uint32_t m_huge_method_max;
   size_t m_topoff_target_entries;
 };

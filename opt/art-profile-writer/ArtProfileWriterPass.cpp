@@ -26,6 +26,7 @@
 #include "DexAssessments.h"
 #include "DexStore.h"
 #include "DexStructure.h"
+#include "GlobalConfig.h"
 #include "HotCallsites.h"
 #include "IRCode.h"
 #include "MethodProfiles.h"
@@ -555,12 +556,6 @@ void ArtProfileWriterPass::bind_config() {
   bind("override_strip_classes", std::nullopt, m_override_strip_classes,
        "Override the strip_classes flag to the one given.");
 
-  bind("huge_method_max", baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX,
-       m_huge_method_max,
-       "Treat a profile entry larger than this many code units as "
-       "uncompilable. Shadows ART's own `huge_method_threshold_`, whose "
-       "default is 10000 and which dex2oat applies with a strict `>`. Raise it "
-       "beyond any real method to disable the gate.");
   bind("topoff_target_entries", 0, m_topoff_target_entries,
        "Pad the default baseline profile with extra dex2oat-compilable methods "
        "until it holds this many entries. 0 disables. This is a measurement "
@@ -766,6 +761,7 @@ void ArtProfileWriterPass::run_pass(DexStoresVector& stores,
 
   UnorderedSet<const DexMethodRef*> method_refs_without_def;
   const auto& method_profiles = conf.get_method_profiles();
+  const auto huge_method_max = baseline_profiles::get_huge_method_max(conf);
 
   auto scope = build_class_scope(stores);
   // Only the root store ships alongside the profile, so it bounds everything
@@ -853,9 +849,9 @@ void ArtProfileWriterPass::run_pass(DexStoresVector& stores,
       // full predicate is applied rather than just a code check.
       size_t inserted = 0;
       walk::code(coldstart_classes,
-                 [&baseline_profile, &inserted, flags, this](DexMethod* method,
-                                                             IRCode&) {
-                   if (uncompilable_reason(method, m_huge_method_max) !=
+                 [&baseline_profile, &inserted, flags,
+                  huge_method_max](DexMethod* method, IRCode&) {
+                   if (uncompilable_reason(method, huge_method_max) !=
                        UncompilableReason::kNone) {
                      return;
                    }
@@ -949,7 +945,7 @@ void ArtProfileWriterPass::run_pass(DexStoresVector& stores,
   UnorderedMap<std::string, MethodWriteStats> method_write_stats;
   UnorderedMap<std::string, ClassWriteStats> class_write_stats;
 
-  WriteMethodsConfig write_config{.huge_method_max = m_huge_method_max,
+  WriteMethodsConfig write_config{.huge_method_max = huge_method_max,
                                   .root_types = &root_types,
                                   .never_compiled = &never_compiled};
   for (const auto& entry : UnorderedIterable(baseline_profiles)) {

@@ -10,9 +10,11 @@
 #include <sstream>
 
 #include "BaselineProfile.h"
+#include "ConfigFiles.h"
 #include "ControlFlow.h"
 #include "Creators.h"
 #include "DexAnnotation.h"
+#include "GlobalConfig.h"
 #include "IRAssembler.h"
 #include "RedexTest.h"
 #include "Show.h"
@@ -129,22 +131,26 @@ class BaselineProfileTest : public RedexTest {
 
 TEST_F(BaselineProfileTest, plain_method_is_compilable) {
   auto* m = create_method("plain", ACC_PUBLIC, /* code_units */ 4);
-  EXPECT_EQ(bp::uncompilable_reason(m), bp::UncompilableReason::kNone);
+  EXPECT_EQ(bp::uncompilable_reason(m, bp::DEFAULT_ART_HUGE_METHOD_MAX),
+            bp::UncompilableReason::kNone);
 }
 
 TEST_F(BaselineProfileTest, abstract_method_has_no_code) {
   auto* m = create_method("abs", ACC_PUBLIC | ACC_ABSTRACT, /* none */ 0);
-  EXPECT_EQ(bp::uncompilable_reason(m), bp::UncompilableReason::kNoCode);
+  EXPECT_EQ(bp::uncompilable_reason(m, bp::DEFAULT_ART_HUGE_METHOD_MAX),
+            bp::UncompilableReason::kNoCode);
 }
 
 TEST_F(BaselineProfileTest, native_method_has_no_code) {
   auto* m = create_method("nat", ACC_PUBLIC | ACC_NATIVE, /* none */ 0);
-  EXPECT_EQ(bp::uncompilable_reason(m), bp::UncompilableReason::kNoCode);
+  EXPECT_EQ(bp::uncompilable_reason(m, bp::DEFAULT_ART_HUGE_METHOD_MAX),
+            bp::UncompilableReason::kNoCode);
 }
 
 TEST_F(BaselineProfileTest, static_constructor_is_clinit) {
   auto* m = create_method("<clinit>", ACC_STATIC | ACC_CONSTRUCTOR, 4);
-  EXPECT_EQ(bp::uncompilable_reason(m), bp::UncompilableReason::kClinit);
+  EXPECT_EQ(bp::uncompilable_reason(m, bp::DEFAULT_ART_HUGE_METHOD_MAX),
+            bp::UncompilableReason::kClinit);
 }
 
 // dex2oat's gate is ACC_CONSTRUCTOR *and* ACC_STATIC. An instance constructor
@@ -153,12 +159,14 @@ TEST_F(BaselineProfileTest, static_constructor_is_clinit) {
 // ACC_CONSTRUCTOR would silently throw them away.
 TEST_F(BaselineProfileTest, instance_constructor_is_compilable) {
   auto* m = create_method("<init>", ACC_PUBLIC | ACC_CONSTRUCTOR, 4);
-  EXPECT_EQ(bp::uncompilable_reason(m), bp::UncompilableReason::kNone);
+  EXPECT_EQ(bp::uncompilable_reason(m, bp::DEFAULT_ART_HUGE_METHOD_MAX),
+            bp::UncompilableReason::kNone);
 }
 
 TEST_F(BaselineProfileTest, never_compile_annotation_is_honored) {
   auto* m = create_method("nc", ACC_PUBLIC, 4, /* never_compile */ true);
-  EXPECT_EQ(bp::uncompilable_reason(m), bp::UncompilableReason::kNeverCompile);
+  EXPECT_EQ(bp::uncompilable_reason(m, bp::DEFAULT_ART_HUGE_METHOD_MAX),
+            bp::UncompilableReason::kNeverCompile);
 }
 
 // ART's IsHugeMethod is a strict `>`, so a method sitting exactly on the
@@ -179,13 +187,30 @@ TEST_F(BaselineProfileTest, huge_method_gate_is_strictly_greater_than) {
 // Pins the constant the gate defaults to. ART's kDefaultHugeMethodThreshold is
 // 10000; Redex's unrelated assessments::HUGE_METHOD_THRESHOLD is 9000, and
 // reaching for that one instead would strip methods dex2oat compiles fine.
+TEST_F(BaselineProfileTest, global_huge_method_max) {
+  ConfigFiles unparsed(Json::nullValue);
+  EXPECT_EQ(bp::get_huge_method_max(unparsed), bp::DEFAULT_ART_HUGE_METHOD_MAX);
+
+  ConfigFiles defaults(Json::nullValue);
+  defaults.parse_global_config();
+  EXPECT_EQ(bp::get_huge_method_max(defaults), bp::DEFAULT_ART_HUGE_METHOD_MAX);
+
+  Json::Value json;
+  json["dex2oat"]["huge_method_max"] = 123;
+  ConfigFiles overridden(json);
+  overridden.parse_global_config();
+  EXPECT_EQ(bp::get_huge_method_max(overridden), 123);
+}
+
 TEST_F(BaselineProfileTest, default_huge_method_max_matches_art) {
   EXPECT_EQ(bp::DEFAULT_ART_HUGE_METHOD_MAX, 10000u);
 
   auto* under = create_method("under", ACC_PUBLIC, 10000);
   auto* over = create_method("over", ACC_PUBLIC, 10001);
-  EXPECT_EQ(bp::uncompilable_reason(under), bp::UncompilableReason::kNone);
-  EXPECT_EQ(bp::uncompilable_reason(over), bp::UncompilableReason::kHugeMethod);
+  EXPECT_EQ(bp::uncompilable_reason(under, bp::DEFAULT_ART_HUGE_METHOD_MAX),
+            bp::UncompilableReason::kNone);
+  EXPECT_EQ(bp::uncompilable_reason(over, bp::DEFAULT_ART_HUGE_METHOD_MAX),
+            bp::UncompilableReason::kHugeMethod);
 }
 
 // ---------------------------------------------------------------------------
@@ -233,8 +258,8 @@ TEST_F(BaselineProfileTest, topoff_picks_the_smallest_methods) {
   create_methods_in_one_class({"a", "b", "y", "z"}, {30, 20, 10, 1});
 
   bp::BaselineProfile profile;
-  auto selection =
-      bp::select_smallest_topoff_methods(scope(), profile, /* count */ 2);
+  auto selection = bp::select_smallest_topoff_methods(
+      scope(), profile, /* count */ 2, bp::DEFAULT_ART_HUGE_METHOD_MAX);
 
   EXPECT_EQ(selection.candidates, 4u);
   EXPECT_EQ(names_of(selection.methods),
@@ -251,8 +276,8 @@ TEST_F(BaselineProfileTest, topoff_skips_methods_already_in_the_profile) {
   hot.hot = true;
   profile.methods.emplace(tiny, hot);
 
-  auto selection =
-      bp::select_smallest_topoff_methods(scope(), profile, /* count */ 2);
+  auto selection = bp::select_smallest_topoff_methods(
+      scope(), profile, /* count */ 2, bp::DEFAULT_ART_HUGE_METHOD_MAX);
 
   EXPECT_EQ(selection.candidates, 2u);
   EXPECT_EQ(names_of(selection.methods), names_of({small, medium}));
@@ -268,8 +293,9 @@ TEST_F(BaselineProfileTest, topoff_only_draws_from_the_candidate_scope) {
 
   Scope candidate_scope{type_class(in_scope->get_class())};
   bp::BaselineProfile profile;
-  auto selection = bp::select_smallest_topoff_methods(candidate_scope, profile,
-                                                      /* count */ 10);
+  auto selection = bp::select_smallest_topoff_methods(
+      candidate_scope, profile,
+      /* count */ 10, bp::DEFAULT_ART_HUGE_METHOD_MAX);
 
   EXPECT_EQ(selection.candidates, 1u);
   EXPECT_EQ(names_of(selection.methods), names_of({in_scope}));
@@ -299,8 +325,8 @@ TEST_F(BaselineProfileTest, topoff_stops_at_the_pool_size) {
   auto* b = create_method("b", ACC_PUBLIC, 2);
 
   bp::BaselineProfile profile;
-  auto selection =
-      bp::select_smallest_topoff_methods(scope(), profile, /* count */ 50);
+  auto selection = bp::select_smallest_topoff_methods(
+      scope(), profile, /* count */ 50, bp::DEFAULT_ART_HUGE_METHOD_MAX);
 
   EXPECT_EQ(selection.candidates, 2u);
   EXPECT_EQ(names_of(selection.methods), names_of({a, b}));
@@ -310,8 +336,8 @@ TEST_F(BaselineProfileTest, topoff_of_zero_selects_nothing) {
   create_method("a", ACC_PUBLIC, 1);
 
   bp::BaselineProfile profile;
-  auto selection =
-      bp::select_smallest_topoff_methods(scope(), profile, /* count */ 0);
+  auto selection = bp::select_smallest_topoff_methods(
+      scope(), profile, /* count */ 0, bp::DEFAULT_ART_HUGE_METHOD_MAX);
 
   EXPECT_EQ(selection.candidates, 0u);
   EXPECT_TRUE(selection.methods.empty());
@@ -327,8 +353,8 @@ TEST_F(BaselineProfileTest, topoff_breaks_size_ties_by_deobfuscated_name) {
   create_methods_in_one_class({"d", "b", "a", "c"}, {3, 3, 3, 3});
 
   bp::BaselineProfile profile;
-  auto selection =
-      bp::select_smallest_topoff_methods(scope(), profile, /* count */ 2);
+  auto selection = bp::select_smallest_topoff_methods(
+      scope(), profile, /* count */ 2, bp::DEFAULT_ART_HUGE_METHOD_MAX);
 
   ASSERT_EQ(selection.methods.size(), 2u);
   EXPECT_EQ(names_of(selection.methods),
@@ -345,8 +371,8 @@ TEST_F(BaselineProfileTest, topoff_prefers_void_returns_over_value_returns) {
   auto* returns_void = create_method("returns_void", ACC_PUBLIC, 1);
 
   bp::BaselineProfile profile;
-  auto selection =
-      bp::select_smallest_topoff_methods(scope(), profile, /* count */ 1);
+  auto selection = bp::select_smallest_topoff_methods(
+      scope(), profile, /* count */ 1, bp::DEFAULT_ART_HUGE_METHOD_MAX);
 
   EXPECT_EQ(selection.candidates, 2u);
   EXPECT_EQ(selection.candidates_returning_void, 1u);
@@ -364,8 +390,8 @@ TEST_F(BaselineProfileTest, topoff_prefers_the_narrower_frame) {
   narrow->get_code()->cfg().set_registers_size(1);
 
   bp::BaselineProfile profile;
-  auto selection =
-      bp::select_smallest_topoff_methods(scope(), profile, /* count */ 1);
+  auto selection = bp::select_smallest_topoff_methods(
+      scope(), profile, /* count */ 1, bp::DEFAULT_ART_HUGE_METHOD_MAX);
 
   EXPECT_EQ(names_of(selection.methods), names_of({narrow}));
 }
@@ -407,15 +433,17 @@ TEST_F(BaselineProfileTest, topoff_selection_is_stable_across_runs) {
 
   bp::BaselineProfile profile;
   auto first =
-      names_of(bp::select_smallest_topoff_methods(scope(), profile, 5).methods);
+      names_of(bp::select_smallest_topoff_methods(
+                   scope(), profile, 5, bp::DEFAULT_ART_HUGE_METHOD_MAX)
+                   .methods);
   ASSERT_EQ(first.size(), 5u);
   EXPECT_NE(std::find(first.begin(), first.end(), "LMulti;.zz_smallest:()V"),
             first.end());
   for (int i = 0; i < 5; ++i) {
-    EXPECT_EQ(
-        names_of(
-            bp::select_smallest_topoff_methods(scope(), profile, 5).methods),
-        first);
+    EXPECT_EQ(names_of(bp::select_smallest_topoff_methods(
+                           scope(), profile, 5, bp::DEFAULT_ART_HUGE_METHOD_MAX)
+                           .methods),
+              first);
   }
 }
 

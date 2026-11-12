@@ -459,3 +459,64 @@ INSTANTIATE_TEST_SUITE_P(
         ArtProfileWriterNeverInlineCodeUnitCountTest::ParamType>& info) {
       return info.param.name;
     });
+
+class ArtProfileWriterHugeMethodTest : public RedexTest {
+ public:
+  // Runs the pass on a hot method of 11 code units and returns how many
+  // profiled methods it counted as too large to compile, or -1.
+  int64_t uncompilable_huge(std::optional<uint32_t> huge_method_max) {
+    std::string body = "(";
+    for (int i = 0; i < 10; ++i) {
+      body += "(nop)";
+    }
+    body += "(return-void))";
+    ClassCreator cc(DexType::make_type("LHuge;"));
+    cc.set_super(type::java_lang_Object());
+    auto* m = assembler::method_from_string(
+        "(method (public static) \"LHuge;.m:()V\" " + body + ")");
+    cc.add_method(m);
+    DexStore store("classes");
+    store.add_classes({cc.create()});
+    std::vector<DexStore> stores;
+    stores.emplace_back(std::move(store));
+
+    Json::Value json_conf;
+    json_conf["baseline_profile"]["default"]
+             ["use_final_redex_generated_profile"] = true;
+    if (huge_method_max) {
+      json_conf["dex2oat"]["huge_method_max"] = *huge_method_max;
+    }
+    ConfigFiles conf(json_conf);
+    conf.parse_global_config();
+    UnorderedMap<const DexMethodRef*, method_profiles::Stats> hot;
+    hot[m] = method_profiles::Stats{};
+    conf.get_method_profiles() =
+        method_profiles::MethodProfiles::initialize("manual_hot", hot);
+    auto tmp_dir = redex::make_tmp_dir("apw_huge_%%%%%%%%");
+    conf.set_outdir(tmp_dir.path);
+
+    ArtProfileWriterPass pass;
+    PassManager manager({&pass}, conf, RedexOptions{});
+    manager.run_passes(stores, conf);
+    for (const auto& info : manager.get_pass_info()) {
+      if (info.pass == &pass) {
+        auto it = info.metrics.find("profile_default_uncompilable_huge");
+        return it == info.metrics.end() ? -1 : it->second;
+      }
+    }
+    ADD_FAILURE() << "ArtProfileWriterPass did not run";
+    return -1;
+  }
+};
+
+TEST_F(ArtProfileWriterHugeMethodTest, defaultLimit) {
+  EXPECT_EQ(uncompilable_huge(std::nullopt), 0);
+}
+
+TEST_F(ArtProfileWriterHugeMethodTest, globalLimitAtTheMethodSize) {
+  EXPECT_EQ(uncompilable_huge(11), 0);
+}
+
+TEST_F(ArtProfileWriterHugeMethodTest, globalLimitBelowTheMethodSize) {
+  EXPECT_EQ(uncompilable_huge(10), 1);
+}

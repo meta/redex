@@ -256,6 +256,28 @@ struct JarLoaderConfig : public Configurable {
   bool legacy_mode{true};
 };
 
+namespace baseline_profiles {
+
+// ART's default huge_method_threshold_ (art/compiler/driver/compiler_options.h,
+// kDefaultHugeMethodThreshold). dex2oat refuses a method STRICTLY larger than
+// this. Overridable on the dex2oat command line with --huge-method-max, which
+// no Android build of ours passes, so the default is what runs.
+constexpr uint32_t DEFAULT_ART_HUGE_METHOD_MAX = 10000;
+
+} // namespace baseline_profiles
+
+struct Dex2oatConfig : public Configurable {
+  void bind_config() override;
+
+  std::string get_config_name() override { return "Dex2oatConfig"; }
+  std::string get_config_doc() override {
+    return "The settings of dex2oat, ART's ahead-of-time compiler, that Redex "
+           "takes into account.";
+  }
+
+  uint32_t huge_method_max{baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX};
+};
+
 class GlobalConfig;
 
 using BindOperationFn = std::function<std::unique_ptr<Configurable>(

@@ -1113,6 +1113,22 @@ TEST_F(BranchPrefixHoistingTest, hoisting_marks_only_the_copy_it_creates) {
 
   EXPECT_EQ(join_stats.marked_unreliable, 1u);
   EXPECT_EQ(count_unreliable_positions(cfg), 1u);
+
+  // The copy remains primary; its candidate set names the one alternate arm.
+  DexPosition* marked = nullptr;
+  for (auto* block : cfg.blocks()) {
+    for (auto& mie : *block) {
+      if (mie.type == MFLOW_POSITION && mie.pos->is_unreliable()) {
+        marked = mie.pos.get();
+      }
+    }
+  }
+  ASSERT_NE(marked, nullptr);
+  ASSERT_NE(marked->alt_id(), 0u);
+  EXPECT_EQ(g_redex->get_position_pattern_switch_manager()
+                ->get_alt_set(marked->alt_id())
+                .total_candidates(),
+            1u);
 }
 
 // Both arms report the same line, so the hoisted copy names a place that was
@@ -1251,6 +1267,59 @@ TEST_F(BranchPrefixHoistingTest,
   EXPECT_EQ(result.join_stats.not_recorded, 0u);
 }
 
+// Both arms run inlined code at Y.java:20 under the same callsite object,
+// which an earlier fold already marked with a recorded candidate set. The
+// hoisted copy names exactly what both arms named, so it must not be marked --
+// least of all as "merged, sites not recorded", which is absorbing.
+TEST_F(BranchPrefixHoistingTest,
+       hoisting_under_a_shared_merged_callsite_records_nothing) {
+  auto* method = make_position_test_method("LHoistPosSharedMergedParent;", R"(
+    (
+      (load-param v0)
+      (.pos:dbg_0 "LX;.test:(I)V" "X.java" 5)
+      (.pos:dbg_1 "LY;.callee:()V" "Y.java" 20 dbg_0)
+      (if-eqz v0 :true)
+
+      (.pos:dbg_2 "LY;.callee:()V" "Y.java" 20 dbg_0)
+      (sget "LX;.f:I")
+      (move-result-pseudo v1)
+      (return-void)
+
+      (:true)
+      (sget "LX;.f:I")
+      (move-result-pseudo v1)
+      (return-void)
+    )
+  )");
+  auto* code = method->get_code();
+  code->build_cfg();
+  DexPosition* callsite = nullptr;
+  for (auto* block : code->cfg().blocks()) {
+    for (auto& mie : *block) {
+      if (mie.type == MFLOW_POSITION && mie.pos->line == 5 &&
+          callsite == nullptr) {
+        callsite = mie.pos.get();
+      }
+    }
+  }
+  ASSERT_NE(callsite, nullptr);
+  auto other_callsite =
+      std::make_unique<DexPosition>(DexString::make_string("LX;.test:(I)V"),
+                                    DexString::make_string("X.java"), 7);
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  manager->record_candidates(callsite, {other_callsite.get()});
+  ASSERT_NE(callsite->alt_id(), 0u);
+  code->clear_cfg();
+
+  auto result = process_and_find_hoisted_sget(method);
+  EXPECT_EQ(result.count, 1u);
+  ASSERT_NE(result.position, nullptr);
+  EXPECT_EQ(result.position->line, 20u);
+  EXPECT_EQ(result.position->parent, callsite);
+  EXPECT_FALSE(result.position->is_unreliable());
+  EXPECT_EQ(result.join_stats.marked_unreliable, 0u);
+}
+
 // No position governs either arm, so the hoisted `sget` is exactly as
 // position-less as both originals were: nothing disagreed, nothing is cloned,
 // and there is no gap to count.
@@ -1301,4 +1370,41 @@ TEST_F(BranchPrefixHoistingTest,
     }
   }
   EXPECT_EQ(positions, 0u);
+}
+
+// A class without a SourceFile attribute binds its positions with no file
+// (`DexDebugItem::bind_positions`). Hoisting out of such a method must not
+// hand a fileless position to the candidate-set registry, which requires a
+// file on every member.
+TEST_F(BranchPrefixHoistingTest, hoisting_in_a_fileless_method_does_not_crash) {
+  auto* method = make_position_test_method("LHoistPosFileless;", R"(
+    (
+      (load-param v0)
+      (.pos "LX;.test:(I)V" "X.java" 30)
+      (if-eqz v0 :true)
+
+      (sget "LX;.f:I")
+      (move-result-pseudo v1)
+      (return-void)
+
+      (:true)
+      (.pos "LX;.test:(I)V" "X.java" 40)
+      (sget "LX;.f:I")
+      (move-result-pseudo v1)
+      (return-void)
+    )
+  )");
+  for (auto& mie : *method->get_code()) {
+    if (mie.type == MFLOW_POSITION) {
+      mie.pos->file = nullptr;
+    }
+  }
+
+  HoistedSgetResult result;
+  ASSERT_NO_THROW(result = process_and_find_hoisted_sget(method));
+  EXPECT_EQ(result.count, 1u);
+  ASSERT_NE(result.position, nullptr);
+  EXPECT_EQ(result.position->line, 40u);
+  EXPECT_TRUE(result.position->is_unreliable());
+  EXPECT_EQ(result.position->alt_id(), 0u);
 }

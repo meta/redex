@@ -545,7 +545,9 @@ size_t hoist_insns_for_block(
                             hoisted_position.get(), succ_position);
                       });
       if (disagrees) {
-        account(positions::mark_merged(hoisted_position.get()));
+        account(
+            g_redex->get_position_pattern_switch_manager()->record_candidates(
+                hoisted_position.get(), succ_positions));
       }
       cfg.insert_before(insert_it, std::move(hoisted_position));
     }

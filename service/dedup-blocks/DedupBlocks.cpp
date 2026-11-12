@@ -602,6 +602,40 @@ class DedupBlocksImpl {
     return cnt;
   }
 
+  // Insertion-ordered. Blocks arrive here in block-id order, so retaining that
+  // order makes candidate registration and debugging reproducible even though
+  // the manager canonicalizes each set and emits records by content.
+  // The order and the map have to agree -- the order names the survivors and
+  // the map holds their candidates -- so the two are reachable only through
+  // operations that maintain both.
+  class CandidatesBySurvivor {
+   public:
+    std::vector<DexPosition*>& operator[](DexPosition* survivor) {
+      auto [it, inserted] =
+          m_by_survivor.emplace(survivor, std::vector<DexPosition*>());
+      if (inserted) {
+        m_order.push_back(survivor);
+      }
+      return it->second;
+    }
+
+    template <typename Fn>
+    void for_each(Fn fn) const {
+      for (auto* survivor : m_order) {
+        fn(survivor, m_by_survivor.at(survivor));
+      }
+    }
+
+    void clear() {
+      m_order.clear();
+      m_by_survivor.clear();
+    }
+
+   private:
+    std::vector<DexPosition*> m_order;
+    UnorderedMap<DexPosition*, std::vector<DexPosition*>> m_by_survivor;
+  };
+
   // The positions governing the instructions that can throw, in order. Those
   // are the only positions a stack trace can land on, so a merge anywhere else
   // cannot misattribute a crash and recording it would be noise.
@@ -636,60 +670,35 @@ class DedupBlocksImpl {
     return result;
   }
 
-  // The surviving positions one round of folding found disagreeing with code
-  // folded into them, in the order first found. They are marked together once
-  // every fold of the round has been compared: a surviving position can be the
-  // inlined caller of another, and `same_source_claim` treats an unreliable
-  // caller as disagreeing, so marking fold by fold would let one fold's mark
-  // flip another fold's comparison of exact lines.
-  class PendingMarks {
-   public:
-    void add(DexPosition* survivor) {
-      if (m_seen.insert(survivor).second) {
-        m_order.push_back(survivor);
-      }
-    }
-
-    const std::vector<DexPosition*>& survivors() const { return m_order; }
-
-   private:
-    std::vector<DexPosition*> m_order;
-    UnorderedSet<DexPosition*> m_seen;
-  };
-
-  // Folds `victim` into `survivor`, counting the merge that could not be
-  // recorded when there is no surviving position to record on.
-  // `throwing_positions` yields a null entry when there is no usable survivor,
-  // and this is where that absence is discovered, so this is where it is
-  // counted -- `mark_merged` requires a survivor precisely so the gap cannot
-  // be silently dropped.
-  void join_or_count_gap(DexPosition* survivor,
-                         const DexPosition* victim,
-                         PendingMarks* pending) {
-    if (survivor == nullptr) {
-      m_stats.join_stats.count_unrecorded();
-      return;
-    }
-    if (!positions::same_source_claim(survivor, victim)) {
-      pending->add(survivor);
-    }
-  }
-
-  void mark_pending(const PendingMarks& pending) {
-    for (auto* survivor : pending.survivors()) {
-      m_stats.join_stats.account(positions::mark_merged(survivor));
-    }
-  }
-
   // Records, on canon's positions, that `dup`'s code is being folded into it.
   // Call this where the merge is actually committed, not once per candidate
   // group: a group that is examined and then left alone must not come out of it
   // marked.
   void record_merged_positions(cfg::Block* canon,
                                cfg::Block* dup,
-                               PendingMarks* pending) {
+                               CandidatesBySurvivor* candidates) {
     auto canon_positions = throwing_positions(canon);
     auto dup_positions = throwing_positions(dup);
+
+    // Every fold of the round is compared before anything is recorded, and
+    // `flush_candidates` records them together: a surviving position can be
+    // the inlined caller of another, and `same_source_claim` treats an
+    // unreliable caller as disagreeing, so recording fold by fold would let one
+    // record flip another fold's comparison of exact lines. A null candidate is
+    // a site nobody can name, which leaves the survivor merged with sites
+    // nobody captured.
+    auto remember = [this, candidates](DexPosition* survivor,
+                                       DexPosition* candidate) {
+      if (survivor == nullptr) {
+        m_stats.join_stats.count_unrecorded();
+        return;
+      }
+      if (candidate != nullptr &&
+          positions::same_source_claim(survivor, candidate)) {
+        return;
+      }
+      (*candidates)[survivor].push_back(candidate);
+    };
 
     bool has_correspondence = canon_positions.size() == dup_positions.size();
     if (has_correspondence) {
@@ -708,7 +717,7 @@ class DedupBlocksImpl {
       auto dup_it = dup_positions.begin();
       for (; canon_it != canon_positions.end() && dup_it != dup_positions.end();
            ++canon_it, ++dup_it) {
-        join_or_count_gap(canon_it->position, dup_it->position, pending);
+        remember(canon_it->position, dup_it->position);
       }
       return;
     }
@@ -723,7 +732,9 @@ class DedupBlocksImpl {
     // than inventing a specific pairing.
     ++m_stats.positions_merged_without_correspondence;
     for (const auto& throwing_position : canon_positions) {
-      join_or_count_gap(throwing_position.position, nullptr, pending);
+      remember(throwing_position.position, nullptr);
+      // Deliberately no candidates: there is no correspondence, so naming any
+      // particular site would be a guess dressed up as a record.
     }
   }
 
@@ -738,7 +749,25 @@ class DedupBlocksImpl {
     }
 
     size_t cnt{0}; // Removed blocks.
-    PendingMarks pending;
+    CandidatesBySurvivor candidates;
+    // Candidates are positions owned by the blocks being folded away, so they
+    // have to be recorded -- which deep-copies them -- before anything destroys
+    // those blocks. Doing it after `replace_blocks` reads freed memory.
+    auto flush_candidates = [this, &candidates]() {
+      std::vector<std::pair<DexPosition*, std::vector<const DexPosition*>>>
+          records;
+      candidates.for_each([&records](DexPosition* survivor,
+                                     const std::vector<DexPosition*>& sites) {
+        records.emplace_back(survivor, std::vector<const DexPosition*>(
+                                           sites.begin(), sites.end()));
+      });
+      auto changes = g_redex->get_position_pattern_switch_manager()
+                         ->record_candidates_jointly(records);
+      for (auto change : changes) {
+        m_stats.join_stats.account(change);
+      }
+      candidates.clear();
+    };
 
     if (is_instrument_mode()) {
       for (const BlockSet& group : order) {
@@ -771,19 +800,19 @@ class DedupBlocksImpl {
           };
           redex_assert(exc_check_fn());
 
-          // Don't remove directly. Just remove everything but dex positions.
-          // Then remove all outgoing edges and make a goto
-          // to the replacement.
-          //
-          // This will not deal correctly with exceptions.
           // Ahead of `remove_instructions`, which strips this block's opcodes.
           // The pairing is derived from the throwing instructions on both
           // sides, so a stripped block reports none: every merge whose survivor
           // throws would take the no-correspondence path and mark that survivor
           // against nothing at all, rather than against the position it
           // actually folded.
-          record_merged_positions(canon, block, &pending);
+          record_merged_positions(canon, block, &candidates);
 
+          // Don't remove directly. Just remove everything but dex positions.
+          // Then remove all outgoing edges and make a goto
+          // to the replacement.
+          //
+          // This will not deal correctly with exceptions.
           cfg.delete_edges(block->succs().begin(), block->succs().end());
 
           // Undercounts branch instructions.
@@ -795,7 +824,7 @@ class DedupBlocksImpl {
           ++cnt;
         }
       }
-      mark_pending(pending);
+      flush_candidates();
       cfg.simplify();
     } else {
       // Replace duplicated blocks with the "canon" (block with lowest ID).
@@ -817,7 +846,7 @@ class DedupBlocksImpl {
           }
           always_assert(canon->id() < block->id());
 
-          record_merged_positions(canon, block, &pending);
+          record_merged_positions(canon, block, &candidates);
           blocks_to_replace.emplace_back(block, canon);
           ++cnt;
 
@@ -849,7 +878,14 @@ class DedupBlocksImpl {
         }
       }
 
-      mark_pending(pending);
+      // Merging blocks whose calls sit at different source lines is
+      // deliberate: keeping them apart costs code size. When a stack trace's
+      // top frame is in the callee, the merge leaves that frame unchanged and
+      // only the caller's line becomes ambiguous. `record_candidates` records
+      // the folded-away lines as candidates of the surviving line when it can
+      // name every one; otherwise the surviving line is marked merged without
+      // candidates, or the fold is counted when no line survives.
+      flush_candidates();
 
       // Note that replace_blocks also fixes any arising dangling parents.
       m_stats.insns_removed +=

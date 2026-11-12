@@ -15,6 +15,7 @@
 #include "IRAssembler.h"
 #include "IRCode.h"
 #include "IROpcode.h"
+#include "RedexContext.h"
 #include "RedexTest.h"
 #include "Show.h"
 #include "SourceBlocks.h"
@@ -2802,6 +2803,12 @@ TEST_F(DedupBlocksTest, mergedBlocksMarkTheSurvivingPositionUnreliable) {
   auto* pos = position_at_first_throwing_insn(method->get_code());
   ASSERT_NE(pos, nullptr);
   EXPECT_TRUE(pos->is_unreliable());
+  // The survivor remains primary; its candidate set names the one alternate.
+  ASSERT_NE(pos->alt_id(), 0u);
+  EXPECT_EQ(g_redex->get_position_pattern_switch_manager()
+                ->get_alt_set(pos->alt_id())
+                .total_candidates(),
+            1u);
 }
 
 // The same shape, but both arms report the same line. Folding them costs no
@@ -2863,6 +2870,70 @@ TEST_F(DedupBlocksTest, mergedBlocksMarkUnreliableAcrossAThreeWayGroup) {
   auto* pos = position_at_first_throwing_insn(method->get_code());
   ASSERT_NE(pos, nullptr);
   EXPECT_TRUE(pos->is_unreliable());
+  // The two alternates are collected across the group rather than retaining
+  // only the last one folded in.
+  ASSERT_NE(pos->alt_id(), 0u);
+  EXPECT_EQ(g_redex->get_position_pattern_switch_manager()
+                ->get_alt_set(pos->alt_id())
+                .total_candidates(),
+            2u);
+}
+
+// One duplicate pairs the survivor with a named line, a later one with no
+// usable position at all. The survivor ends up ambiguous with its sites
+// uncaptured, and the metric counts it as newly unreliable once, not once per
+// duplicate.
+TEST_F(DedupBlocksTest, mergedBlocksCountASurvivorOnce) {
+  DexMethod* method = get_fresh_method("mergedBlocksCountOnce");
+
+  const auto* str = R"(
+    (
+      (const v0 0)
+      (if-eqz v0 :second)
+      (if-eqz v0 :third)
+      (.pos "LTestClass;.m:()V" "Test.java" 20)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+      (:second)
+      (.pos "LTestClass;.m:()V" "Test.java" 30)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+      (:third)
+      (.pos "LTestClass;.m:()V" "Test.java" 40)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+    )
+  )";
+  method->set_code(assembler::ircode_from_string(str));
+  auto* code = method->get_code();
+  code->build_cfg();
+  // A fileless position names no site, which is how the third arm comes to
+  // offer no usable position.
+  for (auto* block : code->cfg().blocks()) {
+    for (auto& mie : *block) {
+      if (mie.type == MFLOW_POSITION && mie.pos->line == 40) {
+        mie.pos->file = nullptr;
+      }
+    }
+  }
+  dedup_blocks_impl::Config config;
+  dedup_blocks_impl::DedupBlocks impl(&config, method);
+  impl.run();
+  const auto& join_stats = impl.get_stats().join_stats;
+  EXPECT_EQ(join_stats.marked_unreliable, 1u);
+
+  DexPosition* survivor = nullptr;
+  for (auto* block : code->cfg().blocks()) {
+    for (auto& mie : *block) {
+      if (mie.type == MFLOW_POSITION && mie.pos->line == 20) {
+        survivor = mie.pos.get();
+      }
+    }
+  }
+  ASSERT_NE(survivor, nullptr);
+  EXPECT_TRUE(survivor->is_unreliable());
+  EXPECT_EQ(survivor->alt_id(), 0u);
+  code->clear_cfg();
 }
 
 // Neither arm opens with a position. The effective position is outside the
@@ -2942,4 +3013,122 @@ TEST_F(DedupBlocksTest, mergedBlocksKeepInlinedLineExactWhenItsCallerIsMarked) {
   ASSERT_EQ(inlined[0]->parent, caller);
   EXPECT_TRUE(caller->is_unreliable());
   EXPECT_FALSE(inlined[0]->is_unreliable());
+}
+
+// The arms of the previous test, except that the folded arm's own line names no
+// site (its position has no file). Line 20 then stands for a site nobody can
+// name, and the inlined line, whose caller and callee lines are the same in
+// both arms, still names one place.
+TEST_F(DedupBlocksTest,
+       mergedBlocksKeepInlinedLineExactWhenItsCallerIsUncaptured) {
+  DexMethod* method = get_fresh_method("mergedBlocksUncapturedCaller");
+
+  const auto* str = R"(
+    (
+      (const v0 0)
+      (if-eqz v0 :left)
+      (.pos:dbg_0 "LTestClass;.m:()V" "Test.java" 20)
+      (invoke-static () "LTestClass;.helper:()V")
+      (.pos:dbg_1 "LTestClass;.callee:()V" "Callee.java" 5 dbg_0)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+      (:left)
+      (.pos "LTestClass;.m:()V" "Test.java" 21)
+      (invoke-static () "LTestClass;.helper:()V")
+      (.pos:dbg_2 "LTestClass;.m:()V" "Test.java" 20)
+      (.pos:dbg_3 "LTestClass;.callee:()V" "Callee.java" 5 dbg_2)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+    )
+  )";
+  method->set_code(assembler::ircode_from_string(str));
+  auto* code = method->get_code();
+  code->build_cfg();
+  for (auto* block : code->cfg().blocks()) {
+    for (auto& mie : *block) {
+      if (mie.type == MFLOW_POSITION && mie.pos->line == 21) {
+        mie.pos->file = nullptr;
+      }
+    }
+  }
+  dedup_blocks_impl::Config config;
+  dedup_blocks_impl::DedupBlocks impl(&config, method);
+  impl.run();
+  EXPECT_EQ(impl.get_stats().join_stats.marked_unreliable, 1u);
+
+  DexPosition* caller = nullptr;
+  DexPosition* inlined = nullptr;
+  for (auto* block : code->cfg().blocks()) {
+    for (auto& mie : *block) {
+      if (mie.type != MFLOW_POSITION) {
+        continue;
+      }
+      if (mie.pos->line == 5) {
+        ASSERT_EQ(inlined, nullptr);
+        inlined = mie.pos.get();
+      } else if (mie.pos->line == 20 && caller == nullptr) {
+        caller = mie.pos.get();
+      }
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  ASSERT_NE(inlined, nullptr);
+  ASSERT_EQ(inlined->parent, caller);
+  EXPECT_TRUE(caller->is_unreliable());
+  EXPECT_EQ(caller->alt_id(), 0u);
+  EXPECT_FALSE(inlined->is_unreliable());
+  code->clear_cfg();
+}
+
+// Both arms run `callee()`'s line 5 inlined under line 20, and each arm's
+// line 20 already stands for line 25 as well. The inlined lines differ only in
+// which of two equally ambiguous caller objects they hang under, so folding
+// them records nothing new, and nothing is counted as newly unreliable.
+TEST_F(DedupBlocksTest, mergedBlocksCountOnlyRecordsThatChangeALine) {
+  DexMethod* method = get_fresh_method("mergedBlocksEquallyAmbiguousCallers");
+
+  const auto* str = R"(
+    (
+      (const v0 0)
+      (if-eqz v0 :left)
+      (.pos:dbg_0 "LTestClass;.m:()V" "Test.java" 20)
+      (.pos:dbg_1 "LTestClass;.callee:()V" "Callee.java" 5 dbg_0)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+      (:left)
+      (.pos:dbg_2 "LTestClass;.m:()V" "Test.java" 20)
+      (.pos:dbg_3 "LTestClass;.callee:()V" "Callee.java" 5 dbg_2)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+    )
+  )";
+  method->set_code(assembler::ircode_from_string(str));
+  auto* code = method->get_code();
+  code->build_cfg();
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  DexPosition line_25(DexString::make_string("LTestClass;.m:()V"),
+                      DexString::make_string("Test.java"), 25);
+  for (auto* block : code->cfg().blocks()) {
+    for (auto& mie : *block) {
+      if (mie.type == MFLOW_POSITION && mie.pos->line == 20) {
+        manager->record_candidates(mie.pos.get(), {&line_25});
+      }
+    }
+  }
+  dedup_blocks_impl::Config config;
+  dedup_blocks_impl::DedupBlocks impl(&config, method);
+  impl.run();
+  EXPECT_EQ(impl.get_stats().join_stats.marked_unreliable, 0u);
+
+  std::vector<DexPosition*> inlined;
+  for (auto* block : code->cfg().blocks()) {
+    for (auto& mie : *block) {
+      if (mie.type == MFLOW_POSITION && mie.pos->line == 5) {
+        inlined.push_back(mie.pos.get());
+      }
+    }
+  }
+  ASSERT_EQ(inlined.size(), 1u);
+  EXPECT_FALSE(inlined[0]->is_unreliable());
+  code->clear_cfg();
 }

@@ -225,6 +225,7 @@ check_PROGRAMS = \
     unique_method_tracker_test \
     up_code_motion_test \
     used_vars_test \
+    vertical_merging_no_optimizations_test \
     vertical_merging_r_class_test \
     vertical_merging_type_lookup_test \
     virtual_merging_test \
@@ -690,6 +691,8 @@ up_code_motion_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 used_vars_test_SOURCES = object-sensitive-dce/UsedVarsTest.cpp
 used_vars_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
+
+vertical_merging_no_optimizations_test_SOURCES = VerticalMergingNoOptimizationsTest.cpp
 
 vertical_merging_r_class_test_SOURCES = VerticalMergingRClassTest.cpp
 

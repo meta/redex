@@ -548,6 +548,27 @@ void record_r_classes(
 }
 
 /**
+ * Merging moves and rewrites the methods of both classes and every reference to
+ * the class that goes away. A method excluded from optimization must stay
+ * untouched, so neither its class nor any type it mentions in its signature,
+ * code or annotations may take part in a merge.
+ */
+void record_no_optimizations(
+    const Scope& scope,
+    UnorderedMap<const DexType*, DontMergeState>* dont_merge_status) {
+  walk::methods(scope, [&](DexMethod* method) {
+    if (!method->rstate.no_optimizations()) {
+      return;
+    }
+    std::vector<const DexType*> types;
+    method->gather_types(types);
+    for (const auto* type : types) {
+      record_dont_merge_state(type, kStrict, dont_merge_status);
+    }
+  });
+}
+
+/**
  * Remove pair of classes from merging if they both have clinit function.
  */
 void remove_both_have_clinit(ClassMap* mergeable_to_merger) {
@@ -640,6 +661,7 @@ TypeLikeStringStats record_referenced(
   record_method_signature(scope, dont_merge_status);
   record_blocklist(scope, dont_merge_status, blocklist);
   record_r_classes(scope, r_class_reader, dont_merge_status);
+  record_no_optimizations(scope, dont_merge_status);
   return stats;
 }
 

@@ -70,6 +70,23 @@ TEST_F(ReduceArrayLiteralsTest, illegal_aput_on_empty_array) {
   test(code_str, expected_str, 0, 0);
 }
 
+TEST_F(ReduceArrayLiteralsTest, negative_length_array) {
+  // new int[-1] always throws NegativeArraySizeException at runtime; it must
+  // stay in place and must not crash at compile time
+  const auto* code_str = R"(
+    (
+      (const v0 -1)
+      (new-array v0 "[I")
+      (move-result-pseudo-object v1)
+      (const v2 0)
+      (aput v2 v1 v2)
+      (return-object v1)
+    )
+  )";
+  const auto& expected_str = code_str;
+  test(code_str, expected_str, 0, 0);
+}
+
 TEST_F(ReduceArrayLiteralsTest, array_one_element) {
   const auto* code_str = R"(
     (

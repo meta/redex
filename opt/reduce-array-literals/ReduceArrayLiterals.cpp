@@ -224,8 +224,7 @@ class Analyzer final
 
     case OPCODE_NEW_ARRAY: {
       TRACE(RAL, 4, "[RAL]   new array of type %s", SHOW(insn->get_type()));
-      const auto length = get_singleton(current_state->get(insn->src(0)));
-      if (!length || !is_literal(*length)) {
+      if (!get_constructible_array_length(insn, *current_state)) {
         m_escaped_arrays[insn] = EscapedArrayDomain::top();
         default_case(insn, current_state);
       }
@@ -294,14 +293,11 @@ class Analyzer final
     switch (insn->opcode()) {
     case OPCODE_NEW_ARRAY: {
       TRACE(RAL, 4, "[RAL]   new array of type %s", SHOW(insn->get_type()));
-      const auto length = get_singleton(current_state->get(insn->src(0)));
-      if (length && is_literal(*length)) {
-        auto length_literal = get_literal(*length);
-        TRACE(RAL, 4, "[RAL]     with length %" PRId64, length_literal);
-        always_assert(length_literal >= 0 && length_literal <= 2147483647);
+      const auto length = get_constructible_array_length(insn, *current_state);
+      if (length) {
+        TRACE(RAL, 4, "[RAL]     with length %u", *length);
         current_state->set(RESULT_REGISTER,
-                           TrackedDomain(make_array(
-                               static_cast<uint32_t>(length_literal), insn)));
+                           TrackedDomain(make_array(*length, insn)));
       }
       break;
     }
@@ -352,6 +348,26 @@ class Analyzer final
   }
 
  private:
+  // The length of the array that a new-array instruction constructs, if it is
+  // a known literal. A negative length makes new-array throw
+  // NegativeArraySizeException, so no array is constructed and there is no
+  // literal array to track.
+  std::optional<uint32_t> get_constructible_array_length(
+      const IRInstruction* new_array_insn,
+      const TrackedDomainEnvironment& current_state) const {
+    const auto length =
+        get_singleton(current_state.get(new_array_insn->src(0)));
+    if (!length || !is_literal(*length)) {
+      return std::nullopt;
+    }
+    const int64_t literal = get_literal(*length);
+    always_assert(literal <= std::numeric_limits<int32_t>::max());
+    if (literal < 0) {
+      return std::nullopt;
+    }
+    return static_cast<uint32_t>(literal);
+  }
+
   bool is_array_construction_in_progress(
       const std::optional<TrackedValue>& array,
       const std::optional<TrackedValue>& index) const {

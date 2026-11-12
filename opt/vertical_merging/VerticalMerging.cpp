@@ -77,8 +77,12 @@ void record_dont_merge_state(
     const DexType* type,
     DontMergeState state,
     UnorderedMap<const DexType*, DontMergeState>* dont_merge_status) {
-  record_dont_merge_element_state(type::make_element_type_if_array(type), state,
-                                  dont_merge_status);
+  const auto* element_type = type::get_element_type_if_array(type);
+  if (element_type == nullptr) {
+    // No class can be defined for a type that does not exist.
+    return;
+  }
+  record_dont_merge_element_state(element_type, state, dont_merge_status);
 }
 
 struct TypeLikeStringStats {
@@ -383,7 +387,11 @@ size_t record_code_reference(
   ConcurrentMap<const DexType*, DontMergeState> deferred_records;
   auto deferred_record_dont_merge_state =
       [&deferred_records](const DexType* type, DontMergeState state) {
-        type = type::make_element_type_if_array(type);
+        type = type::get_element_type_if_array(type);
+        if (type == nullptr) {
+          // No class can be defined for a type that does not exist.
+          return;
+        }
         deferred_records.update(type, [state](auto*, auto& v, auto exists) {
           if (!exists || state > v) {
             v = state;
@@ -396,7 +404,10 @@ size_t record_code_reference(
        record_type_like_string_refs](DexMethod* /*method*/,
                                      IRInstruction* insn) {
         if (insn->has_type()) {
-          const auto* type = type::make_element_type_if_array(insn->get_type());
+          const auto* type = type::get_element_type_if_array(insn->get_type());
+          if (type == nullptr) {
+            return;
+          }
           if (opcode::is_instance_of(insn->opcode())) {
             // We don't want to merge class if either merger or
             // mergeable was ever accessed in instance_of to prevent
@@ -640,7 +651,7 @@ void update_references(const Scope& scope,
         if (insn->has_type()) {
           const auto* ref_type = insn->get_type();
           DexType* type =
-              const_cast<DexType*>(type::make_element_type_if_array(ref_type));
+              const_cast<DexType*>(type::get_element_type_if_array(ref_type));
           auto find_mergeable = update_map.find(type);
           if (find_mergeable == update_map.end()) {
             return;

@@ -43,6 +43,10 @@
  * Deleting the line info would also make things complicated if `cleanup()` is
  * inlined into `getBar()`. We would be unable to reconstruct the inlined stack
  * frame if we deleted the callsite's line number.
+ *
+ * So the line is kept, and the survivor records that it represents more than
+ * one source site. Consumers can use that fidelity instead of treating the
+ * retained line as uniquely identifying the branch. See `PositionJoin.h`.
  */
 
 #include "DedupBlocks.h"
@@ -58,6 +62,7 @@
 #include "LiveRange.h"
 #include "MethodUtil.h"
 #include "OutlinedMethods.h"
+#include "PositionJoin.h"
 #include "RedexContext.h"
 #include "Resolver.h"
 #include "Show.h"
@@ -597,6 +602,131 @@ class DedupBlocksImpl {
     return cnt;
   }
 
+  // The positions governing the instructions that can throw, in order. Those
+  // are the only positions a stack trace can land on, so a merge anywhere else
+  // cannot misattribute a crash and recording it would be noise.
+  //
+  // Collected per instruction, never per MethodItemEntry: block equality
+  // ignores positions -- MIEHasher hashes only MFLOW_OPCODE and
+  // MFLOW_SOURCE_BLOCK -- so two blocks in a group legally carry different
+  // numbers of position entries in different places.
+  //
+  // A null position means no position precedes the instruction within the
+  // block, or that position has no source file. On the survivor's side the
+  // caller counts a gap; on the folded side it compares against nothing.
+  // Neither reaches back outside the block for a position.
+  struct ThrowingPosition {
+    DexPosition* position;
+    IROpcode opcode;
+  };
+
+  static std::vector<ThrowingPosition> throwing_positions(cfg::Block* block) {
+    std::vector<ThrowingPosition> result;
+    DexPosition* pos{nullptr};
+    for (auto& mie : *block) {
+      if (mie.type == MFLOW_POSITION) {
+        pos = mie.pos.get();
+      } else if (mie.type == MFLOW_OPCODE &&
+                 opcode::can_throw(mie.insn->opcode())) {
+        result.push_back(
+            {pos != nullptr && pos->file != nullptr ? pos : nullptr,
+             mie.insn->opcode()});
+      }
+    }
+    return result;
+  }
+
+  // The surviving positions one round of folding found disagreeing with code
+  // folded into them, in the order first found. They are marked together once
+  // every fold of the round has been compared: a surviving position can be the
+  // inlined caller of another, and `same_source_claim` treats an unreliable
+  // caller as disagreeing, so marking fold by fold would let one fold's mark
+  // flip another fold's comparison of exact lines.
+  class PendingMarks {
+   public:
+    void add(DexPosition* survivor) {
+      if (m_seen.insert(survivor).second) {
+        m_order.push_back(survivor);
+      }
+    }
+
+    const std::vector<DexPosition*>& survivors() const { return m_order; }
+
+   private:
+    std::vector<DexPosition*> m_order;
+    UnorderedSet<DexPosition*> m_seen;
+  };
+
+  // Folds `victim` into `survivor`, counting the merge that could not be
+  // recorded when there is no surviving position to record on.
+  // `throwing_positions` yields a null entry when there is no usable survivor,
+  // and this is where that absence is discovered, so this is where it is
+  // counted -- `mark_merged` requires a survivor precisely so the gap cannot
+  // be silently dropped.
+  void join_or_count_gap(DexPosition* survivor,
+                         const DexPosition* victim,
+                         PendingMarks* pending) {
+    if (survivor == nullptr) {
+      m_stats.join_stats.count_unrecorded();
+      return;
+    }
+    if (!positions::same_source_claim(survivor, victim)) {
+      pending->add(survivor);
+    }
+  }
+
+  void mark_pending(const PendingMarks& pending) {
+    for (auto* survivor : pending.survivors()) {
+      m_stats.join_stats.account(positions::mark_merged(survivor));
+    }
+  }
+
+  // Records, on canon's positions, that `dup`'s code is being folded into it.
+  // Call this where the merge is actually committed, not once per candidate
+  // group: a group that is examined and then left alone must not come out of it
+  // marked.
+  void record_merged_positions(cfg::Block* canon,
+                               cfg::Block* dup,
+                               PendingMarks* pending) {
+    auto canon_positions = throwing_positions(canon);
+    auto dup_positions = throwing_positions(dup);
+
+    bool has_correspondence = canon_positions.size() == dup_positions.size();
+    if (has_correspondence) {
+      auto canon_it = canon_positions.begin();
+      auto dup_it = dup_positions.begin();
+      for (; canon_it != canon_positions.end() && dup_it != dup_positions.end();
+           ++canon_it, ++dup_it) {
+        if (canon_it->opcode != dup_it->opcode) {
+          has_correspondence = false;
+          break;
+        }
+      }
+    }
+    if (has_correspondence) {
+      auto canon_it = canon_positions.begin();
+      auto dup_it = dup_positions.begin();
+      for (; canon_it != canon_positions.end() && dup_it != dup_positions.end();
+           ++canon_it, ++dup_it) {
+        join_or_count_gap(canon_it->position, dup_it->position, pending);
+      }
+      return;
+    }
+
+    // Blocks are grouped by value numbering, not by instruction equality
+    // (`BlockAndBlockValuePairInSameGroup` compares `BlockValue`s), so two
+    // blocks that fold together can compute the same values with different
+    // throwing instruction counts or opcodes. There is then no correspondence
+    // to pair up, and guessing one would mark arbitrary positions. Joining each
+    // survivor against "no position" says only what is actually known -- the
+    // marking covers a site that cannot be lined up -- and over-marks rather
+    // than inventing a specific pairing.
+    ++m_stats.positions_merged_without_correspondence;
+    for (const auto& throwing_position : canon_positions) {
+      join_or_count_gap(throwing_position.position, nullptr, pending);
+    }
+  }
+
   // remove all but one of a duplicate set. Reroute the predecessors to the
   // canonical block
   bool deduplicate(const Duplicates& dups, cfg::ControlFlowGraph& cfg) {
@@ -608,6 +738,7 @@ class DedupBlocksImpl {
     }
 
     size_t cnt{0}; // Removed blocks.
+    PendingMarks pending;
 
     if (is_instrument_mode()) {
       for (const BlockSet& group : order) {
@@ -645,6 +776,14 @@ class DedupBlocksImpl {
           // to the replacement.
           //
           // This will not deal correctly with exceptions.
+          // Ahead of `remove_instructions`, which strips this block's opcodes.
+          // The pairing is derived from the throwing instructions on both
+          // sides, so a stripped block reports none: every merge whose survivor
+          // throws would take the no-correspondence path and mark that survivor
+          // against nothing at all, rather than against the position it
+          // actually folded.
+          record_merged_positions(canon, block, &pending);
+
           cfg.delete_edges(block->succs().begin(), block->succs().end());
 
           // Undercounts branch instructions.
@@ -656,6 +795,7 @@ class DedupBlocksImpl {
           ++cnt;
         }
       }
+      mark_pending(pending);
       cfg.simplify();
     } else {
       // Replace duplicated blocks with the "canon" (block with lowest ID).
@@ -677,6 +817,7 @@ class DedupBlocksImpl {
           }
           always_assert(canon->id() < block->id());
 
+          record_merged_positions(canon, block, &pending);
           blocks_to_replace.emplace_back(block, canon);
           ++cnt;
 
@@ -707,6 +848,8 @@ class DedupBlocksImpl {
           }
         }
       }
+
+      mark_pending(pending);
 
       // Note that replace_blocks also fixes any arising dangling parents.
       m_stats.insns_removed +=
@@ -1532,6 +1675,9 @@ Stats& Stats::operator+=(const Stats& that) {
   insns_removed += that.insns_removed;
   blocks_split += that.blocks_split;
   positions_inserted += that.positions_inserted;
+  join_stats += that.join_stats;
+  positions_merged_without_correspondence +=
+      that.positions_merged_without_correspondence;
   for (const auto& p : UnorderedIterable(that.dup_sizes)) {
     dup_sizes[p.first] += p.second;
   }

@@ -19,6 +19,8 @@ const char* METRIC_BLOCKS_REMOVED = "blocks_removed";
 const char* METRIC_INSNS_REMOVED = "insns_removed";
 const char* METRIC_BLOCKS_SPLIT = "blocks_split";
 const char* METRIC_POSITIONS_INSERTED = "positions_inserted";
+const char* METRIC_POSITIONS_MERGED_WITHOUT_CORRESPONDENCE =
+    "positions_merged_without_correspondence";
 const char* METRIC_ELIGIBLE_BLOCKS = "eligible_blocks";
 } // namespace
 
@@ -60,11 +62,19 @@ void DedupBlocksPass::report_stats(PassManager& mgr,
   int insns_removed = stats.insns_removed;
   int split = stats.blocks_split;
   int positions_inserted = stats.positions_inserted;
+  int positions_merged_without_correspondence =
+      stats.positions_merged_without_correspondence;
   mgr.incr_metric(METRIC_ELIGIBLE_BLOCKS, eligible_blocks);
   mgr.incr_metric(METRIC_BLOCKS_REMOVED, removed);
   mgr.incr_metric(METRIC_INSNS_REMOVED, insns_removed);
   mgr.incr_metric(METRIC_BLOCKS_SPLIT, split);
   mgr.incr_metric(METRIC_POSITIONS_INSERTED, positions_inserted);
+  mgr.incr_metric(positions::metrics::kMarkedUnreliable,
+                  stats.join_stats.marked_unreliable);
+  mgr.incr_metric(positions::metrics::kNotRecorded,
+                  stats.join_stats.not_recorded);
+  mgr.incr_metric(METRIC_POSITIONS_MERGED_WITHOUT_CORRESPONDENCE,
+                  positions_merged_without_correspondence);
   TRACE(DEDUP_BLOCKS, 2, "%d eligible_blocks", eligible_blocks);
 
   for (const auto& entry : UnorderedIterable(stats.dup_sizes)) {

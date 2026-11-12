@@ -34,6 +34,7 @@ class PassImpl : public Pass {
     uint32_t big_override_threshold{5};
     UnorderedSet<const DexType*> field_blocklist;
     bool compute_definitely_assigned_ifields{true};
+    bool analyze_ancestor_constructors{false};
     bool reduce_stringbuilder_concat{false};
     bool merge_adjacent_constant_appends{false};
     bool replace_constant_stringbuilder_tostring_with_const_string{false};
@@ -120,6 +121,10 @@ program resolves to (JLS 3.10.5):
          m_config.compute_definitely_assigned_ifields,
          "Whether to predict which instance fields are always written before "
          "they are read, in order to ignore the default value 0.");
+    bind("analyze_ancestor_constructors", false,
+         m_config.analyze_ancestor_constructors,
+         "Analyze constructor calls on ancestor classes when proving instance "
+         "field initialization.");
     bind("reduce_stringbuilder_concat", false,
          m_config.reduce_stringbuilder_concat,
          "Rewrite two-append String concatenations to String.concat: "

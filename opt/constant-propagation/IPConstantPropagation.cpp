@@ -182,7 +182,8 @@ std::unique_ptr<FixpointIterator> PassImpl::analyze(
   UnorderedSet<const DexField*> definitely_assigned_ifields;
   if (m_config.compute_definitely_assigned_ifields) {
     definitely_assigned_ifields =
-        definitely_assigned_ifields::get_definitely_assigned_ifields(scope);
+        definitely_assigned_ifields::get_definitely_assigned_ifields(
+            scope, m_config.analyze_ancestor_constructors);
   }
   m_stats.definitely_assigned_ifields = definitely_assigned_ifields.size();
   for (size_t i = 0; i < m_config.max_heap_analysis_iterations; ++i) {
@@ -409,6 +410,8 @@ void PassImpl::run_pass(DexStoresVector& stores,
 
   mgr.set_metric("config.max_heap_analysis_iterations",
                  m_config.max_heap_analysis_iterations);
+  mgr.set_metric("config.analyze_ancestor_constructors",
+                 m_config.analyze_ancestor_constructors);
   mgr.incr_metric("stringbuilder_appends_merged", m_appends_merged);
   mgr.incr_metric("stringbuilder_constant_tostrings_replaced",
                   m_stringbuilder_constant_tostrings_replaced);

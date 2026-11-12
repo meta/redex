@@ -16,6 +16,6 @@ namespace definitely_assigned_ifields {
 // before they are ever read. This method assumes that cfgs have been
 // build, and exit-blocks calculated.
 UnorderedSet<const DexField*> get_definitely_assigned_ifields(
-    const Scope& scope);
+    const Scope& scope, bool analyze_ancestor_constructors = false);
 } // namespace definitely_assigned_ifields
 } // namespace constant_propagation

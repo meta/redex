@@ -224,6 +224,321 @@ TEST_F(InterproceduralConstantPropagationTest,
   EXPECT_EQ(assembler::to_s_expr(num_types->get_code()), original_reader);
 }
 
+TEST_F(InterproceduralConstantPropagationTest,
+       ancestorConstructorInitializesDelegatedField) {
+  ClassCreator middle(DexType::make_type("LMiddle;"));
+  middle.set_super(type::java_lang_Object());
+  auto* middle_cls = middle.create();
+  ClassCreator leaf(DexType::make_type("LLeaf;"));
+  leaf.set_super(middle_cls->get_type());
+  auto* field = DexField::make_field("LLeaf;.value:I")
+                    ->make_concrete(ACC_PRIVATE | ACC_FINAL);
+  leaf.add_field(field);
+  auto* target = assembler::method_from_string(R"(
+    (method (public constructor) "LLeaf;.<init>:(I)V"
+      (
+        (load-param-object v0)
+        (load-param v1)
+        (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+        (const v2 7)
+        (iput v2 v0 "LLeaf;.value:I")
+        (return-void)
+      )
+    )
+  )");
+  target->rstate.set_root();
+  leaf.add_method(target);
+  auto* delegating = assembler::method_from_string(R"(
+    (method (public constructor) "LLeaf;.<init>:()V"
+      (
+        (load-param-object v0)
+        (const v1 0)
+        (invoke-direct (v0 v1) "LLeaf;.<init>:(I)V")
+        (return-void)
+      )
+    )
+  )");
+  delegating->rstate.set_root();
+  leaf.add_method(delegating);
+  auto* reader = assembler::method_from_string(R"(
+    (method (public static) "LLeaf;.read:(LLeaf;)I"
+      (
+        (load-param-object v0)
+        (iget v0 "LLeaf;.value:I")
+        (move-result-pseudo v1)
+        (return v1)
+      )
+    )
+  )");
+  reader->rstate.set_root();
+  leaf.add_method(reader);
+  Scope scope{middle_cls, leaf.create()};
+  walk::code(scope, [](DexMethod*, IRCode& code) {
+    code.build_cfg();
+    code.cfg().calculate_exit_block();
+  });
+  auto assigned =
+      definitely_assigned_ifields::get_definitely_assigned_ifields(scope, true);
+  EXPECT_NE(assigned.count(field), 0u);
+  PassImpl::Config config;
+  config.max_heap_analysis_iterations = 3;
+  config.use_multiple_callee_callgraph = true;
+  config.analyze_ancestor_constructors = true;
+  PassImpl(config).run(make_simple_stores(scope), conf);
+  auto expected = assembler::ircode_from_string(R"((
+    (load-param-object v0)
+    (const v1 7)
+    (return v1)
+  ))");
+  reader->get_code()->clear_cfg();
+  EXPECT_CODE_EQ(reader->get_code(), expected.get());
+}
+
+enum class AncestorFieldProofCase {
+  Disabled,
+  Enabled,
+  Publication,
+  NoOptimizations,
+  ConditionalWrite,
+  AllocationBypass,
+};
+
+class AncestorFieldProofTest
+    : public InterproceduralConstantPropagationTest,
+      public ::testing::WithParamInterface<AncestorFieldProofCase> {};
+
+TEST_P(AncestorFieldProofTest, preservesInitializationBoundaries) {
+  auto scenario = GetParam();
+  const bool enabled = scenario != AncestorFieldProofCase::Disabled;
+  const bool inferred = scenario == AncestorFieldProofCase::Enabled;
+  ClassCreator other(DexType::make_type("LOther;"));
+  other.set_super(type::java_lang_Object());
+  other.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LOther;.<init>:()V"
+      ((load-param-object v0)
+       (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+       (return-void)))
+  )"));
+  ClassCreator middle(DexType::make_type("LMiddle;"));
+  middle.set_super(type::java_lang_Object());
+  ClassCreator leaf(DexType::make_type("LLeaf;"));
+  leaf.set_super(middle.get_type());
+  auto* field = DexField::make_field("LLeaf;.tag:Ljava/lang/String;")
+                    ->make_concrete(ACC_PRIVATE | ACC_FINAL);
+  leaf.add_field(field);
+  auto* escaped = DexField::make_field("LLeaf;.escaped:Ljava/lang/Object;")
+                      ->make_concrete(ACC_PUBLIC | ACC_STATIC);
+  escaped->rstate.set_root();
+  leaf.add_field(escaped);
+  const std::string extra =
+      scenario == AncestorFieldProofCase::Publication
+          ? R"((sput-object v0 "LLeaf;.escaped:Ljava/lang/Object;"))"
+      : scenario == AncestorFieldProofCase::ConditionalWrite
+          ? R"((if-eqz v1 :exit))"
+      : scenario == AncestorFieldProofCase::Enabled
+          ? R"((new-instance "LOther;")
+               (move-result-pseudo-object v5)
+               (invoke-direct (v5) "LOther;.<init>:()V"))"
+          : "";
+  auto* target = assembler::method_from_string(
+      R"((method (public constructor) "LLeaf;.<init>:(I)V"
+        (
+          (load-param-object v0)
+          (load-param v1)
+          (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      )" +
+      extra + R"(
+          (const-string "Feed")
+          (move-result-pseudo-object v2)
+          (iput-object v2 v0 "LLeaf;.tag:Ljava/lang/String;")
+          (:exit)
+          (return-void)
+        )
+      ))");
+  target->rstate.set_root();
+  if (scenario == AncestorFieldProofCase::NoOptimizations) {
+    target->rstate.set_no_optimizations();
+  }
+  leaf.add_method(target);
+  auto* delegating = assembler::method_from_string(R"(
+    (method (public constructor) "LLeaf;.<init>:()V"
+      (
+        (load-param-object v0)
+        (const v1 1)
+        (invoke-direct (v0 v1) "LLeaf;.<init>:(I)V")
+        (return-void)
+      )
+    )
+  )");
+  delegating->rstate.set_root();
+  leaf.add_method(delegating);
+  const std::string reader_body = R"((
+    (load-param-object v0)
+    (iget-object v0 "LLeaf;.tag:Ljava/lang/String;")
+    (move-result-pseudo-object v1)
+    (return-object v1)
+  ))";
+  auto* reader = assembler::method_from_string(
+      R"((method (public static) "LLeaf;.read:(LLeaf;)Ljava/lang/String;" )" +
+      reader_body + ")");
+  reader->rstate.set_root();
+  leaf.add_method(reader);
+  if (scenario == AncestorFieldProofCase::AllocationBypass) {
+    auto* bypass = assembler::method_from_string(R"(
+      (method (public static) "LLeaf;.bypass:()LLeaf;"
+        (
+          (new-instance "LLeaf;")
+          (move-result-pseudo-object v0)
+          (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+          (return-object v0)
+        )
+      )
+    )");
+    bypass->rstate.set_root();
+    leaf.add_method(bypass);
+  }
+  Scope scope{other.create(), middle.create(), leaf.create()};
+  walk::code(scope, [](DexMethod*, IRCode& code) {
+    code.build_cfg();
+    code.cfg().calculate_exit_block();
+  });
+  auto assigned = definitely_assigned_ifields::get_definitely_assigned_ifields(
+      scope, enabled);
+  EXPECT_EQ(assigned.count(field) != 0u, inferred);
+  PassImpl::Config config;
+  config.max_heap_analysis_iterations = 3;
+  config.use_multiple_callee_callgraph = true;
+  config.analyze_ancestor_constructors = enabled;
+  PassImpl(config).run(make_simple_stores(scope), conf);
+  auto expected = assembler::ircode_from_string(inferred ? R"((
+    (load-param-object v0)
+    (const-string "Feed")
+    (move-result-pseudo-object v1)
+    (return-object v1)
+  ))"
+                                                         : reader_body);
+  reader->get_code()->clear_cfg();
+  EXPECT_CODE_EQ(reader->get_code(), expected.get());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AncestorInitialization,
+    AncestorFieldProofTest,
+    ::testing::Values(AncestorFieldProofCase::Disabled,
+                      AncestorFieldProofCase::Enabled,
+                      AncestorFieldProofCase::Publication,
+                      AncestorFieldProofCase::NoOptimizations,
+                      AncestorFieldProofCase::ConditionalWrite,
+                      AncestorFieldProofCase::AllocationBypass));
+
+enum class AncestorCalleeProofCase { Callback, NoOptimizations, External };
+
+class AncestorCalleeProofTest
+    : public InterproceduralConstantPropagationTest,
+      public ::testing::WithParamInterface<AncestorCalleeProofCase> {};
+
+TEST_P(AncestorCalleeProofTest, doesNotAssumeAncestorsAreNonEscaping) {
+  auto scenario = GetParam();
+  ClassCreator ancestor(DexType::make_type("LAncestor;"));
+  ancestor.set_super(type::java_lang_Object());
+  ancestor.set_access(ACC_PUBLIC | ACC_ABSTRACT);
+  auto* observed = DexField::make_field("LAncestor;.observed:I")
+                       ->make_concrete(ACC_PUBLIC | ACC_STATIC);
+  observed->rstate.set_root();
+  ancestor.add_field(observed);
+  ancestor.add_method(DexMethod::make_method("LAncestor;.observe:()I")
+                          ->make_concrete(ACC_PUBLIC | ACC_ABSTRACT, true));
+  const std::string callback =
+      scenario == AncestorCalleeProofCase::Callback
+          ? R"((invoke-virtual (v0) "LAncestor;.observe:()I")
+               (move-result v1)
+               (sput v1 "LAncestor;.observed:I"))"
+          : "";
+  DexMethod* ancestor_ctor;
+  if (scenario == AncestorCalleeProofCase::External) {
+    ancestor_ctor = dynamic_cast<DexMethod*>(
+        DexMethod::make_method("LAncestor;.<init>:()V"));
+    ASSERT_NE(ancestor_ctor, nullptr);
+    ancestor_ctor->set_access(ACC_PUBLIC | ACC_CONSTRUCTOR);
+    ancestor_ctor->set_external();
+  } else {
+    ancestor_ctor = assembler::method_from_string(
+        R"((method (public constructor) "LAncestor;.<init>:()V"
+          ((load-param-object v0)
+           (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+        )" +
+        callback + R"((return-void))))");
+  }
+  ancestor_ctor->rstate.set_root();
+  if (scenario == AncestorCalleeProofCase::NoOptimizations) {
+    ancestor_ctor->rstate.set_no_optimizations();
+  }
+  ancestor.add_method(ancestor_ctor);
+  auto* ancestor_cls = ancestor.create();
+  if (scenario == AncestorCalleeProofCase::External) {
+    ancestor_cls->set_external();
+  }
+  ClassCreator middle(DexType::make_type("LMiddle;"));
+  middle.set_super(ancestor_cls->get_type());
+  ClassCreator leaf(DexType::make_type("LLeaf;"));
+  leaf.set_super(middle.get_type());
+  auto* field = DexField::make_field("LLeaf;.value:I")
+                    ->make_concrete(ACC_PRIVATE | ACC_FINAL);
+  leaf.add_field(field);
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LLeaf;.<init>:()V"
+      ((load-param-object v0)
+       (invoke-direct (v0) "LAncestor;.<init>:()V")
+       (const v1 7)
+       (iput v1 v0 "LLeaf;.value:I")
+       (return-void)))
+  )");
+  ctor->rstate.set_root();
+  leaf.add_method(ctor);
+  const std::string read_body = R"((
+    (load-param-object v0)
+    (iget v0 "LLeaf;.value:I")
+    (move-result-pseudo v1)
+    (return v1)
+  ))";
+  auto* observer = assembler::method_from_string(
+      R"((method (public) "LLeaf;.observe:()I" )" + read_body + ")");
+  observer->rstate.set_root();
+  leaf.add_method(observer);
+  auto* reader = assembler::method_from_string(
+      R"((method (public static) "LLeaf;.read:(LLeaf;)I" )" + read_body + ")");
+  reader->rstate.set_root();
+  leaf.add_method(reader);
+  Scope scope{middle.create(), leaf.create()};
+  if (scenario != AncestorCalleeProofCase::External) {
+    scope.insert(scope.begin(), ancestor_cls);
+  }
+  walk::code(scope, [](DexMethod*, IRCode& code) {
+    code.build_cfg();
+    code.cfg().calculate_exit_block();
+  });
+  auto assigned =
+      definitely_assigned_ifields::get_definitely_assigned_ifields(scope, true);
+  EXPECT_EQ(assigned.count(field), 0u);
+  PassImpl::Config config;
+  config.max_heap_analysis_iterations = 3;
+  config.use_multiple_callee_callgraph = true;
+  config.analyze_ancestor_constructors = true;
+  PassImpl(config).run(make_simple_stores(scope), conf);
+  auto expected = assembler::ircode_from_string(read_body);
+  reader->get_code()->clear_cfg();
+  observer->get_code()->clear_cfg();
+  EXPECT_CODE_EQ(reader->get_code(), expected.get());
+  EXPECT_CODE_EQ(observer->get_code(), expected.get());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AncestorCalleeBoundaries,
+    AncestorCalleeProofTest,
+    ::testing::Values(AncestorCalleeProofCase::Callback,
+                      AncestorCalleeProofCase::NoOptimizations,
+                      AncestorCalleeProofCase::External));
+
 TEST_F(InterproceduralConstantPropagationTest, constantArgument) {
   // Let bar() be the only method calling baz(I)V, passing it a constant
   // argument. baz() should be optimized for that constant argument.

@@ -40,11 +40,15 @@ class VerticalMergingPass : public Pass {
     bind("blocklist", {}, m_blocklist);
     bind("unsafe_ignore_type_like_strings", false,
          m_unsafe_ignore_type_like_strings);
+    bind("merge_whole_chains", false, m_merge_whole_chains,
+         "Repeat merging until no pair is left, so that a single-child chain "
+         "collapses in one run instead of losing one class per run.");
   }
 
   void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
 
  private:
+  size_t merge_round(DexStoresVector&, ConfigFiles&, PassManager&, bool);
   void merge_classes(const Scope&, const UnorderedMap<DexClass*, DexClass*>&);
 
   void move_methods(DexClass*,
@@ -56,4 +60,5 @@ class VerticalMergingPass : public Pass {
                          const UnorderedMap<DexClass*, DexClass*>&);
   std::vector<std::string> m_blocklist;
   bool m_unsafe_ignore_type_like_strings{false};
+  bool m_merge_whole_chains{false};
 };

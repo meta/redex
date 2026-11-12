@@ -1071,9 +1071,10 @@ void VerticalMergingPass::merge_classes(const Scope& scope,
   update_references(scope, update_map, methodref_update_map);
 }
 
-void VerticalMergingPass::run_pass(DexStoresVector& stores,
-                                   ConfigFiles& conf,
-                                   PassManager& mgr) {
+size_t VerticalMergingPass::merge_round(DexStoresVector& stores,
+                                        ConfigFiles& conf,
+                                        PassManager& mgr,
+                                        bool first_round) {
   auto scope = build_class_scope(stores);
 
   UnorderedMap<const DexType*, DontMergeState> dont_merge_status;
@@ -1093,14 +1094,31 @@ void VerticalMergingPass::run_pass(DexStoresVector& stores,
   merge_classes(scope, mergeable_to_merger);
   remove_merged(scope, mergeable_to_merger);
   post_dexen_changes(scope, stores);
-  mgr.set_metric("num_single_extend", num_single_extend);
-  mgr.set_metric("num_merged", mergeable_to_merger.size());
-  mgr.set_metric("num_type_like_string_annotation_refs",
-                 type_like_string_stats.annotation_refs);
-  mgr.set_metric("num_type_like_string_code_refs",
-                 type_like_string_stats.code_refs);
-  mgr.set_metric("num_type_like_string_static_field_refs",
-                 type_like_string_stats.static_field_refs);
+  if (first_round) {
+    mgr.set_metric("num_single_extend", num_single_extend);
+    mgr.set_metric("num_type_like_string_annotation_refs",
+                   type_like_string_stats.annotation_refs);
+    mgr.set_metric("num_type_like_string_code_refs",
+                   type_like_string_stats.code_refs);
+    mgr.set_metric("num_type_like_string_static_field_refs",
+                   type_like_string_stats.static_field_refs);
+  }
+  return mergeable_to_merger.size();
+}
+
+void VerticalMergingPass::run_pass(DexStoresVector& stores,
+                                   ConfigFiles& conf,
+                                   PassManager& mgr) {
+  size_t round_merged = merge_round(stores, conf, mgr, /* first_round */ true);
+  size_t num_merged = round_merged;
+  size_t num_rounds = 1;
+  while (m_merge_whole_chains && round_merged > 0) {
+    round_merged = merge_round(stores, conf, mgr, /* first_round */ false);
+    num_merged += round_merged;
+    num_rounds++;
+  }
+  mgr.set_metric("num_merged", num_merged);
+  mgr.set_metric("num_rounds", num_rounds);
 }
 
 static VerticalMergingPass s_pass;

@@ -27,6 +27,8 @@ class UnreachableLoweringPass : public Pass {
     };
   }
 
+  void bind_config() override;
+
   void eval_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
 
   void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
@@ -34,4 +36,5 @@ class UnreachableLoweringPass : public Pass {
  private:
   std::optional<ReserveRefsInfoHandle> m_reserved_refs_handle;
   DexMethod* m_create_and_throw_method{nullptr};
+  bool m_typed_nonreturning_methods{false};
 };

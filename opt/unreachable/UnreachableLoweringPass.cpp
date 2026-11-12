@@ -7,15 +7,19 @@
 
 #include "UnreachableLoweringPass.h"
 
+#include "BaselineProfile.h"
 #include "CFGMutation.h"
 #include "ConfigFiles.h"
 #include "ControlFlow.h"
 #include "Creators.h"
 #include "Debug.h"
+#include "DexUtil.h"
 #include "Lazy.h"
 #include "LiveRange.h"
 #include "Show.h"
 #include "Trace.h"
+#include "TypedNonReturningMethods.h"
+#include "UnreachableDefUseChains.h"
 #include "Walkers.h"
 #include <DexStructure.h>
 
@@ -32,7 +36,31 @@ constexpr const char* UNREACHABLE_EXCEPTION_CLASS_NAME =
 constexpr const char* UNREACHABLE_EXCEPTION_CREATE_AND_THROW_METHOD_NAME =
     "createAndThrow";
 
+void report(const typed_nonreturning_methods::Stats& stats, PassManager& mgr) {
+  mgr.incr_metric("typed_nonreturning_method_candidates",
+                  stats.candidate_methods);
+  mgr.incr_metric("typed_nonreturning_methods_rejected",
+                  stats.rejected_methods);
+  mgr.incr_metric("typed_nonreturning_methods_unprofitable",
+                  stats.unprofitable_methods);
+  mgr.incr_metric("typed_nonreturning_methods", stats.typed_methods);
+  mgr.incr_metric("typed_nonreturning_method_call_sites",
+                  stats.typed_call_sites);
+  mgr.incr_metric("typed_nonreturning_method_compiled_call_sites",
+                  stats.compiled_call_sites);
+}
+
 } // namespace
+
+void UnreachableLoweringPass::bind_config() {
+  bind("typed_nonreturning_methods", false, m_typed_nonreturning_methods,
+       "Where a static method that cannot return normally is called right "
+       "before an unreachable throw, change the method's return type in place "
+       "to com.redex.UnreachableException and throw the call's result, rather "
+       "than lowering the unreachable instruction to a second call. Only call "
+       "sites in callers that the baseline profile does not compile, or in "
+       "try regions, are converted, and instrumented builds are left alone.");
+}
 
 void UnreachableLoweringPass::eval_pass(DexStoresVector& stores,
                                         ConfigFiles&,
@@ -114,13 +142,23 @@ void UnreachableLoweringPass::eval_pass(DexStoresVector& stores,
 }
 
 void UnreachableLoweringPass::run_pass(DexStoresVector& stores,
-                                       ConfigFiles&,
+                                       ConfigFiles& conf,
                                        PassManager& mgr) {
   always_assert(m_reserved_refs_handle);
   mgr.release_reserved_refs(*m_reserved_refs_handle);
   m_reserved_refs_handle = std::nullopt;
 
   const auto scope = build_class_scope(stores);
+  // Like other code-shape optimizations, not under instrumentation.
+  if (m_typed_nonreturning_methods &&
+      !mgr.get_redex_options().instrument_pass_enabled) {
+    report(typed_nonreturning_methods::type_nonreturning_methods(
+               stores, scope, m_create_and_throw_method->get_class(),
+               baseline_profiles::get_default_baseline_profile(scope, conf),
+               baseline_profiles::get_huge_method_max(conf)),
+           mgr);
+  }
+
   std::atomic<size_t> unreachable_instructions{0};
   std::atomic<size_t> unreachable_methods{0};
   std::atomic<size_t> reachable_methods_with_unreachable_instructions{0};
@@ -131,12 +169,8 @@ void UnreachableLoweringPass::run_pass(DexStoresVector& stores,
       unreachable_methods++;
     }
     size_t local_unreachable_instructions{0};
-    Lazy<live_range::DefUseChains> duchains([&cfg]() {
-      live_range::MoveAwareChains chains(
-          cfg, /* ignore_unreachable */ false,
-          [&](auto* insn) { return opcode::is_unreachable(insn->opcode()); });
-      return chains.get_def_use_chains();
-    });
+    Lazy<live_range::DefUseChains> duchains(
+        [&cfg]() { return unreachable::get_def_use_chains(cfg); });
     auto ii = InstructionIterable(cfg);
     std::unique_ptr<cfg::CFGMutation> mutation;
     for (auto it = ii.begin(); it != ii.end(); ++it) {

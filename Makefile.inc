@@ -99,6 +99,7 @@ COMMON_INCLUDES = \
 	-I$(top_srcdir)/opt/track_resources \
 	-I$(top_srcdir)/opt/type-analysis \
 	-I$(top_srcdir)/opt/unmark_proguard_keep \
+	-I$(top_srcdir)/opt/unreachable \
 	-I$(top_srcdir)/opt/unreferenced_interfaces \
 	-I$(top_srcdir)/opt/unterface \
 	-I$(top_srcdir)/opt/up-code-motion \

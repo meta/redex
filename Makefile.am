@@ -531,6 +531,7 @@ libopt_la_SOURCES = \
 	opt/resource-value-merging-pass/Styles.cpp \
 	opt/shrinker/ShrinkerPass.cpp \
 	opt/shrinker/TailDuplicationPass.cpp \
+	opt/unreachable/TypedNonReturningMethods.cpp \
 	opt/unreachable/UnreachableLoweringPass.cpp \
 	opt/hot-cold-method-specializing/HotColdMethodSpecializingPass.cpp \
 	opt/make-public/MakePublicPass.cpp \

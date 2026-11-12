@@ -186,14 +186,18 @@ struct RedexContext {
   void add_destruction_task(const Task& t);
 
   static constexpr bool kDebugPointersCacheLoad = false;
+  // Thread-safe; loads the cache at most once.
   void load_pointers_cache() {
+    std::lock_guard<std::mutex> lock(m_pointers_cache_lock);
+    if (m_pointers_cache_loaded.load(std::memory_order_relaxed)) {
+      return;
+    }
     m_pointers_cache.load();
-    m_pointers_cache_loaded = true;
+    m_pointers_cache_loaded.store(true, std::memory_order_release);
   }
   const FrequentlyUsedPointers& pointers_cache() {
-    if (!m_pointers_cache_loaded) {
+    if (!m_pointers_cache_loaded.load(std::memory_order_acquire)) {
       redex_assert(!kDebugPointersCacheLoad);
-      std::lock_guard<std::mutex> lock(m_pointers_cache_lock);
       load_pointers_cache();
     }
     return m_pointers_cache;
@@ -540,7 +544,7 @@ struct RedexContext {
 
   bool m_allow_class_duplicates;
 
-  bool m_pointers_cache_loaded{false};
+  std::atomic<bool> m_pointers_cache_loaded{false};
   std::mutex m_pointers_cache_lock;
   FrequentlyUsedPointers m_pointers_cache;
 

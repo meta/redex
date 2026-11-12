@@ -7,6 +7,10 @@
 
 #include "TypeUtil.h"
 
+#include <latch>
+#include <thread>
+#include <vector>
+
 #include "RedexTest.h"
 
 class TypeUtilTest : public RedexTest {
@@ -233,4 +237,28 @@ TEST_F(TypeUtilTest, array_checks) {
   EXPECT_TRUE(is_reference_array(DexType::make_type("[[I")));
   EXPECT_FALSE(is_reference_array(DexType::make_type("[I")));
   EXPECT_FALSE(is_reference_array(java_lang_Object()));
+}
+
+// A fresh context loads its well-known pointers on first use, which may come
+// from several threads at once.
+TEST_F(TypeUtilTest, concurrent_first_use_of_well_known_types) {
+  constexpr size_t kThreads = 8;
+  std::latch start(kThreads);
+  std::vector<DexType*> objects(kThreads);
+  std::vector<std::thread> threads;
+  threads.reserve(kThreads);
+  for (size_t i = 0; i < kThreads; i++) {
+    threads.emplace_back([&start, &objects, i] {
+      start.arrive_and_wait();
+      objects[i] = type::java_lang_Object();
+    });
+  }
+  for (auto& thread : threads) {
+    thread.join();
+  }
+  auto* object = DexType::get_type("Ljava/lang/Object;");
+  ASSERT_NE(object, nullptr);
+  for (auto* loaded : objects) {
+    EXPECT_EQ(loaded, object);
+  }
 }

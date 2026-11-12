@@ -156,6 +156,7 @@ check_PROGRAMS = \
     partial_pass_test \
     peephole_test \
     position_interning_test \
+    position_join_test \
     position_map_reader_test \
     print_kotlin_stats_test \
     proguard_lexer_test \
@@ -521,6 +522,8 @@ partial_pass_test_SOURCES = PartialPassTest.cpp
 peephole_test_SOURCES = PeepholeTest.cpp
 
 position_interning_test_SOURCES = PositionInterningTest.cpp
+
+position_join_test_SOURCES = PositionJoinTest.cpp
 
 position_map_reader_test_SOURCES = PositionMapReaderTest.cpp \
 	$(top_srcdir)/tools/debug-info/PositionMap.cpp

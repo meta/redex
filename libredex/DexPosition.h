@@ -30,6 +30,18 @@ struct DexPosition final {
   const DexString* method{nullptr};
   const DexString* file{nullptr};
   uint32_t line;
+
+ private:
+  // Provenance occupies the four bytes of padding already present between
+  // `line` and `parent`. It does not participate in position identity.
+  //
+  // Not atomic: parallel walkers hand out whole methods, and provenance is
+  // written only through the MethodItemEntry that owns the position.
+  uint32_t m_prov{0};
+
+  static constexpr uint32_t kUnreliableBit = uint32_t{1};
+
+ public:
   // when a function gets inlined for the first time, all its DexPositions will
   // have the DexPosition of the callsite as their parent.
   DexPosition* parent{nullptr};
@@ -42,7 +54,59 @@ struct DexPosition final {
 
   static std::unique_ptr<DexPosition> make_synthetic_entry_position(
       const DexMethod* method);
+
+  // Whether a producer has recorded that this position stopped uniquely
+  // identifying the source location of the code it governs. A position that is
+  // not unreliable is not proven exact: no producer recorded a loss, so
+  // consumers treat it as an ordinary position. There is no "exact"
+  // state, because this records known loss, not proof that every earlier
+  // transformation preserved a unique source location.
+  bool is_unreliable() const { return (m_prov & kUnreliableBit) != 0; }
+  // A position on line 0: Redex made it up for code with no source line (for
+  // example `make_synthetic_entry_position`), or the input carried no line.
+  // Java prints such a frame without a line number.
+  //
+  // Synthetic and unreliable are independent: code on line 0 can later be
+  // folded with another source location. Because `line` is part of position
+  // identity, being synthetic survives copying, interning and outlining.
+  //
+  // Outliner pattern and switch records (see `PositionPatternSwitchManager`)
+  // keep their pattern or switch id in `line`, so one with id 0 also reads as
+  // synthetic. Callers that can meet such records check `is_pattern_position`
+  // and `is_switch_position` first.
+  bool is_synthetic() const { return line == 0; }
+  // Source claims only lose certainty. There is deliberately no mutator back:
+  // later agreement cannot prove earlier transforms kept one origin.
+  void mark_unreliable() { m_prov |= kUnreliableBit; }
+  // Compares this level only; see `same_position_and_provenance` for chains.
+  bool same_provenance(const DexPosition& that) const {
+    return m_prov == that.m_prov;
+  }
 };
+
+/*
+ * Whether one of two position entries can be dropped in favor of the other
+ * without losing anything: same identity and same provenance at every level of
+ * the inlining chain. A copy that a producer has since marked is not redundant
+ * with the unmarked original, because the two govern different instructions.
+ */
+inline bool same_position_and_provenance(const DexPosition& a,
+                                         const DexPosition& b) {
+  if (!(a == b)) {
+    return false;
+  }
+  const DexPosition* pa = &a;
+  const DexPosition* pb = &b;
+  for (; pa != nullptr && pb != nullptr; pa = pa->parent, pb = pb->parent) {
+    if (pa == pb) {
+      return true;
+    }
+    if (!pa->same_provenance(*pb)) {
+      return false;
+    }
+  }
+  return pa == nullptr && pb == nullptr;
+}
 // Identity of an interned position. Keep these two adjacent: they are a pair,
 // and a hash that stops agreeing with its equality is the bug this replaced.
 // A parent is interned before its child, so a whole inlining chain is
@@ -62,6 +126,16 @@ struct InternedPositionEqual {
            a.parent == b.parent;
   }
 };
+static_assert(sizeof(DexPosition) == 32,
+              "DexPosition provenance must stay inside the existing padding "
+              "between `line` and `parent`; growing the struct multiplies "
+              "across millions of live positions.");
+// Provenance reaches cloned positions because copying a DexPosition copies its
+// bytes. A user-declared copy constructor here could keep compiling while
+// silently stopping propagation through clone sites, so pin the property.
+static_assert(std::is_trivially_copyable_v<DexPosition>,
+              "DexPosition must stay trivially copyable: provenance propagates "
+              "through the implicit copy constructor at every clone site.");
 
 using PositionPattern = std::vector<DexPosition*>;
 using PositionPatternHasher = boost::hash<PositionPattern>;

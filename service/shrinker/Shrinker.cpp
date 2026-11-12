@@ -231,6 +231,7 @@ void Shrinker::shrink_code(
   LocalDce::Stats local_dce_stats;
   dedup_blocks_impl::Stats dedup_blocks_stats;
   size_t branch_prefix_hoisting_stats{0};
+  positions::JoinStats join_stats;
 
   code->build_cfg();
   if (m_config.run_const_prop) {
@@ -341,7 +342,7 @@ void Shrinker::shrink_code(
           /* force_type_inference */ true);
     });
     branch_prefix_hoisting_stats = branch_prefix_hoisting_impl::process_cfg(
-        cfg, constant_uses, /* can_allocate_regs */ true);
+        cfg, constant_uses, /* can_allocate_regs */ true, &join_stats);
   }
 
   auto data_after_dedup = get_features(kMMINLDataCollectionLevel);
@@ -364,11 +365,17 @@ void Shrinker::shrink_code(
   m_methods_shrunk++;
   m_methods_reg_alloced += reg_alloc_inc;
   m_branch_prefix_hoisting_stats += branch_prefix_hoisting_stats;
+  m_position_join_stats += join_stats;
+  m_position_join_stats += dedup_blocks_stats.join_stats;
 }
 
 void Shrinker::log_metrics(ScopedMetrics& sm) const {
   auto scope = sm.scope("shrinker");
   m_const_prop_stats.log_metrics(sm);
+  sm.set_metric(positions::metrics::kMarkedUnreliable,
+                m_position_join_stats.marked_unreliable);
+  sm.set_metric(positions::metrics::kNotRecorded,
+                m_position_join_stats.not_recorded);
 }
 
 } // namespace shrinker

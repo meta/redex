@@ -9,6 +9,7 @@
 
 #include "ConstantUses.h"
 #include "Lazy.h"
+#include "PositionJoin.h"
 
 class IRCode;
 
@@ -18,8 +19,15 @@ class ControlFlowGraph;
 
 namespace branch_prefix_hoisting_impl {
 
-size_t process_code(IRCode*, DexMethod*, bool can_allocate_regs = true);
+// When non-null, `join_stats` counts fidelity changes and throwing instructions
+// for which hoisting could not copy a governing position. Marking does not
+// depend on whether stats are requested.
+size_t process_code(IRCode*,
+                    DexMethod*,
+                    bool can_allocate_regs = true,
+                    positions::JoinStats* join_stats = nullptr);
 size_t process_cfg(cfg::ControlFlowGraph&,
                    Lazy<const constant_uses::ConstantUses>&,
-                   bool can_allocate_regs = true);
+                   bool can_allocate_regs = true,
+                   positions::JoinStats* join_stats = nullptr);
 } // namespace branch_prefix_hoisting_impl

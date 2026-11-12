@@ -6,7 +6,9 @@
  */
 
 #include "BranchPrefixHoisting.h"
+#include "PositionJoin.h"
 
+#include <algorithm>
 #include <optional>
 
 #include "ControlFlow.h"
@@ -360,7 +362,8 @@ size_t hoist_insns_for_block(
     const std::vector<IRInstruction>& insns_to_hoist,
     const UnorderedMap<reg_t, bool>& crit_regs,
     Lazy<const constant_uses::ConstantUses>& constant_uses,
-    bool can_allocate_regs) {
+    bool can_allocate_regs,
+    positions::JoinStats* join_stats) {
   auto insert_it = block->to_cfg_instruction_iterator(pos);
 
   {
@@ -397,13 +400,29 @@ size_t hoist_insns_for_block(
       insns_to_hoist.begin(), insns_to_hoist.end(),
       [](const auto& insn) { return opcode::can_throw(insn.opcode()); });
 
-  DexPosition* last_position = nullptr;
+  // The last position any successor carries locally; the hoisted copy clones
+  // it. When no successor carries one, nothing is cloned and the hoisted code
+  // stays under the branch's own position, which every successor inherited.
+  const DexPosition* last_position = nullptr;
+  // The position each successor is under, tracked separately from
+  // `last_position`, which belongs to an arbitrary branch. Comparing them is
+  // what says whether the branches actually disagreed about where this code
+  // came from. A successor with no local position inherits the position
+  // governing the branch itself.
+  std::vector<const DexPosition*> succ_positions(succs.size(),
+                                                 cfg.get_dbg_pos(insert_it));
+  auto account = [join_stats](positions::FidelityChange change) {
+    if (join_stats != nullptr) {
+      join_stats->account(change);
+    }
+  };
   // The hoisted prefix needs at most one SourceBlock, not one per successor.
   bool hoisted_source_block_inserted = false;
   for (const auto& insn : insns_to_hoist) {
     // Check if any source blocks or positions precede instructions.
     if (!opcode::is_move_result_any(insn.opcode())) {
-      for (auto& p : succs) {
+      for (size_t succ_idx = 0; succ_idx < succs.size(); ++succ_idx) {
+        auto& p = succs[succ_idx];
         auto* b = p.first;
         auto& it = p.second;
         redex_assert(it != CONSTP(b)->end()); // Should have instructions.
@@ -487,6 +506,14 @@ size_t hoist_insns_for_block(
             break;
           case MFLOW_POSITION:
             last_position = it->pos.get();
+            // Fileless positions name no source site, so the successor keeps
+            // the inherited branch position for comparison.
+            if (it->pos->file != nullptr) {
+              // `.at()`: sized from `succs` above and indexed by the loop over
+              // `succs`, so this is in range by construction -- but the two are
+              // separate containers, which no bounds checker can correlate.
+              succ_positions.at(succ_idx) = it->pos.get();
+            }
             break;
           case MFLOW_REMARK:
             // Block-anchored metadata; leave remarks in the block (not
@@ -504,8 +531,23 @@ size_t hoist_insns_for_block(
       // We clone positions instead of moving, so that we don't move away
       // any initial positions from the sacrificial block. In case of
       // adjacent positions, the cfg will clean up obvious redundancy.
-      cfg.insert_before(insert_it,
-                        std::make_unique<DexPosition>(*last_position));
+      auto hoisted_position = std::make_unique<DexPosition>(*last_position);
+      // One copy of this instruction now runs for every branch it was hoisted
+      // out of, but it can carry only one line. The clone records that its
+      // retained line is no longer unique; original branch positions remain on
+      // the code they still govern.
+      //
+      // Stats are optional; marking is not.
+      const bool disagrees =
+          std::any_of(succ_positions.begin(), succ_positions.end(),
+                      [&hoisted_position](const DexPosition* succ_position) {
+                        return !positions::same_source_claim(
+                            hoisted_position.get(), succ_position);
+                      });
+      if (disagrees) {
+        account(positions::mark_merged(hoisted_position.get()));
+      }
+      cfg.insert_before(insert_it, std::move(hoisted_position));
     }
 
     // Insert instruction.
@@ -591,7 +633,8 @@ size_t process_hoisting_for_block(
     cfg::Block* block,
     cfg::ControlFlowGraph& cfg,
     Lazy<const constant_uses::ConstantUses>& constant_uses,
-    bool can_allocate_regs) {
+    bool can_allocate_regs,
+    positions::JoinStats* join_stats) {
   IRList::iterator last_insn_it = block->get_last_insn();
   if (last_insn_it == block->end()) {
     // block is empty
@@ -666,9 +709,9 @@ size_t process_hoisting_for_block(
     return 0;
   }
   // do the mutation
-  auto hoisted = hoist_insns_for_block(block, last_insn_it, *succ_blocks, cfg,
-                                       insns_to_hoist, *crit_regs,
-                                       constant_uses, can_allocate_regs);
+  auto hoisted = hoist_insns_for_block(
+      block, last_insn_it, *succ_blocks, cfg, insns_to_hoist, *crit_regs,
+      constant_uses, can_allocate_regs, join_stats);
   TRACE(
       BPH, 5, "Hoisted %zu/%zu instruction from %s into B%zu", hoisted,
       insns_to_hoist.size(),
@@ -688,7 +731,10 @@ size_t process_hoisting_for_block(
 
 namespace branch_prefix_hoisting_impl {
 
-size_t process_code(IRCode* code, DexMethod* method, bool can_allocate_regs) {
+size_t process_code(IRCode* code,
+                    DexMethod* method,
+                    bool can_allocate_regs,
+                    positions::JoinStats* join_stats) {
   auto& cfg = code->cfg();
   TRACE(BPH, 5, "%s", SHOW(cfg));
   Lazy<const constant_uses::ConstantUses> constant_uses([&] {
@@ -696,13 +742,14 @@ size_t process_code(IRCode* code, DexMethod* method, bool can_allocate_regs) {
         cfg, method,
         /* force_type_inference */ true);
   });
-  size_t ret = process_cfg(cfg, constant_uses, can_allocate_regs);
+  size_t ret = process_cfg(cfg, constant_uses, can_allocate_regs, join_stats);
   return ret;
 }
 
 size_t process_cfg(cfg::ControlFlowGraph& cfg,
                    Lazy<const constant_uses::ConstantUses>& constant_uses,
-                   bool can_allocate_regs) {
+                   bool can_allocate_regs,
+                   positions::JoinStats* join_stats) {
   size_t ret_insns_hoisted = 0;
   bool performed_transformation = false;
   do {
@@ -713,7 +760,7 @@ size_t process_cfg(cfg::ControlFlowGraph& cfg,
     for (auto* block : blocks) {
       // when we are processing hoist for one block, other blocks may be changed
       size_t n_insn_hoisted = process_hoisting_for_block(
-          block, cfg, constant_uses, can_allocate_regs);
+          block, cfg, constant_uses, can_allocate_regs, join_stats);
       if (n_insn_hoisted != 0u) {
         performed_transformation = true;
         ret_insns_hoisted += n_insn_hoisted;

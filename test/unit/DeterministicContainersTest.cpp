@@ -12,7 +12,11 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <map>
+#include <memory>
+#include <set>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 using ::testing::ElementsAre;
@@ -46,6 +50,120 @@ TEST_F(DeterministicContainersTest, unordered_any_set) {
 TEST_F(DeterministicContainersTest, unordered_any_set_empty) {
   UnorderedSet<int> set;
   EXPECT_EQ(set.end(), unordered_any(set));
+}
+
+namespace {
+template <class Collection>
+concept CanGetOnly = requires(Collection&& collection) {
+  only(std::forward<Collection>(collection));
+};
+
+static_assert(CanGetOnly<UnorderedMap<int, int>&>);
+static_assert(CanGetOnly<const UnorderedMap<int, int>&>);
+static_assert(!CanGetOnly<UnorderedMap<int, int>>);
+static_assert(!CanGetOnly<const UnorderedMap<int, int>>);
+static_assert(!CanGetOnly<UnorderedSet<int>>);
+static_assert(!CanGetOnly<UnorderedBag<int>>);
+static_assert(!CanGetOnly<std::vector<int>>);
+static_assert(!CanGetOnly<const std::vector<int>>);
+} // namespace
+
+TEST_F(DeterministicContainersTest, only_map) {
+  UnorderedMap<int, std::unique_ptr<int>> map;
+  map.emplace(1, std::make_unique<int>(42));
+  auto& entry = only(map);
+  static_assert(std::is_same_v<decltype(entry),
+                               std::pair<const int, std::unique_ptr<int>>&>);
+  EXPECT_EQ(1, entry.first);
+  EXPECT_EQ(&map.at(1), &entry.second);
+  *entry.second = 23;
+  EXPECT_EQ(23, *map.at(1));
+
+  const auto& const_entry = only(std::as_const(map));
+  static_assert(
+      std::is_same_v<decltype(only(std::as_const(map))),
+                     const std::pair<const int, std::unique_ptr<int>>&>);
+  EXPECT_EQ(&entry, &const_entry);
+}
+
+TEST_F(DeterministicContainersTest, only_set) {
+  UnorderedSet<int> set{23};
+  static_assert(std::is_same_v<decltype(only(set)), const int&>);
+  static_assert(std::is_same_v<decltype(only(std::as_const(set))), const int&>);
+  EXPECT_EQ(23, only(set));
+  EXPECT_EQ(&*unordered_any(set), &only(std::as_const(set)));
+}
+
+TEST_F(DeterministicContainersTest, only_bag) {
+  UnorderedBag<std::unique_ptr<int>> bag;
+  bag.insert(std::make_unique<int>(42));
+  auto& value = only(bag);
+  static_assert(std::is_same_v<decltype(value), std::unique_ptr<int>&>);
+  EXPECT_EQ(&*unordered_any(bag), &value);
+  *value = 23;
+  EXPECT_EQ(23, **unordered_any(bag));
+  static_assert(std::is_same_v<decltype(only(std::as_const(bag))),
+                               const std::unique_ptr<int>&>);
+  EXPECT_EQ(&value, &only(std::as_const(bag)));
+}
+
+TEST_F(DeterministicContainersTest, only_multimap) {
+  UnorderedMultiMap<int, int> map{{1, 42}};
+  auto& entry = only(map);
+  static_assert(std::is_same_v<decltype(entry), std::pair<const int, int>&>);
+  entry.second = 23;
+  EXPECT_EQ(1, entry.first);
+  EXPECT_EQ(23, unordered_any(map)->second);
+  EXPECT_EQ(&entry, &only(std::as_const(map)));
+}
+
+TEST_F(DeterministicContainersTest, only_ordinary_containers) {
+  std::vector<int> vector{23};
+  std::set<int> set{23};
+  std::unordered_set<int> hash_set{23};
+  std::map<int, int> map{{1, 23}};
+  std::unordered_map<int, int> hash_map{{1, 23}};
+  static_assert(std::is_same_v<decltype(only(vector)), int&>);
+  static_assert(
+      std::is_same_v<decltype(only(std::as_const(vector))), const int&>);
+  auto check = [](auto& collection) {
+    EXPECT_EQ(&*collection.begin(), &only(collection));
+    EXPECT_EQ(&*collection.begin(), &only(std::as_const(collection)));
+  };
+  check(vector);
+  check(set);
+  check(hash_set);
+  check(map);
+  check(hash_map);
+  only(vector) = 42;
+  EXPECT_EQ(42, vector.front());
+}
+
+TEST_F(DeterministicContainersTest, only_rejects_wrong_size) {
+  auto check = [](auto collection) {
+    const auto message = "only requires exactly one element, got " +
+                         std::to_string(collection.size());
+    EXPECT_THAT([&] { only(collection); },
+                ::testing::ThrowsMessage<RedexException>(
+                    ::testing::HasSubstr(message)));
+    EXPECT_THAT([&] { only(std::as_const(collection)); },
+                ::testing::ThrowsMessage<RedexException>(
+                    ::testing::HasSubstr(message)));
+  };
+  check(UnorderedSet<int>{});
+  check(UnorderedSet<int>{23, 42});
+  check(UnorderedMap<int, int>{});
+  check(UnorderedMap<int, int>{{1, 23}, {2, 42}});
+  check(UnorderedBag<int>{});
+  check(UnorderedBag<int>{23, 23});
+  check(UnorderedMultiMap<int, int>{});
+  check(UnorderedMultiMap<int, int>{{1, 23}, {1, 42}});
+  check(std::vector<int>{});
+  check(std::vector<int>{23, 42});
+  check(std::set<int>{});
+  check(std::set<int>{23, 42});
+  check(std::unordered_set<int>{});
+  check(std::unordered_set<int>{23, 42});
 }
 
 TEST_F(DeterministicContainersTest, UnorderedIterable_map) {

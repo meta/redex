@@ -121,6 +121,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "Debug.h"
 #include "TemplateUtil.h"
 
 // Redex must produce bit-for-bit reproducible APKs: reproducible builds, build
@@ -1647,6 +1648,24 @@ auto unordered_any(Collection&& collection) {
   // Only present so that a return type can be inferred; never reached.
   return collection.end();
 }
+
+// Return the sole element by reference, preserving iterator constness. Maps
+// return a key-value pair; use .first or .second to select the key or value.
+// Requires size() == 1 in opt builds too. Selection is deterministic because
+// there is no choice of element. Accepts lvalue Unordered* wrappers and
+// ordinary containers supported by unordered_any whose iterators return
+// references. Temporaries are rejected; the reference follows the container's
+// invalidation rules and must not outlive it.
+template <class Collection>
+auto& only(Collection& collection) {
+  always_assert_log(collection.size() == 1,
+                    "only requires exactly one element, got %zu",
+                    static_cast<size_t>(collection.size()));
+  return *unordered_any(collection);
+}
+
+template <class Collection>
+void only(const Collection&&) = delete;
 
 template <class UnorderedCollection,
           std::enable_if_t<std::is_base_of_v<UnorderedBase<UnorderedCollection>,

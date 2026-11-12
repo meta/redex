@@ -32,3 +32,22 @@ TEST_F(MethodUtilTest, test_count_opcodes) {
       method::count_opcode_of_types(code->cfg().entry_block(), {OPCODE_CONST}));
   code->clear_cfg();
 }
+
+TEST_F(MethodUtilTest, can_change_signature) {
+  auto make = [](const char* signature, DexAccessFlags access) {
+    return DexMethod::make_method(signature)->make_concrete(access, false);
+  };
+  auto* plain = make("LA;.plain:()V", ACC_PUBLIC | ACC_STATIC);
+  EXPECT_TRUE(method::can_change_signature(plain));
+
+  auto* kept = make("LA;.kept:()V", ACC_PUBLIC | ACC_STATIC);
+  kept->rstate.set_root();
+  EXPECT_FALSE(method::can_change_signature(kept));
+
+  auto* native = make("LA;.jni:()V", ACC_PUBLIC | ACC_STATIC | ACC_NATIVE);
+  EXPECT_FALSE(method::can_change_signature(native));
+
+  auto* no_optimizations = make("LA;.noOpt:()V", ACC_PUBLIC | ACC_STATIC);
+  no_optimizations->rstate.set_no_optimizations();
+  EXPECT_FALSE(method::can_change_signature(no_optimizations));
+}

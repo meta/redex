@@ -11,6 +11,7 @@
 #include "Debug.h"
 #include "DexAnnotation.h"
 #include "EditableCfgAdapter.h"
+#include "ReachableClasses.h"
 #include "RedexContext.h"
 #include "Resolver.h"
 #include "TypeUtil.h"
@@ -531,6 +532,11 @@ bool may_be_invoke_target(const DexMethod* method) {
     return true;
   }
   return !is_abstract(method) && !method->get_code()->is_unreachable();
+}
+
+bool can_change_signature(const DexMethod* method) {
+  return can_rename(method) && !is_native(method) &&
+         !method->rstate.no_optimizations();
 }
 
 #define DEFINE_CACHED_METHOD(func_name, _)                 \

@@ -17,6 +17,54 @@
 
 class SpecializeRtypeTest : public RedexTest {};
 
+namespace {
+
+// A class `C` with a static `C.get()` declared to return `Object` that
+// returns a `String`, specialized to return `String` where allowed.
+DexMethod* specialize_static_get(bool no_optimizations) {
+  ClassCreator creator(DexType::make_type("LC;"));
+  creator.set_super(type::java_lang_Object());
+  auto* get = DexMethod::make_method("LC;.get:()Ljava/lang/Object;")
+                  ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  get->set_code(assembler::ircode_from_string(R"((
+    (const-string "C")
+    (move-result-pseudo-object v0)
+    (return-object v0)
+  ))"));
+  if (no_optimizations) {
+    get->rstate.set_no_optimizations();
+  }
+  creator.add_method(get);
+  auto* cls = creator.create();
+
+  DexStore store("classes");
+  store.add_classes({cls});
+  DexStoresVector stores{store};
+  Scope scope{cls};
+  resolve_refs::MethodToInferredReturnType candidates{
+      {get, type::java_lang_String()}};
+  resolve_refs::RtypeSpecialization specialization(
+      candidates, XStoreRefs(stores, /* normal_primary_dex */ false));
+  specialization.specialize_rtypes(scope, build_subtype_maps(scope));
+  return get;
+}
+
+} // namespace
+
+TEST_F(SpecializeRtypeTest, specializes_static_method) {
+  create_object_class();
+  auto* get = specialize_static_get(/* no_optimizations */ false);
+  EXPECT_EQ(get->get_proto()->get_rtype(), type::java_lang_String());
+}
+
+TEST_F(SpecializeRtypeTest, keeps_no_optimizations_method) {
+  // The runtime version of a `no_optimizations` class may differ from the
+  // one Redex sees, so callers must keep calling `C.get()` returning `Object`.
+  create_object_class();
+  auto* get = specialize_static_get(/* no_optimizations */ true);
+  EXPECT_EQ(get->get_proto()->get_rtype(), type::java_lang_Object());
+}
+
 TEST_F(SpecializeRtypeTest, keeps_default_method_of_interface) {
   // `C.get()` returning `String` would override `I.get()`, which `C` does not
   // override today.

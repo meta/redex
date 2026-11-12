@@ -11,6 +11,7 @@
 #include "Debug.h"
 #include "DexTypeEnvironment.h"
 #include "MethodOverrideGraph.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "ReachableClasses.h"
 #include "Show.h"
@@ -59,11 +60,9 @@ void RtypeStats::print(PassManager* mgr) const {
 
 namespace {
 
-/*
- * Mirroring the similar checks we have in RemoveUnusedArgsPass.
- */
+// Whether keep rules and the method itself allow changing its return type.
 bool is_safe_to_specialize(const DexMethod* meth) {
-  return can_delete(meth) && can_rename(meth) && !is_native(meth);
+  return can_delete(meth) && method::can_change_signature(meth);
 }
 
 bool can_update_rtype_for(const SubtypeMaps& subtype_maps,

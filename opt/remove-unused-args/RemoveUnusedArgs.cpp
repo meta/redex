@@ -21,6 +21,7 @@
 #include "DexUtil.h"
 #include "IRCode.h"
 #include "Liveness.h"
+#include "MethodUtil.h"
 #include "OptData.h"
 #include "OptDataDefs.h"
 #include "PassManager.h"
@@ -173,8 +174,7 @@ void RemoveArgs::compute_reordered_protos(const mog::Graph& override_graph) {
        &defined_protos](DexMethod* caller) {
         auto* caller_proto = caller->get_proto();
         defined_protos.insert(caller_proto);
-        if (!can_rename(caller) || is_native(caller) ||
-            caller->rstate.no_optimizations() ||
+        if (!method::can_change_signature(caller) ||
             has_any_parameter_annotation(caller)) {
           record_fixed_proto(caller_proto, 1);
         } else if (caller->is_virtual()) {
@@ -578,7 +578,7 @@ void RemoveArgs::gather_updated_entries(
         // this method.
         for (const auto* m : UnorderedIterable(kvp->second)) {
           // If we can't edit, just skip
-          if (!can_rename(m) || is_native(m) || m->rstate.no_optimizations() ||
+          if (!method::can_change_signature(m) ||
               has_any_annotation(m, no_devirtualize_annos) ||
               has_any_parameter_annotation(m)) {
             return;

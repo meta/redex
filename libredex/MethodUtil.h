@@ -55,6 +55,15 @@ bool is_clinit_invoked_method_benign(const DexMethodRef*);
  */
 bool may_be_invoke_target(const DexMethod* method);
 
+/**
+ * Whether the definition of `method` allows an optimization to change its
+ * signature (its proto, possibly its name): keep rules allow renaming it, it
+ * is not native, so JNI does not bind it by its signature, and it is not
+ * marked `no_optimizations`. Whether its references, overrides and colliding
+ * signatures allow the change is up to the caller.
+ */
+bool can_change_signature(const DexMethod* method);
+
 using ClInitHasNoSideEffectsPredicate = std::function<bool(const DexType*)>;
 
 /**

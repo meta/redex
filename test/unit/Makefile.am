@@ -158,6 +158,7 @@ check_PROGRAMS = \
     position_interning_test \
     position_join_test \
     position_map_reader_test \
+    position_map_trailer_test \
     print_kotlin_stats_test \
     proguard_lexer_test \
     proguard_map_test \
@@ -531,6 +532,8 @@ position_join_test_SOURCES = PositionJoinTest.cpp
 position_map_reader_test_SOURCES = PositionMapReaderTest.cpp \
 	$(top_srcdir)/tools/debug-info/PositionMap.cpp
 position_map_reader_test_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/tools/debug-info
+
+position_map_trailer_test_SOURCES = PositionMapTrailerTest.cpp
 
 print_kotlin_stats_test_SOURCES = PrintKotlinStatsTest.cpp
 

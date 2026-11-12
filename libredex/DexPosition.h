@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <queue>
@@ -40,6 +41,11 @@ struct DexPosition final {
   uint32_t m_prov{0};
 
   static constexpr uint32_t kUnreliableBit = uint32_t{1};
+
+  friend class PositionPatternSwitchManager;
+  // The interner's copy is identity-only, so provenance is cleared before
+  // insertion.
+  void clear_provenance() { m_prov = 0; }
 
  public:
   // when a function gets inlined for the first time, all its DexPositions will
@@ -260,11 +266,67 @@ class PositionMapper {
 };
 
 /*
+ * Optional extension layout:
+ *
+ *   [v2 body][section payloads][section directory][Trailer]
+ *
+ * Known count-driven readers stop after the declared positions array. New
+ * readers find a possible trailer at EOF, but magic is necessary rather than
+ * sufficient: exact suffix accounting, section bounds, whole entries, sorted
+ * record indices, and index ranges must all validate. Truncated maps are an
+ * ordinary storage failure mode, so offsets and lengths are checked before use.
+ *
+ * `record_index` is zero-based. `alt_record_index == 0` means no alternate;
+ * this writer emits only `{record_index, 0, 0}` ambiguity markers. Integers use
+ * the host byte order, matching the existing line-map body.
+ */
+namespace position_map {
+
+// Line-map extension trailer magic. This is deliberately distinct from the v2
+// body magic (`0xfaceb000`) and IODI metadata magic (`0xfaceb001`).
+constexpr uint32_t kTrailerMagic = 0xfaceb002;
+
+enum class SectionTag : uint32_t {
+  // Sparse and sorted by record index; only unreliable positions are emitted.
+  Provenance = 0x564f5250, // 'PROV'
+};
+
+struct SectionEntry {
+  uint32_t tag;
+  uint32_t reserved;
+  uint64_t offset;
+  uint64_t length;
+};
+
+struct Trailer {
+  uint64_t directory_offset;
+  uint32_t section_count;
+  uint32_t magic;
+};
+
+// One entry per `Unreliable` position. `record_index` is zero-based; zero in
+// `alt_record_index` means no alternate. This writer emits both optional fields
+// as zero.
+struct ProvenanceEntry {
+  uint32_t record_index;
+  uint32_t alt_record_index;
+  uint32_t total_candidates;
+};
+
+// These are written to the file verbatim, so their layout is the format.
+static_assert(sizeof(SectionEntry) == 24);
+static_assert(sizeof(Trailer) == 16);
+static_assert(sizeof(ProvenanceEntry) == 12);
+
+} // namespace position_map
+
+/*
  * This allows us to recover the original file names and line numbers from
  * runtime stack traces of Dex files that have undergone inlining. The
  * PositionMapper produces a text file with this data, and the line numbers in
  * the Dex debug info indicate the line in this text file at which the real
- * position can be found.
+ * position can be found. See `position_map` above for the appended provenance
+ * format.
  */
 class RealPositionMapper : public PositionMapper {
   std::string m_filename_v2;
@@ -274,6 +336,8 @@ class RealPositionMapper : public PositionMapper {
   std::vector<std::unique_ptr<DexPosition>> m_owned_auxiliary_positions;
 
   void process_pattern_switch_positions();
+  // Writes nothing when no position in the map carries provenance.
+  void write_provenance_trailer(std::ofstream& ofs);
 
  protected:
   int64_t add_position(DexPosition* pos);

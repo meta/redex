@@ -21,6 +21,7 @@ class UnreachableLoweringPass : public Pass {
     return {
         {DexLimitsObeyed, Preserves},
         {NoInitClassInstructions, Preserves},
+        {NoResolvablePureRefs, Preserves},
         {NoUnreachableInstructions, Establishes},
         {RenameClass, Preserves},
     };

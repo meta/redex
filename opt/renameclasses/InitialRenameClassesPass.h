@@ -30,6 +30,7 @@ class InitialRenameClassesPass : public Pass {
     return {
         {DexLimitsObeyed, Preserves},
         {InitialRenameClass, Establishes},
+        {NoResolvablePureRefs, Preserves},
     };
   }
 

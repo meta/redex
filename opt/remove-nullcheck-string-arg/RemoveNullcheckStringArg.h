@@ -82,6 +82,7 @@ class RemoveNullcheckStringArg : public Pass {
     using namespace redex_properties::interactions;
     using namespace redex_properties::names;
     return {
+        {NoResolvablePureRefs, Preserves},
         {UltralightCodePatterns, Preserves},
     };
   }

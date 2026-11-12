@@ -203,11 +203,11 @@ using CheckCastSet = UnorderedSet<const IRInstruction*>;
 
 struct OptimizationImpl {
   OptimizationImpl(std::unique_ptr<SingleImplAnalysis> analysis,
-                   const ClassHierarchy& ch,
+                   const SubtypeMaps& subtype_maps,
                    const api::AndroidSDK& api,
                    method_profiles::MethodProfiles& method_profiles)
       : single_impls(std::move(analysis)),
-        ch(ch),
+        subtype_maps(subtype_maps),
         m_api(api),
         m_method_profiles(method_profiles) {}
 
@@ -249,7 +249,7 @@ struct OptimizationImpl {
   NewMethods m_intf_meth_to_impl_meth;
   // list of optimized types
   UnorderedSet<const DexType*> optimized;
-  const ClassHierarchy& ch;
+  const SubtypeMaps& subtype_maps;
   UnorderedMap<std::string_view, size_t> deobfuscated_name_counters;
   const api::AndroidSDK& m_api;
   method_profiles::MethodProfiles& m_method_profiles;
@@ -674,15 +674,7 @@ EscapeReason OptimizationImpl::check_method_collision(
   for (auto* method : data.methoddefs) {
     auto* proto = get_or_make_proto(intf, data.cls, method->get_proto());
     redex_assert(proto != method->get_proto());
-    DexMethodRef* collision =
-        DexMethod::get_method(method->get_class(), method->get_name(), proto);
-    if (collision == nullptr) {
-      collision = find_collision(ch,
-                                 method->get_name(),
-                                 proto,
-                                 type_class(method->get_class()),
-                                 method->is_virtual());
-    }
+    bool collision = has_signature_collision(subtype_maps, method, proto);
     // For bridge method, a collision could exist with the actual implementation
     // method if the interface to be removed is also on the parameter list.
     // Example:
@@ -699,15 +691,15 @@ EscapeReason OptimizationImpl::check_method_collision(
     // Alternatively, for the bridge method, we can perform additional collision
     // check by only update the rtype on the proto (Impl is Impl setup(Intf) in
     // the above example) just to be conservative.
-    if ((collision == nullptr) && is_bridge(method)) {
+    if (!collision && is_bridge(method)) {
       proto = get_or_make_proto(intf, data.cls, method->get_proto(),
                                 /* skip_args */ true);
-      collision =
-          DexMethod::get_method(method->get_class(), method->get_name(), proto);
+      collision = DexMethod::get_method(method->get_class(), method->get_name(),
+                                        proto) != nullptr;
     }
-    if (collision != nullptr) {
+    if (collision) {
       TRACE(INTF, 9, "Found collision %s", SHOW(method));
-      TRACE(INTF, 9, "\t to %s", SHOW(collision));
+      TRACE(INTF, 9, "\t to %s", SHOW(proto));
       return SIG_COLLISION;
     }
   }
@@ -973,11 +965,12 @@ check_casts::impl::Stats OptimizationImpl::post_process(
  * Entry point for an optimization pass.
  */
 OptimizeStats optimize(std::unique_ptr<SingleImplAnalysis> analysis,
-                       const ClassHierarchy& ch,
+                       const SubtypeMaps& subtype_maps,
                        Scope& scope,
                        const SingleImplConfig& config,
                        const api::AndroidSDK& api,
                        method_profiles::MethodProfiles& method_profiles) {
-  OptimizationImpl optimizer(std::move(analysis), ch, api, method_profiles);
+  OptimizationImpl optimizer(std::move(analysis), subtype_maps, api,
+                             method_profiles);
   return optimizer.optimize(scope, config);
 }

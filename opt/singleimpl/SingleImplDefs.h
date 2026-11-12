@@ -211,7 +211,7 @@ struct OptimizeStats {
  * Run an optimization pass over a SingleImplAnalysis.
  */
 OptimizeStats optimize(std::unique_ptr<SingleImplAnalysis> analysis,
-                       const ClassHierarchy& ch,
+                       const SubtypeMaps& subtype_maps,
                        Scope& scope,
                        const SingleImplConfig& config,
                        const api::AndroidSDK& api,

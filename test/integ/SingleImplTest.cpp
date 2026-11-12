@@ -11,15 +11,21 @@
 #include "ConfigFiles.h"
 #include "Creators.h"
 #include "DexClass.h"
+#include "DexUtil.h"
 #include "IRAssembler.h"
 #include "MethodProfiles.h"
 #include "PassManager.h"
 #include "RedexTest.h"
 #include "SingleImpl.h"
+#include "TypeUtil.h"
 
 class SingleImplTest : public RedexIntegrationTest {
  public:
   void SetUp() override {
+    // As in an app, `java.lang.Object` resolves to an external class.
+    create_object_class();
+    type_class(type::java_lang_Object())->set_external();
+
     DexType* m_helper = DexType::get_type("Lcom/facebook/redextest/Helper;");
 
     auto* create_intf = assembler::method_from_string(R"(
@@ -145,4 +151,41 @@ TEST_F(SingleImplTest, MovedDefaultMethodKeepsProfile) {
       baseline_profiles::get_huge_method_max(config));
   EXPECT_TRUE(baseline_profiles::dex2oat_compiles(
       after, target, baseline_profiles::get_huge_method_max(config)));
+}
+
+TEST_F(SingleImplTest, KeepsOverloadsOfDefaultMethods) {
+  for (const auto* signature :
+       {"Lcom/facebook/redextest/Printer;.print:(Lcom/facebook/redextest/"
+        "GreetingImpl;)Ljava/lang/String;",
+        "Lcom/facebook/redextest/Sender;.send:(Lcom/facebook/redextest/"
+        "Message;)Ljava/lang/String;"}) {
+    auto* default_method = assembler::method_from_string(
+        std::string("(method (public) \"") + signature + R"(" (
+          (load-param-object v1)
+          (load-param-object v2)
+          (const-string "default")
+          (move-result-pseudo-object v0)
+          (return-object v0)
+        )))");
+    type_class(default_method->get_class())->add_method(default_method);
+  }
+
+  auto si = std::make_unique<SingleImplPass>();
+  std::vector<Pass*> passes{si.get()};
+  run_passes(passes);
+
+  auto is_def = [](const char* signature) {
+    auto* method = DexMethod::get_method(signature);
+    return method != nullptr && method->is_def();
+  };
+  // `ConsolePrinter.print(GreetingImpl)` would override the default method
+  // `Printer.print(GreetingImpl)`.
+  EXPECT_TRUE(
+      is_def("Lcom/facebook/redextest/ConsolePrinter;.print:(Lcom/facebook/"
+             "redextest/Greeting;)Ljava/lang/String;"));
+  // `EmailSender.send(MessageImpl)` would override the default method
+  // `Sender.send(MessageImpl)`.
+  EXPECT_TRUE(
+      is_def("Lcom/facebook/redextest/Sender;.send:(Lcom/facebook/redextest/"
+             "Message;)Ljava/lang/String;"));
 }

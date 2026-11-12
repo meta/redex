@@ -28,3 +28,34 @@ class Helper {
 //     return createIntf();
 //   }
 }
+
+// Overloads whose parameter type is a single-implementation interface. The
+// test adds the default methods `Printer.print(GreetingImpl)` and
+// `Sender.send(Message)`, which d8 would desugar for this test's min SDK.
+interface Greeting {
+  public String text();
+}
+
+class GreetingImpl implements Greeting {
+  public String text() { return "hi"; }
+}
+
+interface Printer {}
+
+class ConsolePrinter implements Printer {
+  public String print(Greeting g) { return "console"; }
+}
+
+interface Message {
+  public String body();
+}
+
+class MessageImpl implements Message {
+  public String body() { return "message"; }
+}
+
+interface Sender {}
+
+class EmailSender implements Sender {
+  public String send(MessageImpl m) { return "email"; }
+}

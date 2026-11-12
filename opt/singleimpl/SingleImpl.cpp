@@ -132,7 +132,11 @@ void SingleImplPass::run_pass(DexStoresVector& stores,
                               ConfigFiles& conf,
                               PassManager& mgr) {
   auto scope = build_class_scope(stores);
-  ClassHierarchy ch = build_type_hierarchy(scope);
+  // Built once for all rounds. A round only removes interfaces and moves their
+  // superinterfaces down to the implementing class, so in later rounds the
+  // maps still list the removed interfaces, which can only report collisions
+  // that no longer exist, never miss one.
+  SubtypeMaps subtype_maps = build_subtype_maps(scope);
   int max_steps = 0;
   size_t previous_invoke_intf_count = s_invoke_intf_count;
   OptimizeStats stats;
@@ -154,8 +158,8 @@ void SingleImplPass::run_pass(DexStoresVector& stores,
                                     m_pass_config, conf);
 
     auto optimized_stats =
-        optimize(std::move(single_impls), ch, scope, m_pass_config, android_sdk,
-                 conf.get_method_profiles());
+        optimize(std::move(single_impls), subtype_maps, scope, m_pass_config,
+                 android_sdk, conf.get_method_profiles());
     stats += optimized_stats;
     if (optimized_stats.removed_interfaces == 0 || ++max_steps >= MAX_PASSES) {
       break;

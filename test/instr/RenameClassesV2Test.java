@@ -36,4 +36,13 @@ public class RenameClassesV2Test {
     assertThat(ForceRename.class.getPackage().getName()).isEqualTo("X");
     assertThat(FooTextView.class.getPackage().getName()).isEqualTo("X");
   }
+
+  // ForceRename[][] and IForceRename[][] are referenced here, but neither
+  // one-dimensional array type is referenced anywhere in this app. The
+  // two-dimensional array types must still follow their renamed classes.
+  @Test
+  public void testRenamesArrayTypeWithoutLowerDimension() {
+    Object array = new ForceRename[1][1];
+    assertThat(array instanceof IForceRename[][]).isTrue();
+  }
 }

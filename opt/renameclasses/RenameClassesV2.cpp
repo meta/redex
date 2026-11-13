@@ -25,6 +25,7 @@
 #include "ProguardConfiguration.h"
 #include "ProguardMap.h"
 #include "ReachableClasses.h"
+#include "RedexContext.h"
 #include "RedexResources.h"
 #include "Show.h"
 #include "TypeStringRewriter.h"
@@ -977,11 +978,57 @@ RenameClassesPassV2::get_name_mapping_avoiding_collisions(
   }
 }
 
+namespace {
+
+// Returns the new name of every existing array type whose element type is
+// renamed by `class_map`. Each dimension is an independent type: `[[LFoo;`
+// can exist while `[LFoo;` does not, so every existing type is examined.
+std::vector<std::pair<DexType*, const DexString*>> get_array_type_renames(
+    const UnorderedMap<const DexString*, const DexString*>& class_map) {
+  std::vector<std::pair<DexType*, const DexString*>> renames;
+  g_redex->walk_types([&](DexType* type) {
+    auto name = type->str();
+    auto level = name.find_first_not_of('[');
+    if (level == 0 || level == std::string_view::npos) {
+      return;
+    }
+    const auto* element_name = DexString::get_string(name.substr(level));
+    if (element_name == nullptr) {
+      return;
+    }
+    auto it = class_map.find(element_name);
+    if (it == class_map.end()) {
+      return;
+    }
+    std::string new_name(level, '[');
+    new_name += it->second->str();
+    renames.emplace_back(type, DexString::make_string(new_name));
+  });
+  std::sort(renames.begin(), renames.end(), [](const auto& a, const auto& b) {
+    return compare_dextypes(a.first, b.first);
+  });
+  return renames;
+}
+
+} // namespace
+
 void RenameClassesPassV2::rename_classes(
     Scope& scope,
     const rewriter::TypeStringMap& name_mapping,
     PassManager& mgr) {
   const auto& class_map = name_mapping.get_class_map();
+  auto array_type_renames = get_array_type_renames(class_map);
+  UnorderedSet<const DexString*> new_array_type_names;
+  for (const auto& [_, new_name] : array_type_renames) {
+    always_assert_log(!DexType::get_type(new_name),
+                      "Type name collision detected. %s already exists.",
+                      new_name->c_str());
+    always_assert_log(new_array_type_names.insert(new_name).second,
+                      "Type name collision detected. Two array types would "
+                      "be renamed to %s.",
+                      new_name->c_str());
+  }
+
   for (auto* clazz : scope) {
     auto* dtype = clazz->get_type();
     const auto* oldname = dtype->get_name();
@@ -993,23 +1040,9 @@ void RenameClassesPassV2::rename_classes(
     dtype->set_name(dstring);
     m_base_strings_size += oldname->size();
     m_ren_strings_size += dstring->size();
-
-    while (true) {
-      std::string arrayop("[");
-      arrayop += oldname->str();
-      oldname = DexString::get_string(arrayop);
-      if (oldname == nullptr) {
-        break;
-      }
-      auto* arraytype = DexType::get_type(oldname);
-      if (arraytype == nullptr) {
-        break;
-      }
-      std::string newarraytype("[");
-      newarraytype += dstring->str();
-      dstring = DexString::make_string(newarraytype);
-      arraytype->set_name(dstring);
-    }
+  }
+  for (const auto& [array_type, new_name] : array_type_renames) {
+    array_type->set_name(new_name);
   }
   /* Now rewrite all const-string strings for force renamed classes. */
   rewriter::TypeStringMap force_rename_map;

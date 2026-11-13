@@ -30,6 +30,47 @@ void verify_layout(const std::string& filename) {
       << "Got unexpected class name in layout: " << cls_name.str;
 }
 
+namespace {
+
+const DexType* get_instance_of_type(const DexClasses& classes) {
+  auto* cls = find_class_named(
+      classes, "Lcom/facebook/redex/test/instr/RenameClassesV2Test;");
+  if (cls == nullptr) {
+    return nullptr;
+  }
+  auto* method =
+      find_vmethod_named(*cls, "testRenamesArrayTypeWithoutLowerDimension");
+  if (method == nullptr) {
+    return nullptr;
+  }
+  auto* insn = dynamic_cast<DexOpcodeType*>(
+      find_instruction(method, DOPCODE_INSTANCE_OF));
+  if (insn == nullptr) {
+    return nullptr;
+  }
+  return insn->get_type();
+}
+
+} // namespace
+
+TEST_F(PreVerify, RenameClassesV2ArrayTypeWithoutLowerDimension) {
+  const auto* type = get_instance_of_type(classes);
+  ASSERT_NE(type, nullptr);
+  EXPECT_EQ(type->str(), "[[Lcom/facebook/redex/test/instr/IForceRename;");
+  // The case under test: the one-dimensional array types do not exist.
+  EXPECT_EQ(DexType::get_type("[Lcom/facebook/redex/test/instr/IForceRename;"),
+            nullptr);
+  EXPECT_EQ(DexType::get_type("[Lcom/facebook/redex/test/instr/ForceRename;"),
+            nullptr);
+}
+
+TEST_F(PostVerify, RenameClassesV2ArrayTypeWithoutLowerDimension) {
+  const auto* type = get_instance_of_type(classes);
+  ASSERT_NE(type, nullptr);
+  EXPECT_EQ(type->str().find("[[LX/"), 0)
+      << "Got unexpected array type name: " << type->str();
+}
+
 TEST_F(PostVerify, RenameClassesV2) {
   std::cout << "Loaded classes: " << classes.size() << "\n";
   verify_layout(resources["res/layout/simple_layout.xml"]);

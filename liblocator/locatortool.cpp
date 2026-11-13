@@ -78,7 +78,6 @@ int main(int argc, char* argv[]) {
       }
       default: {
         throw 0;
-        break;
       }
     }
   } catch (...) {

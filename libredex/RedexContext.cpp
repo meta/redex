@@ -575,6 +575,17 @@ void RedexContext::remove_type_name(const DexString* name) {
   s_type_map.erase(name);
 }
 
+void RedexContext::walk_types(const std::function<void(DexType*)>& walker) {
+  for (auto const& [name, atomic_type] : UnorderedIterable(s_type_map)) {
+    DexType* type = atomic_type.load();
+    // A type's current name is never removed from the map, so this visits
+    // each type exactly once and skips its aliases.
+    if (type->get_name() == name) {
+      walker(type);
+    }
+  }
+}
+
 DexFieldRef* RedexContext::make_field(const DexType* container,
                                       const DexString* name,
                                       const DexType* type) {

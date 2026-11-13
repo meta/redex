@@ -8,10 +8,29 @@
 #include "DexClass.h"
 
 #include "IRAssembler.h"
+#include "RedexContext.h"
 #include "RedexTest.h"
 #include "SimpleClassHierarchy.h"
 
 class DexClassTest : public RedexTest {};
+
+TEST_F(DexClassTest, walk_types) {
+  auto* foo = DexType::make_type("LFoo;");
+  auto* bar = DexType::make_type("LBar;");
+  // After a rename, the old name still maps to the type.
+  foo->set_name(DexString::make_string("LRenamedFoo;"));
+  ASSERT_EQ(DexType::get_type("LFoo;"), foo);
+  g_redex->alias_type_name(bar, DexString::make_string("LAliasOfBar;"));
+  ASSERT_EQ(DexType::get_type("LAliasOfBar;"), bar);
+
+  UnorderedMap<DexType*, size_t> visits;
+  g_redex->walk_types([&](DexType* type) { ++visits[type]; });
+
+  EXPECT_EQ(visits.at(foo), 1);
+  EXPECT_EQ(visits.at(bar), 1);
+  EXPECT_TRUE(unordered_all_of(
+      visits, [](const auto& entry) { return entry.second == 1; }));
+}
 
 TEST_F(DexClassTest, testUniqueMethodName) {
   auto* method = assembler::class_with_method("LFoo;",

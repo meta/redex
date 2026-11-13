@@ -81,6 +81,14 @@ struct RedexContext {
    */
   void remove_type_name(const DexString* name);
 
+  /**
+   * Call `walker` once for every type, in unspecified order. Names kept as
+   * aliases (see `set_type_name` and `alias_type_name`) do not cause extra
+   * calls. Must not run concurrently with creating, renaming or aliasing
+   * types.
+   */
+  void walk_types(const std::function<void(DexType*)>& walker);
+
   DexFieldRef* make_field(const DexType* container,
                           const DexString* name,
                           const DexType* type);

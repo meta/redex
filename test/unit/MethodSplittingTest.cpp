@@ -5,6 +5,9 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <algorithm>
+#include <deque>
+#include <limits>
 #include <memory>
 
 #include <gtest/gtest.h>
@@ -200,6 +203,51 @@ class MethodSplitterTest : public RedexTest {
   static std::atomic<size_t> s_counter;
 };
 std::atomic<size_t> MethodSplitterTest::s_counter{0};
+
+namespace {
+cfg::Block* profile_block(DexMethod* method, uint32_t id);
+DexMethod* make_source_block_copy(DexClass* cls,
+                                  DexMethod* method,
+                                  const std::vector<cfg::Block*>& heads,
+                                  cfg::Block* switch_block = nullptr);
+} // namespace
+
+TEST_F(MethodSplitterTest, ColdSuffixCopyDoesNotInheritHotJoinCounts) {
+  auto [cls, method] = create("(I)I", R"((
+    (load-param v0)
+    (.src_block "LFoo;.bar:(I)I" 1 (10.0 100.0))
+    (if-eqz v0 :cold)
+    (.src_block "LFoo;.bar:(I)I" 2 (10.0 100.0))
+    (add-int v0 v0 v0)
+    (goto :join)
+    (:cold)
+    (.src_block "LFoo;.bar:(I)I" 3 (0.0 0.0))
+    (add-int v0 v0 v0)
+    (goto :join)
+    (:join)
+    (.src_block "LFoo;.bar:(I)I" 4 (10.0 100.0))
+    (add-int v0 v0 v0)
+    (return v0)
+  ))");
+  method->get_code()->build_cfg();
+  auto* cold = profile_block(method, 3);
+  auto* join = profile_block(method, 4);
+  ASSERT_NE(cold, nullptr);
+  ASSERT_NE(join, nullptr);
+  auto* split = make_source_block_copy(cls, method, {cold});
+  ASSERT_NE(split, nullptr);
+  method->get_code()->cfg().remove_unreachable_blocks();
+  auto& split_cfg = split->get_code()->cfg();
+  split_cfg.remove_unreachable_blocks();
+  auto* copy = split_cfg.get_block(join->id());
+  ASSERT_NE(copy, nullptr);
+  EXPECT_TRUE(method_splitting_impl::is_hot(join));
+  EXPECT_FALSE(method_splitting_impl::is_hot(copy));
+  EXPECT_FLOAT_EQ(*source_blocks::get_first_source_block(join)->get_val(0),
+                  10.0f);
+  EXPECT_FLOAT_EQ(*source_blocks::get_first_source_block(copy)->get_val(0),
+                  0.0f);
+}
 
 TEST_F(MethodSplitterTest, NothingToDo) {
   const auto* before = R"(
@@ -1253,6 +1301,440 @@ TEST_F(MethodSplitterTest, DuplicateSourceBlocksWithReturn) {
   auto source_blocks = source_blocks::gather_source_blocks(blocks[1]);
   ASSERT_EQ(source_blocks.size(), 2);
   m->get_code()->clear_cfg();
+}
+
+namespace {
+
+cfg::Block* profile_block(DexMethod* method, uint32_t id) {
+  for (auto* block : method->get_code()->cfg().blocks()) {
+    auto* sb = source_blocks::get_first_source_block(block);
+    if (sb != nullptr && sb->id == id) {
+      return block;
+    }
+  }
+  return nullptr;
+}
+
+void replace_test_profile(cfg::Block* block,
+                          const std::vector<SourceBlock::Val>& vals) {
+  for (auto& mie : *block) {
+    if (mie.type == MFLOW_SOURCE_BLOCK) {
+      mie.src_block = std::make_unique<SourceBlock>(mie.src_block->src,
+                                                    mie.src_block->id, vals);
+      return;
+    }
+  }
+  ADD_FAILURE() << "Missing fixture SourceBlock";
+}
+
+void remove_test_profile(cfg::Block* block) {
+  for (auto it = block->begin(); it != block->end(); ++it) {
+    if (it->type == MFLOW_SOURCE_BLOCK) {
+      block->remove_mie(it);
+      return;
+    }
+  }
+  ADD_FAILURE() << "Missing fixture SourceBlock";
+}
+
+std::optional<method_splitting_impl::SplittableClosure> make_test_closure(
+    const std::shared_ptr<method_splitting_impl::MethodClosures>& mcs,
+    const std::vector<cfg::Block*>& heads,
+    cfg::Block* switch_block = nullptr) {
+  std::vector<const method_splitting_impl::Closure*> closures;
+  closures.reserve(heads.size());
+  UnorderedSet<cfg::BlockId> head_ids;
+  for (auto* head : heads) {
+    head_ids.insert(head->id());
+    auto it = std::find_if(
+        mcs->closures.begin(), mcs->closures.end(),
+        [head](const auto& closure) { return closure.target == head; });
+    if (it == mcs->closures.end()) {
+      ADD_FAILURE() << "Missing fixture closure";
+      return std::nullopt;
+    }
+    closures.push_back(&*it);
+  }
+  return method_splitting_impl::SplittableClosure{
+      .method_closures = mcs,
+      .switch_block = switch_block,
+      .closures = std::move(closures),
+      .grouped_heads = std::move(head_ids),
+      .args = {{0, type::_int(), nullptr}},
+      .rank = 0,
+      .added_code_size = 0,
+      .hot_split_kind = method_splitting_impl::HotSplitKind::HotCold,
+      .net_terms = std::nullopt};
+}
+
+DexMethod* make_source_block_copy(DexClass* cls,
+                                  DexMethod* method,
+                                  const std::vector<cfg::Block*>& heads,
+                                  cfg::Block* switch_block) {
+  method_splitting_impl::normalize_cfg_for_splitting(method);
+  auto rcfg = method_splitting_impl::reduce_cfg(method);
+  auto mcs = method_splitting_impl::discover_closures(method, rcfg);
+  EXPECT_NE(mcs, nullptr);
+  if (!mcs) {
+    return nullptr;
+  }
+  auto sc = make_test_closure(mcs, heads, switch_block);
+  if (!sc) {
+    return nullptr;
+  }
+  auto split = method_splitting_impl::SplitMethod::create(
+      *sc, cls->get_type(), DexString::make_string("profileCopy"),
+      sc->get_arg_types());
+  split.add_to_target();
+  split.apply_code_changes();
+  return split.get_new_method();
+}
+
+std::string shared_copy_fixture(bool loop = false) {
+  std::string code = R"((
+    (load-param v0)
+    (.src_block "LFoo;.bar:(I)I" 1 (10.0 100.0))
+    (if-eqz v0 :cold)
+    (.src_block "LFoo;.bar:(I)I" 2 (10.0 100.0))
+    (add-int v0 v0 v0)
+    (goto :join)
+    (:cold)
+    (.src_block "LFoo;.bar:(I)I" 3 (0.0 0.0))
+    (add-int v0 v0 v0)
+    (goto :private)
+    (:private)
+    (.src_block "LFoo;.bar:(I)I" 5 (0.0 0.0))
+    (add-int v0 v0 v0)
+    (:join)
+    (.src_block "LFoo;.bar:(I)I" 4 (10.0 100.0))
+    (add-int v0 v0 v0)
+  )";
+  code += loop ? R"(
+    (if-eqz v0 :tail)
+    (.src_block "LFoo;.bar:(I)I" 7 (10.0 100.0))
+    (add-int v0 v0 v0)
+    (goto :join)
+  )"
+               : "(goto :tail)\n";
+  return code + R"(
+    (:tail)
+    (.src_block "LFoo;.bar:(I)I" 6 (20.0 100.0))
+    (add-int v0 v0 v0)
+    (return v0)
+  ))";
+}
+
+} // namespace
+
+TEST_F(MethodSplitterTest,
+       SharedCopyPreservesInteractionsAndSourceBlockChains) {
+  auto [cls, method] = create("(I)I", shared_copy_fixture());
+  method->get_code()->build_cfg();
+  auto* head = profile_block(method, 3);
+  auto* private_block = profile_block(method, 5);
+  auto* join = profile_block(method, 4);
+  auto* tail = profile_block(method, 6);
+  ASSERT_NE(head, nullptr);
+  ASSERT_NE(private_block, nullptr);
+  ASSERT_NE(join, nullptr);
+  ASSERT_NE(tail, nullptr);
+  replace_test_profile(head, {{0, 0}, {1, 10}, {0, 0}, {0, 0}});
+  replace_test_profile(private_block, {{0, 0}, {0, 0}, {0, 0}, {0, 0}});
+  replace_test_profile(join, {{std::numeric_limits<float>::infinity(), 80},
+                              {10, 81},
+                              SourceBlock::Val::none(),
+                              {30, 83}});
+  replace_test_profile(tail, {{20, 90}, {21, 91}, {22, 92}, {23, 93}});
+  auto* head_sb = source_blocks::get_first_source_block(head);
+  head_sb->next = std::make_unique<SourceBlock>(
+      head_sb->src, 30,
+      std::vector<SourceBlock::Val>{
+          {0, 0}, {0, 0}, {0, 0}, SourceBlock::Val::none()});
+  auto* join_sb = source_blocks::get_first_source_block(join);
+  join_sb->next = std::make_unique<SourceBlock>(
+      join_sb->src, 40,
+      std::vector<SourceBlock::Val>{{11, 70}, {12, 71}, {13, 72}, {14, 73}});
+  const SourceBlock join_before(*join_sb);
+  const SourceBlock tail_before(*source_blocks::get_first_source_block(tail));
+  const SourceBlock head_before(*head_sb);
+  auto* split = make_source_block_copy(cls, method, {head});
+  ASSERT_NE(split, nullptr);
+  auto* copied_join = profile_block(split, 4);
+  auto* copied_tail = profile_block(split, 6);
+  ASSERT_NE(copied_join, nullptr);
+  ASSERT_NE(copied_tail, nullptr);
+  auto* copy_sb = source_blocks::get_first_source_block(copied_join);
+  ASSERT_NE(copy_sb->next, nullptr);
+  for (size_t i = 0; i < 4; ++i) {
+    SCOPED_TRACE(i);
+    const bool cold = i == 0 || i == 2;
+    EXPECT_EQ(copy_sb->get_val(i),
+              i == 2 ? std::nullopt
+              : cold ? std::optional<float>{0}
+                     : join_before.get_val(i));
+    EXPECT_EQ(copy_sb->next->get_val(i),
+              cold ? std::optional<float>{0} : join_before.next->get_val(i));
+    EXPECT_EQ(source_blocks::get_first_source_block(copied_tail)->get_val(i),
+              cold ? std::optional<float>{0} : tail_before.get_val(i));
+    EXPECT_EQ(copy_sb->get_appear100(i), join_before.get_appear100(i));
+    EXPECT_EQ(copy_sb->next->get_appear100(i),
+              join_before.next->get_appear100(i));
+    EXPECT_EQ(join_sb->get_at(i), join_before.get_at(i));
+    EXPECT_EQ(join_sb->next->get_at(i), join_before.next->get_at(i));
+    EXPECT_EQ(head_sb->get_at(i), head_before.get_at(i));
+    EXPECT_EQ(head_sb->next->get_at(i), head_before.next->get_at(i));
+  }
+}
+
+TEST_F(MethodSplitterTest,
+       PrivateOrHeadUnknownEvidenceProtectsSharedDescendants) {
+  for (bool at_head : {false, true}) {
+    for (int evidence = 0; evidence < 4; ++evidence) {
+      SCOPED_TRACE(at_head);
+      SCOPED_TRACE(evidence);
+      auto [cls, method] = create("(I)I", shared_copy_fixture());
+      method->get_code()->build_cfg();
+      auto* head = profile_block(method, 3);
+      auto* private_block = profile_block(method, 5);
+      auto* join = profile_block(method, 4);
+      auto* tail = profile_block(method, 6);
+      ASSERT_NE(head, nullptr);
+      ASSERT_NE(private_block, nullptr);
+      ASSERT_NE(join, nullptr);
+      ASSERT_NE(tail, nullptr);
+      replace_test_profile(head, {{0, 0}, {0, 0}});
+      replace_test_profile(private_block, {{0, 0}, {0, 0}});
+      replace_test_profile(join, {{10, 80}, {20, 81}});
+      replace_test_profile(tail, {{30, 90}, {40, 91}});
+      auto* seed = at_head ? head : private_block;
+      const auto seed_id = seed->id();
+      if (evidence == 0) {
+        replace_test_profile(seed, {{9, 70}, {0, 0}});
+      } else if (evidence == 1) {
+        auto* sb = source_blocks::get_first_source_block(seed);
+        sb->next = std::make_unique<SourceBlock>(
+            sb->src, 50,
+            std::vector<SourceBlock::Val>{SourceBlock::Val::none(), {0, 0}});
+      } else if (evidence == 2) {
+        remove_test_profile(seed);
+      } else {
+        replace_test_profile(seed, {{0, 0}});
+      }
+      auto before = source_blocks::gather_source_blocks(seed);
+      std::vector<SourceBlock> seed_before;
+      seed_before.reserve(before.size());
+      for (auto* sb : before) {
+        seed_before.emplace_back(*sb);
+      }
+      auto* split = make_source_block_copy(cls, method, {head});
+      ASSERT_NE(split, nullptr);
+      auto* copy_seed = split->get_code()->cfg().get_block(seed_id);
+      ASSERT_NE(copy_seed, nullptr);
+      auto copied_seed = source_blocks::gather_source_blocks(copy_seed);
+      ASSERT_EQ(copied_seed.size(), seed_before.size());
+      for (size_t s = 0; s < copied_seed.size(); ++s) {
+        EXPECT_EQ(copied_seed[s]->vals_size, seed_before[s].vals_size);
+        for (size_t i = 0; i < copied_seed[s]->vals_size; ++i) {
+          EXPECT_EQ(copied_seed[s]->get_at(i), seed_before[s].get_at(i));
+        }
+      }
+      auto* copy_join = profile_block(split, 4);
+      auto* copy_tail = profile_block(split, 6);
+      ASSERT_NE(copy_join, nullptr);
+      ASSERT_NE(copy_tail, nullptr);
+      for (size_t i = 0; i < 2; ++i) {
+        const bool protected_slot =
+            evidence == 2 || (evidence == 3 ? i == 1 : i == 0);
+        EXPECT_EQ(source_blocks::get_first_source_block(copy_join)->get_val(i),
+                  std::optional<float>{protected_slot ? i == 0 ? 10.0f : 20.0f
+                                                      : 0.0f});
+        EXPECT_EQ(source_blocks::get_first_source_block(copy_tail)->get_val(i),
+                  std::optional<float>{protected_slot ? i == 0 ? 30.0f : 40.0f
+                                                      : 0.0f});
+        EXPECT_EQ(source_blocks::get_first_source_block(join)->get_val(i),
+                  std::optional<float>{i == 0 ? 10.0f : 20.0f});
+      }
+    }
+  }
+}
+
+TEST_F(MethodSplitterTest, SharedLoopCopyDoesNotResurrectHotBackedgeCounts) {
+  auto [cls, method] = create("(I)I", shared_copy_fixture(true));
+  method->get_code()->build_cfg();
+  auto* head = profile_block(method, 3);
+  auto* join = profile_block(method, 4);
+  ASSERT_NE(head, nullptr);
+  ASSERT_NE(join, nullptr);
+  method_splitting_impl::ReducedControlFlowGraph graph(
+      method->get_code()->cfg());
+  EXPECT_GT(graph.get_reduced_block(join)->blocks.size(), 1u);
+  auto* split = make_source_block_copy(cls, method, {head});
+  ASSERT_NE(split, nullptr);
+  auto host_reached = method->get_code()->cfg().visit();
+  auto split_reached = split->get_code()->cfg().visit();
+  for (uint32_t id : {4u, 7u, 6u}) {
+    auto* original = profile_block(method, id);
+    auto* copy = profile_block(split, id);
+    ASSERT_NE(original, nullptr);
+    ASSERT_NE(copy, nullptr);
+    EXPECT_TRUE(host_reached[original->id()]);
+    EXPECT_TRUE(split_reached[copy->id()]);
+    auto* original_sb = source_blocks::get_first_source_block(original);
+    auto* copy_sb = source_blocks::get_first_source_block(copy);
+    EXPECT_EQ(copy_sb->get_val(0), std::optional<float>{0});
+    EXPECT_EQ(original_sb->get_val(0),
+              std::optional<float>{id == 6 ? 20.0f : 10.0f});
+    EXPECT_EQ(copy_sb->get_appear100(0), original_sb->get_appear100(0));
+  }
+}
+
+TEST_F(MethodSplitterTest, MixedSwitchHeadsProtectOnlyTheirSharedPaths) {
+  for (int evidence = 0; evidence < 4; ++evidence) {
+    SCOPED_TRACE(evidence);
+    auto [cls, method] = create("(I)I", R"((
+      (load-param v0)
+      (.src_block "LFoo;.bar:(I)I" 1 (10.0 100.0))
+      (switch v0 (:hot :retained))
+      (.src_block "LFoo;.bar:(I)I" 3 (0.0 0.0))
+      (add-int v0 v0 v0)
+      (goto :cold_join)
+      (:hot 0)
+      (.src_block "LFoo;.bar:(I)I" 4 (10.0 100.0))
+      (add-int v0 v0 v0)
+      (goto :hot_join)
+      (:retained 1)
+      (.src_block "LFoo;.bar:(I)I" 5 (10.0 100.0))
+      (if-eqz v0 :hot_join)
+      (:cold_join)
+      (.src_block "LFoo;.bar:(I)I" 6 (20.0 100.0))
+      (add-int v0 v0 v0)
+      (return v0)
+      (:hot_join)
+      (.src_block "LFoo;.bar:(I)I" 7 (30.0 100.0))
+      (add-int v0 v0 v0)
+      (return v0)
+    ))");
+    method->get_code()->build_cfg();
+    auto* cold = profile_block(method, 3);
+    auto* hot = profile_block(method, 4);
+    auto* dispatch = profile_block(method, 1);
+    ASSERT_NE(cold, nullptr);
+    ASSERT_NE(hot, nullptr);
+    ASSERT_NE(dispatch, nullptr);
+    replace_test_profile(cold, {{0, 0}, {0, 0}});
+    replace_test_profile(hot, {{10, 70}, {0, 0}});
+    replace_test_profile(profile_block(method, 6), {{20, 80}, {21, 81}});
+    replace_test_profile(profile_block(method, 7), {{30, 90}, {31, 91}});
+    if (evidence == 1) {
+      replace_test_profile(hot, {{10, 70}, SourceBlock::Val::none()});
+    } else if (evidence == 2) {
+      replace_test_profile(hot, {{10, 70}});
+    } else if (evidence == 3) {
+      remove_test_profile(hot);
+    }
+    auto* split = make_source_block_copy(cls, method, {cold, hot}, dispatch);
+    ASSERT_NE(split, nullptr);
+    auto* cold_copy = profile_block(split, 6);
+    auto* hot_copy = profile_block(split, 7);
+    ASSERT_NE(cold_copy, nullptr);
+    ASSERT_NE(hot_copy, nullptr);
+    for (size_t i = 0; i < 2; ++i) {
+      EXPECT_EQ(source_blocks::get_first_source_block(cold_copy)->get_val(i),
+                std::optional<float>{0});
+      EXPECT_EQ(source_blocks::get_first_source_block(hot_copy)->get_val(i),
+                std::optional<float>{i == 0          ? 30.0f
+                                     : evidence == 0 ? 0.0f
+                                                     : 31.0f});
+      EXPECT_EQ(source_blocks::get_first_source_block(profile_block(method, 6))
+                    ->get_val(i),
+                std::optional<float>{i == 0 ? 20.0f : 21.0f});
+      EXPECT_EQ(source_blocks::get_first_source_block(profile_block(method, 7))
+                    ->get_val(i),
+                std::optional<float>{i == 0 ? 30.0f : 31.0f});
+    }
+  }
+}
+
+TEST_F(MethodSplitterTest, PreCreatedCopiesPreserveSharedAndEvictedProfiles) {
+  for (int count : {2, 3}) {
+    for (bool keep_host_path : {false, true}) {
+      for (bool reverse : {false, true}) {
+        SCOPED_TRACE(count);
+        SCOPED_TRACE(keep_host_path);
+        SCOPED_TRACE(reverse);
+        std::string code = R"((
+          (load-param v0)
+          (.src_block "LFoo;.bar:(I)I" 1 (10.0 100.0))
+        )";
+        for (int i = 0; i < count; ++i) {
+          code += "(if-eqz v0 :cold" + std::to_string(i) + ")\n";
+          code += "(.src_block \"LFoo;.bar:(I)I\" " + std::to_string(100 + i) +
+                  " (10.0 100.0))\n";
+        }
+        code += "(add-int v0 v0 v0)\n";
+        code += keep_host_path ? "(goto :join)\n" : "(return v0)\n";
+        for (int i = 0; i < count; ++i) {
+          code += "(:cold" + std::to_string(i) + ")\n";
+          code += "(.src_block \"LFoo;.bar:(I)I\" " + std::to_string(10 + i) +
+                  " (0.0 0.0))\n";
+          code += "(add-int v0 v0 v0)\n(goto :join)\n";
+        }
+        // Deliberately inconsistent input: cold heads share a hot tail.
+        code += R"(
+          (:join)
+          (.src_block "LFoo;.bar:(I)I" 4 (10.0 80.0))
+          (add-int v0 v0 v0)
+          (return v0)
+        ))";
+        auto [cls, method] = create("(I)I", code);
+        method->get_code()->build_cfg();
+        method_splitting_impl::normalize_cfg_for_splitting(method);
+        auto rcfg = method_splitting_impl::reduce_cfg(method);
+        auto mcs = method_splitting_impl::discover_closures(method, rcfg);
+        ASSERT_NE(mcs, nullptr);
+        auto* join = profile_block(method, 4);
+        ASSERT_NE(join, nullptr);
+        const auto join_id = join->id();
+        auto* host_sb = source_blocks::get_first_source_block(join);
+        const SourceBlock before(*host_sb);
+        std::deque<method_splitting_impl::SplittableClosure> closures;
+        std::vector<method_splitting_impl::SplitMethod> splits;
+        splits.reserve(count);
+        for (int i = 0; i < count; ++i) {
+          auto* head = profile_block(method, 10 + i);
+          ASSERT_NE(head, nullptr);
+          auto closure = make_test_closure(mcs, {head});
+          ASSERT_TRUE(closure);
+          closures.push_back(std::move(*closure));
+          splits.push_back(method_splitting_impl::SplitMethod::create(
+              closures.back(), cls->get_type(),
+              DexString::make_string("copy" + std::to_string(i)),
+              closures.back().get_arg_types()));
+          splits.back().add_to_target();
+        }
+        // All copies exist before any host edges are rewritten.
+        for (int i = 0; i < count; ++i) {
+          const int index = reverse ? count - 1 - i : i;
+          splits[index].apply_code_changes();
+          auto& host_cfg = method->get_code()->cfg();
+          const bool shared = host_cfg.visit()[join_id];
+          auto& split_cfg = splits[index].get_new_method()->get_code()->cfg();
+          ASSERT_TRUE(split_cfg.visit()[join_id]);
+          auto* copy_sb = source_blocks::get_first_source_block(
+              split_cfg.get_block(join_id));
+          ASSERT_NE(copy_sb, nullptr);
+          EXPECT_EQ(copy_sb->get_val(0),
+                    shared ? std::optional<float>{0} : before.get_val(0));
+          EXPECT_EQ(copy_sb->get_appear100(0), before.get_appear100(0));
+          EXPECT_EQ(host_sb->get_at(0), before.get_at(0));
+          EXPECT_EQ(host_sb->src, before.src);
+          EXPECT_EQ(host_sb->id, before.id);
+          EXPECT_EQ(host_sb->vals_size, before.vals_size);
+          EXPECT_EQ(shared, keep_host_path || i + 1 < count);
+        }
+      }
+    }
+  }
 }
 
 TEST_F(MethodSplitterTest, UndupReturns) {

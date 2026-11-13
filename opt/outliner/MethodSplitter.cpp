@@ -393,6 +393,99 @@ class SplitRun {
   AtomicMap<std::string, size_t> m_uniquifiers;
 };
 
+// Whether `b` may have run in interaction `i`: it has no SourceBlock, or one of
+// its SourceBlocks has a nonzero or unknown value there.
+bool may_have_run(const cfg::Block* b, size_t i) {
+  bool has_sb{false};
+  bool all_cold{true};
+  source_blocks::foreach_source_block(b, [&](const auto* sb) {
+    has_sb = true;
+    const auto val = i < sb->vals_size ? sb->get_val(i) : std::nullopt;
+    all_cold &= val && *val == 0.0f;
+  });
+  return !has_sb || !all_cold;
+}
+
+// The split's copy of a block that the host still runs starts with the host's
+// counts, which describe the host's runs. Set the copy's known counts to zero
+// unless the split may have run it on its own path. Only the copies change:
+// host counts, unknown counts and counts of blocks only the split runs stay.
+// `deep_copy` keeps block ids, so a block and its copy have the same id. This
+// runs after the host is rewired and before either CFG is pruned.
+// Counts are set to zero rather than scaled by zero, because infinity times
+// zero is unknown.
+void normalize_shared_source_blocks(const SplittableClosure& sc,
+                                    cfg::ControlFlowGraph& host_cfg,
+                                    cfg::ControlFlowGraph& split_cfg) {
+  const auto host_reached = host_cfg.visit();
+  const auto split_reached = split_cfg.visit();
+  auto is_shared = [&](const cfg::Block* b) {
+    return host_reached[b->id()] && split_reached[b->id()];
+  };
+  // A head, or a block that only the split still reaches, counts the split's
+  // own runs. Any other block the host still reaches also counts the host's.
+  auto is_own = [&](const cfg::Block* b) {
+    return split_reached[b->id()] &&
+           (!host_reached[b->id()] || sc.grouped_heads.contains(b->id()));
+  };
+  UnorderedSet<const ReducedBlock*> components;
+  for (const auto* closure : sc.closures) {
+    insert_unordered_iterable(components, closure->reduced_components);
+  }
+  size_t interactions{0};
+  for (const auto* rb : UnorderedIterable(components)) {
+    for (const auto* block : UnorderedIterable(rb->blocks)) {
+      if (is_shared(block)) {
+        source_blocks::foreach_source_block(block, [&](const auto* sb) {
+          interactions = std::max(interactions, size_t{sb->vals_size});
+        });
+      }
+    }
+  }
+  // `blocks()` lists each reduced block after all of its predecessors, with
+  // loops collapsed into one block, so one pass in that order decides every
+  // predecessor before the block itself.
+  const auto reduced_blocks = sc.method_closures->rcfg->blocks();
+  for (size_t i = 0; i < interactions; ++i) {
+    UnorderedSet<const ReducedBlock*> protected_blocks;
+    for (const auto* rb : reduced_blocks) {
+      if (!components.contains(rb)) {
+        continue;
+      }
+      // A block's copies keep their counts when the block, or any block before
+      // it, may have run on the split's own path, even behind a zero head.
+      const bool is_protected =
+          unordered_any_of(rb->preds,
+                           [&](const auto* e) {
+                             redex_assert(e->src->id < rb->id);
+                             return protected_blocks.contains(e->src);
+                           }) ||
+          unordered_any_of(rb->blocks, [&](const auto* b) {
+            return is_own(b) && may_have_run(b, i);
+          });
+      if (is_protected) {
+        protected_blocks.insert(rb);
+        continue;
+      }
+      for (const auto* block : UnorderedIterable(rb->blocks)) {
+        if (!is_shared(block)) {
+          continue;
+        }
+        auto* copy = split_cfg.get_block(block->id());
+        source_blocks::foreach_source_block(copy, [&](auto* sb) {
+          if (i < sb->vals_size) {
+            sb->apply_at(i, [](auto& val) {
+              if (val) {
+                val->val = 0.0f;
+              }
+            });
+          }
+        });
+      }
+    }
+  }
+}
+
 } // namespace
 
 namespace method_splitting_impl {
@@ -701,6 +794,8 @@ void SplitMethod::apply_code_changes() {
     launchpad->push_back(
         (new IRInstruction(opcode::return_opcode(rtype)))->set_src(0, 0));
   }
+  normalize_shared_source_blocks(m_splittable_closure, cfg,
+                                 m_new_method->get_code()->cfg());
 }
 
 void split_methods_in_stores(

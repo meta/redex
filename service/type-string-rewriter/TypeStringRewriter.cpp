@@ -214,12 +214,14 @@ uint32_t rewrite_string_literal_instructions(const Scope& scope,
         continue;
       }
       const auto* old_str = insn->get_string();
-      const auto* internal_str = DexString::get_string(
-          java_names::external_to_internal(old_str->str()));
-      if ((internal_str == nullptr) ||
-          (DexType::get_type(internal_str) == nullptr)) {
+      // An array name such as "[Lcom.foo.Bar;" is a valid class name even
+      // when the array type itself appears nowhere else in the program.
+      if (java_names::get_element_type_from_external_name(old_str->str()) ==
+          nullptr) {
         continue;
       }
+      const auto* internal_str = DexString::make_string(
+          java_names::external_to_internal(old_str->str()));
       const auto* new_type_name = mapping.get_new_type_name(internal_str);
       if (new_type_name == nullptr) {
         continue;

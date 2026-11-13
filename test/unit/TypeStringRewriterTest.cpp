@@ -83,3 +83,39 @@ TEST_F(TypeStringRewriterTest, rewrites_array_class_name_literal) {
   )");
   EXPECT_CODE_EQ(code, expected.get());
 }
+
+// Class.forName("[Lcom.foo.Bar;") is valid even when the program mentions the
+// type Bar[] nowhere else.
+TEST_F(TypeStringRewriterTest,
+       rewrites_array_class_name_literal_of_unused_array) {
+  DexType::make_type("Lcom/foo/Qux;");
+
+  auto* method = assembler::class_with_method("LUser2;",
+                                              R"(
+    (method (public static) "LUser2;.load:()V"
+      (
+        (const-string "[[Lcom.foo.Qux;")
+        (move-result-pseudo-object v0)
+        (return-void)
+      )
+    )
+  )");
+  auto* code = method->get_code();
+  code->build_cfg();
+  Scope scope{type_class(method->get_class())};
+
+  rewriter::TypeStringMap mapping;
+  mapping.add_type_name(DexString::make_string("Lcom/foo/Qux;"),
+                        DexString::make_string("LX/q;"));
+  EXPECT_EQ(rewriter::rewrite_string_literal_instructions(scope, mapping), 1u);
+
+  code->clear_cfg();
+  auto expected = assembler::ircode_from_string(R"(
+    (
+      (const-string "[[LX.q;")
+      (move-result-pseudo-object v0)
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(code, expected.get());
+}

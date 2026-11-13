@@ -105,8 +105,11 @@ const DexString* lookup_signature_annotation(
 
 uint32_t get_array_level(const DexString* name) {
   uint32_t level = 0;
-  const auto* str = name->c_str();
-  while (*str++ == '[') {
+  for (const char c : name->str()) {
+    if (c != '[') {
+      break;
+    }
+    ++level;
   }
   return level;
 }

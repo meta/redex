@@ -221,6 +221,7 @@ check_PROGRAMS = \
     type_inference_test \
     type_ref_updater_test \
     type_reference_test \
+    type_string_rewriter_test \
     type_system_test \
     type_util_test \
     typed_nonreturning_methods_test \
@@ -682,6 +683,8 @@ type_inference_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 type_ref_updater_test_SOURCES = TypeRefUpdaterTest.cpp
 
 type_reference_test_SOURCES = TypeReferenceTest.cpp
+
+type_string_rewriter_test_SOURCES = TypeStringRewriterTest.cpp
 
 type_system_test_SOURCES = TypeSystemTest.cpp ScopeHelper.cpp
 type_system_test_LDADD = $(COMMON_MOCK_TEST_LIBS)

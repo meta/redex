@@ -242,6 +242,10 @@ uint32_t remove_duplicated_vmethods(
   return ret;
 }
 
+} // namespace
+
+namespace dedup_vmethods {
+
 /**
  * Collect all the methods that are called with INVOKE_SUPPER opcode
  */
@@ -258,9 +262,6 @@ void collect_all_invoke_super_called(
     });
   });
 }
-} // namespace
-
-namespace dedup_vmethods {
 
 uint32_t dedup(const DexStoresVector& stores,
                method_profiles::MethodProfiles* method_profiles,

@@ -10,15 +10,19 @@
 #include <cstdint>
 #include <vector>
 
+#include "ConcurrentContainers.h"
 #include "PositionJoin.h"
 
 namespace method_profiles {
 class MethodProfiles;
 } // namespace method_profiles
 
+class DexClass;
 class DexMethod;
+class DexMethodRef;
 class DexStore;
 using DexStoresVector = std::vector<DexStore>;
+using Scope = std::vector<DexClass*>;
 
 /**
  * Remove small identical virtual methods.
@@ -42,4 +46,8 @@ uint32_t dedup(const DexStoresVector& stores,
 // a superclass: small code without invoke-super, renamable, not a root, and
 // not excluded from optimizations.
 bool is_removable_copy(const DexMethod* method);
+
+// Collects every method that an invoke-super in `scope` names.
+void collect_all_invoke_super_called(
+    const Scope& scope, ConcurrentSet<DexMethodRef*>* super_invoked_methods);
 } // namespace dedup_vmethods

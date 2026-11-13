@@ -582,6 +582,7 @@ libopt_la_SOURCES = \
 	opt/verifier/Verifier.cpp \
 	opt/vertical_merging/VerticalMerging.cpp \
 	opt/virtual_merging/DedupVirtualMethods.cpp \
+	opt/virtual_merging/LiftVirtualMethods.cpp \
 	opt/virtual_merging/VirtualMerging.cpp \
 	opt/virtual_scope/MethodDevirtualizationPass.cpp \
 	opt/wrapped-primitives/WrappedPrimitivesPass.cpp \

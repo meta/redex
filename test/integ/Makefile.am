@@ -37,6 +37,7 @@ check_PROGRAMS = \
     instruction_sequence_outliner_test \
     iodi_test \
     ip_reflection_analysis_test \
+    lift_vmethods_test \
     method_override_graph_test \
     monotonic_fixpoint_test \
     partial_application_test \
@@ -90,6 +91,7 @@ TESTS = \
     final_inline_analysis_test \
     iodi_test \
     ip_reflection_analysis_test \
+    lift_vmethods_test \
     method_override_graph_test \
     peephole_test \
     points_to_semantics_test \
@@ -161,6 +163,9 @@ EXTRA_iodi_test_DEPENDENCIES = iodi_test-class.dex
 
 ip_reflection_analysis_test_SOURCES = IPReflectionAnalysisTest.cpp
 EXTRA_ip_reflection_analysis_test_DEPENDENCIES = ip_reflection_analysis_test-class.dex
+
+lift_vmethods_test_SOURCES = LiftVirtualMethodsTest.cpp
+EXTRA_lift_vmethods_test_DEPENDENCIES = lift_vmethods_test-class.dex
 
 method_override_graph_test_SOURCES = MethodOverrideGraphTest.cpp
 EXTRA_method_override_graph_test_DEPENDENCIES = method_override_graph_test-class.dex
@@ -286,6 +291,9 @@ iodi_test-class.jar: IODI.java
 	$(create_jar)
 
 ip_reflection_analysis_test-class.jar: IPReflectionAnalysisTest.java
+	$(create_jar)
+
+lift_vmethods_test-class.jar: LiftVirtualMethodsTest.java
 	$(create_jar)
 
 method_override_graph_test-class.jar: MethodOverrideGraphTest.java

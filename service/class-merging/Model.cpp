@@ -1433,6 +1433,7 @@ ModelStats& ModelStats::operator+=(const ModelStats& stats) {
   m_num_generated_classes += stats.m_num_generated_classes;
   m_num_ctor_dedupped += stats.m_num_ctor_dedupped;
   m_num_static_non_virt_dedupped += stats.m_num_static_non_virt_dedupped;
+  m_position_join_stats += stats.m_position_join_stats;
   m_num_vmethods_dedupped += stats.m_num_vmethods_dedupped;
   m_num_const_lifted_methods += stats.m_num_const_lifted_methods;
   m_updated_profile_method += stats.m_updated_profile_method;
@@ -1479,6 +1480,13 @@ void ModelStats::update_redex_stats(const std::string& prefix,
   mgr.incr_metric(prefix + "_ctor_dedupped", m_num_ctor_dedupped);
   mgr.incr_metric(prefix + "_static_non_virt_dedupped",
                   m_num_static_non_virt_dedupped);
+  mgr.incr_metric(prefix + "_" + positions::metrics::kMarkedUnreliable,
+                  m_position_join_stats.marked_unreliable);
+  mgr.incr_metric(prefix + "_" + positions::metrics::kNotRecorded,
+                  m_position_join_stats.not_recorded);
+  mgr.incr_metric(
+      prefix + "_" + positions::metrics::kMergedWithoutCorrespondence,
+      m_position_join_stats.merged_without_correspondence);
   mgr.incr_metric(prefix + "_vmethods_dedupped", m_num_vmethods_dedupped);
   mgr.incr_metric(prefix + "_updated_profile_method", m_updated_profile_method);
   mgr.set_metric(prefix + "_const_lifted_methods", m_num_const_lifted_methods);

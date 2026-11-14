@@ -104,6 +104,10 @@ inline FidelityChange mark_merged(DexPosition* survivor) {
 struct JoinStats {
   size_t marked_unreliable{0};
   size_t not_recorded{0};
+  // Folds whose throwing instructions could not be paired at all, so every
+  // surviving position was joined against nothing rather than against the
+  // position it actually folded.
+  size_t merged_without_correspondence{0};
 
   void account(FidelityChange change) {
     if (change == FidelityChange::BecameUnreliable) {
@@ -113,9 +117,12 @@ struct JoinStats {
 
   void count_unrecorded() { ++not_recorded; }
 
+  void count_uncorresponded() { ++merged_without_correspondence; }
+
   JoinStats& operator+=(const JoinStats& that) {
     marked_unreliable += that.marked_unreliable;
     not_recorded += that.not_recorded;
+    merged_without_correspondence += that.merged_without_correspondence;
     return *this;
   }
 };
@@ -123,6 +130,8 @@ struct JoinStats {
 namespace metrics {
 constexpr const char* kMarkedUnreliable = "positions_marked_unreliable";
 constexpr const char* kNotRecorded = "merges_not_recorded";
+constexpr const char* kMergedWithoutCorrespondence =
+    "positions_merged_without_correspondence";
 } // namespace metrics
 
 } // namespace positions

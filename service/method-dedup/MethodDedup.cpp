@@ -7,6 +7,8 @@
 
 #include "MethodDedup.h"
 
+#include "PositionAmbiguity.h"
+
 #include "ControlFlow.h"
 #include "Debug.h"
 #include "DedupBlocks.h"
@@ -72,6 +74,9 @@ UnorderedBag<MethodOrderedSet> get_duplicate_methods_simple(
 
 namespace method_dedup {
 
+// Victims already joined into each survivor.
+using JoinedPairs = UnorderedMap<DexMethod*, UnorderedSet<DexMethod*>>;
+
 UnorderedBag<MethodOrderedSet> group_similar_methods(
     const std::vector<DexMethod*>& methods) {
 
@@ -131,7 +136,9 @@ size_t dedup_methods_helper(
     const std::vector<DexMethod*>& to_dedup,
     bool dedup_fill_in_stack_trace,
     std::vector<DexMethod*>& replacements,
-    std::optional<UnorderedMap<DexMethod*, MethodOrderedSet>>& new_to_old) {
+    std::optional<UnorderedMap<DexMethod*, MethodOrderedSet>>& new_to_old,
+    JoinedPairs* already_joined,
+    positions::JoinStats* join_stats) {
   if (to_dedup.size() <= 1) {
     replacements = to_dedup;
     return 0;
@@ -165,6 +172,11 @@ size_t dedup_methods_helper(
 
     replacements.push_back(replacement);
     if (group.size() > 1) {
+      // A survivor can reappear at a later fixed-point iteration once invoke
+      // references are rewritten, bringing victims the earlier iterations could
+      // not see.
+      positions::join_new_throwing_positions(
+          replacement, group, &(*already_joined)[replacement], join_stats);
       dedup_count += group.size() - 1;
       TRACE(METH_DEDUP,
             9,
@@ -182,9 +194,14 @@ size_t dedup_methods(
     const std::vector<DexMethod*>& to_dedup,
     bool dedup_fill_in_stack_trace,
     std::vector<DexMethod*>& replacements,
-    std::optional<UnorderedMap<DexMethod*, MethodOrderedSet>>& new_to_old) {
+    std::optional<UnorderedMap<DexMethod*, MethodOrderedSet>>& new_to_old,
+    positions::JoinStats* join_stats) {
   size_t total_dedup_count = 0;
   auto to_dedup_temp = to_dedup;
+  // Owned here rather than inside the helper: the point is to span the whole
+  // fixed point, and a record recreated per pass would rejoin exactly the pairs
+  // it is meant to suppress.
+  JoinedPairs already_joined;
   while (true) {
     TRACE(METH_DEDUP,
           8,
@@ -194,7 +211,9 @@ size_t dedup_methods(
                                               to_dedup_temp,
                                               dedup_fill_in_stack_trace,
                                               replacements,
-                                              new_to_old);
+                                              new_to_old,
+                                              &already_joined,
+                                              join_stats);
     total_dedup_count += dedup_count;
     TRACE(METH_DEDUP, 8, "dedup: static|non_virt dedupped %zu", dedup_count);
     if (dedup_count == 0) {

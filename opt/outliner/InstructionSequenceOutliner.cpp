@@ -2922,7 +2922,17 @@ class OutlinedMethodBodySetter {
           }
           if (any_changed) {
             if (current_patterns.size() == 1) {
-              get_or_add_cloned_dbg_position(position_switch.front().position);
+              // Always push a new leaf: the cache would return an earlier
+              // leaf without a position entry, leaving the instructions
+              // under whatever position came last.
+              auto* dbg_pos = position_switch.front().position;
+              auto cloned_dbg_pos = std::make_unique<DexPosition>(*dbg_pos);
+              if (dbg_pos->parent != nullptr) {
+                cloned_dbg_pos->parent =
+                    get_or_add_cloned_dbg_position(dbg_pos->parent);
+              }
+              code->push_back(std::move(cloned_dbg_pos));
+              m_outlined_method_positions++;
             } else {
               always_assert(position_switch.size() >= 2);
               auto switch_id = manager->make_switch(position_switch);

@@ -11,6 +11,7 @@
 #include <json/reader.h>
 #include <json/value.h>
 #include <optional>
+#include <set>
 #include <unordered_set>
 
 #include "ControlFlow.h"
@@ -1145,4 +1146,86 @@ TEST_F(InstructionSequenceOutlinerTest, check_positions) {
     }
   }
   EXPECT_EQ(dex_cls_set.size(), 2);
+}
+
+namespace {
+std::vector<DexMethod*> aba_find_vmethods(std::vector<DexStore>& stores) {
+  const std::set<std::string_view> names{"basic1", "basic2",     "basic3",
+                                         "basic4", "in_try",     "twice1",
+                                         "twice2", "secondary1", "secondary2"};
+  std::vector<DexMethod*> methods;
+  for (auto& store : stores) {
+    for (const auto& classes : store.get_dexen()) {
+      for (const auto& cls : classes) {
+        for (const auto& m : cls->get_vmethods()) {
+          if (names.count(m->get_name()->str()) != 0u) {
+            methods.push_back(m);
+          }
+        }
+      }
+    }
+  }
+  std::sort(methods.begin(), methods.end(), compare_dexmethods);
+  return methods;
+}
+} // namespace
+
+// Slots A, B, A: the third run of instructions selects the position of the
+// first again, so it must be under A, not left under B.
+TEST_F(InstructionSequenceOutlinerTest,
+       a_slot_returning_to_an_earlier_position_selects_it_again) {
+  auto methods = aba_find_vmethods(stores);
+  ASSERT_FALSE(methods.empty());
+  // One method string and file for every call site, so all occurrences intern
+  // to one pattern and the outlined method has no switch. The k-th println
+  // line of each five gets lines[k]; the third returns to the first's line.
+  const std::vector<uint32_t> lines{10, 11, 10, 12, 13};
+  const auto* same_method = DexString::make_string("LSame;.m:()V");
+  const auto* same_file = DexString::make_string("Same.java");
+  for (auto* m : methods) {
+    cfg::ScopedCFG scoped_cfg(m->get_code());
+    size_t sgets = 0;
+    DexPosition* pending = nullptr;
+    for (auto* block : scoped_cfg->blocks()) {
+      for (auto& mie : *block) {
+        if (mie.type == MFLOW_POSITION && mie.pos->file != nullptr) {
+          pending = mie.pos.get();
+          pending->bind(same_method, same_file);
+          // A position inside a println line keeps that line.
+          pending->line =
+              sgets == 0 ? 1 : lines.at(((sgets - 1) / 3) % lines.size());
+        } else if (mie.type == MFLOW_OPCODE) {
+          if (pending != nullptr && opcode::is_an_sget(mie.insn->opcode()) &&
+              sgets % 3 == 0) {
+            pending->line = lines.at((sgets / 3) % lines.size());
+          }
+          pending = nullptr;
+          if (opcode::is_an_sget(mie.insn->opcode())) {
+            ++sgets;
+          }
+        }
+      }
+    }
+    ASSERT_EQ(sgets % 15, 0u);
+  }
+  run_passes({new InstructionSequenceOutliner()});
+
+  cfg::ScopedCFG caller_cfg(methods[0]->get_code());
+  auto* ref = find_invoked_method(*caller_cfg, "$outline");
+  ASSERT_NE(ref, nullptr);
+  auto* code = ref->as_def()->get_code();
+  cfg::ScopedCFG scoped_cfg(code);
+  std::vector<uint32_t> println_lines;
+  const DexPosition* current = nullptr;
+  for (auto* block : scoped_cfg->blocks()) {
+    for (const auto& mie : *block) {
+      if (mie.type == MFLOW_POSITION) {
+        current = mie.pos.get();
+      } else if (mie.type == MFLOW_OPCODE && mie.insn->has_method() &&
+                 mie.insn->get_method()->get_name()->str() == "println") {
+        println_lines.push_back(current == nullptr ? 0 : current->line);
+      }
+    }
+  }
+  EXPECT_EQ(println_lines, lines);
 }

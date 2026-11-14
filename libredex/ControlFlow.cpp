@@ -29,23 +29,16 @@ namespace {
 
 bool edge_type_structural_equals(const cfg::CompactEdgeVector& e1,
                                  const cfg::CompactEdgeVector& e2) {
-  if (e1.empty() && e2.empty()) {
-    return true;
-  }
-
-  if (e1.empty() || e2.empty()) {
-    return false;
-  }
-
-  if (e1.size() != e2.size()) {
-    return false;
-  }
   std::array<ssize_t, cfg::EDGE_TYPE_SIZE> edge_types{};
-  for (size_t i = 0; i < e1.size(); i++) {
-    edge_types[e1[i]->type()] += 1;
-    edge_types[e2[i]->type()] -= 1;
+  for (const auto* e : e1) {
+    edge_types[e->type()] += 1;
   }
-
+  for (const auto* e : e2) {
+    edge_types[e->type()] -= 1;
+  }
+  // Ghost edges describe no code: `calculate_exit_block()` adds them to one
+  // graph and not to an otherwise identical one.
+  edge_types[cfg::EDGE_GHOST] = 0;
   return std::all_of(edge_types.begin(), edge_types.end(),
                      [](const ssize_t& count) { return count == 0; });
 }
@@ -3168,8 +3161,26 @@ bool ControlFlowGraph::structural_equals(const ControlFlowGraph& other) const {
 bool ControlFlowGraph::structural_equals(
     const ControlFlowGraph& other,
     const InstructionEquality& instruction_equals) const {
-  if (this->num_blocks() != other.num_blocks() ||
-      this->num_edges() != other.num_edges()) {
+  // The ghost exit block and its edges describe no code:
+  // `calculate_exit_block()` adds them to one graph and not to an otherwise
+  // identical one.
+  auto count_code_blocks_and_edges = [](const ControlFlowGraph& cfg) {
+    auto blocks = cfg.num_blocks();
+    auto edges = cfg.num_edges();
+    const auto* exit = cfg.exit_block();
+    if (exit != nullptr) {
+      auto ghost_edges =
+          std::count_if(exit->preds().begin(), exit->preds().end(),
+                        [](const Edge* e) { return e->type() == EDGE_GHOST; });
+      if (ghost_edges > 0) {
+        blocks -= 1;
+        edges -= ghost_edges;
+      }
+    }
+    return std::make_pair(blocks, edges);
+  };
+  if (count_code_blocks_and_edges(*this) !=
+      count_code_blocks_and_edges(other)) {
     return false;
   }
 
@@ -3198,16 +3209,6 @@ bool ControlFlowGraph::structural_equals(
   // Check entry block.
   if (!this->entry_block()->extended_structural_equals(other.entry_block(),
                                                        instruction_equals)) {
-    return false;
-  }
-
-  // Check exit_block. Then no need to check EDGE_GHOST later.
-  if (this->exit_block() != nullptr) {
-    if (!this->exit_block()->extended_structural_equals(other.exit_block(),
-                                                        instruction_equals)) {
-      return false;
-    }
-  } else if (other.exit_block() != nullptr) {
     return false;
   }
 

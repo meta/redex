@@ -1083,6 +1083,38 @@ TEST_F(ControlFlowTest, structural_equals_switch_case_keys) {
   EXPECT_FALSE(keys_0_1->cfg().structural_equals(keys_1_2->cfg()));
 }
 
+TEST_F(ControlFlowTest, structural_equals_ignores_exit_block_cache) {
+  // One exit: the exit block is the returning block itself.
+  constexpr const char* kOneExit = R"(
+    (
+      (load-param v0)
+      (return v0)
+    )
+  )";
+  // Two exits: calculate_exit_block() adds a ghost exit block.
+  constexpr const char* kTwoExits = R"(
+    (
+      (load-param v0)
+      (if-eqz v0 :zero)
+      (return v0)
+      (:zero)
+      (const v0 1)
+      (return v0)
+    )
+  )";
+  for (const auto* code_str : {kOneExit, kTwoExits}) {
+    auto computed = assembler::ircode_from_string(code_str);
+    auto lazy = assembler::ircode_from_string(code_str);
+    computed->build_cfg();
+    lazy->build_cfg();
+    computed->cfg().calculate_exit_block();
+    ASSERT_NE(computed->cfg().exit_block(), nullptr);
+    ASSERT_EQ(lazy->cfg().exit_block(), nullptr);
+    EXPECT_TRUE(lazy->cfg().structural_equals(computed->cfg())) << code_str;
+    EXPECT_TRUE(computed->cfg().structural_equals(lazy->cfg())) << code_str;
+  }
+}
+
 TEST_F(ControlFlowTest, structural_equals_catch_types) {
   // The catch type lives on the CFG throw edge, not on any instruction. An
   // IllegalArgumentException thrown by bar() is caught by the RuntimeException

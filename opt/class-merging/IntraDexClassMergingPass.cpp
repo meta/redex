@@ -112,6 +112,8 @@ void IntraDexClassMergingPass::bind_config() {
 void IntraDexClassMergingPass::run_pass(DexStoresVector& stores,
                                         ConfigFiles& conf,
                                         PassManager& mgr) {
+  mgr.set_metric("num_merged_volatile_fields", 0);
+  mgr.set_metric("num_merged_final_fields", 0);
   // Fill the merging configurations.
   m_merging_spec.name = "Intra Dex";
   m_merging_spec.class_name_prefix = "IDx";

@@ -655,7 +655,18 @@ std::vector<DexClass*> ModelMerger::merge_model(
   for (const auto* merger : to_materialize) {
     auto* type = const_cast<DexType*>(merger->type);
     for (const auto* mergeable : merger->mergeables) {
-      loosen_access_modifier_except_vmethods(type_class(mergeable));
+      auto* cls = type_class(mergeable);
+      // Count source instance fields, not coalesced slots or shape
+      // placeholders.
+      for (auto* field : cls->get_ifields()) {
+        if (is_volatile(field)) {
+          ++m_stats.m_num_merged_volatile_fields;
+        }
+        if (is_final(field)) {
+          ++m_stats.m_num_merged_final_fields;
+        }
+      }
+      loosen_access_modifier_except_vmethods(cls);
       mergeable_to_merger[mergeable] = type;
     }
   }

@@ -1428,6 +1428,8 @@ ModelStats& ModelStats::operator+=(const ModelStats& stats) {
   m_approx_stats += stats.m_approx_stats;
 
   m_num_classes_merged += stats.m_num_classes_merged;
+  m_num_merged_volatile_fields += stats.m_num_merged_volatile_fields;
+  m_num_merged_final_fields += stats.m_num_merged_final_fields;
   m_num_generated_classes += stats.m_num_generated_classes;
   m_num_ctor_dedupped += stats.m_num_ctor_dedupped;
   m_num_static_non_virt_dedupped += stats.m_num_static_non_virt_dedupped;

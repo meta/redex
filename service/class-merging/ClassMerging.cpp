@@ -152,6 +152,9 @@ ModelStats merge_model(const TypeSystem& type_system,
   auto num_dedupped = method_dedup::dedup_constructors(merger_classes, scope);
   mm.increase_ctor_dedupped_stats(num_dedupped);
   stats += mm.get_model_stats();
+  mgr.incr_metric("num_merged_volatile_fields",
+                  stats.m_num_merged_volatile_fields);
+  mgr.incr_metric("num_merged_final_fields", stats.m_num_merged_final_fields);
   stats.update_redex_stats(spec.class_name_prefix, mgr);
   return stats;
 }

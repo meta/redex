@@ -97,7 +97,8 @@ bool ends_with_may_throw(cfg::Block* p) {
 /*
  * Given a method-item-entry ordering, delete positions that are...
  * - duplicates with the previous position, even across block boundaries
- *   (they will get reconstituted when the cfg is rebuilt)
+ *   (they will get reconstituted when the cfg is rebuilt). A copy whose
+ *   provenance has diverged from the previous position is not a duplicate.
  * - adjacent to an immediately following position, as the last position wins.
  * Parent positions are kept as needed.
  */
@@ -110,7 +111,7 @@ void remove_redundant_positions(IRList* ir) {
     if (it->type == MFLOW_POSITION) {
       DexPosition* curr = it->pos.get();
       positions_to_remove.emplace(curr, it);
-      if (prev != nullptr && *curr == *prev) {
+      if (prev != nullptr && same_position_and_provenance(*curr, *prev)) {
         duplicate_positions.insert(curr);
       }
       prev = curr;

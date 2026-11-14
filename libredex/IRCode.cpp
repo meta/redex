@@ -848,7 +848,8 @@ void gather_debug_entries(
     } else if (mie.type == MFLOW_POSITION && next_pos_is_root) {
       next_pos_is_root = false;
       // Check for consecutive duplicates
-      if (last_root_pos != nullptr && *last_root_pos == *mie.pos) {
+      if (last_root_pos != nullptr &&
+          same_position_and_provenance(*last_root_pos, *mie.pos)) {
         roots.erase(last_root_pos);
       }
       last_root_pos = mie.pos.get();

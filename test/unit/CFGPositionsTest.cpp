@@ -281,4 +281,162 @@ TEST_F(CFGMutationTest, RedundantAndDuplicatePositionsWithParents) {
       ))");
 }
 
+std::vector<DexPosition*> cfg_positions(ControlFlowGraph& cfg) {
+  std::vector<DexPosition*> result;
+  for (auto* block : cfg.blocks()) {
+    for (auto& mie : *block) {
+      if (mie.type == MFLOW_POSITION) {
+        result.push_back(mie.pos.get());
+      }
+    }
+  }
+  return result;
+}
+
+std::vector<DexPosition*> linear_positions(IRCode& code) {
+  std::vector<DexPosition*> result;
+  for (auto it = code.begin(); it != code.end(); ++it) {
+    if (it->type == MFLOW_POSITION) {
+      result.push_back(it->pos.get());
+    }
+  }
+  return result;
+}
+
+std::unique_ptr<IRCode> linearize_marked_positions(
+    const char* source, const std::vector<size_t>& marked_indices) {
+  auto code = assembler::ircode_from_string(source);
+  code->build_cfg();
+  auto positions = cfg_positions(code->cfg());
+  for (auto index : marked_indices) {
+    positions.at(index)->mark_unreliable();
+  }
+  code->clear_cfg();
+  return code;
+}
+
+// A producer that marks a block-start copy is saying that the instructions
+// after the copy were folded. The instructions before it, still governed by
+// the original, were not.
+TEST_F(CFGMutationTest, MarkedCopyStaysSeparateFromOriginal) {
+  auto code = linearize_marked_positions(R"((
+    (.pos:first FooBar Foo.java 1)
+    (const v0 0)
+    (.pos:second FooBar Foo.java 1)
+    (return-void)
+  ))",
+                                         {1});
+  auto positions = linear_positions(*code);
+  ASSERT_EQ(positions.size(), 2u);
+  EXPECT_FALSE(positions[0]->is_unreliable());
+  EXPECT_TRUE(positions[1]->is_unreliable());
+}
+
+TEST_F(CFGMutationTest, UnmarkedCopyAfterMarkedOriginalStaysSeparate) {
+  auto code = linearize_marked_positions(R"((
+    (.pos:first FooBar Foo.java 1)
+    (const v0 0)
+    (.pos:second FooBar Foo.java 1)
+    (return-void)
+  ))",
+                                         {0});
+  auto positions = linear_positions(*code);
+  ASSERT_EQ(positions.size(), 2u);
+  EXPECT_TRUE(positions[0]->is_unreliable());
+  EXPECT_FALSE(positions[1]->is_unreliable());
+}
+
+TEST_F(CFGMutationTest, DuplicatesWithEqualProvenanceCollapse) {
+  for (const auto& marked : std::vector<std::vector<size_t>>{{}, {0, 1}}) {
+    auto code = linearize_marked_positions(R"((
+      (.pos:first FooBar Foo.java 1)
+      (const v0 0)
+      (.pos:second FooBar Foo.java 1)
+      (return-void)
+    ))",
+                                           marked);
+    auto positions = linear_positions(*code);
+    ASSERT_EQ(positions.size(), 1u);
+    EXPECT_EQ(positions[0]->is_unreliable(), !marked.empty());
+  }
+}
+
+// Building a CFG copies the position in effect into every later block, and
+// linearizing drops those copies again. Neither step folds code, so neither
+// may change what a synthetic position, or a frame inlined under one, claims.
+TEST_F(CFGMutationTest, SyntheticChainSurvivesCfgRoundTrip) {
+  auto code = assembler::ircode_from_string(R"((
+    (.pos:callsite FooBoo Parent.java 0)
+    (.pos:leaf FooBar Foo.java 1 callsite)
+    (const v0 0)
+    (if-eqz v0 :b)
+    (const v1 1)
+    (:b)
+    (return-void)
+  ))");
+  code->build_cfg();
+  code->clear_cfg();
+  code->build_cfg();
+  code->clear_cfg();
+
+  auto positions = linear_positions(*code);
+  ASSERT_EQ(positions.size(), 2u);
+  for (auto* position : positions) {
+    EXPECT_FALSE(position->is_unreliable());
+  }
+  EXPECT_TRUE(positions[0]->is_synthetic());
+  EXPECT_FALSE(positions[1]->is_synthetic());
+  EXPECT_EQ(positions[1]->parent, positions[0]);
+}
+
+TEST_F(CFGMutationTest, DuplicateParentProvenanceIsPreserved) {
+  auto code = assembler::ircode_from_string(R"((
+    (.pos:first_parent FooBoo Parent.java 2)
+    (.pos:second_parent FooBoo Parent.java 2)
+    (goto :leaves)
+    (:leaves)
+    (.pos:first FooBar Foo.java 1 first_parent)
+    (.pos:second FooBar Foo.java 1 second_parent)
+    (return-void)
+  ))");
+  code->build_cfg();
+  auto positions = cfg_positions(code->cfg());
+  std::vector<DexPosition*> leaves;
+  for (auto* position : positions) {
+    if (position->method == DexString::make_string("FooBar")) {
+      leaves.push_back(position);
+    }
+  }
+  ASSERT_EQ(leaves.size(), 2u);
+  ASSERT_NE(leaves[1]->parent, nullptr);
+  leaves[1]->parent->mark_unreliable();
+
+  code->clear_cfg();
+  positions = linear_positions(*code);
+  DexPosition* retained_leaf = nullptr;
+  for (auto* position : positions) {
+    if (position->method == DexString::make_string("FooBar")) {
+      retained_leaf = position;
+      break;
+    }
+  }
+  ASSERT_NE(retained_leaf, nullptr);
+  ASSERT_NE(retained_leaf->parent, nullptr);
+  EXPECT_FALSE(retained_leaf->is_unreliable());
+  EXPECT_TRUE(retained_leaf->parent->is_unreliable());
+}
+
+TEST_F(CFGMutationTest, AdjacentDifferentPositionsDoNotTransferProvenance) {
+  auto code = linearize_marked_positions(R"((
+    (.pos:first FooBar Foo.java 1)
+    (.pos:second FooBar Foo.java 2)
+    (return-void)
+  ))",
+                                         {0});
+  auto positions = linear_positions(*code);
+  ASSERT_EQ(positions.size(), 1u);
+  EXPECT_EQ(positions[0]->line, 2u);
+  EXPECT_FALSE(positions[0]->is_unreliable());
+}
+
 } // namespace

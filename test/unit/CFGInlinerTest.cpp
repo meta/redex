@@ -10,6 +10,7 @@
 #include "CFGInliner.h"
 #include "ControlFlow.h"
 #include "Debug.h"
+#include "DeterministicContainers.h"
 #include "IRAssembler.h"
 #include "IRCode.h"
 #include "RedexTest.h"
@@ -55,6 +56,108 @@ void test_inliner(const std::string& caller_str,
 }
 
 class CFGInlinerTest : public RedexTest {};
+
+// A position's `parent` must itself be a position present in this CFG --
+// `ControlFlowGraph::no_dangling_dex_positions` asserts exactly that, and it
+// runs on every `sanity_check`, so a parent that lives nowhere in the block
+// list crashes any later pass that inlines this code.
+//
+// Inlining is where the invariant is easiest to break: every callee position
+// without a parent is given one pointing at the callsite. Point it at a fresh
+// copy instead of the callsite position itself and the copy is owned by
+// nothing and reachable from nothing, which leaks it as well.
+TEST_F(CFGInlinerTest, inlined_positions_parent_stays_in_the_cfg) {
+  auto caller_code = assembler::ircode_from_string(R"(
+    (
+      (.pos:dbg_call "LFoo;.caller:()V" Foo.java 10)
+      (const v0 0)
+      (invoke-static () "LFoo;.callee:()V")
+      (return-void)
+    )
+  )");
+  caller_code->build_cfg();
+  auto& caller = caller_code->cfg();
+
+  auto callee_code = assembler::ircode_from_string(R"(
+    (
+      (.pos:dbg_leaf "LFoo;.callee:()V" Foo.java 20)
+      (const v1 1)
+      (return-void)
+    )
+  )");
+  callee_code->build_cfg();
+  auto& callee = callee_code->cfg();
+
+  cfg::CFGInliner::inline_cfg(&caller, get_invoke(&caller), nullptr, nullptr,
+                              callee, caller.get_registers_size());
+
+  UnorderedSet<DexPosition*> present;
+  for (auto* b : caller.blocks()) {
+    for (auto& mie : *b) {
+      if (mie.type == MFLOW_POSITION) {
+        present.insert(mie.pos.get());
+      }
+    }
+  }
+  ASSERT_FALSE(present.empty()) << show(caller);
+
+  size_t checked = 0;
+  for (auto* b : caller.blocks()) {
+    for (auto& mie : *b) {
+      if (mie.type != MFLOW_POSITION || mie.pos->parent == nullptr) {
+        continue;
+      }
+      checked++;
+      EXPECT_EQ(present.count(mie.pos->parent), 1u)
+          << "parent " << mie.pos->parent
+          << " is not a position in this CFG: " << show(caller);
+    }
+  }
+  // Without a parented position the loop above is vacuous, and the test would
+  // pass against the very bug it exists for.
+  EXPECT_GT(checked, 0u) << "no inlined position received a parent: "
+                         << show(caller);
+}
+
+TEST_F(CFGInlinerTest, partial_inline_fallback_keeps_exact_callsite_position) {
+  auto caller_code = assembler::ircode_from_string(R"(
+    (
+      (.pos:callsite "LFoo;.caller:()V" Foo.java 10)
+      (invoke-static () "LFoo;.partial:()V")
+      (return-void)
+    )
+  )");
+  caller_code->build_cfg();
+  auto& caller = caller_code->cfg();
+
+  auto callee_code = assembler::ircode_from_string(R"(
+    (
+      (.pos:fallback "LFoo;.partial:()V" PartiallyInlinedSource 0)
+      (invoke-static () "LFoo;.partial:()V")
+      (return-void)
+    )
+  )");
+  callee_code->build_cfg();
+
+  cfg::CFGInliner::inline_cfg(&caller, get_invoke(&caller), nullptr, nullptr,
+                              callee_code->cfg(), caller.get_registers_size());
+
+  auto instructions = cfg::InstructionIterable(caller);
+  size_t fallback_invokes = 0;
+  for (auto it = instructions.begin(); it != instructions.end(); ++it) {
+    if (!opcode::is_an_invoke(it->insn->opcode())) {
+      continue;
+    }
+    ++fallback_invokes;
+    auto* position = caller.get_dbg_pos(it);
+    ASSERT_NE(position, nullptr);
+    EXPECT_EQ(position->file, DexString::make_string("Foo.java"));
+    EXPECT_EQ(position->line, 10u);
+    EXPECT_FALSE(position->is_synthetic());
+    EXPECT_FALSE(position->is_unreliable());
+  }
+  EXPECT_EQ(fallback_invokes, 1u);
+}
 
 TEST_F(CFGInlinerTest, simple) {
   const auto* const caller_str = R"(

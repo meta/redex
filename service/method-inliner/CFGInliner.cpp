@@ -599,6 +599,16 @@ void CFGInliner::set_dbg_pos_parents(ControlFlowGraph* callee,
         if (mie.pos->file == partial_inline_source) {
           mie.pos = std::make_unique<DexPosition>(*callsite_dbg_pos);
         } else {
+          // Share the callsite position rather than cloning it. A parent must
+          // itself be a position present in this CFG --
+          // `no_dangling_dex_positions` enforces exactly that -- and a clone
+          // reachable only through this pointer is owned by nothing and present
+          // nowhere, so it both leaks and trips the check during any later
+          // inlining.
+          //
+          // Sharing does not blur provenance: `positions::mark_merged` mutates
+          // only its survivor leaf, never a parent reached through this
+          // pointer.
           mie.pos->parent = callsite_dbg_pos;
         }
       }

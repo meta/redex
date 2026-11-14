@@ -5,14 +5,18 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <json/reader.h>
 #include <json/value.h>
 #include <optional>
 #include <set>
 #include <unordered_set>
+
+#include <unistd.h>
 
 #include "ControlFlow.h"
 #include "Debug.h"
@@ -107,6 +111,10 @@ class InstructionSequenceOutlinerTest : public RedexIntegrationTest {
 
   void run_passes(const std::vector<Pass*>& passes) {
     RedexIntegrationTest::run_passes(passes, nullptr, m_cfg);
+  }
+
+  void set_full_dbg_positions(bool value) {
+    m_cfg["InstructionSequenceOutlinerPass"]["full_dbg_positions"] = value;
   }
 
  private:
@@ -1056,6 +1064,50 @@ TEST_F(InstructionSequenceOutlinerTest, reuse_outlined_methods) {
   }
 }
 
+TEST_F(InstructionSequenceOutlinerTest,
+       reduced_positions_mark_collapsed_patterns_without_candidates) {
+  set_full_dbg_positions(false);
+  std::vector<DexMethod*> methods;
+  for (const auto& cls : classes->get()) {
+    for (const auto& method : cls->get_vmethods()) {
+      if (method->get_name()->str().find("basic") != std::string::npos) {
+        methods.push_back(method);
+      }
+    }
+  }
+  ASSERT_EQ(methods.size(), 4u);
+
+  std::vector<Pass*> passes = {
+      new InstructionSequenceOutliner(),
+  };
+  run_passes(passes);
+
+  std::vector<DexMethod*> outlined_methods;
+  for (auto* method : methods) {
+    cfg::ScopedCFG scoped_cfg(method->get_code());
+    auto* outlined_method = find_invoked_method(*scoped_cfg, "$outline");
+    ASSERT_NE(outlined_method, nullptr);
+    outlined_methods.push_back(outlined_method->as_def());
+  }
+  sort_unique(outlined_methods);
+  ASSERT_EQ(outlined_methods.size(), 1u);
+
+  bool saw_unreliable = false;
+  cfg::ScopedCFG scoped_cfg(outlined_methods.front()->get_code());
+  for (auto* block : scoped_cfg->blocks()) {
+    for (const auto& mie : *block) {
+      if (mie.type != MFLOW_POSITION || mie.pos->file == nullptr) {
+        continue;
+      }
+      if (mie.pos->is_unreliable()) {
+        saw_unreliable = true;
+        EXPECT_EQ(mie.pos->alt_id(), 0u);
+      }
+    }
+  }
+  EXPECT_TRUE(saw_unreliable);
+}
+
 TEST_F(InstructionSequenceOutlinerTest, check_positions) {
   // It tests that the positions in the outlined method
   // can be correctly traced back to the callsite positions of the
@@ -1074,6 +1126,26 @@ TEST_F(InstructionSequenceOutlinerTest, check_positions) {
           if (method_names.count(m->get_name()->str()) != 0u) {
             methods.push_back(m);
           }
+        }
+      }
+    }
+  }
+
+  ASSERT_FALSE(methods.empty());
+  {
+    // Give every line of one call site a candidate set, so its switch entries
+    // have to carry that set through outlining.
+    auto* manager = g_redex->get_position_pattern_switch_manager();
+    cfg::ScopedCFG scoped_cfg(methods.front()->get_code());
+    uint32_t elsewhere_line = 1000;
+    for (auto* block : scoped_cfg->blocks()) {
+      for (auto& mie : *block) {
+        if (mie.type == MFLOW_POSITION && mie.pos->file != nullptr) {
+          DexPosition elsewhere(mie.pos->method,
+                                DexString::make_string("Elsewhere.java"),
+                                elsewhere_line++);
+          manager->record_candidates(mie.pos.get(), {&elsewhere});
+          ASSERT_NE(mie.pos->alt_id(), 0u);
         }
       }
     }
@@ -1120,17 +1192,30 @@ TEST_F(InstructionSequenceOutlinerTest, check_positions) {
   auto* manager = g_redex->get_position_pattern_switch_manager();
   const auto& alternatives = manager->get_alternatives();
   std::unordered_set<uint32_t> pattern_ids_from_switches;
+  bool saw_mixed_reliability = false;
 
   EXPECT_GT(switch_positions.size(), 0);
-  // Get pattern ids from switches
+  // Get pattern ids from switches and verify that one marked callsite does not
+  // mark the other entries sharing its switch.
   for (auto* sp : switch_positions) {
     const auto& group = alternatives.at(sp->line);
     ASSERT_EQ(group.selection, PositionAlternativesSelection::ByPattern);
+    bool any_unreliable = false;
+    bool all_unreliable = true;
     for (const auto& entry : group.entries) {
       ASSERT_TRUE(entry.pattern_id.has_value());
       pattern_ids_from_switches.insert(*entry.pattern_id);
+      any_unreliable = any_unreliable || entry.provenance != nullptr;
+      all_unreliable = all_unreliable && entry.provenance != nullptr;
+      if (entry.provenance != nullptr) {
+        EXPECT_EQ(*entry.provenance, *entry.position);
+        EXPECT_NE(entry.provenance->alt_id(), 0u);
+      }
     }
+    saw_mixed_reliability =
+        saw_mixed_reliability || (any_unreliable && !all_unreliable);
   }
+  EXPECT_TRUE(saw_mixed_reliability);
 
   EXPECT_GT(pattern_positions.size(), 0);
   // check callsites pattern ids
@@ -1231,4 +1316,341 @@ TEST_F(InstructionSequenceOutlinerTest,
     }
   }
   EXPECT_EQ(println_lines, lines);
+}
+
+namespace {
+std::vector<DexMethod*> find_vmethods(std::vector<DexStore>& stores,
+                                      const std::set<std::string_view>& names) {
+  std::vector<DexMethod*> methods;
+  for (auto& store : stores) {
+    for (const auto& classes : store.get_dexen()) {
+      for (const auto& cls : classes) {
+        for (const auto& m : cls->get_vmethods()) {
+          if (names.count(m->get_name()->str()) != 0u) {
+            methods.push_back(m);
+          }
+        }
+      }
+    }
+  }
+  std::sort(methods.begin(), methods.end(), compare_dexmethods);
+  return methods;
+}
+
+const std::set<std::string_view> kCallSiteMethods{
+    "basic1", "basic2", "basic3",     "basic4",    "in_try",
+    "twice1", "twice2", "secondary1", "secondary2"};
+
+// Gives every line of `method` a candidate set naming a line elsewhere.
+void give_every_line_a_candidate(DexMethod* method) {
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  cfg::ScopedCFG scoped_cfg(method->get_code());
+  uint32_t elsewhere_line = 1000;
+  for (auto* block : scoped_cfg->blocks()) {
+    for (auto& mie : *block) {
+      if (mie.type == MFLOW_POSITION && mie.pos->file != nullptr) {
+        DexPosition elsewhere(mie.pos->method,
+                              DexString::make_string("Elsewhere.java"),
+                              elsewhere_line++);
+        manager->record_candidates(mie.pos.get(), {&elsewhere});
+      }
+    }
+  }
+}
+
+// Calls `fn` on every entry of `code`, read in whatever form it is in: building
+// or clearing a CFG here could free positions that were already registered.
+template <typename Fn>
+void for_each_entry(IRCode* code, Fn fn) {
+  if (code->cfg_built()) {
+    for (auto* block : code->cfg().blocks()) {
+      for (auto& mie : *block) {
+        fn(mie);
+      }
+    }
+  } else {
+    for (auto& mie : *code) {
+      fn(mie);
+    }
+  }
+}
+
+// Calls `fn` on every entry in the code of every method except `skip`.
+template <typename Fn>
+void for_each_entry_without(std::vector<DexStore>& stores,
+                            const DexMethod* skip,
+                            Fn fn) {
+  for (auto& store : stores) {
+    for (const auto& classes : store.get_dexen()) {
+      for (const auto& cls : classes) {
+        for (auto* m : cls->get_all_methods()) {
+          if (m != skip && m->get_code() != nullptr) {
+            for_each_entry(m->get_code(), fn);
+          }
+        }
+      }
+    }
+  }
+}
+
+// Registers every position in the code of every method except `skip`, the way
+// the dex writer registers what code refers to, and writes the map. Skipping a
+// method is what a later pass deleting it looks like to the writer.
+void write_map_without(std::vector<DexStore>& stores,
+                       const std::string& path,
+                       const DexMethod* skip) {
+  RealPositionMapper mapper(path);
+  for_each_entry_without(stores, skip, [&](MethodItemEntry& mie) {
+    if (mie.type != MFLOW_POSITION) {
+      return;
+    }
+    for (auto* p = mie.pos.get(); p != nullptr; p = p->parent) {
+      if (p->file == nullptr || p->method == nullptr) {
+        return;
+      }
+    }
+    for (auto* p = mie.pos.get(); p != nullptr; p = p->parent) {
+      mapper.position_to_line(p);
+    }
+  });
+  mapper.write_map();
+}
+
+// The ids of the outlined call sites among the entries `for_each` visits.
+template <typename ForEach>
+std::set<uint32_t> called_pattern_ids(ForEach for_each) {
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  std::set<uint32_t> ids;
+  for_each([&](MethodItemEntry& mie) {
+    if (mie.type == MFLOW_POSITION &&
+        manager->is_pattern_position(mie.pos.get())) {
+      ids.insert(mie.pos->line);
+    }
+  });
+  return ids;
+}
+
+// The pattern ids the switch cases of the line map at `path` select: a case is
+// a `redex.$Position.case` record whose line is the selected pattern's id.
+// Nothing when the map cannot be read.
+std::optional<std::multiset<uint32_t>> case_pattern_ids(
+    const std::string& path) {
+  std::ifstream ifs(path, std::ios::binary);
+  const std::vector<char> bytes((std::istreambuf_iterator<char>(ifs)),
+                                std::istreambuf_iterator<char>());
+  size_t at = 0;
+  auto read_u32 = [&](uint32_t* value) {
+    if (bytes.size() - at < sizeof(*value)) {
+      return false;
+    }
+    memcpy(value, bytes.data() + at, sizeof(*value));
+    at += sizeof(*value);
+    return true;
+  };
+  uint32_t magic = 0;
+  uint32_t version = 0;
+  uint32_t string_count = 0;
+  if (!read_u32(&magic) || magic != 0xfaceb000u || !read_u32(&version) ||
+      version != 2u || !read_u32(&string_count)) {
+    return std::nullopt;
+  }
+  std::vector<std::string> string_pool;
+  for (uint32_t i = 0; i < string_count; ++i) {
+    uint32_t size = 0;
+    if (!read_u32(&size) || bytes.size() - at < size) {
+      return std::nullopt;
+    }
+    string_pool.emplace_back(bytes.data() + at, size);
+    at += size;
+  }
+  uint32_t position_count = 0;
+  if (!read_u32(&position_count)) {
+    return std::nullopt;
+  }
+  std::multiset<uint32_t> ids;
+  for (uint32_t i = 0; i < position_count; ++i) {
+    uint32_t cls = 0;
+    uint32_t method = 0;
+    uint32_t file = 0;
+    uint32_t line = 0;
+    uint32_t parent = 0;
+    if (!read_u32(&cls) || !read_u32(&method) || !read_u32(&file) ||
+        !read_u32(&line) || !read_u32(&parent) || cls >= string_pool.size() ||
+        method >= string_pool.size()) {
+      return std::nullopt;
+    }
+    if (string_pool[cls] == "redex.$Position" &&
+        string_pool[method] == "case") {
+      ids.insert(line);
+    }
+  }
+  return ids;
+}
+
+// Puts every top-level position of each method under an inlined caller on
+// Caller.java:100, as if each method had been inlined there. The callers of
+// the methods selected by `merged` are themselves merged with
+// Caller.java:107. A caller has to be a position of the method itself, so it
+// is parked before the return, outside any outlined sequence.
+void run_under_one_caller(const std::vector<DexMethod*>& methods,
+                          const std::vector<bool>& merged) {
+  ASSERT_EQ(methods.size(), merged.size());
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  DexPosition elsewhere(DexString::make_string("LCaller;.run:()V"),
+                        DexString::make_string("Caller.java"), 107);
+  for (size_t i = 0; i < methods.size(); ++i) {
+    auto caller = std::make_unique<DexPosition>(
+        DexString::make_string("LCaller;.run:()V"),
+        DexString::make_string("Caller.java"), 100);
+    if (merged[i]) {
+      manager->record_candidates(caller.get(), {&elsewhere});
+      ASSERT_NE(caller->alt_id(), 0u);
+    }
+    cfg::ScopedCFG scoped_cfg(methods[i]->get_code());
+    for (auto* block : scoped_cfg->blocks()) {
+      for (auto& mie : *block) {
+        if (mie.type == MFLOW_POSITION && mie.pos->file != nullptr &&
+            mie.pos->parent == nullptr) {
+          mie.pos->parent = caller.get();
+        }
+      }
+    }
+    bool parked = false;
+    for (auto* block : scoped_cfg->blocks()) {
+      auto ii = InstructionIterable(block);
+      for (auto it = ii.begin(); it != ii.end() && !parked; ++it) {
+        if (opcode::is_a_return(it->insn->opcode())) {
+          scoped_cfg->insert_before(block, it.unwrap(), std::move(caller));
+          parked = true;
+        }
+      }
+    }
+    ASSERT_TRUE(parked);
+  }
+}
+
+// The collapsed (uncaptured) leaves of the outlined method `caller` calls, and
+// how many of them run under a caller presented as exact.
+std::pair<size_t, size_t> count_collapsed_leaves(DexMethod* caller) {
+  DexMethod* outlined = nullptr;
+  {
+    cfg::ScopedCFG scoped_cfg(caller->get_code());
+    auto* ref = find_invoked_method(*scoped_cfg, "$outline");
+    EXPECT_NE(ref, nullptr);
+    if (ref == nullptr) {
+      return {0, 0};
+    }
+    outlined = ref->as_def();
+  }
+  size_t collapsed = 0;
+  size_t under_exact_caller = 0;
+  cfg::ScopedCFG scoped_cfg(outlined->get_code());
+  for (auto* block : scoped_cfg->blocks()) {
+    for (const auto& mie : *block) {
+      if (mie.type != MFLOW_POSITION || mie.pos->parent == nullptr ||
+          !mie.pos->is_unreliable()) {
+        continue;
+      }
+      ++collapsed;
+      if (!mie.pos->parent->is_unreliable()) {
+        ++under_exact_caller;
+      }
+    }
+  }
+  return {collapsed, under_exact_caller};
+}
+
+} // namespace
+
+// A call site of an outlined method goes away after outlining while the
+// outlined method, and its switch, stay. The writer must not emit the dead
+// call site's case, whose provenance it never reached.
+TEST_F(InstructionSequenceOutlinerTest,
+       the_map_is_written_after_a_call_site_with_candidates_dies) {
+  auto methods = find_vmethods(stores, kCallSiteMethods);
+  ASSERT_FALSE(methods.empty());
+  auto* dead = methods.front();
+  give_every_line_a_candidate(dead);
+  run_passes({new InstructionSequenceOutliner()});
+
+  DexMethodRef* outlined = nullptr;
+  {
+    cfg::ScopedCFG scoped_cfg(dead->get_code());
+    outlined = find_invoked_method(*scoped_cfg, "$outline");
+  }
+  ASSERT_NE(outlined, nullptr);
+  ASSERT_TRUE(outlined->is_def());
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  const auto& alternatives = manager->get_alternatives();
+  std::set<uint32_t> case_ids;
+  for_each_entry(outlined->as_def()->get_code(), [&](MethodItemEntry& mie) {
+    if (mie.type == MFLOW_POSITION &&
+        manager->is_switch_position(mie.pos.get())) {
+      for (const auto& entry : alternatives.at(mie.pos->line).entries) {
+        case_ids.insert(*entry.pattern_id);
+      }
+    }
+  });
+  auto dead_ids = called_pattern_ids(
+      [&](auto fn) { for_each_entry(dead->get_code(), fn); });
+  auto live_ids = called_pattern_ids(
+      [&](auto fn) { for_each_entry_without(stores, dead, fn); });
+  std::set<uint32_t> dead_case_ids;
+  std::set<uint32_t> live_case_ids;
+  for (auto id : case_ids) {
+    if (live_ids.count(id) != 0u) {
+      live_case_ids.insert(id);
+    } else if (dead_ids.count(id) != 0u) {
+      dead_case_ids.insert(id);
+    }
+  }
+  ASSERT_FALSE(dead_case_ids.empty());
+  ASSERT_FALSE(live_case_ids.empty());
+
+  auto path = testing::TempDir() + "outliner-dead-call-site-" +
+              std::to_string(getpid()) + ".bin";
+  EXPECT_NO_THROW(write_map_without(stores, path, dead));
+  auto written = case_pattern_ids(path);
+  std::remove(path.c_str());
+  ASSERT_TRUE(written.has_value());
+  for (auto id : dead_case_ids) {
+    EXPECT_EQ(written->count(id), 0u) << "dead pattern " << id;
+  }
+  for (auto id : live_case_ids) {
+    EXPECT_NE(written->count(id), 0u) << "live pattern " << id;
+  }
+}
+
+// With `full_dbg_positions` off, four call sites share one outlined method and
+// name different lines in every slot, so every slot is collapsed. All of them
+// run under the same caller line, but only one of those callers is exact: the
+// collapsed slots' caller has to keep what the other three knew.
+TEST_F(InstructionSequenceOutlinerTest,
+       a_collapsed_slot_joins_every_occurrences_caller) {
+  set_full_dbg_positions(false);
+  auto methods =
+      find_vmethods(stores, {"basic1", "basic2", "basic3", "basic4"});
+  ASSERT_EQ(methods.size(), 4u);
+  run_under_one_caller(methods, {false, true, true, true});
+  run_passes({new InstructionSequenceOutliner()});
+
+  auto [collapsed, under_exact_caller] = count_collapsed_leaves(methods[0]);
+  EXPECT_GT(collapsed, 0u);
+  EXPECT_EQ(under_exact_caller, 0u);
+}
+
+// Control: when every occurrence's caller is merged, the kept pattern's own
+// caller already carries the set.
+TEST_F(InstructionSequenceOutlinerTest,
+       a_collapsed_slot_keeps_a_caller_set_every_occurrence_shares) {
+  set_full_dbg_positions(false);
+  auto methods =
+      find_vmethods(stores, {"basic1", "basic2", "basic3", "basic4"});
+  ASSERT_EQ(methods.size(), 4u);
+  run_under_one_caller(methods, {true, true, true, true});
+  run_passes({new InstructionSequenceOutliner()});
+
+  auto [collapsed, under_exact_caller] = count_collapsed_leaves(methods[0]);
+  EXPECT_GT(collapsed, 0u);
+  EXPECT_EQ(under_exact_caller, 0u);
 }

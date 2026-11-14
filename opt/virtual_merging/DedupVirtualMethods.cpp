@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include "DedupVirtualMethods.h"
+
 #include <vector>
 
 #include "Debug.h"
@@ -41,6 +43,27 @@ bool eligible_code(const cfg::ControlFlowGraph& cfg) {
   return true;
 }
 
+} // namespace
+
+namespace dedup_vmethods {
+
+bool is_removable_copy(const DexMethod* method) {
+  if (root(method) || !can_rename(method) ||
+      method->rstate.no_optimizations()) {
+    return false;
+  }
+  const auto* code = method->get_code();
+  if (code == nullptr) {
+    return false;
+  }
+  always_assert(code->cfg_built());
+  return eligible_code(code->cfg());
+}
+
+} // namespace dedup_vmethods
+
+namespace {
+
 void find_duplications(const method_override_graph::Graph* graph,
                        const DexMethod* root_method,
                        std::vector<DexMethod*>* result) {
@@ -57,20 +80,12 @@ void find_duplications(const method_override_graph::Graph* graph,
     const auto* child = child_node->method;
     // The method definition may be deleted after the overriding graph is
     // created, check if it's still a definition.
-    if (root(child) || !child->is_def() || !can_rename(child)) {
+    if (!child->is_def() || !dedup_vmethods::is_removable_copy(child)) {
       continue;
     }
-    const auto* child_code = child->get_code();
-    if (child_code == nullptr) {
-      continue;
-    }
-    always_assert(child_code->cfg_built());
-    const auto& child_cfg = child_code->cfg();
-    if (eligible_code(child_cfg)) {
-      if (root_cfg.structural_equals(child_cfg)) {
-        result->push_back(const_cast<DexMethod*>(child));
-        find_duplications(graph, child, result);
-      }
+    if (root_cfg.structural_equals(child->get_code()->cfg())) {
+      result->push_back(const_cast<DexMethod*>(child));
+      find_duplications(graph, child, result);
     }
   }
 }
@@ -107,6 +122,10 @@ uint32_t remove_duplicated_vmethods(
       if (method->get_code() == nullptr) {
         // TODO: look at the abstract methods and we can lift the
         // implementations to the abstract class if lots of them are identical.
+        continue;
+      }
+      // Its code at runtime may differ from the code Redex sees.
+      if (method->rstate.no_optimizations()) {
         continue;
       }
       if (!is_public_or_protected(method)) {

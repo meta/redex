@@ -7,11 +7,14 @@
 
 #include "NormalizeConstructor.h"
 
+#include <memory>
 #include <optional>
+#include <vector>
 
 #include "Debug.h"
 #include "DexClass.h"
 #include "MethodReference.h"
+#include "PositionAmbiguity.h"
 #include "ReachingDefinitions.h"
 #include "ScopedCFG.h"
 #include "Show.h"
@@ -476,7 +479,8 @@ uint32_t estimate_deduplicatable_ctor_code_size(const DexClass* cls) {
 }
 
 size_t dedup_constructors(const std::vector<DexClass*>& classes,
-                          const std::vector<DexClass*>& scope) {
+                          const std::vector<DexClass*>& scope,
+                          positions::JoinStats* join_stats) {
   Timer timer("dedup_constructors");
   std::map<DexMethod*, DexMethod*, dexmethods_comparator> old_to_new;
   CtorSummaries methods_summaries;
@@ -529,6 +533,7 @@ size_t dedup_constructors(const std::vector<DexClass*>& classes,
         methods_summaries.insert(cluster.begin(), cluster.end());
 
         auto& representative_summary = cluster[representative];
+        std::vector<DexMethod*> replaced;
 
         for (auto& method_summary : cluster) {
           auto* old_ctor = method_summary.first;
@@ -538,6 +543,7 @@ size_t dedup_constructors(const std::vector<DexClass*>& classes,
             // by the representative
             old_to_new[old_ctor] = representative;
             ctor_set.insert(old_ctor);
+            replaced.push_back(old_ctor);
           } else {
             TRACE(METH_DEDUP, 2,
                   "Could not replace %s with %s due to different summaries: "
@@ -545,6 +551,19 @@ size_t dedup_constructors(const std::vector<DexClass*>& classes,
                   SHOW(old_ctor), SHOW(representative),
                   SHOW(old_ctor->get_code()), SHOW(representative->get_code()));
           }
+        }
+        if (!replaced.empty()) {
+          // The replaced constructors still hold their bodies here, so their
+          // lines can be paired with the representative's.
+          cfg::ScopedCFG cfg(representative->get_code());
+          std::vector<std::unique_ptr<cfg::ScopedCFG>> replaced_cfgs;
+          replaced_cfgs.reserve(replaced.size());
+          for (auto* old_ctor : replaced) {
+            replaced_cfgs.push_back(
+                std::make_unique<cfg::ScopedCFG>(old_ctor->get_code()));
+          }
+          positions::join_throwing_positions_by_member(representative, replaced,
+                                                       join_stats);
         }
       }
     }

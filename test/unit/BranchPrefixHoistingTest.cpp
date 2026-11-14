@@ -11,6 +11,7 @@
 #include "CppUtil.h"
 #include "IRAssembler.h"
 #include "IRCode.h"
+#include "PositionJoin.h"
 #include "RedexContext.h"
 #include "RedexTest.h"
 #include "ScopeHelper.h"
@@ -108,8 +109,7 @@ TEST_F(BranchPrefixHoistingTest, hoisted_prefix_carries_this_blocks_count) {
     return std::make_unique<const constant_uses::ConstantUses>(
         cfg, method, /* force_type_inference */ true);
   });
-  branch_prefix_hoisting_impl::process_cfg(cfg, constant_uses,
-                                           /* can_allocate_regs */ true);
+  branch_prefix_hoisting_impl::process_cfg(cfg, constant_uses);
 
   auto sbs = source_blocks::gather_source_blocks(cfg.entry_block());
   // The block's own SourceBlock, plus exactly one for the hoisted prefix --
@@ -163,8 +163,7 @@ TEST_F(BranchPrefixHoistingTest, hoisted_prefix_falls_back_to_a_single_copy) {
     return std::make_unique<const constant_uses::ConstantUses>(
         cfg, method, /* force_type_inference */ true);
   });
-  branch_prefix_hoisting_impl::process_cfg(cfg, constant_uses,
-                                           /* can_allocate_regs */ true);
+  branch_prefix_hoisting_impl::process_cfg(cfg, constant_uses);
 
   // Exactly one. Leaving the fallback's guard unset let the next arm's
   // SourceBlock annotate the prefix a second time.
@@ -995,4 +994,311 @@ TEST_F(BranchPrefixHoistingTest, fill_array_data) {
     )
   )";
   test(code_str, expected_str, 1);
+}
+
+namespace {
+
+// Counts the positions in the whole method that have been marked as no longer
+// identifying a unique source.
+size_t count_unreliable_positions(cfg::ControlFlowGraph& cfg) {
+  size_t count = 0;
+  for (auto* block : cfg.blocks()) {
+    for (auto& mie : *block) {
+      if (mie.type == MFLOW_POSITION && mie.pos->is_unreliable()) {
+        ++count;
+      }
+    }
+  }
+  return count;
+}
+
+DexMethod* make_two_arm_method(const char* class_name,
+                               uint32_t left_line,
+                               uint32_t right_line) {
+  DexType* type = DexType::make_type(class_name);
+  auto* cls = create_class(type, type::java_lang_Object(), {}, ACC_PUBLIC);
+  auto* args = DexTypeList::make_type_list({type::_int()});
+  auto* proto = DexProto::make_proto(type::_void(), args);
+  auto* method =
+      DexMethod::make_method(type, DexString::make_string("test"), proto)
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  cls->add_method(method);
+  auto src = std::string(R"(
+    (
+      (load-param v0)
+      (if-eqz v0 :true)
+
+      (.pos "LX;.test:(I)V" "X.java" )") +
+             std::to_string(right_line) + R"()
+      (sget "LX;.f:I")
+      (move-result-pseudo v1)
+      (return-void)
+
+      (:true)
+      (.pos "LX;.test:(I)V" "X.java" )" +
+             std::to_string(left_line) + R"()
+      (sget "LX;.f:I")
+      (move-result-pseudo v1)
+      (return-void)
+    )
+  )";
+  method->set_code(assembler::ircode_from_string(src));
+  return method;
+}
+
+DexMethod* make_position_test_method(const char* class_name,
+                                     const std::string& code) {
+  DexType* type = DexType::make_type(class_name);
+  auto* cls = create_class(type, type::java_lang_Object(), {}, ACC_PUBLIC);
+  auto* args = DexTypeList::make_type_list({type::_int()});
+  auto* proto = DexProto::make_proto(type::_void(), args);
+  auto* method =
+      DexMethod::make_method(type, DexString::make_string("test"), proto)
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  cls->add_method(method);
+  method->set_code(assembler::ircode_from_string(code));
+  return method;
+}
+
+struct HoistedSgetResult {
+  size_t count{0};
+  DexPosition* position{nullptr};
+  positions::JoinStats join_stats;
+};
+
+HoistedSgetResult process_and_find_hoisted_sget(DexMethod* method) {
+  auto* code = method->get_code();
+  code->build_cfg();
+  auto& cfg = code->cfg();
+  Lazy<const constant_uses::ConstantUses> constant_uses([&] {
+    return std::make_unique<const constant_uses::ConstantUses>(
+        cfg, method, /* force_type_inference */ true);
+  });
+  HoistedSgetResult result;
+  branch_prefix_hoisting_impl::process_cfg(cfg, constant_uses,
+                                           /* can_allocate_regs */ true,
+                                           &result.join_stats);
+  for (auto* block : cfg.blocks()) {
+    for (auto it = block->begin(); it != block->end(); ++it) {
+      if (it->type != MFLOW_OPCODE || it->insn->opcode() != OPCODE_SGET) {
+        continue;
+      }
+      ++result.count;
+      result.position = cfg.get_dbg_pos(block->to_cfg_instruction_iterator(it));
+    }
+  }
+  return result;
+}
+
+} // namespace
+
+// `sget` can throw, so the hoisted copy is a PC a stack trace can land on. It
+// runs for both arms but can carry only one line, so the copy is marked. The
+// originals stay in the arms and still describe the code left there, so they
+// are left alone -- which is what the count of exactly one checks.
+TEST_F(BranchPrefixHoistingTest, hoisting_marks_only_the_copy_it_creates) {
+  auto* method = make_two_arm_method("LHoistPosDiffer;", 30, 20);
+  auto* code = method->get_code();
+  code->build_cfg();
+  auto& cfg = code->cfg();
+
+  Lazy<const constant_uses::ConstantUses> constant_uses([&] {
+    return std::make_unique<const constant_uses::ConstantUses>(
+        cfg, method, /* force_type_inference */ true);
+  });
+  positions::JoinStats join_stats;
+  branch_prefix_hoisting_impl::process_cfg(cfg, constant_uses,
+                                           /* can_allocate_regs */ true,
+                                           &join_stats);
+
+  EXPECT_EQ(join_stats.marked_unreliable, 1u);
+  EXPECT_EQ(count_unreliable_positions(cfg), 1u);
+}
+
+// Both arms report the same line, so the hoisted copy names a place that was
+// correct for both and nothing is recorded.
+TEST_F(BranchPrefixHoistingTest, hoisting_records_nothing_when_the_arms_agree) {
+  auto* method = make_two_arm_method("LHoistPosAgree;", 20, 20);
+  auto* code = method->get_code();
+  code->build_cfg();
+  auto& cfg = code->cfg();
+
+  Lazy<const constant_uses::ConstantUses> constant_uses([&] {
+    return std::make_unique<const constant_uses::ConstantUses>(
+        cfg, method, /* force_type_inference */ true);
+  });
+  positions::JoinStats join_stats;
+  branch_prefix_hoisting_impl::process_cfg(cfg, constant_uses,
+                                           /* can_allocate_regs */ true,
+                                           &join_stats);
+
+  EXPECT_EQ(join_stats.marked_unreliable, 0u);
+  EXPECT_EQ(count_unreliable_positions(cfg), 0u);
+}
+
+TEST_F(BranchPrefixHoistingTest, hoisting_agrees_with_an_inherited_position) {
+  auto* method = make_position_test_method("LHoistPosInheritedAgree;", R"(
+    (
+      (load-param v0)
+      (.pos "LX;.test:(I)V" "X.java" 10)
+      (if-eqz v0 :true)
+
+      (.pos "LX;.test:(I)V" "X.java" 10)
+      (sget "LX;.f:I")
+      (move-result-pseudo v1)
+      (return-void)
+
+      (:true)
+      (sget "LX;.f:I")
+      (move-result-pseudo v1)
+      (return-void)
+    )
+  )");
+
+  auto result = process_and_find_hoisted_sget(method);
+  EXPECT_EQ(result.count, 1u);
+  ASSERT_NE(result.position, nullptr);
+  EXPECT_EQ(result.position->line, 10u);
+  EXPECT_FALSE(result.position->is_unreliable());
+  EXPECT_EQ(result.join_stats.marked_unreliable, 0u);
+  EXPECT_EQ(result.join_stats.not_recorded, 0u);
+}
+
+TEST_F(BranchPrefixHoistingTest,
+       hoisting_leaves_code_under_the_position_all_arms_inherit) {
+  auto* method = make_position_test_method("LHoistPosAllInherited;", R"(
+    (
+      (load-param v0)
+      (.pos "LX;.test:(I)V" "X.java" 20)
+      (if-eqz v0 :true)
+
+      (sget "LX;.f:I")
+      (move-result-pseudo v1)
+      (return-void)
+
+      (:true)
+      (sget "LX;.f:I")
+      (move-result-pseudo v1)
+      (return-void)
+    )
+  )");
+
+  auto result = process_and_find_hoisted_sget(method);
+  EXPECT_EQ(result.count, 1u);
+  ASSERT_NE(result.position, nullptr);
+  EXPECT_EQ(result.position->line, 20u);
+  EXPECT_FALSE(result.position->is_unreliable());
+  EXPECT_EQ(result.join_stats.marked_unreliable, 0u);
+  EXPECT_EQ(result.join_stats.not_recorded, 0u);
+}
+
+TEST_F(BranchPrefixHoistingTest,
+       hoisting_marks_an_explicit_position_disagreeing_with_inherited) {
+  auto* method = make_position_test_method("LHoistPosInheritedDiffer;", R"(
+    (
+      (load-param v0)
+      (.pos "LX;.test:(I)V" "X.java" 30)
+      (if-eqz v0 :true)
+
+      (sget "LX;.f:I")
+      (move-result-pseudo v1)
+      (return-void)
+
+      (:true)
+      (.pos "LX;.test:(I)V" "X.java" 40)
+      (sget "LX;.f:I")
+      (move-result-pseudo v1)
+      (return-void)
+    )
+  )");
+
+  auto result = process_and_find_hoisted_sget(method);
+  EXPECT_EQ(result.count, 1u);
+  ASSERT_NE(result.position, nullptr);
+  EXPECT_EQ(result.position->line, 40u);
+  EXPECT_TRUE(result.position->is_unreliable());
+  EXPECT_EQ(result.join_stats.marked_unreliable, 1u);
+  EXPECT_EQ(result.join_stats.not_recorded, 0u);
+}
+
+TEST_F(BranchPrefixHoistingTest,
+       hoisting_inherits_position_through_a_goto_predecessor) {
+  auto* method = make_position_test_method("LHoistPosGotoInherited;", R"(
+    (
+      (load-param v0)
+      (.pos "LX;.test:(I)V" "X.java" 50)
+      (goto :branch)
+
+      (:true)
+      (sget "LX;.f:I")
+      (move-result-pseudo v1)
+      (return-void)
+
+      (:branch)
+      (if-eqz v0 :true)
+      (sget "LX;.f:I")
+      (move-result-pseudo v1)
+      (return-void)
+    )
+  )");
+
+  auto result = process_and_find_hoisted_sget(method);
+  EXPECT_EQ(result.count, 1u);
+  ASSERT_NE(result.position, nullptr);
+  EXPECT_EQ(result.position->line, 50u);
+  EXPECT_FALSE(result.position->is_unreliable());
+  EXPECT_EQ(result.join_stats.marked_unreliable, 0u);
+  EXPECT_EQ(result.join_stats.not_recorded, 0u);
+}
+
+// No position governs either arm, so the hoisted `sget` is exactly as
+// position-less as both originals were: nothing disagreed, nothing is cloned,
+// and there is no gap to count.
+TEST_F(BranchPrefixHoistingTest,
+       hoisting_without_any_position_records_nothing) {
+  DexType* type = DexType::make_type("LHoistPosNone;");
+  auto* cls = create_class(type, type::java_lang_Object(), {}, ACC_PUBLIC);
+  auto* args = DexTypeList::make_type_list({type::_int()});
+  auto* proto = DexProto::make_proto(type::_void(), args);
+  auto* method =
+      DexMethod::make_method(type, DexString::make_string("test"), proto)
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  cls->add_method(method);
+  method->set_code(assembler::ircode_from_string(R"(
+    (
+      (load-param v0)
+      (if-eqz v0 :true)
+
+      (sget "LHoistPosNone;.f:I")
+      (move-result-pseudo v1)
+      (return-void)
+
+      (:true)
+      (sget "LHoistPosNone;.f:I")
+      (move-result-pseudo v1)
+      (return-void)
+    )
+  )"));
+  auto* code = method->get_code();
+  code->build_cfg();
+  auto& cfg = code->cfg();
+
+  Lazy<const constant_uses::ConstantUses> constant_uses([&] {
+    return std::make_unique<const constant_uses::ConstantUses>(
+        cfg, method, /* force_type_inference */ true);
+  });
+  positions::JoinStats join_stats;
+  branch_prefix_hoisting_impl::process_cfg(cfg, constant_uses,
+                                           /* can_allocate_regs */ true,
+                                           &join_stats);
+
+  EXPECT_EQ(join_stats.marked_unreliable, 0u);
+  EXPECT_EQ(join_stats.not_recorded, 0u);
+  size_t positions = 0;
+  for (auto* block : cfg.blocks()) {
+    for (auto& mie : *block) {
+      positions += mie.type == MFLOW_POSITION ? 1 : 0;
+    }
+  }
+  EXPECT_EQ(positions, 0u);
 }

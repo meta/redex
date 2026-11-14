@@ -20,6 +20,7 @@
 #include "IRCode.h"
 #include "InitClassesWithSideEffects.h"
 #include "LocalDce.h"
+#include "PositionJoin.h"
 #include "RandomForest.h"
 #include "ShrinkerConfig.h"
 #include "Timer.h"
@@ -85,6 +86,9 @@ class Shrinker {
   }
   size_t get_branch_prefix_hoisting_stats() const {
     return m_branch_prefix_hoisting_stats;
+  }
+  const positions::JoinStats& get_position_join_stats() const {
+    return m_position_join_stats;
   }
   size_t get_methods_shrunk() const { return m_methods_shrunk; }
   size_t get_methods_reg_alloced() const { return m_methods_reg_alloced; }
@@ -191,6 +195,7 @@ class Shrinker {
   LocalDce::Stats m_local_dce_stats;
   AccumulatingTimer m_branch_prefix_hoisting_timer;
   size_t m_branch_prefix_hoisting_stats{0};
+  positions::JoinStats m_position_join_stats;
   AccumulatingTimer m_dedup_blocks_timer;
   dedup_blocks_impl::Stats m_dedup_blocks_stats;
   AccumulatingTimer m_reg_alloc_timer;

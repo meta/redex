@@ -145,10 +145,36 @@ bool PositionPatternSwitchManager::names_no_source(
   return false;
 }
 
+namespace {
+
+// Synthetic is not unreliable: a slot on line 0 names no source line, but it
+// does not stand for several either.
+bool chain_is_unreliable(const DexPosition* pos) {
+  for (; pos != nullptr; pos = pos->parent) {
+    if (pos->is_unreliable()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+} // namespace
+
 uint32_t PositionPatternSwitchManager::make_pattern(
-    PositionPattern pos_pattern) {
+    PositionPattern pos_pattern, std::vector<DexPosition*>* slot_provenance) {
+  if (slot_provenance != nullptr) {
+    slot_provenance->clear();
+    slot_provenance->reserve(pos_pattern.size());
+  }
   for (auto& pos : pos_pattern) {
+    always_assert(pos);
     always_assert(pos->file);
+    // Read before interning, which keeps identity only.
+    auto* provenance =
+        chain_is_unreliable(pos) ? snapshot_candidate(pos) : nullptr;
+    if (slot_provenance != nullptr) {
+      slot_provenance->push_back(provenance);
+    }
     pos = internalize(pos);
   }
   auto it = m_patterns_map.find(pos_pattern);
@@ -176,8 +202,21 @@ uint32_t PositionPatternSwitchManager::make_alternatives(
         "a ByPattern alternative needs a discriminator and an All alternative "
         "has none");
     if (!by_pattern) {
+      always_assert_log(alternative.provenance == nullptr,
+                        "a candidate set member carries no slot provenance");
       alternative.position = snapshot_candidate(alternative.position);
       continue;
+    }
+    // A caller may hand over the slot's original position instead of its
+    // provenance snapshot; what that position knows is kept all the same.
+    if (alternative.provenance == nullptr &&
+        chain_is_unreliable(alternative.position)) {
+      alternative.provenance = alternative.position;
+    }
+    if (alternative.provenance != nullptr) {
+      // Idempotent on a snapshot, so the pointer stays canonical.
+      alternative.provenance = snapshot_candidate(alternative.provenance);
+      redex_assert(*alternative.provenance == *alternative.position);
     }
     alternative.position = internalize(alternative.position);
   }
@@ -250,9 +289,9 @@ PositionKey position_key(
 }
 
 // What one alternatives group says, including how its entries are selected.
-using AlternativesKey =
-    std::pair<uint8_t,
-              std::vector<std::pair<std::optional<uint32_t>, PositionKey>>>;
+using AlternativesKey = std::pair<
+    uint8_t,
+    std::vector<std::tuple<std::optional<uint32_t>, PositionKey, PositionKey>>>;
 
 AlternativesKey alternatives_key(
     const PositionPatternSwitchManager& manager,
@@ -263,7 +302,13 @@ AlternativesKey alternatives_key(
   key.first = static_cast<uint8_t>(group.selection);
   key.second.reserve(group.entries.size());
   for (const auto& entry : group.entries) {
+    // `provenance` is part of the group's identity, so it has to be part of
+    // its order too: two groups differing only there would otherwise compare
+    // equal and be emitted in whatever order registration happened to assign.
     key.second.emplace_back(entry.pattern_id,
+                            entry.provenance == nullptr
+                                ? PositionKey()
+                                : position_key(manager, entry.provenance),
                             position_key(manager, entry.position));
   }
   return key;
@@ -496,6 +541,28 @@ uint32_t PositionPatternSwitchManager::register_alt_set(
   return it->second + 1;
 }
 
+DexPosition* PositionPatternSwitchManager::join_slot_provenance(
+    DexPosition* first, DexPosition* second) {
+  if (first == nullptr || first == second) {
+    return second;
+  }
+  if (second == nullptr) {
+    return first;
+  }
+  auto* joined = join_chains(first, second);
+  return chain_is_unreliable(joined) ? joined : nullptr;
+}
+
+DexPosition* PositionPatternSwitchManager::mark_slot_uncaptured(
+    const DexPosition* pos) {
+  always_assert(pos);
+  DexPosition leaf(*pos);
+  leaf.parent =
+      pos->parent != nullptr ? snapshot_candidate(pos->parent) : nullptr;
+  leaf.mark_unreliable_without_candidates();
+  return m_candidate_positions.insert_unsafe(leaf).first;
+}
+
 std::unique_ptr<DexPosition>
 PositionPatternSwitchManager::make_pattern_position(uint32_t pattern_id) const {
   always_assert(pattern_id < m_patterns.size());
@@ -578,7 +645,7 @@ void RealPositionMapper::process_position_alternatives() {
                                     }
                                   });
         for (auto& c : cases) {
-          visit(c.position);
+          visit(c.emitted_position());
         }
       } else if (manager->is_switch_position(pos)) {
         if (reachable_alternatives.insert(pos->line).second) {
@@ -597,7 +664,7 @@ void RealPositionMapper::process_position_alternatives() {
                                         pending.push_back(c);
                                       });
             if (pattern_reachable) {
-              visit(c.position);
+              visit(c.emitted_position());
             }
           }
         }
@@ -636,7 +703,14 @@ void RealPositionMapper::process_position_alternatives() {
       if (by_pattern && reachable_patterns.count(*entry.pattern_id) == 0u) {
         continue;
       }
-      for (auto* pos = entry.position;
+      // The selected position is interned and identity-only, and its record
+      // is shared by every switch that selects it. An entry that knows more
+      // emits its provenance snapshot instead: a record chain of its own that
+      // carries each level's candidate set or uncaptured mark, which the
+      // trailer then reports.
+      PositionAlternative emitted = entry;
+      emitted.position = entry.emitted_position();
+      for (auto* pos = emitted.position;
            (pos != nullptr) && (pos->file != nullptr);
            pos = pos->parent) {
         auto [it, emplaced] = m_pos_line_map.emplace(pos, m_positions.size());
@@ -646,7 +720,7 @@ void RealPositionMapper::process_position_alternatives() {
           always_assert(it->second != -1);
         }
       }
-      reachable_entries.push_back(entry);
+      reachable_entries.push_back(emitted);
     }
     if (by_pattern) {
       std::sort(reachable_entries.begin(), reachable_entries.end(),

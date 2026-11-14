@@ -60,7 +60,9 @@ struct DexPosition final {
       (uint32_t{1} << kProvenanceBits) - 1;
 
   friend class PositionPatternSwitchManager;
-  // Canonical interner keys are identity-only.
+  // Canonical interner keys are identity-only. Callers read provenance before
+  // interning: `make_pattern` reports it per slot to its caller, and a switch
+  // entry keeps it in `PositionAlternative::provenance`.
   void clear_provenance() { m_prov = 0; }
   // Ambiguity whose candidate sites were not captured. Any set the position
   // carried is dropped: it is no longer the complete membership, and the line
@@ -207,14 +209,33 @@ enum class PositionAlternativesSelection : uint8_t {
 struct PositionAlternative {
   std::optional<uint32_t> pattern_id;
   DexPosition* position;
+  // What the outlined method that registered this entry knows about the
+  // selected position beyond its identity: an immutable snapshot of the same
+  // chain carrying the provenance of every level -- a candidate set or an
+  // uncaptured mark, on the leaf or on an inlined caller. Null when no level
+  // carries any, and always null in a candidate set. The line map emits the
+  // snapshot instead of `position`, so the case keeps that provenance.
+  //
+  // It is part of the group's identity: two switches that select the same
+  // positions but know different things about them describe different
+  // outlined methods, and sharing one group between them would report what
+  // only one of them saw. Snapshots are interned with their provenance, so
+  // comparing the pointer compares the content.
+  DexPosition* provenance{nullptr};
   bool operator==(const PositionAlternative& other) const {
-    return pattern_id == other.pattern_id && position == other.position;
+    return pattern_id == other.pattern_id && position == other.position &&
+           provenance == other.provenance;
+  }
+  // The chain the line map emits for this entry.
+  DexPosition* emitted_position() const {
+    return provenance != nullptr ? provenance : position;
   }
 };
 inline size_t hash_value(const PositionAlternative& alternative) {
   size_t h = alternative.pattern_id.has_value() ? 1 : 0;
   boost::hash_combine(h, alternative.pattern_id.value_or(0));
   boost::hash_combine(h, reinterpret_cast<size_t>(alternative.position));
+  boost::hash_combine(h, reinterpret_cast<size_t>(alternative.provenance));
   return h;
 }
 
@@ -249,8 +270,39 @@ class PositionPatternSwitchManager {
   // outlined method, a limitation imposed by symbolication infrastructure.
   static constexpr bool CAN_OUTLINED_METHOD_INVOKE_OUTLINED_METHOD = false;
 
-  // Returns a value that uniquely identifies the pattern.
-  uint32_t make_pattern(PositionPattern pos_pattern);
+  /*
+   * Returns a value that uniquely identifies the pattern.
+   *
+   * Pattern identity is source identity alone, so one id is shared by every
+   * outlined method whose slots hold the same positions. Per-slot provenance
+   * is therefore reported back to THIS caller through `slot_provenance` rather
+   * than kept beside the canonical pattern: it describes the registration, not
+   * the pattern, and the manager has no way to tell two registrations apart.
+   *
+   * For each slot, `slot_provenance` receives an immutable snapshot of the
+   * slot's chain with the provenance of every level -- what a
+   * `PositionAlternative` carries in `provenance` -- or null when no level of
+   * the chain carries any.
+   */
+  uint32_t make_pattern(PositionPattern pos_pattern,
+                        std::vector<DexPosition*>* slot_provenance = nullptr);
+
+  /*
+   * What one outlined method knows about a slot from two of its occurrences:
+   * `first`'s chain, with each level joined with `second`'s level at the same
+   * depth by `join_chains`. Either may be a provenance snapshot as
+   * `make_pattern` reports it, or the slot's interned chain; null stands for a
+   * chain of the other's identity without provenance. Returns a provenance
+   * snapshot, or null when no level of the result carries any.
+   */
+  DexPosition* join_slot_provenance(DexPosition* first, DexPosition* second);
+
+  /*
+   * A provenance snapshot of `pos`'s chain, keeping the provenance of every
+   * level above the leaf, whose leaf is merged with sites nobody captured.
+   * For a slot that some occurrence of an outlined method does not have.
+   */
+  DexPosition* mark_slot_uncaptured(const DexPosition* pos);
 
   // Returns a value that uniquely identifies a switch selected by pattern id.
   uint32_t make_switch(PositionSwitch pos_switch);
@@ -397,8 +449,8 @@ class PositionPatternSwitchManager {
   // sites nobody captured if either is, or if `other` names a different place
   // there or has no such level; otherwise the union of their candidate sets.
   // Commutative for chains of one identity. Every join of what two copies of
-  // one place know -- set members, the survivor's own place -- goes through
-  // this.
+  // one place know -- set members, the survivor's own place, outlined slots --
+  // goes through this.
   DexPosition* join_chains(const DexPosition* kept, const DexPosition* other);
   // `members` ordered by identity, with members of one identity joined.
   PositionPattern canonical_members(const std::vector<DexPosition*>& members);

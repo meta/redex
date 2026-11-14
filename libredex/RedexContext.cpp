@@ -887,9 +887,9 @@ DexLocation* RedexContext::get_location(std::string_view store_name,
 
 PositionPatternSwitchManager*
 RedexContext::get_position_pattern_switch_manager() {
-  if (m_position_pattern_switch_manager == nullptr) {
+  std::call_once(m_position_pattern_switch_manager_once, [this]() {
     m_position_pattern_switch_manager = new PositionPatternSwitchManager();
-  }
+  });
   return m_position_pattern_switch_manager;
 }
 

@@ -7,7 +7,11 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <atomic>
 #include <set>
+#include <thread>
+#include <vector>
 
 #include "DexPosition.h"
 #include "RedexContext.h"
@@ -28,6 +32,98 @@ class PositionInterningTest : public RedexTest {
                                          DexString::make_string(file), line);
   }
 };
+
+TEST_F(PositionInterningTest, manager_initialization_is_thread_safe) {
+  constexpr size_t kThreadCount = 32;
+  std::array<PositionPatternSwitchManager*, kThreadCount> managers{};
+  std::vector<std::thread> threads;
+  threads.reserve(kThreadCount);
+  for (size_t i = 0; i < kThreadCount; ++i) {
+    threads.emplace_back([&, i]() {
+      managers[i] = g_redex->get_position_pattern_switch_manager();
+    });
+  }
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  ASSERT_NE(managers[0], nullptr);
+  for (auto* initialized : managers) {
+    EXPECT_EQ(initialized, managers[0]);
+  }
+}
+
+TEST_F(PositionInterningTest,
+       parallel_candidate_registration_uses_one_manager) {
+  constexpr size_t kThreadCount = 32;
+  std::array<std::unique_ptr<DexPosition>, kThreadCount> survivors;
+  std::array<std::unique_ptr<DexPosition>, kThreadCount> first_candidates;
+  std::array<std::unique_ptr<DexPosition>, kThreadCount> second_candidates;
+  std::array<uint32_t, kThreadCount> alt_ids{};
+  for (size_t i = 0; i < kThreadCount; ++i) {
+    survivors[i] = pos("Survivor.java", static_cast<uint32_t>(i + 1));
+    first_candidates[i] = pos("First.java", static_cast<uint32_t>(100 + i));
+    second_candidates[i] = pos("Second.java", static_cast<uint32_t>(200 + i));
+  }
+
+  std::vector<std::thread> threads;
+  threads.reserve(kThreadCount);
+  for (size_t i = 0; i < kThreadCount; ++i) {
+    threads.emplace_back([&, i]() {
+      auto* initialized = g_redex->get_position_pattern_switch_manager();
+      initialized->record_candidates(
+          survivors[i].get(),
+          {first_candidates[i].get(), second_candidates[i].get()});
+      alt_ids[i] = survivors[i]->alt_id();
+    });
+  }
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  auto* initialized = g_redex->get_position_pattern_switch_manager();
+  for (auto alt_id : alt_ids) {
+    ASSERT_NE(alt_id, 0u);
+    EXPECT_EQ(initialized->get_alt_set(alt_id).total_candidates(), 2u);
+  }
+}
+
+TEST_F(PositionInterningTest, parallel_updates_to_one_survivor_form_one_union) {
+  constexpr size_t kIterations = 32;
+  auto* initialized = manager();
+  for (size_t iteration = 0; iteration < kIterations; ++iteration) {
+    auto survivor = pos("Survivor.java", static_cast<uint32_t>(iteration));
+    auto first = pos("First.java", static_cast<uint32_t>(100 + iteration));
+    auto second = pos("Second.java", static_cast<uint32_t>(200 + iteration));
+    auto third = pos("Third.java", static_cast<uint32_t>(300 + iteration));
+    auto fourth = pos("Fourth.java", static_cast<uint32_t>(400 + iteration));
+    std::atomic<size_t> ready{0};
+    std::atomic<bool> go{false};
+    auto record = [&](std::vector<DexPosition*> candidates) {
+      ready.fetch_add(1, std::memory_order_release);
+      while (!go.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      initialized->record_candidates(survivor.get(),
+                                     std::vector<const DexPosition*>(
+                                         candidates.begin(), candidates.end()));
+    };
+    std::thread left(record,
+                     std::vector<DexPosition*>{first.get(), second.get()});
+    std::thread right(record,
+                      std::vector<DexPosition*>{third.get(), fourth.get()});
+    while (ready.load(std::memory_order_acquire) != 2) {
+      std::this_thread::yield();
+    }
+    go.store(true, std::memory_order_release);
+    left.join();
+    right.join();
+
+    ASSERT_NE(survivor->alt_id(), 0u);
+    EXPECT_EQ(initialized->get_alt_set(survivor->alt_id()).total_candidates(),
+              4u);
+  }
+}
 
 // Interning under churn: the caller's position dies on every iteration, so the
 // allocator hands the next one the same address. Each distinct line must still
@@ -91,6 +187,23 @@ TEST_F(PositionInterningTest, equal_values_intern_to_one_object) {
   ASSERT_NE(a.get(), b.get());
   EXPECT_EQ(manager()->make_pattern({a.get()}),
             manager()->make_pattern({b.get()}));
+}
+
+TEST_F(PositionInterningTest,
+       ordinary_interning_does_not_copy_candidate_provenance) {
+  auto clean = pos("Foo.java", 12);
+  auto ambiguous = pos("Foo.java", 12);
+  auto first = pos("First.java", 20);
+  auto second = pos("Second.java", 30);
+  auto pattern_id = manager()->make_pattern({clean.get()});
+  manager()->record_candidates(ambiguous.get(), {first.get(), second.get()});
+  ASSERT_NE(ambiguous->alt_id(), 0u);
+
+  EXPECT_EQ(manager()->make_pattern({ambiguous.get()}), pattern_id);
+  const auto& interned = manager()->get_patterns().at(pattern_id).front();
+  EXPECT_EQ(interned->alt_id(), 0u);
+  EXPECT_FALSE(interned->is_unreliable());
+  EXPECT_EQ(manager()->get_alt_set(ambiguous->alt_id()).total_candidates(), 2u);
 }
 
 // Keying the memo on the caller's address is unsound because the address

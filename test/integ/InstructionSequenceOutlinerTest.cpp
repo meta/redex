@@ -16,6 +16,7 @@
 
 #include "ControlFlow.h"
 #include "Debug.h"
+#include "DexPosition.h"
 #include "DexUtil.h"
 #include "IRCode.h"
 #include "RedexTest.h"
@@ -1117,15 +1118,17 @@ TEST_F(InstructionSequenceOutlinerTest, check_positions) {
   }
 
   auto* manager = g_redex->get_position_pattern_switch_manager();
-  const auto& switches = manager->get_switches();
+  const auto& alternatives = manager->get_alternatives();
   std::unordered_set<uint32_t> pattern_ids_from_switches;
 
   EXPECT_GT(switch_positions.size(), 0);
   // Get pattern ids from switches
   for (auto* sp : switch_positions) {
-    auto s = switches.at(sp->line);
-    for (auto pos_case : s) {
-      pattern_ids_from_switches.insert(pos_case.pattern_id);
+    const auto& group = alternatives.at(sp->line);
+    ASSERT_EQ(group.selection, PositionAlternativesSelection::ByPattern);
+    for (const auto& entry : group.entries) {
+      ASSERT_TRUE(entry.pattern_id.has_value());
+      pattern_ids_from_switches.insert(*entry.pattern_id);
     }
   }
 

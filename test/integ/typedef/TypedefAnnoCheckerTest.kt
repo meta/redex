@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+@file:Suppress("WrongIntDefValue", "WrongStringDefValue")
+
 package com.facebook.redextest
 
 import integ.TestIntDef
@@ -420,4 +422,74 @@ class TypedefAnnoCheckerKtTest {
       testLambdaCall(shareType.externalShareOptionType)
     }
   }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+////////// typedef params declared by only some implementations ///////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// Shaped like kotlin.jvm.functions.Function3: each implementation compiles to a typed invoke
+// plus an erased invoke(Object, Object, Object) bridge that overrides Action3.invoke.
+interface Action3<in A, in B, in C> {
+  fun invoke(a: A, b: B, c: C)
+}
+
+class SpeedChangedAction : Action3<Float?, Float, String> {
+  override fun invoke(a: Float?, b: Float, @TestStringDef c: String) {
+    println(c)
+  }
+}
+
+class SeekAction : Action3<Int, Int, Int> {
+  override fun invoke(a: Int, b: Int, c: Int) {
+    println(a + b + c)
+  }
+}
+
+class ToggleAction : Action3<Boolean, Boolean, Boolean> {
+  override fun invoke(a: Boolean, b: Boolean, c: Boolean) {
+    println(a && b && c)
+  }
+}
+
+fun testCallUnannotatedGenericMethod(action: Action3<Int, Int, Int>, value: Int) {
+  action.invoke(value, value, value)
+}
+
+interface Logger {
+  fun log(@TestIntDef level: Int, tag: String)
+}
+
+class TaggedLogger : Logger {
+  override fun log(@TestIntDef level: Int, @TestStringDef tag: String) {
+    println(tag)
+  }
+}
+
+class PlainLogger : Logger {
+  override fun log(@TestIntDef level: Int, tag: String) {
+    println(level)
+  }
+}
+
+fun testCallParamAnnotatedOnlyByOverride(logger: Logger, tag: String) {
+  logger.log(TestIntDef.ONE, tag)
+}
+
+fun testCallInvalidParamAnnotatedByInterface(logger: Logger) {
+  logger.log(6, TestStringDef.ONE)
+}
+
+interface Level {
+  fun set(@TestIntDef level: Int)
+}
+
+class NoBoolLevel : Level {
+  override fun set(@integ.TestIntDefNoBool level: Int) {
+    println(level)
+  }
+}
+
+fun testCallParamWithDifferentTypedefOnOverride(level: Level) {
+  level.set(TestIntDef.ONE)
 }

@@ -75,12 +75,10 @@ class TypedefAnnoCheckerPass : public Pass {
       InsertOnlyConcurrentMap<const DexClass*, UnorderedSet<uint64_t>>&
           intdef_constants);
 
-  // The methods whose typedef params a call can be checked against: those with
-  // a typedef param, and every method they override, because a call to a pure
-  // virtual method is also checked against its overrides.
+  // The methods a call can resolve to and be checked against: those with a
+  // typedef param.
   static void collect_typedef_param_methods(
       const Scope& scope,
-      const method_override_graph::Graph& method_override_graph,
       const UnorderedSet<const DexType*>& typedef_annos,
       InsertOnlyConcurrentSet<const DexMethod*>& typedef_param_methods);
 

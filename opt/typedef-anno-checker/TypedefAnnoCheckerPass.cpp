@@ -214,20 +214,37 @@ void TypedefAnnoChecker::check_instruction(IRInstruction* insn) {
   case OPCODE_INVOKE_STATIC:
   case OPCODE_INVOKE_INTERFACE: {
     auto* callee_def = resolve_method(m_method, insn);
-    if (callee_def == nullptr) {
+    if (callee_def == nullptr || callee_def->get_param_anno() == nullptr) {
+      return;
+    }
+    // A call is held to the typedef params its resolved method declares.
+    // Overrides are checked only on those params, where they declare a
+    // different typedef.
+    UnorderedMap<int, const DexType*> declared_params;
+    for (auto const& [param, anno_set] : *callee_def->get_param_anno()) {
+      auto annotation = type_inference::get_typedef_annotation(
+          anno_set->get_annotations(), m_inference->get_annotations());
+      if (annotation) {
+        declared_params.emplace(param, *annotation);
+      }
+    }
+    if (declared_params.empty()) {
       return;
     }
     auto callees = resolve_callees(callee_def);
-    for (const DexMethod* callee : UnorderedIterable(callees)) {
+    for (const DexMethod* callee :
+         unordered_to_ordered(callees, compare_dexmethods)) {
       if (callee->get_param_anno() == nullptr) {
         // Callee does not expect any Typedef value. Nothing to do.
-        return;
+        continue;
       }
       for (auto const& param_anno : *callee->get_param_anno()) {
         auto annotation = type_inference::get_typedef_annotation(
             param_anno.second->get_annotations(),
             m_inference->get_annotations());
-        if (annotation == std::nullopt) {
+        auto declared = declared_params.find(param_anno.first);
+        if (annotation == std::nullopt || declared == declared_params.end() ||
+            (callee != callee_def && *annotation == declared->second)) {
           continue;
         }
         int param_index = insn->opcode() == OPCODE_INVOKE_STATIC
@@ -614,8 +631,7 @@ void TypedefAnnoCheckerPass::run_pass(DexStoresVector& stores,
   UnorderedSet<const DexType*> typedef_annos{m_config.int_typedef,
                                              m_config.str_typedef};
   InsertOnlyConcurrentSet<const DexMethod*> typedef_param_methods;
-  collect_typedef_param_methods(scope, *method_override_graph, typedef_annos,
-                                typedef_param_methods);
+  collect_typedef_param_methods(scope, typedef_annos, typedef_param_methods);
 
   auto stats = walk::parallel::methods<CheckerStats>(scope, [&](DexMethod* m) {
     if (!has_typedef_sink(m, typedef_param_methods, typedef_annos)) {
@@ -647,7 +663,6 @@ Encountered %zu faulty methods. The errors are
 
 void TypedefAnnoCheckerPass::collect_typedef_param_methods(
     const Scope& scope,
-    const method_override_graph::Graph& method_override_graph,
     const UnorderedSet<const DexType*>& typedef_annos,
     InsertOnlyConcurrentSet<const DexMethod*>& typedef_param_methods) {
   walk::parallel::methods(scope, [&](DexMethod* m) {
@@ -655,12 +670,6 @@ void TypedefAnnoCheckerPass::collect_typedef_param_methods(
       return;
     }
     typedef_param_methods.insert(m);
-    auto overriddens =
-        mog::get_overridden_methods(method_override_graph, m,
-                                    /* include_interfaces */ true);
-    for (const auto* overridden : UnorderedIterable(overriddens)) {
-      typedef_param_methods.insert(overridden);
-    }
   });
 }
 

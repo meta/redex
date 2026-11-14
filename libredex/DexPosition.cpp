@@ -196,25 +196,75 @@ struct PositionNodeKey {
   std::string_view file;
   uint32_t line;
   std::string_view method;
+  bool unreliable;
+  std::vector<std::vector<PositionNodeKey>> alternatives;
 
   bool operator==(const PositionNodeKey& other) const {
-    return std::tie(file, line, method) ==
-           std::tie(other.file, other.line, other.method);
+    return std::tie(file, line, method, unreliable, alternatives) ==
+           std::tie(other.file, other.line, other.method, other.unreliable,
+                    other.alternatives);
   }
   bool operator<(const PositionNodeKey& other) const {
-    return std::tie(file, line, method) <
-           std::tie(other.file, other.line, other.method);
+    return std::tie(file, line, method, unreliable, alternatives) <
+           std::tie(other.file, other.line, other.method, other.unreliable,
+                    other.alternatives);
   }
 };
 using PositionKey = std::vector<PositionNodeKey>;
 
-// Method, file and line at every level of a position's inlining chain.
-PositionKey position_key(const DexPosition* pos) {
+enum class KeyContent : uint8_t {
+  // Method, file and line at every level of the inlining chain.
+  Identity,
+  // Identity plus provenance, including the content of any alternatives
+  // nested on the chain.
+  IdentityAndProvenance,
+};
+
+// What a position says, all the way up its inlining chain. The recursive
+// content, rather than the registration-time alt id, keeps ordering
+// deterministic.
+PositionKey position_key(
+    const PositionPatternSwitchManager& manager,
+    const DexPosition* pos,
+    KeyContent content = KeyContent::IdentityAndProvenance) {
+  const bool with_provenance = content == KeyContent::IdentityAndProvenance;
   PositionKey key;
   for (; pos != nullptr; pos = pos->parent) {
-    key.push_back(PositionNodeKey{
-        pos->file == nullptr ? std::string_view() : pos->file->str(), pos->line,
-        pos->method == nullptr ? std::string_view() : pos->method->str()});
+    PositionNodeKey node{
+        pos->file == nullptr ? std::string_view() : pos->file->str(),
+        pos->line,
+        pos->method == nullptr ? std::string_view() : pos->method->str(),
+        with_provenance && pos->is_unreliable(),
+        {}};
+    if (with_provenance && pos->alt_id() != 0) {
+      const auto& alt_set = manager.get_alt_set(pos->alt_id());
+      node.alternatives.reserve(alt_set.members.size());
+      for (auto* member : alt_set.members) {
+        node.alternatives.push_back(position_key(manager, member));
+      }
+      std::sort(node.alternatives.begin(), node.alternatives.end());
+    }
+    key.push_back(std::move(node));
+  }
+  return key;
+}
+
+// What one alternatives group says, including how its entries are selected.
+using AlternativesKey =
+    std::pair<uint8_t,
+              std::vector<std::pair<std::optional<uint32_t>, PositionKey>>>;
+
+AlternativesKey alternatives_key(
+    const PositionPatternSwitchManager& manager,
+    const std::vector<PositionAlternatives>& alternatives,
+    uint32_t alternatives_id) {
+  const auto& group = alternatives.at(alternatives_id);
+  AlternativesKey key;
+  key.first = static_cast<uint8_t>(group.selection);
+  key.second.reserve(group.entries.size());
+  for (const auto& entry : group.entries) {
+    key.second.emplace_back(entry.pattern_id,
+                            position_key(manager, entry.position));
   }
   return key;
 }
@@ -226,7 +276,8 @@ PositionPattern PositionPatternSwitchManager::canonical_members(
   std::vector<std::pair<PositionKey, DexPosition*>> keyed;
   keyed.reserve(members.size());
   for (auto* member : members) {
-    keyed.emplace_back(position_key(member), member);
+    keyed.emplace_back(position_key(*this, member, KeyContent::Identity),
+                       member);
   }
   std::sort(keyed.begin(), keyed.end(),
             [](const auto& a, const auto& b) { return a.first < b.first; });
@@ -283,16 +334,70 @@ positions::FidelityChange PositionPatternSwitchManager::record_candidates(
     DexPosition* survivor, const std::vector<const DexPosition*>& candidates) {
   always_assert(survivor != nullptr);
   std::lock_guard<std::mutex> survivor_lock(survivor_mutex(survivor));
+  auto record = compute_candidate_record(survivor, candidates);
+  apply_candidate_record(survivor, record);
+  return record.became_unreliable ? positions::FidelityChange::BecameUnreliable
+                                  : positions::FidelityChange::Unchanged;
+}
 
+std::vector<positions::FidelityChange>
+PositionPatternSwitchManager::record_candidates_jointly(
+    const std::vector<std::pair<DexPosition*, std::vector<const DexPosition*>>>&
+        records) {
+  // Every survivor's mutex is held for the whole batch, taken in stripe order
+  // so that two batches cannot wait on each other.
+  std::vector<size_t> stripes;
+  stripes.reserve(records.size());
+  UnorderedSet<const DexPosition*> survivors;
+  for (const auto& [survivor, candidates] : records) {
+    always_assert(survivor != nullptr);
+    always_assert_log(survivors.insert(survivor).second,
+                      "a survivor recorded twice in one batch would lose one "
+                      "of its records");
+    stripes.push_back(survivor_stripe(survivor));
+  }
+  std::sort(stripes.begin(), stripes.end());
+  stripes.erase(std::unique(stripes.begin(), stripes.end()), stripes.end());
+  std::vector<std::unique_lock<std::mutex>> locks;
+  locks.reserve(stripes.size());
+  for (auto stripe : stripes) {
+    locks.emplace_back(m_survivor_mutexes[stripe]);
+  }
+
+  std::vector<CandidateRecord> computed;
+  computed.reserve(records.size());
+  for (const auto& [survivor, candidates] : records) {
+    computed.push_back(compute_candidate_record(survivor, candidates));
+  }
+  std::vector<positions::FidelityChange> changes;
+  changes.reserve(records.size());
+  for (size_t i = 0; i < records.size(); ++i) {
+    apply_candidate_record(records[i].first, computed[i]);
+    changes.push_back(computed[i].became_unreliable
+                          ? positions::FidelityChange::BecameUnreliable
+                          : positions::FidelityChange::Unchanged);
+  }
+  return changes;
+}
+
+void PositionPatternSwitchManager::apply_candidate_record(
+    DexPosition* survivor, const CandidateRecord& record) {
+  if (record.provenance) {
+    survivor->m_prov = *record.provenance;
+  }
+}
+
+PositionPatternSwitchManager::CandidateRecord
+PositionPatternSwitchManager::compute_candidate_record(
+    const DexPosition* survivor,
+    const std::vector<const DexPosition*>& candidates) {
   // Absorbing: a survivor that already stands for a site nobody captured can
   // never present a complete set again, and there is no partial encoding.
   if (survivor->is_unreliable() && survivor->alt_id() == 0) {
-    return positions::FidelityChange::Unchanged;
+    return {};
   }
   // Every path below that changes the survivor leaves it unreliable.
-  const auto change = survivor->is_unreliable()
-                          ? positions::FidelityChange::Unchanged
-                          : positions::FidelityChange::BecameUnreliable;
+  const bool became_unreliable = !survivor->is_unreliable();
 
   // Merging with nothing nameable is itself a loss of fidelity, so an empty
   // request is a report of an uncaptured site rather than a no-op.
@@ -300,10 +405,11 @@ positions::FidelityChange PositionPatternSwitchManager::record_candidates(
     return candidate == nullptr || names_no_source(candidate) ||
            (candidate->is_unreliable() && candidate->alt_id() == 0);
   };
+  DexPosition updated(*survivor);
   if (candidates.empty() ||
       std::any_of(candidates.begin(), candidates.end(), names_nothing)) {
-    survivor->mark_unreliable_without_candidates();
-    return change;
+    updated.mark_unreliable_without_candidates();
+    return {became_unreliable, updated.m_prov};
   }
 
   // The places the candidates stand for. A candidate is its own place -- its
@@ -348,7 +454,7 @@ positions::FidelityChange PositionPatternSwitchManager::record_candidates(
   if (sites.empty()) {
     // Nothing beyond what the survivor already presents, and nothing went
     // uncaptured, so the survivor makes exactly the claim it made before.
-    return positions::FidelityChange::Unchanged;
+    return {};
   }
 
   // Preserve the complete membership, not only the capped records. Otherwise a
@@ -358,8 +464,8 @@ positions::FidelityChange PositionPatternSwitchManager::record_candidates(
     sites.insert(sites.end(), inherited.members.begin(),
                  inherited.members.end());
   }
-  survivor->set_alt_id(register_alt_set(canonical_members(sites)));
-  return change;
+  updated.set_alt_id(register_alt_set(canonical_members(sites)));
+  return {became_unreliable, updated.m_prov};
 }
 
 uint32_t PositionPatternSwitchManager::register_alt_set(
@@ -507,12 +613,20 @@ void RealPositionMapper::process_position_alternatives() {
       DexString::make_string("Lredex/$Position;.case:()V");
   const auto* unknown_source_string = DexString::make_string("UnknownSource");
 
-  UnorderedMap<uint32_t, uint32_t> alternatives_line_map;
+  std::vector<std::pair<AlternativesKey, uint32_t>> emission_order;
   for (uint32_t alternatives_id = 0; alternatives_id < alternatives.size();
        ++alternatives_id) {
-    if (reachable_alternatives.count(alternatives_id) == 0u) {
-      continue;
+    if (reachable_alternatives.count(alternatives_id) != 0u) {
+      emission_order.emplace_back(
+          alternatives_key(*manager, alternatives, alternatives_id),
+          alternatives_id);
     }
+  }
+  std::sort(emission_order.begin(), emission_order.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+
+  UnorderedMap<uint32_t, uint32_t> alternatives_line_map;
+  for (const auto& [_, alternatives_id] : emission_order) {
     const auto& group = alternatives.at(alternatives_id);
     const bool by_pattern =
         group.selection == PositionAlternativesSelection::ByPattern;

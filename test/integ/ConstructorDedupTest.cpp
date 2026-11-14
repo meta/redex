@@ -5,7 +5,9 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <algorithm>
 #include <map>
+#include <set>
 #include <string>
 
 #include "DexClass.h"
@@ -147,6 +149,22 @@ TEST_F(ConstructorDedupTest, representative_joins_victims_by_member) {
     }
   }
 
+  // Which constructor each constructor call of the class invoked before
+  // deduplication.
+  std::map<IRInstruction*, DexMethod*> callees_before;
+  for (auto* method : cls->get_all_methods()) {
+    if (method->get_code() == nullptr) {
+      continue;
+    }
+    for (auto& mie : InstructionIterable(method->get_code())) {
+      if (mie.insn->has_method() &&
+          mie.insn->get_method()->get_class() == type &&
+          method::is_init(mie.insn->get_method())) {
+        callees_before.emplace(mie.insn, mie.insn->get_method()->as_def());
+      }
+    }
+  }
+
   std::vector<DexClass*> scope({cls});
   positions::JoinStats join_stats;
   method_dedup::dedup_constructors(scope, scope, &join_stats);
@@ -167,6 +185,30 @@ TEST_F(ConstructorDedupTest, representative_joins_victims_by_member) {
   ASSERT_NE(representative, nullptr);
   ASSERT_TRUE(field_lines.count(representative));
 
+  // The lines of the same field's writes in the constructors the
+  // representative replaced, which become its candidates. A replaced
+  // constructor is one whose call sites now call the representative.
+  std::map<std::string, std::set<uint32_t>> replaced_lines;
+  for (const auto& [insn, callee] : callees_before) {
+    if (callee == representative || insn->get_method() != representative) {
+      continue;
+    }
+    for (const auto& [field, line] : field_lines.at(callee)) {
+      replaced_lines[field].insert(line);
+    }
+  }
+  ASSERT_FALSE(replaced_lines.empty());
+  std::map<std::string, std::set<uint32_t>> same_field_lines;
+  for (const auto& [ctor, lines] : field_lines) {
+    if (ctor == representative) {
+      continue;
+    }
+    for (const auto& [field, line] : lines) {
+      same_field_lines[field].insert(line);
+    }
+  }
+
+  auto* manager = g_redex->get_position_pattern_switch_manager();
   cfg::ScopedCFG cfg(representative->get_code());
   auto positions = ctor_positions(*cfg);
   ASSERT_NE(positions.super_call, nullptr);
@@ -174,5 +216,21 @@ TEST_F(ConstructorDedupTest, representative_joins_victims_by_member) {
   for (const auto& [field, position] : positions.field_writes) {
     ASSERT_NE(position, nullptr);
     EXPECT_TRUE(position->is_unreliable()) << field;
+    ASSERT_NE(position->alt_id(), 0u) << field;
+    std::set<uint32_t> candidate_lines;
+    for (const auto* member :
+         manager->get_alt_set(position->alt_id()).members) {
+      candidate_lines.insert(member->line);
+    }
+    // Includes the replaced constructors seen through their call sites (the
+    // representative can also replace constructors nothing calls), and names
+    // only writes of this same field.
+    EXPECT_TRUE(std::includes(candidate_lines.begin(), candidate_lines.end(),
+                              replaced_lines[field].begin(),
+                              replaced_lines[field].end()))
+        << field;
+    for (auto line : candidate_lines) {
+      EXPECT_TRUE(same_field_lines[field].count(line)) << field << ":" << line;
+    }
   }
 }

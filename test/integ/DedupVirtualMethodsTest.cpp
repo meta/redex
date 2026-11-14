@@ -9,6 +9,7 @@
 #include "AnnoUtils.h"
 #include "DexStore.h"
 #include "IROpcode.h"
+#include "RedexContext.h"
 #include "RedexTest.h"
 #include "Show.h"
 #include "Walkers.h"
@@ -99,7 +100,8 @@ TEST_F(DedupVirtualMethodsTest, dedup) {
   // against the surviving one.
   EXPECT_EQ(join_stats.merged_without_correspondence, 0u);
 
-  auto expect_unreliable = [](const char* descriptor, bool expected) {
+  auto expect_unreliable = [](const char* descriptor, bool expected,
+                              size_t expected_candidates) {
     auto* method_ref = DexMethod::get_method(descriptor);
     ASSERT_NE(method_ref, nullptr);
     auto* method = method_ref->as_def();
@@ -115,19 +117,29 @@ TEST_F(DedupVirtualMethodsTest, dedup) {
       auto* position = cfg.get_dbg_pos(it);
       ASSERT_NE(position, nullptr);
       EXPECT_EQ(position->is_unreliable(), expected);
+      if (expected_candidates == 0) {
+        EXPECT_EQ(position->alt_id(), 0u);
+      } else {
+        ASSERT_NE(position->alt_id(), 0u);
+        auto candidates =
+            g_redex->get_position_pattern_switch_manager()->get_alt_set(
+                position->alt_id());
+        EXPECT_EQ(candidates.total_candidates(), expected_candidates);
+      }
     }
     EXPECT_GT(throwing_instructions, 0u);
   };
   expect_unreliable(
-      "Lcom/facebook/redextest/P;.throwing_method:()Ljava/lang/Object;", true);
+      "Lcom/facebook/redextest/P;.throwing_method:()Ljava/lang/Object;", true,
+      1);
   expect_unreliable(
       "Lcom/facebook/redextest/InvokeSuperA;.throwing_method:()Ljava/lang/"
       "Object;",
-      false);
+      false, 0);
   expect_unreliable(
       "Lcom/facebook/redextest/InvokeSuperB;.throwing_method:()Ljava/lang/"
       "Object;",
-      true);
+      true, 1);
 
   ASSERT_NE(invoke_super_a->as_def(), nullptr);
   ASSERT_NE(invoke_super_b->as_def(), nullptr);
@@ -203,6 +215,11 @@ TEST_F(DedupVirtualMethodsTest, marksOnlyFinalSurvivor) {
     auto* position = cfg.get_dbg_pos(it);
     ASSERT_NE(position, nullptr);
     EXPECT_TRUE(position->is_unreliable());
+    ASSERT_NE(position->alt_id(), 0u);
+    auto candidates =
+        g_redex->get_position_pattern_switch_manager()->get_alt_set(
+            position->alt_id());
+    EXPECT_EQ(candidates.total_candidates(), 2u);
     found_throwing_position = true;
   }
   EXPECT_TRUE(found_throwing_position);

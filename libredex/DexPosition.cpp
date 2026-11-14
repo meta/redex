@@ -6,6 +6,7 @@
  */
 
 #include <fstream>
+#include <limits>
 #include <type_traits>
 
 #include "ConcurrentContainers.h"
@@ -83,6 +84,7 @@ DexPosition* PositionPatternSwitchManager::internalize(DexPosition* pos) {
   // Copy ctor, not the (method, file, line) ctor: that one always_asserts a
   // non-null file, and a parent in the chain may legitimately have none.
   DexPosition probe(*pos);
+  probe.clear_provenance();
   if (pos->parent != nullptr) {
     // Bottom-up, so the probe's parent is already canonical when it is hashed.
     probe.parent = internalize(pos->parent);
@@ -327,6 +329,9 @@ void RealPositionMapper::write_map_v2() {
    * string_pool[string_pool_size]
    * positions_size (4 bytes)
    * positions[positions_size]
+   * optionally, the provenance trailer -- see `namespace position_map`. Known
+   * count-driven readers stop after the declared positions array and ignore the
+   * optional suffix.
    *
    * Each member of the string pool is encoded as follows:
    * string_length (4 bytes)
@@ -433,7 +438,8 @@ void RealPositionMapper::write_map_v2() {
   }
 
   std::ofstream ofs(m_filename_v2.c_str(),
-                    std::ofstream::out | std::ofstream::trunc);
+                    std::ofstream::out | std::ofstream::binary |
+                        std::ofstream::trunc);
   uint32_t magic = 0xfaceb000; // serves as endianness check
   ofs.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
   uint32_t version = 2;
@@ -470,10 +476,65 @@ void RealPositionMapper::write_map_v2() {
   ofs.write(reinterpret_cast<const char*>(pos_data.data()),
             static_cast<std::streamsize>(sizeof(uint32_t) * pos_data.size()));
 
+  write_provenance_trailer(ofs);
+  ofs.flush();
+  always_assert_log(ofs.good(), "failed to write the line-number map to disk");
+
   TRACE(OPUT, 2,
         "positions: %zu, string pool size: %zu, semi-dense string ids: %u",
         m_positions.size(), string_pool.size(),
         next_semi_dense_string_id.load());
+}
+
+void RealPositionMapper::write_provenance_trailer(std::ofstream& ofs) {
+  // `m_positions` is walked in index order, so the entries come out sorted by
+  // record index without a sort, and identically on every run.
+  std::vector<position_map::ProvenanceEntry> entries;
+  for (size_t idx = 0; idx < m_positions.size(); ++idx) {
+    auto* pos = m_positions[idx];
+    if (!pos->is_unreliable()) {
+      continue;
+    }
+    always_assert(idx <= std::numeric_limits<uint32_t>::max());
+    entries.push_back(position_map::ProvenanceEntry{static_cast<uint32_t>(idx),
+                                                    /* alt_record_index */ 0,
+                                                    /* total_candidates */ 0});
+  }
+
+  if (entries.empty()) {
+    // With no unreliable positions, the declared v2 body ends at EOF; even an
+    // empty trailer would add bytes without carrying information.
+    return;
+  }
+
+  auto current_offset = [&](const char* description) {
+    always_assert_log(ofs.good(),
+                      "failed to determine line-map output offset before %s",
+                      description);
+    const auto offset = ofs.tellp();
+    always_assert_log(offset != std::streampos(-1),
+                      "failed to determine line-map output offset before %s",
+                      description);
+    return static_cast<uint64_t>(static_cast<std::streamoff>(offset));
+  };
+  const auto section_offset = current_offset("provenance section offset");
+  const auto section_length =
+      static_cast<uint64_t>(entries.size() * sizeof(entries[0]));
+  ofs.write(reinterpret_cast<const char*>(entries.data()),
+            static_cast<std::streamsize>(section_length));
+
+  const auto directory_offset = current_offset("provenance directory offset");
+  position_map::SectionEntry entry{
+      static_cast<uint32_t>(position_map::SectionTag::Provenance),
+      /* reserved */ 0, section_offset, section_length};
+  ofs.write(reinterpret_cast<const char*>(&entry), sizeof(entry));
+
+  position_map::Trailer trailer{directory_offset, /* section_count */ 1,
+                                position_map::kTrailerMagic};
+  ofs.write(reinterpret_cast<const char*>(&trailer), sizeof(trailer));
+
+  TRACE(OPUT, 2, "provenance: %zu of %zu positions are unreliable",
+        entries.size(), m_positions.size());
 }
 
 PositionMapper* PositionMapper::make(const std::string& map_filename_v2) {

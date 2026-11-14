@@ -151,6 +151,7 @@ check_PROGRAMS = \
     peephole_test \
     position_interning_test \
     position_join_test \
+    position_map_trailer_test \
     print_kotlin_stats_test \
     proguard_lexer_test \
     proguard_map_test \
@@ -498,6 +499,8 @@ peephole_test_SOURCES = PeepholeTest.cpp
 position_interning_test_SOURCES = PositionInterningTest.cpp
 
 position_join_test_SOURCES = PositionJoinTest.cpp
+
+position_map_trailer_test_SOURCES = PositionMapTrailerTest.cpp
 
 print_kotlin_stats_test_SOURCES = PrintKotlinStatsTest.cpp
 

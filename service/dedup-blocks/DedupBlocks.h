@@ -9,6 +9,7 @@
 
 #include "DeterministicContainers.h"
 #include "DexClass.h"
+#include "PositionJoin.h"
 
 class IRInstruction;
 
@@ -31,6 +32,10 @@ struct Stats {
   int insns_removed{0};
   int blocks_split{0};
   int positions_inserted{0};
+  positions::JoinStats join_stats;
+  // Merges where throwing instructions cannot be paired because the blocks
+  // disagree on their count or opcode sequence.
+  int positions_merged_without_correspondence{0};
   // map from block size to number of blocks with that size
   UnorderedMap<size_t, size_t> dup_sizes;
   Stats& operator+=(const Stats& that);

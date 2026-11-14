@@ -1899,6 +1899,7 @@ TEST_F(DedupBlocksTest, retainPositionWhenMayThrow) {
       (const v1 1)
 
       (:d)
+      (.pos:dbg_2 "LFoo;.caller:()V" "Foo.java" 10)
       (invoke-static () "LMay;.throw:()V")
       (add-int v0 v0 v0)
       (add-int v0 v0 v0)
@@ -1908,6 +1909,21 @@ TEST_F(DedupBlocksTest, retainPositionWhenMayThrow) {
   )";
   auto expected_code = assembler::ircode_from_string(expected_str);
   EXPECT_CODE_EQ(expected_code.get(), method->get_code());
+
+  // The shared tail runs for both `:b` (line 10) and `:c` (line 20), so its
+  // copy of line 10 is marked. `:b`'s own `const` was never folded, so the
+  // copy stays a separate entry rather than being merged into the unmarked
+  // position in front of it.
+  std::vector<DexPosition*> line_10;
+  for (auto& mie : *method->get_code()) {
+    if (mie.type == MFLOW_POSITION && mie.pos->line == 10) {
+      line_10.push_back(mie.pos.get());
+    }
+  }
+  ASSERT_EQ(line_10.size(), 3u);
+  EXPECT_FALSE(line_10[0]->is_unreliable());
+  EXPECT_FALSE(line_10[1]->is_unreliable());
+  EXPECT_TRUE(line_10[2]->is_unreliable());
 }
 
 // The following two test cases illustrate an edge case we can work on
@@ -2640,4 +2656,195 @@ TEST_F(DedupBlocksTest, splitPostfixSourceBlockRestorationSkipsLeadingRemark) {
   }
 
   code_ref.clear_cfg();
+}
+
+namespace {
+
+// The position in effect at the first instruction that can throw, which is the
+// only kind of position a stack trace can land on.
+DexPosition* position_at_first_throwing_insn(IRCode* code) {
+  DexPosition* pos = nullptr;
+  for (auto& mie : *code) {
+    if (mie.type == MFLOW_POSITION) {
+      pos = mie.pos.get();
+    } else if (mie.type == MFLOW_OPCODE &&
+               opcode::can_throw(mie.insn->opcode())) {
+      return pos;
+    }
+  }
+  return nullptr;
+}
+
+} // namespace
+
+// Two arms whose instructions are identical but whose source lines are not.
+// Folding them leaves one line standing for both, and the survivor has to say
+// so. The arms also carry a different NUMBER of position entries, which is the
+// case that breaks any pairing done by MethodItemEntry ordinal rather than by
+// instruction ordinal -- block equality ignores positions, so this is legal
+// input, not a contrivance.
+TEST_F(DedupBlocksTest, mergedBlocksMarkTheSurvivingPositionUnreliable) {
+  DexMethod* method = get_fresh_method("mergedBlocksMarkUnreliable");
+
+  const auto* str = R"(
+    (
+      (const v0 0)
+      (if-eqz v0 :left)
+      (.pos "LTestClass;.m:()V" "Test.java" 20)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+      (:left)
+      (.pos "LTestClass;.m:()V" "Test.java" 30)
+      (.pos "LTestClass;.m:()V" "Test.java" 31)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+    )
+  )";
+  auto code = assembler::ircode_from_string(str);
+  method->set_code(std::move(code));
+  run_dedup_blocks();
+
+  auto* pos = position_at_first_throwing_insn(method->get_code());
+  ASSERT_NE(pos, nullptr);
+  EXPECT_TRUE(pos->is_unreliable());
+}
+
+// The same shape, but both arms report the same line. Folding them costs no
+// accuracy -- the surviving line was already correct for both -- so nothing is
+// recorded. It is not upgraded either: agreement here proves only that these
+// two halves agree, not that the line is the only place the code came from.
+TEST_F(DedupBlocksTest, mergedBlocksAgreeingOnTheirLineRecordNothing) {
+  DexMethod* method = get_fresh_method("mergedBlocksAgreeing");
+
+  const auto* str = R"(
+    (
+      (const v0 0)
+      (if-eqz v0 :left)
+      (.pos "LTestClass;.m:()V" "Test.java" 20)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+      (:left)
+      (.pos "LTestClass;.m:()V" "Test.java" 20)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+    )
+  )";
+  auto code = assembler::ircode_from_string(str);
+  method->set_code(std::move(code));
+  run_dedup_blocks();
+
+  auto* pos = position_at_first_throwing_insn(method->get_code());
+  ASSERT_NE(pos, nullptr);
+  EXPECT_FALSE(pos->is_unreliable());
+}
+
+// Three arms folding into one. The survivor stands for all of them, so one
+// disagreement anywhere in the group is enough to make its line unreliable.
+TEST_F(DedupBlocksTest, mergedBlocksMarkUnreliableAcrossAThreeWayGroup) {
+  DexMethod* method = get_fresh_method("mergedBlocksThreeWay");
+
+  const auto* str = R"(
+    (
+      (const v0 0)
+      (if-eqz v0 :second)
+      (if-eqz v0 :third)
+      (.pos "LTestClass;.m:()V" "Test.java" 20)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+      (:second)
+      (.pos "LTestClass;.m:()V" "Test.java" 30)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+      (:third)
+      (.pos "LTestClass;.m:()V" "Test.java" 40)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+    )
+  )";
+  auto code = assembler::ircode_from_string(str);
+  method->set_code(std::move(code));
+  run_dedup_blocks();
+
+  auto* pos = position_at_first_throwing_insn(method->get_code());
+  ASSERT_NE(pos, nullptr);
+  EXPECT_TRUE(pos->is_unreliable());
+}
+
+// Neither arm opens with a position. The effective position is outside the
+// duplicate block, and marking it could affect code this merge never touched.
+// Count the merge as unrecorded instead of reaching back through CFG order,
+// which is not dominance order.
+TEST_F(DedupBlocksTest, mergedBlocksDoNotMarkAPositionOutsideTheBlock) {
+  DexMethod* method = get_fresh_method("mergedBlocksOutsidePosition");
+
+  const auto* str = R"(
+    (
+      (.pos "LTestClass;.m:()V" "Test.java" 10)
+      (const v0 0)
+      (if-eqz v0 :left)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+      (:left)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+    )
+  )";
+  auto code = assembler::ircode_from_string(str);
+  method->set_code(std::move(code));
+  run_dedup_blocks();
+
+  auto* pos = position_at_first_throwing_insn(method->get_code());
+  ASSERT_NE(pos, nullptr);
+  EXPECT_EQ(pos->line, 10u);
+  EXPECT_FALSE(pos->is_unreliable());
+}
+
+// Java-like shape of the two arms (hand-written, not compiler output): each
+// arm calls `helper()` on its own line, then runs `callee()`'s line 5 inlined
+// under line 20.
+//
+//   kept arm:    line 20: helper();   line 20 -> Callee.java:5: helper();
+//   folded arm:  line 21: helper();   line 20 -> Callee.java:5: helper();
+//
+// Line 20 also stands for line 21, but the inlined line has the same caller and
+// callee lines in both arms, so it still names one place even though its
+// caller is the position that gets marked.
+TEST_F(DedupBlocksTest, mergedBlocksKeepInlinedLineExactWhenItsCallerIsMarked) {
+  DexMethod* method = get_fresh_method("mergedBlocksInlinedCaller");
+
+  const auto* str = R"(
+    (
+      (const v0 0)
+      (if-eqz v0 :left)
+      (.pos:dbg_0 "LTestClass;.m:()V" "Test.java" 20)
+      (invoke-static () "LTestClass;.helper:()V")
+      (.pos:dbg_1 "LTestClass;.callee:()V" "Callee.java" 5 dbg_0)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+      (:left)
+      (.pos "LTestClass;.m:()V" "Test.java" 21)
+      (invoke-static () "LTestClass;.helper:()V")
+      (.pos:dbg_2 "LTestClass;.m:()V" "Test.java" 20)
+      (.pos:dbg_3 "LTestClass;.callee:()V" "Callee.java" 5 dbg_2)
+      (invoke-static () "LTestClass;.helper:()V")
+      (return-void)
+    )
+  )";
+  auto code = assembler::ircode_from_string(str);
+  method->set_code(std::move(code));
+  run_dedup_blocks();
+
+  DexPosition* caller = position_at_first_throwing_insn(method->get_code());
+  ASSERT_NE(caller, nullptr);
+  ASSERT_EQ(caller->line, 20u);
+  std::vector<DexPosition*> inlined;
+  for (auto& mie : *method->get_code()) {
+    if (mie.type == MFLOW_POSITION && mie.pos->line == 5) {
+      inlined.push_back(mie.pos.get());
+    }
+  }
+  ASSERT_EQ(inlined.size(), 1u);
+  ASSERT_EQ(inlined[0]->parent, caller);
+  EXPECT_TRUE(caller->is_unreliable());
+  EXPECT_FALSE(inlined[0]->is_unreliable());
 }

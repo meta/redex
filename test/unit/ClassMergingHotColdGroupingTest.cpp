@@ -8,6 +8,7 @@
 #include <fstream>
 #include <gtest/gtest.h>
 
+#include "BaselineProfile.h"
 #include "ClassMerging.h"
 #include "ClassMergingPass.h"
 #include "ConfigFiles.h"
@@ -264,6 +265,64 @@ class ClassMergingFieldMetricsTest : public ClassMergingHotColdGroupingTest {
 };
 
 } // namespace
+
+TEST_F(ClassMergingHotColdGroupingTest, DedupTransfersProfilesToSurvivor) {
+  m_base = make_class("Lprofile/Base;", type::java_lang_Object());
+  add_ctor(m_base);
+  add_virtual(m_base, "run");
+  auto* a = make_mergeable("Lprofile/A;");
+  auto* b = make_mergeable("Lprofile/B;");
+  auto add_value = [](DexClass* cls) {
+    return add_method(cls,
+                      ir(R"(
+      (method (public static) "$CLS.value:()I"
+        ((const v0 7) (return v0)))
+    )",
+                         {{"$CLS", cls->get_type()->str_copy()}}));
+  };
+  auto* a_value = add_value(a);
+  auto* b_value = add_value(b);
+
+  DexStore store("classes");
+  store.add_classes(m_scope);
+  DexStoresVector stores{store};
+  auto tmp_dir = redex::make_tmp_dir("dedup_method_profiles_test_%%%%%%%%");
+  const auto api_file = tmp_dir.path + "/api.txt";
+  {
+    std::ofstream out(api_file);
+    out << "Ljava/lang/Object; 1 Ljava/lang/Object; 1 0\n"
+        << "  M Ljava/lang/Object;.<init>:()V 1\n";
+  }
+  Json::Value json;
+  json["android_sdk_api_21_file"] = api_file;
+  json["update_method_profiles_stats"] = true;
+  Json::Value model;
+  model["name"] = "DedupProfiles";
+  model["class_name_prefix"] = "DedupProfiles";
+  model["roots"].append("Lprofile/Base;");
+  model["include_primary_dex"] = true;
+  json["ClassMergingPass"]["models"].append(model);
+  ConfigFiles conf(json);
+  conf.parse_global_config();
+  conf.set_outdir(tmp_dir.path);
+  method_profiles::Stats hot_stats{100.0, 10.0, 0.0, 21};
+  conf.get_method_profiles() = method_profiles::MethodProfiles::initialize(
+      "manual_hot", {{b_value, hot_stats}});
+  RedexOptions options;
+  options.min_sdk = 21;
+  ClassMergingPass pass;
+  PassManager mgr({&pass}, conf, options);
+  mgr.run_passes(stores, conf);
+  EXPECT_TRUE(a_value->is_def());
+  EXPECT_EQ(DexMethod::get_method("Lprofile/B;.value:()I"), nullptr);
+  auto profile =
+      conf.get_method_profiles().get_method_stat("manual_hot", a_value);
+  ASSERT_TRUE(profile.has_value());
+  EXPECT_EQ(*profile, hot_stats);
+  auto baseline = baseline_profiles::get_default_baseline_profile(
+      build_class_scope(stores), {{"default", {}}}, conf.get_method_profiles());
+  EXPECT_TRUE(baseline_profiles::is_compiled(baseline, a_value));
+}
 
 TEST_F(ClassMergingHotColdGroupingTest, NoHotMethodIsCold) {
   auto* a = make_mergeable("LA;");

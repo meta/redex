@@ -787,12 +787,11 @@ void ModelMethodMerger::dedup_non_ctor_non_virt_methods() {
 
     // Dedup non_ctors & non_vmethods
     std::vector<DexMethod*> replacements;
-    UnorderedMap<DexMethod*, MethodOrderedSet> new_to_old;
-    auto new_to_old_optional =
-        std::optional<UnorderedMap<DexMethod*, MethodOrderedSet>>(new_to_old);
+    std::optional<UnorderedMap<DexMethod*, MethodOrderedSet>> new_to_old(
+        std::in_place);
     m_stats.m_num_static_non_virt_dedupped += method_dedup::dedup_methods(
         m_scope, to_dedup, m_model_spec.dedup_fill_in_stack_trace, replacements,
-        new_to_old_optional);
+        new_to_old);
     // Relocate the remainders.
     std::set<DexMethod*, dexmethods_comparator> to_relocate(
         replacements.begin(), replacements.end());
@@ -817,7 +816,7 @@ void ModelMethodMerger::dedup_non_ctor_non_virt_methods() {
     }
 
     // Update method dedup map
-    for (auto& pair : UnorderedIterable(new_to_old)) {
+    for (auto& pair : UnorderedIterable(*new_to_old)) {
       auto old_list = pair.second;
       if (m_method_profiles != std::nullopt) {
         std::vector<DexMethod*> old_list_vec{old_list.begin(), old_list.end()};

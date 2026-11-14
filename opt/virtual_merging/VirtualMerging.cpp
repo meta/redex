@@ -1574,7 +1574,12 @@ void VirtualMergingPass::run_pass(DexStoresVector& stores,
     return;
   }
 
-  auto dedupped = dedup_vmethods::dedup(stores);
+  bool update_method_profiles_stats;
+  conf.get_json_config().get("update_method_profiles_stats", false,
+                             update_method_profiles_stats);
+  auto dedupped = dedup_vmethods::dedup(
+      stores,
+      update_method_profiles_stats ? &conf.get_method_profiles() : nullptr);
 
   const api::AndroidSDK* min_sdk_api{nullptr};
   int32_t min_sdk = mgr.get_redex_options().min_sdk;

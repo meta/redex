@@ -10,6 +10,10 @@
 #include <cstdint>
 #include <vector>
 
+namespace method_profiles {
+class MethodProfiles;
+} // namespace method_profiles
+
 class DexMethod;
 class DexStore;
 using DexStoresVector = std::vector<DexStore>;
@@ -28,7 +32,8 @@ using DexStoresVector = std::vector<DexStore>;
  * }
  */
 namespace dedup_vmethods {
-uint32_t dedup(const DexStoresVector& stores);
+uint32_t dedup(const DexStoresVector& stores,
+               method_profiles::MethodProfiles* method_profiles = nullptr);
 
 // Whether `method` may be removed in favor of an identical implementation in
 // a superclass: small code without invoke-super, renamable, not a root, and

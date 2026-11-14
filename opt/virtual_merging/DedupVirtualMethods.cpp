@@ -13,6 +13,7 @@
 #include "DexUtil.h"
 #include "MethodFixup.h"
 #include "MethodOverrideGraph.h"
+#include "MethodProfiles.h"
 #include "Show.h"
 #include "Trace.h"
 #include "Walkers.h"
@@ -112,7 +113,8 @@ void publicize_methods(const method_override_graph::Graph* graph,
  */
 uint32_t remove_duplicated_vmethods(
     const Scope& scope,
-    const ConcurrentSet<DexMethodRef*>& super_invoked_methods) {
+    const ConcurrentSet<DexMethodRef*>& super_invoked_methods,
+    method_profiles::MethodProfiles* method_profiles) {
   uint32_t ret = 0;
   auto graph = method_override_graph::build_graph(scope);
   UnorderedMap<DexMethodRef*, DexMethodRef*> removed_vmethods;
@@ -147,6 +149,11 @@ uint32_t remove_duplicated_vmethods(
       });
 
       if (!duplicates.empty()) {
+        if (method_profiles != nullptr) {
+          auto sources = duplicates;
+          sources.push_back(method);
+          method_profiles->substitute_stats(method, sources);
+        }
         if (is_protected(method)) {
           publicize_methods(graph.get(), method);
         }
@@ -188,12 +195,13 @@ void collect_all_invoke_super_called(
 
 namespace dedup_vmethods {
 
-uint32_t dedup(const DexStoresVector& stores) {
+uint32_t dedup(const DexStoresVector& stores,
+               method_profiles::MethodProfiles* method_profiles) {
   auto scope = build_class_scope(stores);
   ConcurrentSet<DexMethodRef*> super_invoked_methods;
   collect_all_invoke_super_called(scope, &super_invoked_methods);
   auto deduplicated_vmethods =
-      remove_duplicated_vmethods(scope, super_invoked_methods);
+      remove_duplicated_vmethods(scope, super_invoked_methods, method_profiles);
   TRACE(VM, 2, "deduplicated_vmethods %u\n", deduplicated_vmethods);
   return deduplicated_vmethods;
 }

@@ -11,6 +11,7 @@
 #include <unordered_set>
 
 #include "ApiLevelChecker.h"
+#include "BaselineProfile.h"
 #include "Creators.h"
 #include "Debug.h"
 #include "DexClass.h"
@@ -18,7 +19,9 @@
 #include "Dominators.h"
 #include "IRAssembler.h"
 #include "MethodProfiles.h"
+#include "PassManager.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "ScopedCFG.h"
 #include "Show.h"
 #include "SourceBlocks.h"
@@ -260,6 +263,39 @@ class VirtualMergingTest : public RedexTest {
 
   DexStoresVector stores;
 };
+
+TEST_F(VirtualMergingTest, DedupPreservesOverrideProfile) {
+  auto* ancestor = const_cast<DexMethod*>(get_method(0, "foo"));
+  auto* override = const_cast<DexMethod*>(get_method(1, "foo"));
+  override->set_code(assembler::ircode_from_string(R"(
+    ((load-param-object v1) (const v0 0) (return v0))
+  )"));
+  override->get_code()->build_cfg();
+  method_profiles::Stats hot_stats{100.0, 10.0, 0.0, 21};
+  Json::Value json;
+  json["update_method_profiles_stats"] = true;
+  ConfigFiles config(json);
+  config.get_method_profiles() = method_profiles::MethodProfiles::initialize(
+      "manual_hot", {{override, hot_stats}});
+  config.parse_global_config();
+  auto tmp_dir = redex::make_tmp_dir("virtual_dedup_profiles_test_%%%%%%%%");
+  config.set_outdir(tmp_dir.path);
+  VirtualMergingPass pass;
+  PassManager manager({&pass}, config, RedexOptions{});
+
+  manager.run_passes(stores, config);
+
+  EXPECT_EQ(get_method(1, "foo"), nullptr);
+  auto profile =
+      config.get_method_profiles().get_method_stat("manual_hot", ancestor);
+  ASSERT_TRUE(profile.has_value());
+  EXPECT_EQ(*profile, hot_stats);
+  auto baseline = baseline_profiles::get_default_baseline_profile(
+      build_class_scope(stores),
+      {{"default", {}}},
+      config.get_method_profiles());
+  EXPECT_TRUE(baseline_profiles::is_compiled(baseline, ancestor));
+}
 
 TEST_F(VirtualMergingTest, Armv7HardLimitSkipsLateMerge) {
   auto scope = build_class_scope(stores);

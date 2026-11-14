@@ -1115,6 +1115,37 @@ TEST_F(ControlFlowTest, structural_equals_ignores_exit_block_cache) {
   }
 }
 
+TEST_F(ControlFlowTest, structural_equals_block_pairing) {
+  constexpr const char* kSwitch = R"(
+    (
+      (load-param v0)
+      (switch v0 (:a :b))
+      (return-void)
+      (:a 0)
+      (const v1 10)
+      (return-void)
+      (:b 1)
+      (const v1 20)
+      (return-void)
+    )
+  )";
+  auto code = assembler::ircode_from_string(kSwitch);
+  auto copy = assembler::ircode_from_string(kSwitch);
+  code->build_cfg();
+  copy->build_cfg();
+  const auto& cfg = code->cfg();
+  auto pairing = cfg.structural_block_pairing(copy->cfg());
+  ASSERT_TRUE(pairing);
+
+  EXPECT_EQ(pairing->size(), cfg.num_blocks());
+  EXPECT_EQ(pairing->at(cfg.entry_block()), copy->cfg().entry_block());
+  for (const auto* block : cfg.blocks()) {
+    const auto* paired = pairing->at(block);
+    ASSERT_NE(paired, nullptr);
+    EXPECT_TRUE(block->structural_equals(paired));
+  }
+}
+
 TEST_F(ControlFlowTest, structural_equals_catch_types) {
   // The catch type lives on the CFG throw edge, not on any instruction. An
   // IllegalArgumentException thrown by bar() is caught by the RuntimeException

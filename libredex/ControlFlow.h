@@ -1054,6 +1054,17 @@ class ControlFlowGraph {
   bool structural_equals(const ControlFlowGraph& other,
                          const InstructionEquality& instruction_equals) const;
 
+  using BlockPairing = UnorderedMap<const Block*, const Block*>;
+
+  // When this graph and `other` are structurally equal, maps each block
+  // reachable from this graph's entry to its counterpart in `other`.
+  std::optional<BlockPairing> structural_block_pairing(
+      const ControlFlowGraph& other) const;
+
+  std::optional<BlockPairing> structural_block_pairing(
+      const ControlFlowGraph& other,
+      const InstructionEquality& instruction_equals) const;
+
   template <class ForwardIt>
   bool insert(const InstructionIterator& position,
               const ForwardIt& begin_index,

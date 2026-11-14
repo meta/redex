@@ -3161,6 +3161,19 @@ bool ControlFlowGraph::structural_equals(const ControlFlowGraph& other) const {
 bool ControlFlowGraph::structural_equals(
     const ControlFlowGraph& other,
     const InstructionEquality& instruction_equals) const {
+  return structural_block_pairing(other, instruction_equals).has_value();
+}
+
+std::optional<ControlFlowGraph::BlockPairing>
+ControlFlowGraph::structural_block_pairing(
+    const ControlFlowGraph& other) const {
+  return structural_block_pairing(other, std::equal_to<const IRInstruction&>());
+}
+
+std::optional<ControlFlowGraph::BlockPairing>
+ControlFlowGraph::structural_block_pairing(
+    const ControlFlowGraph& other,
+    const InstructionEquality& instruction_equals) const {
   // The ghost exit block and its edges describe no code:
   // `calculate_exit_block()` adds them to one graph and not to an otherwise
   // identical one.
@@ -3181,14 +3194,14 @@ bool ControlFlowGraph::structural_equals(
   };
   if (count_code_blocks_and_edges(*this) !=
       count_code_blocks_and_edges(other)) {
-    return false;
+    return std::nullopt;
   }
 
   std::queue<Block*> this_blocks;
   std::queue<Block*> other_blocks;
   // The pairing must be one-to-one: a block on either side may be paired with
   // only one block on the other side.
-  UnorderedMap<const Block*, const Block*> this_to_other;
+  BlockPairing this_to_other;
   UnorderedMap<const Block*, const Block*> other_to_this;
   // Pairs b1 with b2 and queues them if neither is paired yet. Returns false if
   // either is already paired with a different block.
@@ -3209,7 +3222,7 @@ bool ControlFlowGraph::structural_equals(
   // Check entry block.
   if (!this->entry_block()->extended_structural_equals(other.entry_block(),
                                                        instruction_equals)) {
-    return false;
+    return std::nullopt;
   }
 
   pair_blocks(this->entry_block(), other.entry_block());
@@ -3224,33 +3237,33 @@ bool ControlFlowGraph::structural_equals(
     auto* goto2 = b2->goes_to();
     if (goto1 != nullptr) {
       if (!goto1->extended_structural_equals(goto2, instruction_equals)) {
-        return false;
+        return std::nullopt;
       }
       if (!pair_blocks(goto1, goto2)) {
-        return false;
+        return std::nullopt;
       }
     } else if (goto2 != nullptr) {
-      return false;
+      return std::nullopt;
     }
 
     // Push b1, b2's THROW successors into queue;
     auto throw1_edges = b1->get_outgoing_throws_in_order();
     auto throw2_edges = b2->get_outgoing_throws_in_order();
     if (throw1_edges.size() != throw2_edges.size()) {
-      return false;
+      return std::nullopt;
     }
     for (size_t i = 0; i < throw1_edges.size(); i++) {
       if (throw1_edges[i]->throw_info()->catch_type !=
           throw2_edges[i]->throw_info()->catch_type) {
-        return false;
+        return std::nullopt;
       }
       auto* throw1 = throw1_edges[i]->target();
       auto* throw2 = throw2_edges[i]->target();
       if (!throw1->extended_structural_equals(throw2, instruction_equals)) {
-        return false;
+        return std::nullopt;
       }
       if (!pair_blocks(throw1, throw2)) {
-        return false;
+        return std::nullopt;
       }
     }
 
@@ -3258,24 +3271,24 @@ bool ControlFlowGraph::structural_equals(
     auto branch1_edges = b1->get_outgoing_branches_in_order();
     auto branch2_edges = b2->get_outgoing_branches_in_order();
     if (branch1_edges.size() != branch2_edges.size()) {
-      return false;
+      return std::nullopt;
     }
     for (size_t i = 0; i < branch1_edges.size(); i++) {
       if (branch1_edges[i]->case_key() != branch2_edges[i]->case_key()) {
-        return false;
+        return std::nullopt;
       }
       auto* branch1 = branch1_edges[i]->target();
       auto* branch2 = branch2_edges[i]->target();
       if (!branch1->extended_structural_equals(branch2, instruction_equals)) {
-        return false;
+        return std::nullopt;
       }
       if (!pair_blocks(branch1, branch2)) {
-        return false;
+        return std::nullopt;
       }
     }
   }
 
-  return true;
+  return this_to_other;
 }
 
 DexPosition* ControlFlowGraph::get_dbg_pos(const cfg::InstructionIterator& it) {

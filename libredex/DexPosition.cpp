@@ -617,8 +617,9 @@ void RealPositionMapper::process_position_alternatives() {
   // Registration is complete before map writing starts, so this snapshot stays
   // immutable while the parallel reachability walk reads it.
   auto alternatives = manager->get_alternatives();
-  // First, we find all reachable patterns, switches, cases and candidate sets.
-  ConcurrentMap<uint32_t, std::vector<PositionAlternative>> reachable_patterns;
+  // The patterns whose call sites code still refers to, and the groups code or
+  // a candidate set refers to.
+  InsertOnlyConcurrentSet<uint32_t> reachable_patterns;
   InsertOnlyConcurrentSet<uint32_t> reachable_alternatives;
   InsertOnlyConcurrentSet<DexPosition*> visited;
   std::function<void(DexPosition*)> visit;
@@ -637,42 +638,39 @@ void RealPositionMapper::process_position_alternatives() {
       }
 
       if (manager->is_pattern_position(pos)) {
-        std::vector<PositionAlternative> cases;
-        reachable_patterns.update(pos->line,
-                                  [&](auto, auto& pending, bool exists) {
-                                    if (exists) {
-                                      cases = std::move(pending);
-                                    }
-                                  });
-        for (auto& c : cases) {
-          visit(c.emitted_position());
-        }
+        reachable_patterns.insert(pos->line);
       } else if (manager->is_switch_position(pos)) {
-        if (reachable_alternatives.insert(pos->line).second) {
-          const auto& group = alternatives.at(pos->line);
-          always_assert(group.selection ==
-                        PositionAlternativesSelection::ByPattern);
-          for (const auto& c : group.entries) {
-            always_assert(c.pattern_id.has_value());
-            bool pattern_reachable = false;
-            reachable_patterns.update(*c.pattern_id,
-                                      [&](auto, auto& pending, bool exists) {
-                                        if (exists && pending.empty()) {
-                                          pattern_reachable = true;
-                                          return;
-                                        }
-                                        pending.push_back(c);
-                                      });
-            if (pattern_reachable) {
-              visit(c.emitted_position());
-            }
-          }
-        }
+        always_assert(alternatives.at(pos->line).selection ==
+                      PositionAlternativesSelection::ByPattern);
+        reachable_alternatives.insert(pos->line);
       }
     }
   };
 
+  // First everything code refers to, which settles which patterns are still
+  // called. A switch can outlive the call site of one of its patterns, and that
+  // pattern's case is then dead.
   workqueue_run<DexPosition*>(visit, m_positions);
+  // Then the cases of the called patterns. A case's chain is interned or a
+  // snapshot, never a pattern or switch position, so this reaches no further
+  // pattern or switch, only candidate sets, whose reachability `visit` closes:
+  // emitted records can add no group this walk has not already visited.
+  std::vector<DexPosition*> cases;
+  for (uint32_t alternatives_id = 0; alternatives_id < alternatives.size();
+       ++alternatives_id) {
+    const auto& group = alternatives[alternatives_id];
+    if (group.selection != PositionAlternativesSelection::ByPattern ||
+        reachable_alternatives.count(alternatives_id) == 0u) {
+      continue;
+    }
+    for (const auto& entry : group.entries) {
+      always_assert(entry.pattern_id.has_value());
+      if (reachable_patterns.count(*entry.pattern_id) != 0u) {
+        cases.push_back(entry.emitted_position());
+      }
+    }
+  }
+  workqueue_run<DexPosition*>(visit, cases);
 
   const auto* count_string =
       DexString::make_string("Lredex/$Position;.count:()V");

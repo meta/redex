@@ -1253,6 +1253,73 @@ std::unique_ptr<DexPosition> caller_pos(uint32_t line) {
       line);
 }
 
+// The call site of one pattern was deleted after outlining, so only the
+// outlined method's switch and the other call site remain in code. The dead
+// pattern's case is not emitted: its provenance snapshot, and the candidate set
+// on it, were never reached.
+TEST_F(PositionMapTrailerTest,
+       a_dead_call_site_with_provenance_is_not_emitted) {
+  auto path = map_path("dead-call-site");
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  auto slot = pos(20);
+  auto elsewhere = pos(21);
+  manager->record_candidates(slot.get(), {elsewhere.get()});
+  ASSERT_NE(slot->alt_id(), 0u);
+  std::vector<DexPosition*> provenance;
+  auto pattern_id = manager->make_pattern({slot.get()}, &provenance);
+  auto other_slot = pos(30);
+  auto other_pattern_id = manager->make_pattern({other_slot.get()});
+  auto switch_id = manager->make_switch({
+      {pattern_id, slot.get(), provenance.at(0)},
+      {other_pattern_id, other_slot.get(), nullptr},
+  });
+  auto other_pattern_position =
+      manager->make_pattern_position(other_pattern_id);
+  auto switch_position = manager->make_switch_position(switch_id);
+  RealPositionMapper mapper(path);
+  mapper.position_to_line(other_pattern_position.get());
+  mapper.position_to_line(switch_position.get());
+  ASSERT_NO_THROW(mapper.write_map());
+
+  auto parsed = parse(read_file(path));
+  auto count_index = switch_count_index(parsed.positions, parsed.string_pool);
+  EXPECT_EQ(parsed.positions.at(count_index)[3], 1u);
+  EXPECT_EQ(
+      parsed.positions.at(case_target(parsed.positions, parsed.string_pool,
+                                      count_index, other_pattern_id))[3],
+      30u);
+}
+
+// Control: the same shape without provenance.
+TEST_F(PositionMapTrailerTest,
+       a_dead_call_site_without_provenance_is_not_emitted) {
+  auto path = map_path("dead-call-site-control");
+  auto* manager = g_redex->get_position_pattern_switch_manager();
+  auto slot = pos(20);
+  auto pattern_id = manager->make_pattern({slot.get()});
+  auto other_slot = pos(30);
+  auto other_pattern_id = manager->make_pattern({other_slot.get()});
+  auto switch_id = manager->make_switch({
+      {pattern_id, slot.get(), nullptr},
+      {other_pattern_id, other_slot.get(), nullptr},
+  });
+  auto other_pattern_position =
+      manager->make_pattern_position(other_pattern_id);
+  auto switch_position = manager->make_switch_position(switch_id);
+  RealPositionMapper mapper(path);
+  mapper.position_to_line(other_pattern_position.get());
+  mapper.position_to_line(switch_position.get());
+  ASSERT_NO_THROW(mapper.write_map());
+
+  auto parsed = parse(read_file(path));
+  auto count_index = switch_count_index(parsed.positions, parsed.string_pool);
+  EXPECT_EQ(parsed.positions.at(count_index)[3], 1u);
+  EXPECT_EQ(
+      parsed.positions.at(case_target(parsed.positions, parsed.string_pool,
+                                      count_index, other_pattern_id))[3],
+      30u);
+}
+
 // A victim names the survivor's place, but its inlined caller is merged with
 // sites nobody captured. The survivor's caller is no longer exact for the code
 // it now governs, so the survivor's place re-enters its set carrying the

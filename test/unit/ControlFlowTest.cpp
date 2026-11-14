@@ -1115,6 +1115,70 @@ TEST_F(ControlFlowTest, structural_equals_catch_types) {
   EXPECT_FALSE(ise->cfg().structural_equals(rte->cfg()));
 }
 
+TEST_F(ControlFlowTest, structural_equals_inconsistent_block_pairing) {
+  // Four switch arms reach two identical join blocks, X and Y. In `a` arms
+  // 0,1 go to X and 2,3 to Y; in `b` arms 0,2 go to X and 1,3 to Y. X leads
+  // to T and Y to U. T and U hold the same two instructions, in the same order
+  // in `a` and in swapped order in `b`, so for v0 = 1, `a` returns
+  // ((11 + 1) + 1) * 2 = 26 and `b` returns (11 + 1) * 2 + 1 = 25.
+  constexpr const char* kJoins = R"(
+    (
+      (load-param v0)
+      (const v1 0)
+      (switch v0 (:p :q :r :s))
+      (return v1)
+      (:p 0)
+      (const v1 10)
+      (goto :x)
+      (:q 1)
+      (const v1 11)
+      (goto $Q_TARGET)
+      (:r 2)
+      (const v1 12)
+      (goto $R_TARGET)
+      (:s 3)
+      (const v1 13)
+      (goto :y)
+      (:x)
+      (add-int/lit v1 v1 1)
+      (goto :t)
+      (:y)
+      (add-int/lit v1 v1 1)
+      (goto :u)
+      (:t)
+      (add-int/lit v1 v1 1)
+      (mul-int/lit v1 v1 2)
+      (return v1)
+      (:u)
+      $U_BODY
+      (return v1)
+    )
+  )";
+  auto make_code = [&](const std::string& q_target,
+                       const std::string& r_target,
+                       const std::string& u_body) {
+    return assembler::ircode_from_string(ir(kJoins,
+                                            {{"$Q_TARGET", q_target},
+                                             {"$R_TARGET", r_target},
+                                             {"$U_BODY", u_body}}));
+  };
+  const std::string add_then_mul =
+      "(add-int/lit v1 v1 1) (mul-int/lit v1 v1 2)";
+  const std::string mul_then_add =
+      "(mul-int/lit v1 v1 2) (add-int/lit v1 v1 1)";
+  auto a = make_code(":x", ":y", add_then_mul);
+  auto a_copy = make_code(":x", ":y", add_then_mul);
+  auto b = make_code(":y", ":x", mul_then_add);
+  EXPECT_FALSE(a->structural_equals(*b));
+
+  a->build_cfg();
+  a_copy->build_cfg();
+  b->build_cfg();
+  EXPECT_TRUE(a->cfg().structural_equals(a_copy->cfg()));
+  EXPECT_FALSE(a->cfg().structural_equals(b->cfg()));
+  EXPECT_FALSE(b->cfg().structural_equals(a->cfg()));
+}
+
 TEST_F(ControlFlowTest, deep_copy2) {
 
   auto code = assembler::ircode_from_string(R"(

@@ -3175,7 +3175,26 @@ bool ControlFlowGraph::structural_equals(
 
   std::queue<Block*> this_blocks;
   std::queue<Block*> other_blocks;
-  UnorderedSet<BlockId> block_visited;
+  // The pairing must be one-to-one: a block on either side may be paired with
+  // only one block on the other side.
+  UnorderedMap<const Block*, const Block*> this_to_other;
+  UnorderedMap<const Block*, const Block*> other_to_this;
+  // Pairs b1 with b2 and queues them if neither is paired yet. Returns false if
+  // either is already paired with a different block.
+  auto pair_blocks = [&](Block* b1, Block* b2) {
+    auto it = this_to_other.find(b1);
+    if (it != this_to_other.end()) {
+      return it->second == b2;
+    }
+    if (other_to_this.count(b2) != 0) {
+      return false;
+    }
+    this_to_other.emplace(b1, b2);
+    other_to_this.emplace(b2, b1);
+    this_blocks.push(b1);
+    other_blocks.push(b2);
+    return true;
+  };
   // Check entry block.
   if (!this->entry_block()->extended_structural_equals(other.entry_block(),
                                                        instruction_equals)) {
@@ -3192,9 +3211,7 @@ bool ControlFlowGraph::structural_equals(
     return false;
   }
 
-  this_blocks.push(this->entry_block());
-  other_blocks.push(other.entry_block());
-  block_visited.emplace(this->entry_block()->id());
+  pair_blocks(this->entry_block(), other.entry_block());
   while (!this_blocks.empty()) {
     always_assert(!other_blocks.empty());
     auto* b1 = this_blocks.front();
@@ -3208,10 +3225,8 @@ bool ControlFlowGraph::structural_equals(
       if (!goto1->extended_structural_equals(goto2, instruction_equals)) {
         return false;
       }
-      if (block_visited.count(goto1->id()) == 0) {
-        this_blocks.push(goto1);
-        other_blocks.push(goto2);
-        block_visited.emplace(goto1->id());
+      if (!pair_blocks(goto1, goto2)) {
+        return false;
       }
     } else if (goto2 != nullptr) {
       return false;
@@ -3233,10 +3248,8 @@ bool ControlFlowGraph::structural_equals(
       if (!throw1->extended_structural_equals(throw2, instruction_equals)) {
         return false;
       }
-      if (block_visited.count(throw1->id()) == 0) {
-        this_blocks.push(throw1);
-        other_blocks.push(throw2);
-        block_visited.emplace(throw1->id());
+      if (!pair_blocks(throw1, throw2)) {
+        return false;
       }
     }
 
@@ -3255,10 +3268,8 @@ bool ControlFlowGraph::structural_equals(
       if (!branch1->extended_structural_equals(branch2, instruction_equals)) {
         return false;
       }
-      if (block_visited.count(branch1->id()) == 0) {
-        this_blocks.push(branch1);
-        other_blocks.push(branch2);
-        block_visited.emplace(branch1->id());
+      if (!pair_blocks(branch1, branch2)) {
+        return false;
       }
     }
   }

@@ -27,6 +27,7 @@ class AccessGetClass {
 	public void override_method() {}
 }
 
+@SuppressWarnings({"WrongIntDefValue", "WrongStringDefValue"})
 abstract class AbstractClass{
   abstract @TestIntDef int pureVirtual(@TestIntDef int val);
 
@@ -38,6 +39,7 @@ abstract class AbstractClass{
 }
 
 
+@SuppressWarnings({"WrongIntDefValue", "WrongStringDefValue"})
 class VirtualTest extends AbstractClass{
   @TestIntDef int pureVirtual(@TestIntDef int val) {
     return val;
@@ -56,6 +58,7 @@ class VirtualTest extends AbstractClass{
   }
 }
 
+@SuppressWarnings({"WrongIntDefValue", "WrongStringDefValue"})
 class WrongConstVirtualTest extends AbstractClass{
   @TestIntDef int pureVirtual(@TestIntDef int val) {
     return 6;
@@ -74,6 +77,7 @@ class WrongConstVirtualTest extends AbstractClass{
   }
 }
 
+@SuppressWarnings({"WrongIntDefValue", "WrongStringDefValue"})
 class NoAnnoVirtualTest extends AbstractClass{
   int pureVirtual(@TestIntDef int val) {
     return 2;
@@ -92,6 +96,7 @@ class NoAnnoVirtualTest extends AbstractClass{
   }
 }
 
+@SuppressWarnings({"WrongIntDefValue", "WrongStringDefValue"})
 public class TypedefAnnoCheckerTest {
 
   @TestIntDef int int_field = TestIntDef.ZERO;
@@ -383,4 +388,36 @@ public class TypedefAnnoCheckerTest {
     return res;
   }
 
+}
+
+interface IntDefSource {
+  @TestIntDef int value();
+}
+
+interface NoBoolSource {
+  @TestIntDefNoBool int value();
+}
+
+// value() overrides two methods whose return typedefs conflict.
+class ConflictingSource implements IntDefSource, NoBoolSource {
+  public int value() {
+    return TestIntDef.ONE;
+  }
+}
+
+class ConflictingSourceUser {
+  static @TestIntDefNoBool int noBoolValue(NoBoolSource source) {
+    return source.value();
+  }
+}
+
+interface OtherIntDefSource {
+  @TestIntDef int value();
+}
+
+// value() overrides two methods that agree on the return typedef.
+class AgreeingSource implements IntDefSource, OtherIntDefSource {
+  public int value() {
+    return TestIntDef.ONE;
+  }
 }

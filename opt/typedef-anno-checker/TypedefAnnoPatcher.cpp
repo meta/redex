@@ -471,19 +471,23 @@ void TypedefAnnoPatcher::collect_overriding_method_candidates(
     return;
   }
 
-  auto existing_return =
-      type_inference::get_typedef_anno_from_member(m, m_typedef_annos);
-
-  for (const auto* overridden : UnorderedIterable(overriddens)) {
-    if (existing_return == std::nullopt) {
-      auto return_anno = type_inference::get_typedef_anno_from_member(
-          overridden, m_typedef_annos);
-      if (return_anno != std::nullopt) {
-        candidates.add_method_candidate(m, *return_anno);
-        existing_return = return_anno;
+  // An override inherits a return typedef only when every overridden method
+  // that declares one agrees.
+  if (type_inference::get_typedef_anno_from_member(m, m_typedef_annos) ==
+      std::nullopt) {
+    UnorderedSet<const TypedefAnnoType*> inherited_returns;
+    for (const auto* overridden : UnorderedIterable(overriddens)) {
+      if (auto return_anno = type_inference::get_typedef_anno_from_member(
+              overridden, m_typedef_annos)) {
+        inherited_returns.insert(*return_anno);
       }
     }
+    if (inherited_returns.size() == 1) {
+      candidates.add_method_candidate(m, *unordered_any(inherited_returns));
+    }
+  }
 
+  for (const auto* overridden : UnorderedIterable(overriddens)) {
     // Collect parameter annotation candidates.
     if (overridden->get_param_anno() == nullptr) {
       continue;

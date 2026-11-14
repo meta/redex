@@ -7,6 +7,7 @@
 
 #include "DedupVirtualMethods.h"
 
+#include <map>
 #include <vector>
 
 #include "Debug.h"
@@ -14,6 +15,7 @@
 #include "MethodFixup.h"
 #include "MethodOverrideGraph.h"
 #include "MethodProfiles.h"
+#include "PositionAmbiguity.h"
 #include "Show.h"
 #include "Trace.h"
 #include "Walkers.h"
@@ -65,9 +67,17 @@ bool is_removable_copy(const DexMethod* method) {
 
 namespace {
 
-void find_duplications(const method_override_graph::Graph* graph,
-                       const DexMethod* root_method,
-                       std::vector<DexMethod*>* result) {
+struct Duplication {
+  DexMethod* removed;
+  DexMethod* survivor;
+};
+
+void find_duplications(
+    const method_override_graph::Graph* graph,
+    const DexMethod* root_method,
+    DexMethod* survivor,
+    const ConcurrentSet<DexMethodRef*>& super_invoked_methods,
+    std::vector<Duplication>* result) {
   const auto* root_code = root_method->get_code();
   if (root_code == nullptr) {
     return;
@@ -85,8 +95,15 @@ void find_duplications(const method_override_graph::Graph* graph,
       continue;
     }
     if (root_cfg.structural_equals(child->get_code()->cfg())) {
-      result->push_back(const_cast<DexMethod*>(child));
-      find_duplications(graph, child, result);
+      auto* mutable_child = const_cast<DexMethod*>(child);
+      auto* child_survivor = survivor;
+      if (super_invoked_methods.count_unsafe(mutable_child) != 0) {
+        child_survivor = mutable_child;
+      } else {
+        result->push_back({mutable_child, survivor});
+      }
+      find_duplications(graph, child, child_survivor, super_invoked_methods,
+                        result);
     }
   }
 }
@@ -114,10 +131,13 @@ void publicize_methods(const method_override_graph::Graph* graph,
 uint32_t remove_duplicated_vmethods(
     const Scope& scope,
     const ConcurrentSet<DexMethodRef*>& super_invoked_methods,
-    method_profiles::MethodProfiles* method_profiles) {
+    method_profiles::MethodProfiles* method_profiles,
+    positions::JoinStats* join_stats) {
   uint32_t ret = 0;
   auto graph = method_override_graph::build_graph(scope);
   UnorderedMap<DexMethodRef*, DexMethodRef*> removed_vmethods;
+  std::vector<Duplication> duplications;
+  UnorderedMap<DexMethod*, DexMethod*> removed_to_survivor;
 
   walk::classes(scope, [&](DexClass* cls) {
     for (auto* method : cls->get_vmethods()) {
@@ -130,6 +150,11 @@ uint32_t remove_duplicated_vmethods(
       if (method->rstate.no_optimizations()) {
         continue;
       }
+      if (removed_to_survivor.count(method) != 0) {
+        // Already folded into an ancestor. Its body is dropped below, so it
+        // cannot host anything of its own.
+        continue;
+      }
       if (!is_public_or_protected(method)) {
         // Note: package-private methods are skipped. Need consider package
         // names when change the accessibility of them.
@@ -139,36 +164,78 @@ uint32_t remove_duplicated_vmethods(
       if (!eligible_code(method->get_code()->cfg())) {
         continue;
       }
-      std::vector<DexMethod*> duplicates;
-      find_duplications(graph.get(), method, &duplicates);
-
-      // Now, remove the methods that are called with INVOKE_SUPER from
-      // the duplicates set.
-      std::erase_if(duplicates, [&](auto& m) {
-        return super_invoked_methods.count_unsafe(m);
+      std::vector<Duplication> found;
+      find_duplications(graph.get(), method, method, super_invoked_methods,
+                        &found);
+      // Removal is deferred until every body has been read, so a method
+      // already folded away is still a definition here and is reached again.
+      std::erase_if(found, [&](const auto& duplication) {
+        return removed_to_survivor.count(duplication.removed) != 0;
       });
 
-      if (!duplicates.empty()) {
+      if (!found.empty()) {
         if (method_profiles != nullptr) {
-          auto sources = duplicates;
+          std::vector<DexMethod*> sources;
+          sources.reserve(found.size() + 1);
+          for (const auto& duplication : found) {
+            sources.push_back(duplication.removed);
+          }
           sources.push_back(method);
           method_profiles->substitute_stats(method, sources);
         }
         if (is_protected(method)) {
           publicize_methods(graph.get(), method);
         }
-        TRACE(VM, 8, "Same as %s", SHOW(method));
-        for (auto* m : duplicates) {
-          TRACE(VM, 8, "\t%s", SHOW(m));
-          type_class(m->get_class())->remove_method(m);
-          removed_vmethods.emplace(m, method);
-          DexMethod::delete_method(m);
+        for (const auto& duplication : found) {
+          auto* removed = duplication.removed;
+          TRACE(VM,
+                8,
+                "%s shares the body of %s; references use %s",
+                SHOW(removed),
+                SHOW(duplication.survivor),
+                SHOW(method));
+          removed_to_survivor.emplace(removed, duplication.survivor);
+          removed_vmethods.emplace(removed, method);
         }
-        ret += duplicates.size();
+        ret += found.size();
+        duplications.insert(duplications.end(), found.begin(), found.end());
         TRACE(VM, 9, "%s\n", SHOW(method->get_code()->cfg()));
       }
     }
   });
+
+  // A survivor can itself be folded into an ancestor by a later class, so the
+  // body that ends up serving a removed method is the end of that chain.
+  auto final_survivor = [&removed_to_survivor](DexMethod* survivor) {
+    // Every step moves to a strict ancestor, so the chain cannot cycle. The
+    // bound turns a broken invariant into a failure instead of a hang.
+    for (size_t step = 0; step <= removed_to_survivor.size(); ++step) {
+      auto it = removed_to_survivor.find(survivor);
+      if (it == removed_to_survivor.end()) {
+        return survivor;
+      }
+      survivor = it->second;
+    }
+    not_reached_log("a chain of deduplicated overrides does not terminate");
+  };
+
+  std::map<DexMethod*, std::vector<DexMethod*>, dexmethods_comparator>
+      victims_by_survivor;
+  for (const auto& duplication : duplications) {
+    victims_by_survivor[final_survivor(duplication.survivor)].push_back(
+        duplication.removed);
+  }
+  // Comparing the lines reads the removed bodies, so it has to happen while
+  // they are all still concrete.
+  for (const auto& [survivor, victims] : victims_by_survivor) {
+    positions::join_throwing_positions(survivor, victims, join_stats);
+  }
+
+  for (const auto& duplication : duplications) {
+    auto* removed = duplication.removed;
+    type_class(removed->get_class())->remove_method(removed);
+    DexMethod::delete_method(removed);
+  }
 
   method_fixup::fixup_references_to_removed_methods(scope, removed_vmethods);
 
@@ -196,12 +263,13 @@ void collect_all_invoke_super_called(
 namespace dedup_vmethods {
 
 uint32_t dedup(const DexStoresVector& stores,
-               method_profiles::MethodProfiles* method_profiles) {
+               method_profiles::MethodProfiles* method_profiles,
+               positions::JoinStats* join_stats) {
   auto scope = build_class_scope(stores);
   ConcurrentSet<DexMethodRef*> super_invoked_methods;
   collect_all_invoke_super_called(scope, &super_invoked_methods);
-  auto deduplicated_vmethods =
-      remove_duplicated_vmethods(scope, super_invoked_methods, method_profiles);
+  auto deduplicated_vmethods = remove_duplicated_vmethods(
+      scope, super_invoked_methods, method_profiles, join_stats);
   TRACE(VM, 2, "deduplicated_vmethods %u\n", deduplicated_vmethods);
   return deduplicated_vmethods;
 }

@@ -3224,6 +3224,10 @@ bool ControlFlowGraph::structural_equals(
       return false;
     }
     for (size_t i = 0; i < throw1_edges.size(); i++) {
+      if (throw1_edges[i]->throw_info()->catch_type !=
+          throw2_edges[i]->throw_info()->catch_type) {
+        return false;
+      }
       auto* throw1 = throw1_edges[i]->target();
       auto* throw2 = throw2_edges[i]->target();
       if (!throw1->extended_structural_equals(throw2, instruction_equals)) {

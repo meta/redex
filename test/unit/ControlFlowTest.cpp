@@ -1083,6 +1083,38 @@ TEST_F(ControlFlowTest, structural_equals_switch_case_keys) {
   EXPECT_FALSE(keys_0_1->cfg().structural_equals(keys_1_2->cfg()));
 }
 
+TEST_F(ControlFlowTest, structural_equals_catch_types) {
+  // The catch type lives on the CFG throw edge, not on any instruction. An
+  // IllegalArgumentException thrown by bar() is caught by the RuntimeException
+  // handler but not by the IllegalStateException one.
+  constexpr const char* kCatch = R"(
+    (
+      (.try_start a)
+      (invoke-static () "LFoo;.bar:()V")
+      (.try_end a)
+      (const v0 0)
+      (return v0)
+      (.catch (a) "$CATCH_TYPE")
+      (const v0 1)
+      (return v0)
+    )
+  )";
+  auto make_code = [&](const std::string& catch_type) {
+    return assembler::ircode_from_string(
+        ir(kCatch, {{"$CATCH_TYPE", catch_type}}));
+  };
+  auto ise = make_code("Ljava/lang/IllegalStateException;");
+  auto ise_copy = make_code("Ljava/lang/IllegalStateException;");
+  auto rte = make_code("Ljava/lang/RuntimeException;");
+  EXPECT_FALSE(ise->structural_equals(*rte));
+
+  ise->build_cfg();
+  ise_copy->build_cfg();
+  rte->build_cfg();
+  EXPECT_TRUE(ise->cfg().structural_equals(ise_copy->cfg()));
+  EXPECT_FALSE(ise->cfg().structural_equals(rte->cfg()));
+}
+
 TEST_F(ControlFlowTest, deep_copy2) {
 
   auto code = assembler::ircode_from_string(R"(

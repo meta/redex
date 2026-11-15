@@ -1884,7 +1884,7 @@ bool EnumUtilsFieldAnalyzer::analyze_sget(
   if (field == nullptr || !is_final(field) ||
       field->get_type() != integer_type || field->str().empty() ||
       field->str()[0] != 'f' ||
-      field->get_class() != DexType::make_type("Lredex/$EnumUtils;")) {
+      field->get_class() != DexType::get_type("Lredex/$EnumUtils;")) {
     return false;
   }
   auto* valueOf = method::java_lang_Integer_valueOf();

@@ -73,3 +73,26 @@ TEST_F(EnumUtilsFieldTest, Basic) {
 )");
   EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
+
+TEST_F(EnumUtilsFieldTest, OtherFieldDoesNotCreateTheHolderType) {
+  auto* cls_ty = DexType::make_type("LFoo;");
+  ClassCreator creator(cls_ty);
+  creator.set_super(type::java_lang_Object());
+  auto* field = dynamic_cast<DexField*>(
+      DexField::make_field("LFoo;.fooValue:Ljava/lang/Integer;"));
+  field->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL);
+  creator.add_field(field);
+  Scope scope{creator.create()};
+
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (sget-object "LFoo;.fooValue:Ljava/lang/Integer;")
+      (move-result-pseudo-object v0)
+    )
+)");
+  do_const_prop(code.get(), m_analyzer, m_config);
+
+  // OptimizeEnumsPass names its holder after this type only if the type does
+  // not exist yet.
+  EXPECT_EQ(DexType::get_type("Lredex/$EnumUtils;"), nullptr);
+}

@@ -173,7 +173,7 @@ DexField* try_get_enum_utils_f_field(EnumUtilsCache& cache,
                   static_cast<int32_t>(*c),
                   [&](int32_t key) -> DexField* {
                     auto* cls =
-                        type_class(DexType::make_type("Lredex/$EnumUtils;"));
+                        type_class(DexType::get_type("Lredex/$EnumUtils;"));
                     if (cls == nullptr) {
                       return nullptr;
                     }

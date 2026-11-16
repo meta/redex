@@ -93,6 +93,11 @@ struct BlockAccessor;
 
 namespace cfg {
 
+// Conditional branches have one unkeyed EDGE_BRANCH and one EDGE_GOTO.
+// Switches have one default EDGE_GOTO and one or more EDGE_BRANCH edges,
+// each with a distinct case key. Neither has outgoing EDGE_THROW edges:
+// a may-throw instruction in a try region ends a separate block.
+// Return blocks have no successors except optional EDGE_GHOST exit edges.
 enum EdgeType : uint8_t {
   // The false branch of an if statement, default of a switch, or unconditional
   // goto

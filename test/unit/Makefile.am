@@ -155,6 +155,7 @@ check_PROGRAMS = \
     optimize_enums_test \
     outliner_type_analysis_test \
     partial_pass_test \
+    pass_manager_feature_test \
     peephole_test \
     position_interning_test \
     position_join_test \
@@ -319,6 +320,8 @@ concurrent_containers_test_SOURCES = ConcurrentContainersTest.cpp
 concurrent_hashtable_test_SOURCES = ConcurrentHashtableTest.cpp
 
 atomic_map_test_SOURCES = AtomicMapTest.cpp
+
+pass_manager_feature_test_SOURCES = PassManagerFeatureTest.cpp
 
 configurable_test_SOURCES = ConfigurableTest.cpp
 configurable_test_LDADD = $(COMMON_MOCK_TEST_LIBS)

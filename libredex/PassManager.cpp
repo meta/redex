@@ -1584,19 +1584,19 @@ class PassManager::RunPassesContext {
     switch (check_against_version) {
     case 39:
       always_assert_log(
-          !has_dex39_features,
+          !has_dex39_features.value(),
           "Input APK has dex39 features that this pass %s doesn't support",
           pass->name().c_str());
       [[fallthrough]];
     case 38:
       always_assert_log(
-          !has_dex38_features,
+          !has_dex38_features.value(),
           "Input APK has dex38 features that this pass %s doesn't support",
           pass->name().c_str());
       [[fallthrough]];
     case 37:
       always_assert_log(
-          !has_dex37_features,
+          !has_dex37_features.value(),
           "Input APK has dex37 features that this pass %s doesn't support",
           pass->name().c_str());
       [[fallthrough]];

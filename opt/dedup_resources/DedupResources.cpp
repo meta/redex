@@ -429,9 +429,29 @@ void DedupResourcesPass::prepare_disallowed_ids(
 
 void DedupResourcesPass::eval_pass(DexStoresVector& /*stores*/,
                                    ConfigFiles& conf,
-                                   PassManager&) {
+                                   PassManager& mgr) {
   auto& plugin_registery = opt_res::ReachableResourcesPluginRegistry::get();
   plugin_registery.configure_plugins(conf);
+
+  // The app may look up by name any resource that the last
+  // OptimizeResourcesPass (or an alias of it, such as
+  // NullifyOptimizeResourcesPass) assumes reachable, so keep those names. The
+  // app cannot rely on looking up any other name: that pass empties or deletes
+  // such resources when no code references them.
+  const OptimizeResourcesPass* last_removal_pass = nullptr;
+  for (const auto& info : mgr.get_pass_info()) {
+    if (const auto* pass =
+            dynamic_cast<const OptimizeResourcesPass*>(info.pass)) {
+      last_removal_pass = pass;
+    }
+  }
+  if (last_removal_pass != nullptr) {
+    const auto& prefixes = last_removal_pass->assume_reachable_prefixes();
+    m_disallowed_resource_prefixes.insert(m_disallowed_resource_prefixes.end(),
+                                          prefixes.begin(), prefixes.end());
+    TRACE(DEDUP_RES, 2, "Keeping %zu name prefix(es) assumed reachable by %s",
+          prefixes.size(), last_removal_pass->name().c_str());
+  }
 }
 
 void DedupResourcesPass::run_pass(DexStoresVector& stores,

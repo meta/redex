@@ -135,6 +135,10 @@ class OptimizeResourcesPass : public Pass {
     return std::make_unique<OptimizeResourcesPass>(new_name);
   }
 
+  const std::vector<std::string>& assume_reachable_prefixes() const {
+    return m_options.assume_reachable_prefixes;
+  }
+
   static void report_metric(TraceModule trace_module,
                             const std::string& metric_name,
                             size_t metric_value,

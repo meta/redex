@@ -38,6 +38,9 @@
  * app bundles, so for best results enable this for simple things like dimen,
  * color, etc.
  *
+ * Names that the last OptimizeResourcesPass (or an alias of it) assumes
+ * reachable are always disabled, as the app may look them up by name.
+ *
  * Possible further improvements:
  * This does not do a particularly good job of finding duplicate files when run
  * against .aab inputs. Reason for this is that .pb schema for .xml files will

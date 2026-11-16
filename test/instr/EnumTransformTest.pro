@@ -7,7 +7,7 @@
 -dontshrink
 -dontoptimize
 
--keep class redex.EnumTransformTest { *; }
+-keep class redex.EnumTransform*Test { *; }
 
 # Don't muck with test infra
 -keep class org.junit.** { *; }

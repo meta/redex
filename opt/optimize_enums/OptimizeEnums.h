@@ -30,6 +30,7 @@ class OptimizeEnumsPass : public Pass {
 
  private:
   int m_max_enum_size;
+  uint32_t m_enum_utils_split_size;
   bool m_skip_sanity_check;
   bool m_support_kt_19_enum_entries;
   bool m_inline_enum_values;

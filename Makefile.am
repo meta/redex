@@ -297,6 +297,7 @@ libredex_la_SOURCES = \
 	service/dataflow/ConstantUses.cpp \
 	service/dedup-blocks/DedupBlocks.cpp \
 	service/dedup-blocks/DedupBlockValueNumbering.cpp \
+	service/enum-utils/EnumUtilsHolders.cpp \
 	service/escape-analysis/BlamingAnalysis.cpp \
 	service/escape-analysis/LocalPointersAnalysis.cpp \
 	service/atomic-field-updaters/AtomicFieldUpdaters.cpp \

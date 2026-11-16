@@ -118,6 +118,7 @@ COMMON_INCLUDES = \
 	-I$(top_srcdir)/service/cse \
 	-I$(top_srcdir)/service/dataflow \
 	-I$(top_srcdir)/service/dedup-blocks \
+	-I$(top_srcdir)/service/enum-utils \
 	-I$(top_srcdir)/service/escape-analysis \
 	-I$(top_srcdir)/service/field-ops \
 	-I$(top_srcdir)/service/init-classes \

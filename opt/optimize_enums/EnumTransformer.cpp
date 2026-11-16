@@ -18,6 +18,7 @@
 #include "DexClass.h"
 #include "DexUtil.h"
 #include "EnumUpcastAnalysis.h"
+#include "EnumUtilsHolders.h"
 #include "Mutators.h"
 #include "OptData.h"
 #include "RedexContext.h"
@@ -33,8 +34,9 @@
  * We already get a set of candidate enums which are safe to be replaced with
  * Integer objects from EnumUpcastAnalysis, we do the transformation in the
  * EnumTransformer in following steps.
- * 1. Create an enum helper class LEnumUtils; with some helper methods and
- * singleton Integer fields, Integer f0, f1, f2 ....
+ * 1. Create enum helper classes, LEnumUtils; and, when the values are split,
+ * LEnumUtils$1; ..., with some helper methods and singleton Integer fields,
+ * Integer f0, f1, f2 ....
  * 2. Update instructions.
  *  -- invoke-virtual LCandidateEnum;.ordinal()I =>
  *                    Ljava/lang/Integer;.intValue:()I
@@ -98,6 +100,7 @@ struct EnumUtil {
       m_get_instance_field_methods;
 
   DexMethodRef* m_values_method_ref = nullptr;
+  size_t m_num_holders{0};
 
   const Config& m_config;
 
@@ -161,10 +164,11 @@ struct EnumUtil {
   explicit EnumUtil(const Config& config) : m_config(config) {}
 
   void create_util_class(DexStoresVector* stores, uint32_t fields_count) {
-    uint32_t fields_in_primary = std::min(fields_count, m_config.max_enum_size);
-    DexClass* cls = make_enumutils_class(fields_in_primary);
+    auto classes =
+        make_enumutils_classes(std::min(fields_count, m_config.max_enum_size));
+    m_num_holders = classes.size();
     auto& dexen = (*stores)[0].get_dexen()[0];
-    dexen.push_back(cls);
+    dexen.insert(dexen.end(), classes.begin(), classes.end());
   }
 
   bool is_super_type_of_candidate_enum(const DexType* type) {
@@ -371,18 +375,64 @@ struct EnumUtil {
 
  private:
   /**
-   * Create a helper class for enums.
+   * A holder class for the boxed values [first, first + count): one fN field
+   * per value and a $VALUES array of the same objects, both filled in
+   * <clinit>.
    */
-  DexClass* make_enumutils_class(uint32_t fields_count) {
-    // Note that the EnumUtilsFieldAnalyzer does pattern matching on fields of
-    // the form $EnumUtils.fXXX, and should be kept in sync.
-    std::string name = "Lredex/$EnumUtils;";
-    DexType* type = DexType::get_type(name);
-    while (type != nullptr) {
-      name.insert(name.size() - 1, "$u");
-      type = DexType::get_type(name);
+  struct Holder {
+    DexClass* cls;
+    DexFieldRef* values_field;
+    uint32_t first;
+    uint32_t count;
+    std::vector<DexFieldRef*> fields;
+  };
+
+  /**
+   * Create the helper classes holding the boxed values [0, fields_count).
+   * With a positive `enum_utils_split_size`, each block of that many values
+   * gets a class of its own, which the runtime initializes only when code
+   * first reads one of its fields or values() needs its block. Otherwise one
+   * class holds every value.
+   */
+  std::vector<DexClass*> make_enumutils_classes(uint32_t fields_count) {
+    // Note that the EnumUtilsFieldAnalyzer recognizes the fXXX fields of these
+    // classes through enum_utils, which names them.
+    const uint32_t split_size = m_config.enum_utils_split_size;
+    uint32_t num_holders = 1;
+    if (split_size != 0 && fields_count > split_size) {
+      num_holders = (fields_count + split_size - 1) / split_size;
     }
-    type = DexType::make_type(name);
+    const std::string family = enum_utils::unused_family(num_holders);
+
+    std::vector<Holder> holders;
+    holders.reserve(num_holders);
+    m_fields.reserve(fields_count);
+    for (uint32_t chunk = 0; chunk < num_holders; ++chunk) {
+      uint32_t first = chunk * split_size;
+      uint32_t count = num_holders == 1
+                           ? fields_count
+                           : std::min(split_size, fields_count - first);
+      auto& holder = holders.emplace_back(make_holder_class(
+          enum_utils::holder_name(family, chunk), first, count));
+      m_fields.insert(m_fields.end(), holder.fields.begin(),
+                      holder.fields.end());
+    }
+    // m_fields is indexed by value.
+    redex_assert(m_fields.size() == fields_count);
+    m_values_method_ref = make_values_method(holders, fields_count);
+
+    std::vector<DexClass*> classes;
+    classes.reserve(holders.size());
+    for (const auto& holder : holders) {
+      classes.push_back(holder.cls);
+    }
+    return classes;
+  }
+
+  Holder make_holder_class(const std::string& name,
+                           uint32_t first,
+                           uint32_t count) {
+    DexType* type = DexType::make_type(name);
     ClassCreator cc(type);
     cc.set_access(ACC_PUBLIC | ACC_FINAL);
     cc.set_super(type::java_lang_Object());
@@ -390,43 +440,50 @@ struct EnumUtil {
     cls->rstate.set_generated();
     cls->rstate.set_clinit_has_no_side_effects();
 
-    auto* values_field = make_values_field(cls);
-    auto* clinit_method = make_clinit_method(cls, fields_count);
+    // values() in the first holder reads the other holders' arrays.
+    auto* values_field =
+        make_values_field(cls, first == 0 ? ACC_PRIVATE : ACC_PUBLIC);
+    auto* clinit_method = make_clinit_method(cls, count);
     auto* clinit_code = clinit_method->get_code();
-    m_fields.reserve(fields_count);
-    for (uint32_t i = 0; i < fields_count; ++i) {
-      m_fields.push_back(make_a_field(cls, i, clinit_code));
+    std::vector<DexFieldRef*> fields;
+    fields.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+      fields.push_back(make_a_field(cls, first, i, clinit_code));
     }
 
     clinit_code->push_back(dasm(OPCODE_SPUT_OBJECT, values_field, {2_v}));
     clinit_code->push_back(dasm(OPCODE_RETURN_VOID));
     clinit_code->build_cfg();
-
-    m_values_method_ref = make_values_method(cls, values_field, fields_count);
-
-    return cls;
+    clinit_code->cfg().recompute_registers_size();
+    return {cls, values_field, first, count, std::move(fields)};
   }
 
   /**
    * LEnumUtils;.$VALUES:[Ljava/lang/Integer;
    */
-  DexFieldRef* make_values_field(DexClass* cls) {
+  DexFieldRef* make_values_field(DexClass* cls, DexAccessFlags visibility) {
     const auto* name = DexString::make_string("$VALUES");
     auto* field = DexField::make_field(cls->get_type(), name,
                                        type::make_array_type(INTEGER_TYPE))
-                      ->make_concrete(ACC_PRIVATE | ACC_FINAL | ACC_STATIC);
+                      ->make_concrete(visibility | ACC_FINAL | ACC_STATIC);
     cls->add_field(field);
     field->set_deobfuscated_name(show_deobfuscated(field));
     return (DexFieldRef*)field;
   }
 
   /**
-   * Create a static final Integer field and update <clinit> code.
+   * Create a static final Integer field for the value `first + index` and
+   * update the <clinit> code of the holder whose values start at `first` to
+   * store it into the field and into $VALUES[index].
    */
-  DexFieldRef* make_a_field(DexClass* cls, uint32_t value, IRCode* code) {
-    // Note that the EnumUtilsFieldAnalyzer does pattern matching on fields of
-    // the form $EnumUtils.fXXX, and should be kept in sync.
-    const auto* name = DexString::make_string("f" + std::to_string(value));
+  DexFieldRef* make_a_field(DexClass* cls,
+                            uint32_t first,
+                            uint32_t index,
+                            IRCode* code) {
+    uint32_t value = first + index;
+    // Note that the EnumUtilsFieldAnalyzer recognizes this field through
+    // enum_utils, which names it.
+    const auto* name = DexString::make_string(enum_utils::field_name(value));
     auto* field = DexField::make_field(cls->get_type(), name, INTEGER_TYPE)
                       ->make_concrete(ACC_PUBLIC | ACC_FINAL | ACC_STATIC);
     cls->add_field(field);
@@ -435,7 +492,12 @@ struct EnumUtil {
     code->push_back(dasm(OPCODE_INVOKE_STATIC, INTEGER_VALUEOF_METHOD, {1_v}));
     code->push_back(dasm(OPCODE_MOVE_RESULT_OBJECT, {0_v}));
     code->push_back(dasm(OPCODE_SPUT_OBJECT, field, {0_v}));
-    code->push_back(dasm(OPCODE_APUT_OBJECT, {0_v, 2_v, 1_v}));
+    if (first == 0) {
+      code->push_back(dasm(OPCODE_APUT_OBJECT, {0_v, 2_v, 1_v}));
+    } else {
+      code->push_back(dasm(OPCODE_CONST, {3_v, {LITERAL, index}}));
+      code->push_back(dasm(OPCODE_APUT_OBJECT, {0_v, 2_v, 3_v}));
+    }
     return (DexFieldRef*)field;
   }
 
@@ -466,19 +528,19 @@ struct EnumUtil {
   /**
    * LEnumUtils;.values:(I)[Ljava/lang/Integer;
    *
-   * We construct an array field at class loading time, which stores some of the
-   * integers. Copy part of the array if the required integers are in the array,
-   * otherwise copy all of them and construct more. The following comments are
-   * the basic blocks of this method.
+   * The holders' $VALUES arrays store the integers in [0, total). Copy the
+   * part of them that count needs, so that the elements are the same objects
+   * as the fN fields, and construct the integers beyond them. The following
+   * comments are the basic blocks of this method.
    *
    * res = new Integer[count]
-   * if count <= VALUES.length
+   * if count <= total
    *   : small_argument_block
    *   copy_size = count
    *   goto :copy_array_block
    * else
    *   : large_argument_block
-   *   copy_size = VALUES.length
+   *   copy_size = total
    *   id = copy_size
    *   goto :integers_block
    *   : integers_block
@@ -490,12 +552,18 @@ struct EnumUtil {
    *   else
    *     goto :copy_array_block
    * : copy_array_block
-   * System.arraycopy(VALUES, 0, res, 0, copy_size);
+   * for each holder, while copy_size > holder.first:
+   *   System.arraycopy(holder.$VALUES, 0, res, holder.first,
+   *                    min(copy_size - holder.first, holder.count))
    * return res
+   *
+   * A holder reached only when copy_size exceeds its first value is
+   * initialized only then.
    */
-  DexMethodRef* make_values_method(DexClass* cls,
-                                   DexFieldRef* values_field,
+  DexMethodRef* make_values_method(const std::vector<Holder>& holders,
                                    uint32_t total_integer_fields) {
+    always_assert(!holders.empty());
+    auto* cls = holders.front().cls;
     const auto* name = DexString::make_string("values");
     auto* integer_array_type = type::make_array_type(INTEGER_TYPE);
     DexProto* proto = DexProto::make_proto(
@@ -537,17 +605,73 @@ struct EnumUtil {
          dasm(OPCODE_APUT_OBJECT, {6_v, 1_v, 5_v}),
          dasm(OPCODE_ADD_INT_LIT, {5_v, 5_v, 1_L})});
 
+    append_copy_holders(cfg, copy_array_block, holders, total_integer_fields);
+    cfg.recompute_registers_size();
+    return (DexMethodRef*)method;
+  }
+
+  /**
+   * Append to `block` the copies out of each holder's $VALUES for values() and
+   * its return, in registers v4 (copy_size) and v1 (res). A holder whose first
+   * value is not below copy_size is not read. Uses v7 for a $VALUES array, v8
+   * for zero, v9 for a holder's first value, v10 for a copy length, and v11 for
+   * a holder's size; a single holder needs only v7 and v8.
+   */
+  void append_copy_holders(cfg::ControlFlowGraph& cfg,
+                           cfg::Block* block,
+                           const std::vector<Holder>& holders,
+                           uint32_t total_integer_fields) {
     auto* copy_array_method = DexMethod::make_method(
         "Ljava/lang/System;.arraycopy:(Ljava/lang/Object;ILjava/lang/"
         "Object;II)V");
-    copy_array_block->push_back({dasm(OPCODE_SGET_OBJECT, values_field),
-                                 dasm(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT, {7_v}),
-                                 dasm(OPCODE_CONST, {8_v, 0_L}),
-                                 dasm(OPCODE_INVOKE_STATIC, copy_array_method,
-                                      {7_v, 8_v, 1_v, 8_v, 4_v}),
-                                 dasm(OPCODE_RETURN_OBJECT, {1_v})});
-    cfg.recompute_registers_size();
-    return (DexMethodRef*)method;
+    cfg::Block* return_block = nullptr;
+    for (size_t i = 0; i < holders.size(); ++i) {
+      const auto& holder = holders[i];
+      // Without a later holder, copy_size - first never exceeds count.
+      bool needs_clamp = holder.first + holder.count < total_integer_fields;
+      Operand dest = 8_v;
+      Operand length = 4_v;
+      if (holder.first != 0) {
+        if (return_block == nullptr) {
+          return_block = cfg.create_block();
+          return_block->push_back(dasm(OPCODE_RETURN_OBJECT, {1_v}));
+        }
+        auto* next = cfg.create_block();
+        block->push_back(dasm(OPCODE_CONST, {9_v, {LITERAL, holder.first}}));
+        cfg.create_branch(block, dasm(OPCODE_IF_LE, {4_v, 9_v}), next,
+                          return_block);
+        block = next;
+        block->push_back(dasm(OPCODE_SUB_INT, {10_v, 4_v, 9_v}));
+        dest = 9_v;
+        length = 10_v;
+      } else if (needs_clamp) {
+        block->push_back(dasm(OPCODE_MOVE, {10_v, 4_v}));
+        length = 10_v;
+      }
+      if (needs_clamp) {
+        auto* clamp_block = cfg.create_block();
+        auto* copy_block = cfg.create_block();
+        block->push_back(dasm(OPCODE_CONST, {11_v, {LITERAL, holder.count}}));
+        // Clamp a length above the holder's size.
+        cfg.create_branch(block, dasm(OPCODE_IF_LE, {10_v, 11_v}), clamp_block,
+                          copy_block);
+        clamp_block->push_back(dasm(OPCODE_MOVE, {10_v, 11_v}));
+        cfg.add_edge(clamp_block, copy_block, cfg::EDGE_GOTO);
+        block = copy_block;
+      }
+      block->push_back({dasm(OPCODE_SGET_OBJECT, holder.values_field),
+                        dasm(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT, {7_v}),
+                        dasm(OPCODE_CONST, {8_v, 0_L}),
+                        dasm(OPCODE_INVOKE_STATIC, copy_array_method,
+                             {7_v, 8_v, 1_v, dest, length})});
+      if (i + 1 == holders.size()) {
+        block->push_back(dasm(OPCODE_RETURN_OBJECT, {1_v}));
+      } else {
+        auto* next = cfg.create_block();
+        cfg.add_edge(block, next, cfg::EDGE_GOTO);
+        block = next;
+      }
+    }
   }
 };
 
@@ -1220,6 +1344,7 @@ class EnumTransformer final {
   }
 
   uint32_t get_int_objs_count() { return m_int_objs; }
+  size_t get_enum_utils_holders_count() { return m_enum_util->m_num_holders; }
   uint32_t get_enum_objs_count() { return m_enum_objs; }
   size_t get_enum_attributes_map_size() { return m_enum_attributes_map.size(); }
   size_t get_eliminated_kotlin_enum_classes() { return m_kotlin_enum_classes; }
@@ -1769,6 +1894,8 @@ Stats transform_enums(PassManager& mgr,
         stats.num_eliminated_kotlin_enum_classes);
   stats.num_erased_enum_objs = transformer.get_enum_objs_count();
   stats.num_int_objs = transformer.get_int_objs_count();
+  mgr.incr_metric("num_enum_utils_holders",
+                  transformer.get_enum_utils_holders_count());
   return stats;
 }
 } // namespace optimize_enums

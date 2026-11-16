@@ -303,7 +303,7 @@ TEST_F(OptimizeEnumsTest, analyzeRConstMembers) {
 
   optimize_enums::OptimizeEnumsPass pass;
   PassManager manager({&pass});
-  optimize_enums::Config config(100, false, false, {});
+  optimize_enums::Config config(100);
   config.candidate_enums.insert(bar->get_type());
 
   Json::Value conf_obj = Json::nullValue;
@@ -388,7 +388,7 @@ TEST_F(OptimizeEnumsTest, rejectionReasonsAreComplete) {
   // walkers, which is expensive under sanitizers/debug builds, and a handful of
   // iterations is enough to shake out scheduling differences.
   for (size_t iteration = 0; iteration < 10; ++iteration) {
-    optimize_enums::Config config(100, false, false, {});
+    optimize_enums::Config config(100);
     config.candidate_enums.insert(bar_type);
 
     std::mutex reasons_mutex;

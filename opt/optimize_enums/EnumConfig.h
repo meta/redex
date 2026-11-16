@@ -36,13 +36,19 @@ using SummaryMap = InsertOnlyConcurrentMap<const DexMethodRef*, ParamSummary>;
 
 struct Config {
   /**
-   * We create a helper class `EnumUtils` in primary dex with all the boxed
+   * We create helper classes `EnumUtils` in primary dex with all the boxed
    * integer fields for representing enum values. The maximum number of the
    * fields is equal to largest number of values of candidate enum classes. To
-   * limit the size of the class, exclude the enum classes that contain more
+   * limit the size of the classes, exclude the enum classes that contain more
    * than max_enum_size values before the transformation.
    */
   uint32_t max_enum_size;
+  /**
+   * When positive, put each block of this many boxed values into its own
+   * holder class, which the runtime initializes, and so boxes, only when code
+   * first reads one of its fields. Otherwise `EnumUtils` holds every value.
+   */
+  uint32_t enum_utils_split_size{0};
   bool skip_sanity_check{false};
   bool support_kt_19_enum_entries{false};
   /**
@@ -54,16 +60,6 @@ struct Config {
   ConcurrentSet<const DexType*> candidate_enums;
 
   explicit Config(uint32_t max_size) : max_enum_size(max_size) {}
-
-  explicit Config(uint32_t max_size,
-                  bool skip_sanity_check,
-                  bool support_kt_19_enum_entries,
-                  const std::vector<const DexType*>& allowlist)
-      : max_enum_size(max_size),
-        skip_sanity_check(skip_sanity_check),
-        support_kt_19_enum_entries(support_kt_19_enum_entries),
-        breaking_reference_equality_allowlist(allowlist.begin(),
-                                              allowlist.end()) {}
 };
 
 bool params_contain_object_type(const DexMethod* method,

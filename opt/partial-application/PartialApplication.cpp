@@ -91,6 +91,7 @@
 #include "Debug.h"
 #include "DeterministicContainers.h"
 #include "DexUtil.h"
+#include "EnumUtilsHolders.h"
 #include "IRCode.h"
 #include "InitClassesWithSideEffects.h"
 #include "LiveRange.h"
@@ -154,10 +155,26 @@ const api::AndroidSDK* get_min_sdk_api(ConfigFiles& conf, PassManager& mgr) {
   }
 }
 
-using EnumUtilsCache = InsertOnlyConcurrentMap<int32_t, DexField*>;
+// OptimizeEnumsPass's holder fields, by the value whose boxed object they hold.
+using EnumUtilsFields = InsertOnlyConcurrentMap<int32_t, DexField*>;
 
-// Check if we have a boxed value for which there is a $EnumUtils field.
-DexField* try_get_enum_utils_f_field(EnumUtilsCache& cache,
+EnumUtilsFields get_enum_utils_fields(const Scope& scope) {
+  EnumUtilsFields fields;
+  walk::parallel::classes(scope, [&](DexClass* cls) {
+    if (!enum_utils::is_holder(cls->get_type())) {
+      return;
+    }
+    for (auto* field : cls->get_sfields()) {
+      if (auto value = enum_utils::boxed_value(field)) {
+        fields.insert({*value, field});
+      }
+    }
+  });
+  return fields;
+}
+
+// Check if we have a boxed value for which there is a holder field.
+DexField* try_get_enum_utils_f_field(const EnumUtilsFields& fields,
                                      const ObjectWithImmutAttr& object) {
   // This matches EnumUtilsFieldAnalyzer::analyze_sget.
   always_assert(object.jvm_cached_singleton);
@@ -168,22 +185,8 @@ DexField* try_get_enum_utils_f_field(EnumUtilsCache& cache,
   const auto& signed_value = attribute.value.get<SignedConstantDomain>();
   auto c = signed_value.get_constant();
   always_assert(c);
-  return *cache
-              .get_or_create_and_assert_equal(
-                  static_cast<int32_t>(*c),
-                  [&](int32_t key) -> DexField* {
-                    auto* cls =
-                        type_class(DexType::get_type("Lredex/$EnumUtils;"));
-                    if (cls == nullptr) {
-                      return nullptr;
-                    }
-                    std::string field_name = "f" + std::to_string(key);
-                    auto* field = cls->find_sfield(field_name.c_str(),
-                                                   type::java_lang_Integer());
-                    always_assert(!field || is_static(field));
-                    return field;
-                  })
-              .first;
+  const auto* field = fields.get(static_cast<int32_t>(*c));
+  return field == nullptr ? nullptr : *field;
 }
 
 // Identify how many argument slots an invocation needs after expansion of wide
@@ -326,7 +329,7 @@ using InvokeCallSiteSummaries =
 // violate anything the ref-checker would complain about. We can also handle
 // singletons and immutable objects if they represent jvm cached singletons.
 bool filter(const RefChecker& ref_checker,
-            EnumUtilsCache& enum_utils_cache,
+            const EnumUtilsFields& enum_utils_fields,
             const ConstantValue& value) {
   if (const auto& signed_value = value.maybe_get<SignedConstantDomain>()) {
     return !!signed_value->get_constant();
@@ -341,13 +344,13 @@ bool filter(const RefChecker& ref_checker,
       return false;
     }
     if (DexField* field =
-            try_get_enum_utils_f_field(enum_utils_cache, *object)) {
+            try_get_enum_utils_f_field(enum_utils_fields, *object)) {
       return ref_checker.check_field(field);
     } else {
       const auto& signed_value2 =
           only(object->attributes).value.maybe_get<SignedConstantDomain>();
       always_assert(signed_value2);
-      return filter(ref_checker, enum_utils_cache, *signed_value2);
+      return filter(ref_checker, enum_utils_fields, *signed_value2);
     }
     // NOLINTNEXTLINE(bugprone-branch-clone)
   } else if (const auto& string_value = value.maybe_get<StringDomain>()) {
@@ -379,7 +382,7 @@ CallSiteSummaryVector order_csses(const CallSiteSummarySet& csses) {
 // arguments are beneficial to transform.
 class CalleeInvocationSelector {
  private:
-  EnumUtilsCache& m_enum_utils_cache;
+  const EnumUtilsFields& m_enum_utils_fields;
   CallSiteSummarizer& m_call_site_summarizer;
   const DexMethod* m_callee;
   const InsnsArgExclusivity& m_arg_exclusivity;
@@ -452,7 +455,7 @@ class CalleeInvocationSelector {
                    value.maybe_get<ObjectWithImmutAttrDomain>()) {
       auto object = obj_or_none->get_constant();
       always_assert(object);
-      if (try_get_enum_utils_f_field(m_enum_utils_cache, *object) != nullptr) {
+      if (try_get_enum_utils_f_field(m_enum_utils_fields, *object) != nullptr) {
         return static_cast<int16_t>(m_cost_config.const_obj_or_none_cost_1);
       } else {
         always_assert(object->jvm_cached_singleton);
@@ -538,13 +541,13 @@ class CalleeInvocationSelector {
   MutablePriorityQueue<const CallSiteSummary*, Priority> m_pq;
 
  public:
-  CalleeInvocationSelector(EnumUtilsCache& enum_utils_cache,
+  CalleeInvocationSelector(const EnumUtilsFields& enum_utils_fields,
                            CallSiteSummarizer& call_site_summarizer,
                            const DexMethod* callee,
                            const InsnsArgExclusivity& arg_exclusivity,
                            size_t callee_caller_classes,
                            const PartialApplicationConfig& cost_config)
-      : m_enum_utils_cache(enum_utils_cache),
+      : m_enum_utils_fields(enum_utils_fields),
         m_call_site_summarizer(call_site_summarizer),
         m_callee(callee),
         m_arg_exclusivity(arg_exclusivity),
@@ -800,7 +803,7 @@ using PaMethodRefs =
                             boost::hash<CalleeCallSiteSummary>>;
 // Run the analysis over all callees.
 void select_invokes_and_callers(
-    EnumUtilsCache& enum_utils_cache,
+    const EnumUtilsFields& enum_utils_fields,
     CallSiteSummarizer& call_site_summarizer,
     const ConcurrentMethodToMethodOccurrences& callee_caller,
     const InsnsArgExclusivity& arg_exclusivity,
@@ -827,7 +830,7 @@ void select_invokes_and_callers(
   workqueue_run<const DexMethod*>(
       [&](const DexMethod* callee) {
         CalleeInvocationSelector cis(
-            enum_utils_cache, call_site_summarizer, callee, arg_exclusivity,
+            enum_utils_fields, call_site_summarizer, callee, arg_exclusivity,
             callee_caller_classes.at_unsafe(callee).size(), config);
         cis.fill_pq();
         cis.reduce_pq();
@@ -1023,7 +1026,7 @@ void rewrite_callers(
 }
 
 // Helper used to build the partial-assignment helper methods.
-void push_callee_arg(EnumUtilsCache& enum_utils_cache,
+void push_callee_arg(const EnumUtilsFields& enum_utils_fields,
                      const DexType* type,
                      const ConstantValue& value,
                      MethodCreator* method_creator,
@@ -1050,7 +1053,7 @@ void push_callee_arg(EnumUtilsCache& enum_utils_cache,
     auto object = obj_or_none->get_constant();
     always_assert(object);
     if (DexField* field =
-            try_get_enum_utils_f_field(enum_utils_cache, *object)) {
+            try_get_enum_utils_f_field(enum_utils_fields, *object)) {
       auto tmp = method_creator->make_local(field->get_type());
       main_block->sfield_op(opcode::sget_opcode_for_field(field), field, tmp);
       callee_args->push_back(tmp);
@@ -1078,7 +1081,7 @@ void push_callee_arg(EnumUtilsCache& enum_utils_cache,
 
 // Create all new helper methods that bind constant arguments
 void create_partial_application_methods(
-    EnumUtilsCache& enum_utils_cache,
+    const EnumUtilsFields& enum_utils_fields,
     PaMethodRefs& pa_method_refs,
     PaCallSiteSourceBlocks& pa_call_site_source_blocks) {
   Timer t("create_partial_application_methods");
@@ -1116,7 +1119,7 @@ void create_partial_application_methods(
       if (value.is_top()) {
         callee_args.push_back(method_creator.get_local(next_arg_idx++));
       } else {
-        push_callee_arg(enum_utils_cache, args->at(i), value, &method_creator,
+        push_callee_arg(enum_utils_fields, args->at(i), value, &method_creator,
                         main_block, &callee_args);
       }
     }
@@ -1351,10 +1354,10 @@ void PartialApplicationPass::run_pass(DexStoresVector& stores,
   // limiting parallelism.
   auto has_callee_other_call_sites_fn = [](DexMethod*) -> bool { return true; };
 
-  EnumUtilsCache enum_utils_cache;
+  const auto enum_utils_fields = get_enum_utils_fields(scope);
   std::function<bool(const ConstantValue& value)> filter_fn =
       [&](const ConstantValue& value) {
-        return filter(ref_checker, enum_utils_cache, value);
+        return filter(ref_checker, enum_utils_fields, value);
       };
 
   CallSiteSummaryStats call_site_summarizer_stats;
@@ -1369,7 +1372,7 @@ void PartialApplicationPass::run_pass(DexStoresVector& stores,
   UnorderedSet<DexMethod*> selected_callers;
 
   select_invokes_and_callers(
-      enum_utils_cache, call_site_summarizer, callee_caller, arg_exclusivity,
+      enum_utils_fields, call_site_summarizer, callee_caller, arg_exclusivity,
       callee_caller_classes, m_iteration++, &total_estimated_savings,
       &pa_method_refs, &selected_invokes, &selected_callers, m_cost_config);
 
@@ -1381,7 +1384,7 @@ void PartialApplicationPass::run_pass(DexStoresVector& stores,
                   m_fix_missing_source_blocks ? &pa_call_site_source_blocks
                                               : nullptr);
 
-  create_partial_application_methods(enum_utils_cache, pa_method_refs,
+  create_partial_application_methods(enum_utils_fields, pa_method_refs,
                                      pa_call_site_source_blocks);
 
   if (m_derive_method_profiles_stats) {

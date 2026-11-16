@@ -35,6 +35,7 @@ std::enable_if_t<std::is_integral<T>::value, int> fpclassify(T x) {
 #include "DexAccess.h"
 #include "DexAnnotation.h"
 #include "DexInstruction.h"
+#include "EnumUtilsHolders.h"
 #include "Resolver.h"
 #include "Trace.h"
 #include "Walkers.h"
@@ -1876,15 +1877,13 @@ bool EnumUtilsFieldAnalyzer::analyze_sget(
     ImmutableAttributeAnalyzerState* state,
     const IRInstruction* insn,
     ConstantEnvironment* env) {
-  // The $EnumUtils class contains fields named fXXX, where XXX encodes a 32-bit
-  // number whose boxed value is stored as a java.lang.Integer instance in that
-  // field. These fields are initialized through Integer.valueOf(...).
-  auto* integer_type = type::java_lang_Integer();
+  // OptimizeEnumsPass's holder classes contain fields named fXXX, where XXX
+  // encodes a 32-bit number whose boxed value is stored as a java.lang.Integer
+  // instance in that field. These fields are initialized through
+  // Integer.valueOf(...).
   auto* field = resolve_field(insn->get_field());
-  if (field == nullptr || !is_final(field) ||
-      field->get_type() != integer_type || field->str().empty() ||
-      field->str()[0] != 'f' ||
-      field->get_class() != DexType::get_type("Lredex/$EnumUtils;")) {
+  auto value = field == nullptr ? std::nullopt : enum_utils::boxed_value(field);
+  if (!value) {
     return false;
   }
   auto* valueOf = method::java_lang_Integer_valueOf();
@@ -1896,11 +1895,9 @@ bool EnumUtilsFieldAnalyzer::analyze_sget(
   const auto& initializer = only(initializers);
   always_assert(initializer->insn_src_id_of_attr == 0);
 
-  const auto name = field->str();
-  auto value = std::stoi(str_copy(name.substr(1)));
-  ObjectWithImmutAttr object(integer_type, 1);
-  object.write_value(initializer->attr, SignedConstantDomain(value));
-  object.jvm_cached_singleton = state->is_jvm_cached_object(valueOf, value);
+  ObjectWithImmutAttr object(type::java_lang_Integer(), 1);
+  object.write_value(initializer->attr, SignedConstantDomain(*value));
+  object.jvm_cached_singleton = state->is_jvm_cached_object(valueOf, *value);
   env->set(RESULT_REGISTER, ObjectWithImmutAttrDomain(std::move(object)));
   return true;
 }

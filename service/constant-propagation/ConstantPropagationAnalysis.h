@@ -704,7 +704,7 @@ ReturnState collect_return_state(IRCode* code,
 std::optional<size_t> get_dereferenced_object_src_index(const IRInstruction*);
 
 /*
- * Handle reading of static fields fXXX in $EnumUtils class.
+ * Handle reading of static fields fXXX in OptimizeEnumsPass's holder classes.
  */
 class EnumUtilsFieldAnalyzer final
     : public InstructionAnalyzerBase<EnumUtilsFieldAnalyzer,

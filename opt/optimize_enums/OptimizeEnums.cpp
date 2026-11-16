@@ -403,17 +403,10 @@ class OptimizeEnums {
    * Replace enum with Boxed Integer object
    */
   void replace_enum_with_int(PassManager& mgr,
-                             int max_enum_size,
-                             bool skip_sanity_check,
-                             const bool support_kt_19_enum_entries,
-                             const std::vector<const DexType*>& allowlist,
+                             optimize_enums::Config& config,
                              ConfigFiles& conf,
                              UnorderedMap<UnsafeType, size_t>& unsafe_counts) {
-    if (max_enum_size <= 0) {
-      return;
-    }
-    optimize_enums::Config config(max_enum_size, skip_sanity_check,
-                                  support_kt_19_enum_entries, allowlist);
+    const bool support_kt_19_enum_entries = config.support_kt_19_enum_entries;
     const auto override_graph = method_override_graph::build_graph(m_scope);
     calculate_param_summaries(m_scope, *override_graph,
                               &config.param_summary_map);
@@ -979,6 +972,12 @@ void OptimizeEnumsPass::bind_config() {
   bind("max_enum_size", 100, m_max_enum_size,
        "The maximum number of enum field substitutions that are generated and "
        "stored in primary dex.");
+  bind("enum_utils_split_size", 0u, m_enum_utils_split_size,
+       "When positive, put each block of this many boxed values into its own "
+       "holder class, so that the runtime boxes a block only when code first "
+       "reads one of its values. 128 keeps exactly the values that "
+       "Integer.valueOf caches in the first holder. 0 keeps every value in one "
+       "holder class.");
   bind("break_reference_equality_allowlist", {}, m_enum_to_integer_allowlist,
        "A allowlist of enum classes that may have more than `max_enum_size` "
        "enum fields, try to erase them without considering reference equality "
@@ -1006,9 +1005,15 @@ void OptimizeEnumsPass::run_pass(DexStoresVector& stores,
   OptimizeEnums opt_enums(stores, conf);
   opt_enums.remove_redundant_generated_classes();
   UnorderedMap<UnsafeType, size_t> unsafe_counts;
-  opt_enums.replace_enum_with_int(
-      mgr, m_max_enum_size, m_skip_sanity_check, m_support_kt_19_enum_entries,
-      m_enum_to_integer_allowlist, conf, unsafe_counts);
+  if (m_max_enum_size > 0) {
+    optimize_enums::Config config(m_max_enum_size);
+    config.enum_utils_split_size = m_enum_utils_split_size;
+    config.skip_sanity_check = m_skip_sanity_check;
+    config.support_kt_19_enum_entries = m_support_kt_19_enum_entries;
+    config.breaking_reference_equality_allowlist.insert(
+        m_enum_to_integer_allowlist.begin(), m_enum_to_integer_allowlist.end());
+    opt_enums.replace_enum_with_int(mgr, config, conf, unsafe_counts);
+  }
   opt_enums.remove_enum_generated_methods();
   opt_enums.stats(mgr);
   for (auto& p : UnorderedIterable(unsafe_counts)) {

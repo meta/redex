@@ -25,6 +25,9 @@ class ReduceSparseSwitchesPass : public Pass {
     size_t removed_trivial_switch_cases{0};
     size_t removed_trivial_switches{0};
 
+    size_t arithmetic_transformations{0};
+    size_t arithmetic_switch_cases{0};
+
     size_t splitting_transformations{0};
     size_t splitting_transformations_packed_segments{0};
     size_t splitting_transformations_switch_cases_packed{0};
@@ -60,6 +63,8 @@ class ReduceSparseSwitchesPass : public Pass {
     uint64_t min_multiplexing_switch_cases{64};
 
     bool expand_remaining{true};
+
+    bool arithmetic_switches{false};
 
     // When true, expanded if-else chains are sorted by target-block appearance
     // percentage (appear100) so the most frequently appearing cases are checked
@@ -124,6 +129,9 @@ runtime performance:
 
 Finally, less for runtime performance but rather to avoid size-overhead, we can
 expand the remaining small sparse switches to a sequence of if-eq instructions.
+The optional arithmetic_switches transformation replaces consecutive integer
+case values that differ from their keys by one fixed delta with bounds checks
+and an arithmetic assignment, preserving the original default.
     )");
   }
 
@@ -132,6 +140,9 @@ expand the remaining small sparse switches to a sequence of if-eq instructions.
   void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
 
   static Stats trivial_transformation(cfg::ControlFlowGraph& cfg);
+
+  static Stats arithmetic_transformation(cfg::ControlFlowGraph& cfg,
+                                         DexMethod* method);
 
   static Stats splitting_transformation(size_t min_switch_cases,
                                         size_t min_switch_cases_per_segment,

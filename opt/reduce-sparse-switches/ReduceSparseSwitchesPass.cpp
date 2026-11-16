@@ -14,13 +14,16 @@
 #include <vector>
 
 #include "ConfigFiles.h"
+#include "ConstantUses.h"
 #include "Debug.h"
 #include "DexUtil.h"
 #include "InstructionLowering.h"
+#include "RClass.h"
 #include "ScopedCFG.h"
 #include "Show.h"
 #include "SourceBlocks.h"
 #include "Trace.h"
+#include "TypeUtil.h"
 #include "Walkers.h"
 
 namespace {
@@ -49,6 +52,10 @@ constexpr const char* METRIC_EXPANDED_TRANSFORMATIONS =
     "num_expanded_transformations";
 constexpr const char* METRIC_EXPANDED_SWITCH_CASES =
     "num_expanded_switch_cases";
+constexpr const char* METRIC_ARITHMETIC_TRANSFORMATIONS =
+    "num_arithmetic_transformations";
+constexpr const char* METRIC_ARITHMETIC_SWITCH_CASES =
+    "num_arithmetic_switch_cases";
 
 bool is_sufficiently_sparse(cfg::Block* block) {
   always_assert(opcode::is_switch(block->get_last_insn()->insn->opcode()));
@@ -781,6 +788,287 @@ ReduceSparseSwitchesPass::Stats ReduceSparseSwitchesPass::expand_transformation(
   return stats;
 }
 
+namespace {
+
+struct ArithmeticSwitch {
+  cfg::Block* default_target;
+  cfg::Block* continuation;
+  reg_t selector;
+  reg_t dest;
+  int32_t first;
+  int32_t last;
+  int32_t delta;
+  bool returns;
+  std::vector<cfg::Block*> targets;
+};
+
+std::optional<ArithmeticSwitch> find_arithmetic_switch(cfg::Block* block) {
+  auto last = block->get_last_insn();
+  if (last == block->end() || last->insn->opcode() != OPCODE_SWITCH) {
+    return std::nullopt;
+  }
+  std::vector<std::pair<int32_t, cfg::Block*>> cases;
+  auto* default_target = block->goes_to();
+  for (auto* edge : block->succs()) {
+    if (edge->type() == cfg::EDGE_BRANCH) {
+      cases.emplace_back(*edge->case_key(), edge->target());
+    }
+  }
+  always_assert(!cases.empty());
+  std::sort(cases.begin(), cases.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  if (static_cast<int64_t>(cases.back().first) - cases.front().first !=
+      static_cast<int64_t>(cases.size()) - 1) {
+    return std::nullopt;
+  }
+
+  ArithmeticSwitch plan{default_target,
+                        nullptr,
+                        last->insn->src(0),
+                        0,
+                        cases.front().first,
+                        cases.back().first,
+                        0,
+                        false,
+                        {}};
+  for (const auto& [key, target] : cases) {
+    if (std::any_of(target->preds().begin(), target->preds().end(),
+                    [block](auto* e) { return e->src() != block; })) {
+      return std::nullopt;
+    }
+    auto insns = InstructionIterable(target);
+    auto it = insns.begin();
+    if (it == insns.end() || it->insn->opcode() != OPCODE_CONST) {
+      return std::nullopt;
+    }
+    const auto* value_insn = it->insn;
+    if (value_insn->get_literal() < std::numeric_limits<int32_t>::min() ||
+        value_insn->get_literal() > std::numeric_limits<int32_t>::max()) {
+      return std::nullopt;
+    }
+    ++it;
+    const bool returns = it != insns.end();
+    if (returns) {
+      if (it->insn->opcode() != OPCODE_RETURN ||
+          it->insn->src(0) != value_insn->dest()) {
+        return std::nullopt;
+      }
+      ++it;
+      if (it != insns.end()) {
+        return std::nullopt;
+      }
+    }
+    auto* continuation = target->goes_to();
+    const auto value = static_cast<int32_t>(value_insn->get_literal());
+    // Late resource reachability reads literal references, not computed IDs.
+    if (resources::is_potential_resid(value)) {
+      return std::nullopt;
+    }
+    const auto delta = static_cast<int32_t>(static_cast<int64_t>(value) - key);
+    if (plan.targets.empty()) {
+      plan.dest = value_insn->dest();
+      plan.delta = delta;
+      plan.returns = returns;
+      plan.continuation = continuation;
+    } else if (value_insn->dest() != plan.dest || delta != plan.delta ||
+               returns != plan.returns || continuation != plan.continuation) {
+      return std::nullopt;
+    }
+    plan.targets.push_back(target);
+  }
+  if (resources::is_potential_resid(plan.first) ||
+      resources::is_potential_resid(plan.last) ||
+      resources::is_potential_resid(plan.delta)) {
+    return std::nullopt;
+  }
+  return plan;
+}
+
+bool can_use_integer_arithmetic(const ArithmeticSwitch& plan,
+                                cfg::ControlFlowGraph& cfg,
+                                DexMethod* method) {
+  constant_uses::ConstantUses uses(cfg, method);
+  auto is_narrow = [](const DexType* type) {
+    return type::is_integral(type) && !type::is_int(type);
+  };
+  for (auto* target : plan.targets) {
+    auto* insn = target->get_first_insn()->insn;
+    if (uses.get_constant_type_demand(insn) != constant_uses::TypeDemand::Int) {
+      return false;
+    }
+    // TypeDemand::Int includes boolean, byte, char and short consumers.
+    // Constants can satisfy those narrow types; an ordinary int computation
+    // cannot, even when it produces the same numeric value.
+    for (const auto& [use, src] : uses.get_constant_uses(insn)) {
+      const auto op = use->opcode();
+      if (op == OPCODE_RETURN && is_narrow(method->get_proto()->get_rtype())) {
+        return false;
+      }
+      if (opcode::is_an_iput(op) || opcode::is_an_sput(op)) {
+        if (src == 0 && is_narrow(use->get_field()->get_type())) {
+          return false;
+        }
+      }
+      if (opcode::is_an_invoke(op)) {
+        const size_t offset = opcode::is_invoke_static(op) ? 0 : 1;
+        const auto* args = use->get_method()->get_proto()->get_args();
+        if (src >= offset) {
+          always_assert(src - offset < args->size());
+          if (is_narrow(args->at(src - offset))) {
+            return false;
+          }
+        }
+      }
+      if (op == OPCODE_FILLED_NEW_ARRAY) {
+        const auto* component = type::get_array_component_type(use->get_type());
+        if (component == nullptr || is_narrow(component)) {
+          return false;
+        }
+      }
+      if (op == OPCODE_APUT_BOOLEAN || op == OPCODE_APUT_BYTE ||
+          op == OPCODE_APUT_CHAR || op == OPCODE_APUT_SHORT) {
+        if (src == 0) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+} // namespace
+
+ReduceSparseSwitchesPass::Stats
+ReduceSparseSwitchesPass::arithmetic_transformation(cfg::ControlFlowGraph& cfg,
+                                                    DexMethod* method) {
+  Stats stats;
+  // The block snapshot stays valid because rewrites do not delete blocks.
+  // Keep block-deleting simplification after the loop.
+  for (auto* block : cfg.blocks()) {
+    auto plan = find_arithmetic_switch(block);
+    if (!plan || !can_use_integer_arithmetic(*plan, cfg, method)) {
+      continue;
+    }
+    auto switch_it = block->get_last_insn();
+    auto* template_sb =
+        source_blocks::get_last_source_block_before(block, switch_it);
+    std::vector<SourceBlock*> source_blocks_to_sum;
+    bool exclusive_case_counts = true;
+    for (auto* target : plan->targets) {
+      exclusive_case_counts &=
+          target != cfg.entry_block() && target != plan->default_target;
+      if (auto* sb = source_blocks::get_first_source_block(target)) {
+        source_blocks_to_sum.push_back(sb);
+      }
+    }
+    if (!source_blocks_to_sum.empty() || template_sb != nullptr) {
+      if (source_blocks_to_sum.size() != plan->targets.size()) {
+        continue;
+      }
+      if (template_sb == nullptr) {
+        template_sb = source_blocks_to_sum.front();
+      }
+      if (std::any_of(source_blocks_to_sum.begin(), source_blocks_to_sum.end(),
+                      [template_sb](auto* sb) {
+                        return sb->vals_size != template_sb->vals_size ||
+                               sb->foreach_val_early(
+                                   [](const auto& v) { return !v; });
+                      })) {
+        continue;
+      }
+    }
+    const bool single_case = plan->first == plan->last;
+    const bool check_lower =
+        !single_case && plan->first != std::numeric_limits<int32_t>::min();
+    const bool check_upper =
+        !single_case && plan->last != std::numeric_limits<int32_t>::max();
+    auto* upper = check_lower && check_upper ? cfg.create_block() : nullptr;
+    auto* value = cfg.create_block();
+    if (template_sb != nullptr) {
+      if (upper != nullptr) {
+        // Default-edge counts do not distinguish lower and upper misses.
+        source_blocks::impl::BlockAccessor::push_source_block(
+            upper, source_blocks::clone_as_synthetic(template_sb, nullptr,
+                                                     SourceBlock::Val::none()));
+      }
+      // Entry and default blocks can include traffic unrelated to case edges.
+      auto value_sb = exclusive_case_counts
+                          ? source_blocks::clone_as_synthetic_summing(
+                                template_sb, nullptr, source_blocks_to_sum)
+                          : source_blocks::clone_as_synthetic(
+                                template_sb, nullptr, SourceBlock::Val::none());
+      source_blocks::impl::BlockAccessor::push_source_block(
+          value, std::move(value_sb));
+      // Removed case traffic cannot be separated from these retained counts.
+      for (auto* target : plan->targets) {
+        if (target == cfg.entry_block() || target == plan->default_target) {
+          source_blocks::foreach_source_block(target, [](auto* sb) {
+            sb->foreach_val([](auto& val) { val = SourceBlock::Val::none(); });
+          });
+        }
+      }
+    }
+    const auto temp = cfg.allocate_temp();
+    cfg.remove_insn(block->to_cfg_instruction_iterator(switch_it));
+    const auto add_guard = [&](cfg::Block* guard, IROpcode op, int32_t bound,
+                               cfg::Block* next) {
+      guard->push_back((new IRInstruction(OPCODE_CONST))
+                           ->set_dest(temp)
+                           ->set_literal(bound));
+      cfg.create_branch(
+          guard,
+          (new IRInstruction(op))->set_src(0, plan->selector)->set_src(1, temp),
+          next, plan->default_target);
+    };
+    if (single_case) {
+      add_guard(block, OPCODE_IF_NE, plan->first, value);
+    } else {
+      if (check_lower) {
+        add_guard(block, OPCODE_IF_LT, plan->first,
+                  upper != nullptr ? upper : value);
+      }
+      if (check_upper) {
+        add_guard(upper != nullptr ? upper : block, OPCODE_IF_GT, plan->last,
+                  value);
+      }
+      if (!check_lower && !check_upper) {
+        cfg.set_edge_target(cfg.get_succ_edge_of_type(block, cfg::EDGE_GOTO),
+                            value);
+      }
+    }
+    if (plan->delta == 0) {
+      value->push_back((new IRInstruction(OPCODE_MOVE))
+                           ->set_dest(plan->dest)
+                           ->set_src(0, plan->selector));
+    } else if (fits_16(plan->delta)) {
+      value->push_back((new IRInstruction(OPCODE_ADD_INT_LIT))
+                           ->set_dest(plan->dest)
+                           ->set_src(0, plan->selector)
+                           ->set_literal(plan->delta));
+    } else {
+      value->push_back((new IRInstruction(OPCODE_CONST))
+                           ->set_dest(temp)
+                           ->set_literal(plan->delta));
+      value->push_back((new IRInstruction(OPCODE_ADD_INT))
+                           ->set_dest(plan->dest)
+                           ->set_src(0, plan->selector)
+                           ->set_src(1, temp));
+    }
+    if (plan->returns) {
+      value->push_back(
+          (new IRInstruction(OPCODE_RETURN))->set_src(0, plan->dest));
+    } else {
+      cfg.add_edge(value, plan->continuation, cfg::EDGE_GOTO);
+    }
+    stats.arithmetic_transformations++;
+    stats.arithmetic_switch_cases += plan->targets.size();
+  }
+  if (stats.arithmetic_transformations != 0) {
+    cfg.simplify();
+  }
+  return stats;
+}
+
 void ReduceSparseSwitchesPass::bind_config() {
   bind("min_splitting_switch_cases",
        m_config.min_splitting_switch_cases,
@@ -794,6 +1082,8 @@ void ReduceSparseSwitchesPass::bind_config() {
        m_config.min_multiplexing_switch_cases,
        m_config.min_multiplexing_switch_cases);
 
+  bind("arithmetic_switches", m_config.arithmetic_switches,
+       m_config.arithmetic_switches);
   bind("expand_remaining", m_config.expand_remaining,
        m_config.expand_remaining);
   bind("expand_sort_by_appear100", m_config.expand_sort_by_appear100,
@@ -818,7 +1108,7 @@ void ReduceSparseSwitchesPass::run_pass(DexStoresVector& stores,
 
   Stats stats;
   std::mutex stats_mutex;
-  walk::parallel::code(scope, [&](const DexMethod* method, IRCode& code) {
+  walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {
     if (method->rstate.no_optimizations() ||
         method->rstate.should_not_outline()) {
       return;
@@ -831,6 +1121,10 @@ void ReduceSparseSwitchesPass::run_pass(DexStoresVector& stores,
         m_config.min_splitting_switch_cases,
         m_config.min_splitting_switch_cases_per_segment, cfg);
 
+    if (m_config.arithmetic_switches) {
+      local_stats += arithmetic_transformation(cfg, method);
+    }
+
     local_stats += multiplexing_transformation(
         m_config.min_multiplexing_switch_cases, cfg);
 
@@ -840,6 +1134,7 @@ void ReduceSparseSwitchesPass::run_pass(DexStoresVector& stores,
     }
 
     if (local_stats.removed_trivial_switch_cases == 0 &&
+        local_stats.arithmetic_transformations == 0 &&
         local_stats.splitting_transformations == 0 &&
         local_stats.multiplexing_transformations() == 0 &&
         local_stats.expanded_transformations == 0) {
@@ -898,6 +1193,10 @@ void ReduceSparseSwitchesPass::run_pass(DexStoresVector& stores,
   mgr.incr_metric(METRIC_EXPANDED_TRANSFORMATIONS,
                   stats.expanded_transformations);
   mgr.incr_metric(METRIC_EXPANDED_SWITCH_CASES, stats.expanded_switch_cases);
+  mgr.incr_metric(METRIC_ARITHMETIC_TRANSFORMATIONS,
+                  stats.arithmetic_transformations);
+  mgr.incr_metric(METRIC_ARITHMETIC_SWITCH_CASES,
+                  stats.arithmetic_switch_cases);
 
   TRACE(RSS, 1,
         "[reduce sparse switches] Removed %zu (%zu cases) trivial switches, "
@@ -948,6 +1247,8 @@ ReduceSparseSwitchesPass::Stats& ReduceSparseSwitchesPass::Stats::operator+=(
   affected_methods += that.affected_methods;
   removed_trivial_switch_cases += that.removed_trivial_switch_cases;
   removed_trivial_switches += that.removed_trivial_switches;
+  arithmetic_transformations += that.arithmetic_transformations;
+  arithmetic_switch_cases += that.arithmetic_switch_cases;
   splitting_transformations += that.splitting_transformations;
   splitting_transformations_packed_segments +=
       that.splitting_transformations_packed_segments;

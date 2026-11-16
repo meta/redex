@@ -2181,6 +2181,52 @@ TEST_F(SourceBlocksTest, violations_tracking_reports_each_kind_separately) {
   EXPECT_EQ(sink.get("~violation~tracking.new_method_violations"), 0);
 }
 
+// The pass manager keeps every method's CFG built from one pass to the next,
+// and the coverage metrics are taken between passes. Taking them must leave
+// that CFG in place: rebuilding it re-linearizes the method, and the next pass
+// would then see different code depending on whether metrics were requested.
+TEST_F(SourceBlocksTest, coverage_tracking_keeps_the_built_cfg) {
+  auto* method = create_method("LCoverage");
+  ASSERT_NE(method, nullptr);
+  // @lint-ignore NULLSAFECLANG (guarded by ASSERT_NE above)
+  method->set_code(assembler::ircode_from_string(kBranchWithSourceBlocks));
+  // @lint-ignore NULLSAFECLANG (guarded by ASSERT_NE above)
+  auto* code = method->get_code();
+  ASSERT_NE(code, nullptr);
+  code->build_cfg();
+  const auto* cfg_before = &code->cfg();
+  // @lint-ignore NULLSAFECLANG (guarded by ASSERT_NE above)
+  auto stores = make_stores(type_class(method->get_class()));
+
+  RecordingSink sink;
+  track_source_block_coverage(sink, stores);
+
+  ASSERT_TRUE(code->cfg_built());
+  EXPECT_EQ(&code->cfg(), cfg_before);
+  EXPECT_EQ(sink.get("~blocks~count"), 4);
+  EXPECT_EQ(sink.get("~blocks~with~source~blocks"), 4);
+}
+
+// Code that arrives without a CFG leaves the same way, with the same metrics.
+TEST_F(SourceBlocksTest, coverage_tracking_leaves_linear_code_linear) {
+  auto* method = create_method("LCoverageLinear");
+  ASSERT_NE(method, nullptr);
+  // @lint-ignore NULLSAFECLANG (guarded by ASSERT_NE above)
+  method->set_code(assembler::ircode_from_string(kBranchWithSourceBlocks));
+  // @lint-ignore NULLSAFECLANG (guarded by ASSERT_NE above)
+  auto* code = method->get_code();
+  ASSERT_NE(code, nullptr);
+  // @lint-ignore NULLSAFECLANG (guarded by ASSERT_NE above)
+  auto stores = make_stores(type_class(method->get_class()));
+
+  RecordingSink sink;
+  track_source_block_coverage(sink, stores);
+
+  EXPECT_FALSE(code->cfg_built());
+  EXPECT_EQ(sink.get("~blocks~count"), 4);
+  EXPECT_EQ(sink.get("~blocks~with~source~blocks"), 4);
+}
+
 TEST_F(SourceBlocksTest, parse_source_block_descriptor_round_trips_show) {
   SourceBlock sb(DexString::make_string("LFoo;.bar:()V"), 3,
                  {SourceBlock::Val(1.0f, 2.0f)});

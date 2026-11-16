@@ -1025,8 +1025,11 @@ void track_source_block_coverage(MetricsSink& sm,
         if (code == nullptr) {
           return ret;
         }
-        code->build_cfg();
-        auto& cfg = code->cfg();
+        // Measure the CFG the pipeline holds: rebuilding it and clearing it
+        // again would re-linearize every method and change the code later
+        // passes see.
+        cfg::ScopedCFG scoped_cfg(code);
+        auto& cfg = *scoped_cfg;
         auto dominators =
             dominators::SimpleFastDominators<cfg::GraphInterface>(cfg);
 
@@ -1050,8 +1053,6 @@ void track_source_block_coverage(MetricsSink& sm,
             }
           }
         }
-
-        code->clear_cfg();
 
         ret.fill_derived(m);
 

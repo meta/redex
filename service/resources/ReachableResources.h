@@ -16,6 +16,13 @@
 #include "RedexResources.h"
 
 namespace resources {
+// Returns the IDs of every resource whose name is in `names` or starts with one
+// of `prefixes`.
+UnorderedSet<uint32_t> get_resources_by_prefix_and_name(
+    const std::vector<std::string>& prefixes,
+    const UnorderedSet<std::string>& names,
+    const std::map<std::string, std::vector<uint32_t>>& name_to_ids);
+
 class ReachableResources {
  public:
   ReachableResources(const std::string& zip_dir,

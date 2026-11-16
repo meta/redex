@@ -52,27 +52,6 @@ UnorderedSet<uint32_t> get_disallowed_resources(
   return disallowed_resources;
 }
 
-UnorderedSet<uint32_t> get_resources_by_prefix_and_name(
-    const std::vector<std::string>& prefixes,
-    const UnorderedSet<std::string>& names,
-    const std::map<std::string, std::vector<uint32_t>>& name_to_ids) {
-  UnorderedSet<uint32_t> found_resources;
-  for (const auto& pair : name_to_ids) {
-    if (names.find(pair.first) != names.end()) {
-      TRACE(RES, 1, "Resource added by name matching: %s", pair.first.c_str());
-      found_resources.insert(pair.second.begin(), pair.second.end());
-      continue;
-    }
-
-    for (const auto& prefix : UnorderedIterable(prefixes)) {
-      if (pair.first.starts_with(prefix)) {
-        found_resources.insert(pair.second.begin(), pair.second.end());
-      }
-    }
-  }
-  return found_resources;
-}
-
 UnorderedSet<uint32_t> find_code_resource_references(
     DexStoresVector& stores,
     const resources::RClassReader& r_class_reader,
@@ -176,6 +155,27 @@ UnorderedSet<uint32_t> find_code_resource_references(
 } // namespace
 
 namespace resources {
+UnorderedSet<uint32_t> get_resources_by_prefix_and_name(
+    const std::vector<std::string>& prefixes,
+    const UnorderedSet<std::string>& names,
+    const std::map<std::string, std::vector<uint32_t>>& name_to_ids) {
+  UnorderedSet<uint32_t> found_resources;
+  for (const auto& pair : name_to_ids) {
+    if (names.find(pair.first) != names.end()) {
+      TRACE(RES, 1, "Resource added by name matching: %s", pair.first.c_str());
+      found_resources.insert(pair.second.begin(), pair.second.end());
+      continue;
+    }
+
+    for (const auto& prefix : UnorderedIterable(prefixes)) {
+      if (pair.first.starts_with(prefix)) {
+        found_resources.insert(pair.second.begin(), pair.second.end());
+      }
+    }
+  }
+  return found_resources;
+}
+
 UnorderedSet<uint32_t> ReachableResources::get_resource_roots(
     DexStoresVector& stores) {
   // Roots from dex code.

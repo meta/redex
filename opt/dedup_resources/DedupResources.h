@@ -32,10 +32,11 @@
  * If a resource cannot be removed, either individual names (or entire types)
  * can be disabled. Do this if there is any requirement on looking up resources
  * by their string name, i.e. android.content.res.Resources.getIdentifier() on a
- * non-canonical duplicate. Also note that this pass has not been equally tested
- * against all possible resource types. "attr" type has some known problems with
- * regards to xml attribute ordering in app bundles, so for best results enable
- * this for simple things like dimen, color, etc.
+ * non-canonical duplicate. Names can also be disabled by prefix. Also note that
+ * this pass has not been equally tested against all possible resource types.
+ * "attr" type has some known problems with regards to xml attribute ordering in
+ * app bundles, so for best results enable this for simple things like dimen,
+ * color, etc.
  *
  * Possible further improvements:
  * This does not do a particularly good job of finding duplicate files when run
@@ -64,6 +65,11 @@ class DedupResourcesPass : public Pass {
   void bind_config() override {
     bind("disallowed_types", {}, m_disallowed_types);
     bind("disallowed_resources", {}, m_disallowed_resources);
+    bind("disallowed_resource_prefixes",
+         {},
+         m_disallowed_resource_prefixes,
+         "Resources whose names start with any of these prefixes are never "
+         "merged into a duplicate, so they keep their names.");
   }
 
   void eval_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
@@ -76,4 +82,5 @@ class DedupResourcesPass : public Pass {
 
   UnorderedSet<std::string> m_disallowed_types;
   UnorderedSet<std::string> m_disallowed_resources;
+  std::vector<std::string> m_disallowed_resource_prefixes;
 };

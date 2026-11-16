@@ -18,6 +18,7 @@
 #include "OptimizeResources.h"
 #include "PassManager.h"
 #include "RClass.h"
+#include "ReachableResources.h"
 #include "ReadMaybeMapped.h"
 #include "RedexResources.h"
 #include "Timer.h"
@@ -408,10 +409,10 @@ void DedupResourcesPass::prepare_disallowed_ids(
   auto types = res_table->get_types_by_name(m_disallowed_types);
   insert_unordered_iterable(*disallowed_types, types);
 
-  for (const std::string& n : UnorderedIterable(m_disallowed_resources)) {
-    const auto& v = res_table->get_res_ids_by_name(n);
-    disallowed_ids->insert(v.begin(), v.end());
-  }
+  auto disallowed_by_name = resources::get_resources_by_prefix_and_name(
+      m_disallowed_resource_prefixes, m_disallowed_resources,
+      res_table->name_to_ids);
+  insert_unordered_iterable(*disallowed_ids, disallowed_by_name);
   // Overlayable ids, keep as-is.
   auto overlayable_ids = res_table->get_overlayable_id_roots();
   insert_unordered_iterable(*disallowed_ids, overlayable_ids);

@@ -697,6 +697,13 @@ Given an APK, produce a better APK!
     )
 
     parser.add_argument(
+        "--fast-repackage",
+        action="store_true",
+        help="Repackage xz-compressed secondary dex stores with xz level 0 instead "
+        "of 9. Unlike --dev, this changes nothing else.",
+    )
+
+    parser.add_argument(
         "-m",
         "--proguard-map",
         nargs="?",
@@ -1352,7 +1359,7 @@ def prepare_redex(args: argparse.Namespace) -> State:
                 extracted_apk_dir,
                 dex_dir,
                 debug_mode=debug_mode,
-                fast_repackage=args.dev,
+                fast_repackage=args.dev or args.fast_repackage,
                 reset_timestamps=args.reset_zip_timestamps or args.dev,
                 is_bundle=is_bundle,
             )

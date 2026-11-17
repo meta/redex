@@ -18,6 +18,7 @@
 #include "Show.h"
 #include "SourceBlocks.h"
 #include "SwitchEquivFinder.h"
+#include "SwitchEquivPrerequisites.h"
 
 using namespace testing;
 
@@ -1891,4 +1892,48 @@ TEST_F(SwitchEquivFinderTest,
   EXPECT_EQ(source_block_count, 1)
       << "In non-instrument mode, source blocks should NOT be duplicated to "
          "leaf blocks";
+}
+
+namespace {
+
+std::unique_ptr<IRCode> make_two_case_switch() {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param v0)
+      (switch v0 (:a :b))
+      (const v1 0)
+      (throw v1)
+      (:a 1)
+      (const v1 1)
+      (return v1)
+      (:b 2)
+      (const v1 2)
+      (return v1)
+    )
+  )");
+  code->build_cfg();
+  return code;
+}
+
+} // namespace
+
+// A finder made by create_switch_equiv_finder still knows its root branch once
+// that helper has returned, even after another call reused the helper's stack.
+TEST_F(SwitchEquivFinderTest, created_finder_keeps_its_root_branch) {
+  auto code1 = make_two_case_switch();
+  auto finder1 = create_switch_equiv_finder(&code1->cfg(), 0,
+                                            SwitchEquivFinder::NOT_ALLOWED);
+  ASSERT_TRUE(finder1);
+  ASSERT_TRUE(finder1->success());
+
+  auto code2 = make_two_case_switch();
+  auto finder2 = create_switch_equiv_finder(&code2->cfg(), 0,
+                                            SwitchEquivFinder::NOT_ALLOWED);
+  ASSERT_TRUE(finder2);
+
+  auto* root1 = get_first_branch(code1->cfg()).block();
+  auto* root2 = get_first_branch(code2->cfg()).block();
+  auto visited = finder1->visited_blocks();
+  EXPECT_TRUE(unordered_any_of(visited, [&](auto* b) { return b == root1; }));
+  EXPECT_FALSE(unordered_any_of(visited, [&](auto* b) { return b == root2; }));
 }

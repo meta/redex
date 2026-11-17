@@ -135,7 +135,7 @@ class SwitchEquivFinder {
 
   cfg::ControlFlowGraph* m_cfg;
   // The top-most branch instruction of the tree
-  const cfg::InstructionIterator& m_root_branch;
+  const cfg::InstructionIterator m_root_branch;
   // The register that holds the value that we're "switching" on, even if this
   // is an if-else chain and not a switch statement
   reg_t m_switching_reg;

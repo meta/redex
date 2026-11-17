@@ -332,6 +332,58 @@ TEST_F(OptimizeEnumsTest, analyzeRConstMembers) {
   EXPECT_EQ(rconst_count, 2);
 }
 
+// The substitute for `Enum.hashCode()` multiplies the ordinal by an odd
+// constant, adds a seed derived from the enum's name ("LBar;" gives 8261) and
+// xors the result with its upper half.
+// It does not look up the constant's name, so Bar, whose name is otherwise
+// unused, gets no `redex$OE$name`.
+TEST_F(OptimizeEnumsTest, hashCodeSubstituteDoesNotLookUpName) {
+  DexStoresVector stores({create_enum_store()});
+  auto scope = build_class_scope(stores);
+  auto* bar = scope[0];
+  auto* hash_z = assembler::method_from_string(R"(
+    (method (public static) "LBar;.hashZ:()I"
+     (
+      (sget-object "LBar;.Z:LBar;")
+      (move-result-pseudo-object v0)
+      (invoke-virtual (v0) "LBar;.hashCode:()I")
+      (move-result v0)
+      (return v0)
+     )
+    )
+  )");
+  hash_z->get_code()->build_cfg();
+  bar->add_method(hash_z);
+
+  optimize_enums::OptimizeEnumsPass pass;
+  PassManager manager({&pass});
+  Json::Value conf_obj = Json::nullValue;
+  ConfigFiles dummy_config(conf_obj);
+  dummy_config.parse_global_config();
+  manager.run_passes(stores, dummy_config);
+
+  EXPECT_EQ(bar->find_method_from_simple_deobfuscated_name("redex$OE$name"),
+            nullptr);
+  auto* hashcode =
+      bar->find_method_from_simple_deobfuscated_name("redex$OE$hashCode");
+  ASSERT_NE(hashcode, nullptr);
+  hashcode->get_code()->clear_cfg();
+  auto expected = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (.pos:dbg_0 "LBar;.redex$OE$hashCode:(Ljava/lang/Integer;)I" RedexGenerated 0)
+      (invoke-virtual (v0) "Ljava/lang/Integer;.intValue:()I")
+      (move-result v1)
+      (mul-int/lit v1 v1 -25033)
+      (add-int/lit v1 v1 8261)
+      (ushr-int/lit v2 v1 16)
+      (xor-int v1 v1 v2)
+      (return v1)
+    )
+  )");
+  EXPECT_CODE_EQ(hashcode->get_code(), expected.get());
+}
+
 // When a candidate enum is unsafe for several reasons across different methods,
 // every reason must be recorded -- not just whichever one a worker thread
 // happened to observe first. `reject_unsafe_enums` runs the usage analysis in

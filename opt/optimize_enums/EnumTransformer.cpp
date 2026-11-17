@@ -16,6 +16,7 @@
 #include "DeterministicContainers.h"
 #include "DexAsm.h"
 #include "DexClass.h"
+#include "DexEncoding.h"
 #include "DexUtil.h"
 #include "EnumUpcastAnalysis.h"
 #include "EnumUtilsHolders.h"
@@ -140,8 +141,6 @@ struct EnumUtil {
   const DexMethodRef* STRINGBUILDER_APPEND_OBJ_METHOD = DexMethod::make_method(
       "Ljava/lang/StringBuilder;.append:(Ljava/lang/Object;)Ljava/lang/"
       "StringBuilder;");
-  DexMethodRef* STRING_HASHCODE_METHOD =
-      DexMethod::make_method("Ljava/lang/String;.hashCode:()I");
   DexMethodRef* STRINGBUILDER_APPEND_STR_METHOD =
       method::java_lang_StringBuilder_append_String();
   DexMethodRef* INTEGER_INTVALUE_METHOD = method::java_lang_Integer_intValue();
@@ -314,9 +313,6 @@ struct EnumUtil {
    */
   DexMethodRef* add_substitute_of_hashcode(const DexType* enum_type,
                                            SourceBlock* prev_sb) {
-    // `redex$OE$hashCode()` uses `redex$OE$name()` so we better make sure
-    // the method exists.
-    add_substitute_of_name(enum_type, prev_sb);
     auto* method = get_substitute_of_hashcode(enum_type);
     collect_callsite_source_blocks(method, prev_sb);
     return method;
@@ -1590,16 +1586,26 @@ class EnumTransformer final {
   /**
    * Substitute for LCandidateEnum:.hashCode()
    *
-   * Since `Enum.hashCode()` is not in the Java spec so that different JVMs
-   * may have different implementations and since hashcodes are usually
-   * only used as keys to hash maps we can choose one implementation.
-   * https://android.googlesource.com/platform/libcore/+/9edf43dfcc35c761d97eb9156ac4254152ddbc55/libdvm/src/main/java/java/lang/Enum.java#118
-   *
+   * `Enum.hashCode()` is the identity hash code, whose value the Java spec
+   * leaves unspecified, so any deterministic value is a valid implementation.
    *
    * public static int redex$OE$hashCode(Integer obj) {
-   *   String name = CandidateEnum.name(obj);
-   *   return obj.intValue() + name.hashCode();
+   *   int h = obj.intValue() * HASHCODE_MULTIPLIER + <seed of CandidateEnum>;
+   *   return h ^ (h >>> 16);
    * }
+   *
+   * The result must not be linear in the ordinal. A Kotlin data class with two
+   * fields of one enum computes `31 * first.hashCode() + second.hashCode()`,
+   * and for any linear hash, the ordinals (1, 0) and (0, 31) then share a
+   * hash. The final xor with the upper half removes that structure.
+   *
+   * The constants of one enum still get distinct hashes. The multiplier is
+   * odd, which is what power-of-two tables such as `HashMap`'s need (primality
+   * would add nothing): `h` is distinct modulo every power of two at least as
+   * large as the enum. The xor step can be undone, and `HashMap` applies the
+   * same step before picking a bucket, which undoes it: keys whose hash is one
+   * enum's hash fill distinct buckets. The seed keeps constants of different
+   * enums with the same ordinal apart.
    */
   DexMethod* create_hashcode_method(DexMethodRef* ref) {
     MethodCreator mc(ref, ACC_STATIC | ACC_PUBLIC);
@@ -1610,20 +1616,38 @@ class EnumTransformer final {
     code->build_cfg();
     auto& cfg = code->cfg();
     auto* entry = cfg.entry_block();
-    auto* name_method = m_enum_util->get_substitute_of_name(ref->get_class());
     entry->push_back({
-        dasm(OPCODE_INVOKE_STATIC, name_method, {0_v}),
-        dasm(OPCODE_MOVE_RESULT_OBJECT, {1_v}),
-        dasm(OPCODE_INVOKE_VIRTUAL, m_enum_util->STRING_HASHCODE_METHOD, {1_v}),
-        dasm(OPCODE_MOVE_RESULT, {1_v}),
         dasm(OPCODE_INVOKE_VIRTUAL, m_enum_util->INTEGER_INTVALUE_METHOD,
              {0_v}),
-        dasm(OPCODE_MOVE_RESULT, {2_v}),
-        dasm(OPCODE_ADD_INT, {1_v, 1_v, 2_v}),
+        dasm(OPCODE_MOVE_RESULT, {1_v}),
+        dasm(OPCODE_MUL_INT_LIT, {1_v, 1_v})->set_literal(HASHCODE_MULTIPLIER),
+        dasm(OPCODE_ADD_INT_LIT, {1_v, 1_v})
+            ->set_literal(get_hashcode_seed(ref->get_class())),
+        dasm(OPCODE_USHR_INT_LIT, {2_v, 1_v})->set_literal(16),
+        dasm(OPCODE_XOR_INT, {1_v, 1_v, 2_v}),
         dasm(OPCODE_RETURN, {1_v}),
     });
     cfg.recompute_registers_size();
     return method;
+  }
+
+  // 0x9E37, the top 16 bits of the 32-bit golden ratio, as a signed literal
+  // of `mul-int/lit16`.
+  static constexpr int16_t HASHCODE_MULTIPLIER = -25033;
+
+  /**
+   * A constant in [1, -HASHCODE_MULTIPLIER - 1] derived from the enum's
+   * deobfuscated name, so that it does not depend on renaming done by Redex
+   * and fits the literal of `add-int/lit16`. A seed in that range gives no
+   * constant the hash 0, which a Kotlin data class uses for a null field: `h`
+   * of ordinal `o` is 0 only when the seed is `o * -HASHCODE_MULTIPLIER`, and
+   * the final xor step turns only 0 into 0.
+   */
+  static int16_t get_hashcode_seed(const DexType* enum_type) {
+    constexpr uint32_t seed_count = -HASHCODE_MULTIPLIER - 1;
+    const auto hash = static_cast<uint32_t>(
+        java_hashcode_of_utf8_string(show_deobfuscated(enum_type).c_str()));
+    return static_cast<int16_t>(1 + hash % seed_count);
   }
 
   /**

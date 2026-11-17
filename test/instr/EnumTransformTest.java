@@ -528,4 +528,28 @@ public class EnumTransformTest {
     SCORE.increase(null_ptr);
     CAST_PARAMETER.method_accepts_enum_arg(null_ptr);
   }
+
+  @Test
+  public void test_hashCode_values() {
+    assertThat(COUNT.ONE.hashCode()).isEqualTo(COUNT.ONE.hashCode());
+    assertThat(COUNT.ONE.hashCode()).isNotEqualTo(COUNT.TWO.hashCode());
+    assertThat(SCORE.ONE.hashCode()).isNotEqualTo(SCORE.TWO.hashCode());
+    assertThat(SCORE.TWO.hashCode()).isNotEqualTo(SCORE.THREE.hashCode());
+    // Same ordinal, different enums.
+    assertThat(SCORE.ONE.hashCode()).isNotEqualTo(COUNT.ONE.hashCode());
+  }
+
+  // The hashCode substitute does not look up the constant's name, so COUNT,
+  // whose name is never used, gets no name substitute.
+  // POSTCHECK-LABEL: class: redex.EnumTransformTest$COUNT
+  // POSTCHECK-NOT: redex$OE$name
+  // POSTCHECK: method: direct redex.EnumTransformTest$COUNT.redex$OE$hashCode:(java.lang.Integer)int
+  // POSTCHECK: invoke-virtual {{.*}} java.lang.Integer.intValue:()int
+  // POSTCHECK-NEXT: move-result [[SRC:v[0-9]+]]
+  // POSTCHECK-NEXT: mul-int/lit16 [[MUL:v[0-9]+]], [[SRC]], #int -25033
+  // POSTCHECK-NEXT: add-int/lit16 [[ADD:v[0-9]+]], [[MUL]], #int 1771
+  // POSTCHECK-NEXT: ushr-int/lit8 [[SHR:v[0-9]+]], [[ADD]], #int 16
+  // POSTCHECK-NEXT: xor-int{{(/2addr)?}} [[DST:v[0-9]+]], {{.*}}
+  // POSTCHECK-NEXT: return [[DST]]
+  // POSTCHECK-NOT: redex.EnumTransformTest$COUNT.redex$OE$name
 }

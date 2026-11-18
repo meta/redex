@@ -53,6 +53,35 @@ TEST_F(ObjectSensitiveDceTest, basic) {
   ASSERT_EQ(it->insn->opcode(), OPCODE_RETURN_VOID);
 }
 
+// The code of a method marked `no_optimizations` may not be what runs, so an
+// object passed to it may be kept and read later, and writes to it stay.
+TEST_F(ObjectSensitiveDceTest, passed_to_no_optimizations_method) {
+  auto* method = DexMethod::get_method(
+                     "Lcom/facebook/redextest/"
+                     "ObjectSensitiveDceTest;.passed_to_no_optimizations_"
+                     "method:()V")
+                     ->as_def();
+  ASSERT_NE(method, nullptr);
+  auto* take = DexMethod::get_method(
+                   "Lcom/facebook/redextest/"
+                   "NoOptimizations;.take:(Ljava/lang/Object;)V")
+                   ->as_def();
+  ASSERT_NE(take, nullptr);
+  take->rstate.set_no_optimizations();
+
+  std::vector<Pass*> passes = {
+      new ObjectSensitiveDcePass(),
+  };
+
+  run_passes(passes);
+
+  auto ii = InstructionIterable(method->get_code());
+  EXPECT_TRUE(std::any_of(ii.begin(), ii.end(), [](const auto& mie) {
+    return mie.insn->opcode() == OPCODE_INVOKE_VIRTUAL &&
+           mie.insn->get_method()->get_name()->str() == "foo";
+  }));
+}
+
 TEST_F(ObjectSensitiveDceTest, invoke_super) {
   auto* method_ref = DexMethod::get_method(
       "Lcom/facebook/redextest/ObjectSensitiveDceTest;.invoke_super:()V");

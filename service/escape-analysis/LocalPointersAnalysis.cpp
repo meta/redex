@@ -368,6 +368,30 @@ void FixpointIterator::analyze_instruction(const IRInstruction* insn,
   }
 }
 
+namespace {
+
+/*
+ * The summary of code that may do anything: every object parameter escapes,
+ * and a returned object may be any escaped one.
+ */
+EscapeSummary get_unknown_code_summary(const cfg::ControlFlowGraph& cfg,
+                                       bool result_may_be_pointer) {
+  EscapeSummary summary;
+  uint16_t idx{0};
+  for (const auto& mie : InstructionIterable(cfg.get_param_instructions())) {
+    if (mie.insn->opcode() == IOPCODE_LOAD_PARAM_OBJECT) {
+      summary.escaping_parameters.insert(idx);
+    }
+    ++idx;
+  }
+  if (result_may_be_pointer) {
+    summary.returned_parameters.insert(ESCAPED_FRESH_RETURN);
+  }
+  return summary;
+}
+
+} // namespace
+
 std::pair<std::unique_ptr<FixpointIterator>, EscapeSummary> analyze_method(
     const DexMethod* method,
     const call_graph::Graph& call_graph,
@@ -412,7 +436,10 @@ std::pair<std::unique_ptr<FixpointIterator>, EscapeSummary> analyze_method(
 
   bool result_may_be_pointer =
       !type::is_primitive(method->get_proto()->get_rtype());
-  auto summary = get_escape_summary(*fp_iter, *code, result_may_be_pointer);
+  auto summary =
+      method->rstate.no_optimizations()
+          ? get_unknown_code_summary(cfg, result_may_be_pointer)
+          : get_escape_summary(*fp_iter, *code, result_may_be_pointer);
   return std::make_pair(std::move(fp_iter), std::move(summary));
 }
 

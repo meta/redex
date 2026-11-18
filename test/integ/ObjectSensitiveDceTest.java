@@ -23,6 +23,12 @@ class ObjectSensitiveDceTest {
     useless.mutually_recursive_foo(100);
   }
 
+  public static void passed_to_no_optimizations_method() {
+    Useless useless = new Useless();
+    NoOptimizations.take(useless);
+    useless.foo();
+  }
+
   public static void invoke_super() {
     UselessDerived useless = new UselessDerived();
     useless.foo();
@@ -217,4 +223,10 @@ class UselessDerivedWithFinalize extends UselessWithFinalize {
   public void bar() {
     F = 37;
   }
+}
+
+class NoOptimizations {
+  // The test marks this method `no_optimizations`: the code that runs may keep
+  // its argument and read it later.
+  public static void take(Object o) {}
 }

@@ -7,12 +7,15 @@
 
 #include "EnumConfig.h"
 
+#include "ControlFlow.h"
 #include "Debug.h"
+#include "IRCode.h"
 #include "LocalPointersAnalysis.h"
 #include "Show.h"
 #include "Trace.h"
 #include "TypeUtil.h"
 #include "Walkers.h"
+#include <algorithm>
 #include <utility>
 
 #include "KotlinNullCheckMethods.h"
@@ -83,14 +86,41 @@ void load_external_method_summaries(
   // Load summaries for kotlin null assertion methods.
   auto null_check_methods =
       kotlin_nullcheck_wrapper::get_kotlin_null_assertions();
+  // The code of a copy marked `no_optimizations` may not be what runs, and the
+  // summary below takes the first argument to be the checked value.
+  auto is_untrusted_copy = [](const DexMethodRef* ref) {
+    if (!ref->is_def()) {
+      return false;
+    }
+    const auto* def = ref->as_def();
+    return def->rstate.no_optimizations() || !is_static(def);
+  };
   for (auto* method : UnorderedIterable(null_check_methods)) {
     if (param_summary_map->count(method) != 0u) {
-      // The method is defined in the apk and their summaries are analyzed from
-      // the method code.
+      // Already summarized from its code.
       continue;
     }
-    // Assume that kotlin assertions only check nullity of the first argument
-    // and return void.
+    if (is_untrusted_copy(method)) {
+      continue;
+    }
+    // A wrapper that RemoveNullcheckStringArg made does what the null check it
+    // calls does, so it is no more trusted than that one.
+    const auto* code =
+        method->is_def() ? method->as_def()->get_code() : nullptr;
+    if (code != nullptr) {
+      auto ii = cfg::ConstInstructionIterable(code->cfg());
+      if (std::any_of(ii.begin(), ii.end(), [&](const auto& mie) {
+            return opcode::is_an_invoke(mie.insn->opcode()) &&
+                   null_check_methods.count(mie.insn->get_method()) != 0u &&
+                   is_untrusted_copy(mie.insn->get_method());
+          })) {
+        continue;
+      }
+    }
+    // Kotlin's null checks, and the wrappers Redex makes for them, only check
+    // the nullity of their first argument and return void, wherever their code
+    // lives. A summary of a wrapper from its code alone would count the call
+    // to the null check it wraps as an escape.
     optimize_enums::ParamSummary summary({0}, std::nullopt);
     always_assert(method->get_proto()->get_rtype() == type::_void());
     sanity_check_method_summary(method, summary, object_type);
@@ -195,10 +225,12 @@ void calculate_param_summaries(
   walk::parallel::code(
       scope,
       [object_type, &override_graph](DexMethod* method) {
+        // The code of a method marked `no_optimizations` may not be what
+        // runs, so its body says nothing about what it does.
         return (method->get_code() != nullptr) &&
+               !method->rstate.no_optimizations() &&
                !method_override_graph::is_true_virtual(override_graph,
                                                        method) &&
-
                params_contain_object_type(method, object_type);
       },
       [object_type, param_summary_map](DexMethod* method, IRCode&) {

@@ -860,7 +860,10 @@ class OptimizeEnums {
     const optimize_enums::OptimizeEnumsUnmap unmap(enum_field_to_ordinal,
                                                    generated_switch_cases);
 
-    walk::parallel::code(m_scope, [&](DexMethod*, IRCode& code) {
+    walk::parallel::code(m_scope, [&](DexMethod* method, IRCode& code) {
+      if (method->rstate.no_optimizations()) {
+        return;
+      }
       cfg::ControlFlowGraph& cfg = code.cfg();
       cfg.calculate_exit_block();
       unmap.unmap_switchmaps(cfg);

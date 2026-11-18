@@ -802,6 +802,21 @@ void reject_unsafe_enums(
       });
 
   walk::parallel::methods(classes, [&](DexMethod* method) {
+    // Boxing an enum rewrites every method that refers to it, but Redex must
+    // leave a method marked `no_optimizations` exactly as it is.
+    if (method->rstate.no_optimizations()) {
+      std::vector<const DexType*> types;
+      method->gather_types(types);
+      for (const auto* type : types) {
+        const auto* elem_type = type::make_element_type_if_array(type);
+        if (candidate_enums->count_unsafe(elem_type) != 0u) {
+          rejected_enums.insert(elem_type);
+          reject_fn(elem_type, UnsafeType::kUsageNoOptimizationsMethod);
+        }
+      }
+      return;
+    }
+
     // When doing static analysis, simply skip some javac-generated enum
     // methods <init>, values(), and valueOf(String). Skip unconditionally:
     // these methods have known-safe patterns and are only ever analyzed (under

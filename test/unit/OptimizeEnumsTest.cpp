@@ -23,6 +23,7 @@
 #include "OptimizeEnums.h"
 #include "OptimizeEnumsUnsafeType.h"
 #include "RedexTest.h"
+#include "RemoveNullcheckStringArg.h"
 #include "Show.h"
 #include "TypeUtil.h"
 #include "Walkers.h"
@@ -536,6 +537,330 @@ TEST_F(OptimizeEnumsTest, constantOfTwoDimensionalArrayIsFormattedByName) {
     }
   }
   EXPECT_EQ(name_helpers, 1u) << show(method->get_code()->cfg());
+}
+
+/* Run the usage analysis with `LUser;.x_of_y`, which reads `Bar.Y.x`, and
+return the reasons that keep Bar, or an empty set if Bar can be boxed. */
+std::set<optimize_enums::UnsafeType> reasons_with_user_method(
+    bool no_optimizations) {
+  auto store = create_enum_store();
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  auto* user = assembler::method_from_string(R"(
+    (method (public static) "LUser;.x_of_y:()I"
+      (
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v0)
+        (iget v0 "LBar;.x:I")
+        (move-result-pseudo v0)
+        (return v0)
+      )
+    )
+  )");
+  if (no_optimizations) {
+    user->rstate.set_no_optimizations();
+  }
+  uc.add_method(user);
+  store.add_classes({uc.create()});
+
+  DexStoresVector stores({std::move(store)});
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  auto* bar_type = DexType::get_type("LBar;");
+  optimize_enums::Config config(100);
+  config.candidate_enums.insert(bar_type);
+  std::mutex reasons_mutex;
+  std::set<optimize_enums::UnsafeType> bar_reasons;
+  optimize_enums::reject_unsafe_enums(
+      scope, &config, [&](const DexType* type, optimize_enums::UnsafeType u) {
+        std::lock_guard<std::mutex> lock(reasons_mutex);
+        if (type == bar_type) {
+          bar_reasons.insert(u);
+        }
+      });
+  EXPECT_EQ(config.candidate_enums.count_unsafe(bar_type) == 0,
+            !bar_reasons.empty());
+  return bar_reasons;
+}
+
+// Redex must not change a method marked `no_optimizations`, and boxing an enum
+// would rewrite every method that refers to it, so such a method keeps the
+// enum.
+TEST_F(OptimizeEnumsTest, noOptimizationsMethodKeepsEnum) {
+  EXPECT_EQ(reasons_with_user_method(/* no_optimizations */ true),
+            std::set<optimize_enums::UnsafeType>{
+                optimize_enums::UnsafeType::kUsageNoOptimizationsMethod});
+}
+
+TEST_F(OptimizeEnumsTest, optimizableMethodLetsEnumBeBoxed) {
+  EXPECT_TRUE(reasons_with_user_method(/* no_optimizations */ false).empty());
+}
+
+/* Run the pass with `LUser;.use`, which reads `(Bar) Prebuilt.identity(Bar.Y)`
+and `identity` returns its `Object` parameter. Return whether Bar is boxed. */
+bool bar_boxed_through_identity(bool no_optimizations) {
+  auto store = create_enum_store();
+  ClassCreator pc(DexType::make_type("LPrebuilt;"));
+  pc.set_super(type::java_lang_Object());
+  pc.set_access(ACC_PUBLIC);
+  auto* identity = assembler::method_from_string(R"(
+    (method (public static) "LPrebuilt;.identity:(Ljava/lang/Object;)Ljava/lang/Object;"
+      (
+        (load-param-object v0)
+        (return-object v0)
+      )
+    )
+  )");
+  if (no_optimizations) {
+    identity->rstate.set_no_optimizations();
+  }
+  pc.add_method(identity);
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  uc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LUser;.use:()I"
+      (
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v0)
+        (invoke-static (v0) "LPrebuilt;.identity:(Ljava/lang/Object;)Ljava/lang/Object;")
+        (move-result-object v0)
+        (check-cast v0 "LBar;")
+        (move-result-pseudo-object v0)
+        (iget v0 "LBar;.x:I")
+        (move-result-pseudo v0)
+        (return v0)
+      )
+    )
+  )"));
+  store.add_classes({pc.create(), uc.create()});
+  DexStoresVector stores({std::move(store)});
+  walk::code(build_class_scope(stores),
+             [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  optimize_enums::OptimizeEnumsPass pass;
+  PassManager manager({&pass});
+  ConfigFiles conf(Json::nullValue);
+  conf.parse_global_config();
+  manager.run_passes(stores, conf);
+  return type_class(DexType::get_type("LBar;"))->get_super_class() ==
+         type::java_lang_Object();
+}
+
+// The body of a method marked `no_optimizations` may not be the code that
+// runs, so a call to it may return its argument or anything else.
+TEST_F(OptimizeEnumsTest, noOptimizationsCalleeKeepsEnum) {
+  EXPECT_FALSE(bar_boxed_through_identity(/* no_optimizations */ true));
+}
+
+TEST_F(OptimizeEnumsTest, optimizableCalleeLetsEnumBeBoxed) {
+  EXPECT_TRUE(bar_boxed_through_identity(/* no_optimizations */ false));
+}
+
+constexpr const char* kCheckNotNullParameter =
+    "Lkotlin/jvm/internal/Intrinsics;.checkNotNullParameter:(Ljava/lang/"
+    "Object;Ljava/lang/String;)V";
+
+/* Run OptimizeEnums with `LUser;.use(Bar bar)`, which passes `bar` to the
+in-APK method `check_method` with the given body, like Kotlin's parameter check
+`Intrinsics.checkNotNullParameter(bar, "bar")`. With `wrap_null_checks`,
+RemoveNullcheckStringArg runs first, as in app builds, and routes the call
+through the wrapper it adds to `Intrinsics`. Return whether Bar is boxed. */
+bool bar_boxed_through_in_apk_null_check(
+    const std::string& body,
+    bool no_optimizations,
+    const std::string& check_method = kCheckNotNullParameter,
+    bool wrap_null_checks = false) {
+  auto store = create_enum_store();
+  ClassCreator cc(DexMethod::make_method(check_method)->get_class());
+  cc.set_super(type::java_lang_Object());
+  cc.set_access(ACC_PUBLIC);
+  auto* check = assembler::method_from_string(
+      "(method (public static) \"" + check_method + "\" (" + body + "))");
+  if (no_optimizations) {
+    check->rstate.set_no_optimizations();
+  }
+  cc.add_method(check);
+  ClassCreator sc(DexType::make_type("LSink;"));
+  sc.set_super(type::java_lang_Object());
+  sc.set_access(ACC_PUBLIC);
+  sc.add_field(DexField::make_field("LSink;.sink:Ljava/lang/Object;")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  std::string use = R"(
+    (method (public static) "LUser;.use:(LBar;)I"
+      (
+        (load-param-object v0)
+        (const-string "bar")
+        (move-result-pseudo-object v1)
+        (invoke-static (v0 v1) "CHECK")
+        (iget v0 "LBar;.x:I")
+        (move-result-pseudo v0)
+        (return v0)
+      )
+    )
+  )";
+  boost::replace_all(use, "CHECK", check_method);
+  uc.add_method(assembler::method_from_string(use));
+  store.add_classes({cc.create(), sc.create(), uc.create()});
+  DexStoresVector stores({std::move(store)});
+  walk::code(build_class_scope(stores),
+             [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  // The wrapper's message building calls these.
+  DexMethod::make_method("Ljava/lang/Integer;.toString:(I)Ljava/lang/String;");
+  DexMethod::make_method("Ljava/lang/StringBuilder;.<init>:()V");
+  RemoveNullcheckStringArg wrap_pass;
+  optimize_enums::OptimizeEnumsPass pass;
+  std::vector<Pass*> passes;
+  if (wrap_null_checks) {
+    passes.push_back(&wrap_pass);
+  }
+  passes.push_back(&pass);
+  PassManager manager(passes);
+  ConfigFiles conf(Json::nullValue);
+  conf.parse_global_config();
+  manager.run_passes(stores, conf);
+  if (wrap_null_checks) {
+    EXPECT_NE(kotlin_nullcheck_wrapper::
+                  kotlin_jvm_internal_Intrinsics_WrCheckParameter_V1_4(),
+              nullptr);
+  }
+  return type_class(DexType::get_type("LBar;"))->get_super_class() ==
+         type::java_lang_Object();
+}
+
+constexpr const char* kNullCheckBody = R"(
+  (load-param-object v0)
+  (load-param-object v1)
+  (if-nez v0 :ok)
+  (invoke-static (v1) "Lkotlin/jvm/internal/Intrinsics;.throwParameterIsNullNPE:(Ljava/lang/String;)V")
+  (:ok)
+  (return-void)
+)";
+
+// The code of an in-APK Kotlin null check marked `no_optimizations` may not be
+// what runs, so it gets no summary at all.
+TEST_F(OptimizeEnumsTest, noOptimizationsInApkNullCheckKeepsEnum) {
+  EXPECT_FALSE(bar_boxed_through_in_apk_null_check(
+      kNullCheckBody, /* no_optimizations */ true));
+}
+
+TEST_F(OptimizeEnumsTest, inApkNullCheckLetsEnumBeBoxed) {
+  EXPECT_TRUE(bar_boxed_through_in_apk_null_check(
+      kNullCheckBody, /* no_optimizations */ false));
+}
+
+// Apps ship the Kotlin standard library, and RemoveNullcheckStringArg routes
+// each parameter check through a wrapper in `Intrinsics` that passes the
+// argument on to the original check. Kotlin specifies what both do, so their
+// code in the APK does not decide whether the argument escapes.
+TEST_F(OptimizeEnumsTest, inApkNullCheckBehindRedexWrapperLetsEnumBeBoxed) {
+  EXPECT_TRUE(bar_boxed_through_in_apk_null_check(
+      kNullCheckBody, /* no_optimizations */ false, kCheckNotNullParameter,
+      /* wrap_null_checks */ true));
+}
+
+// A wrapper does what the null check it calls does, so it is no more trusted
+// than one marked `no_optimizations`.
+TEST_F(OptimizeEnumsTest,
+       noOptimizationsInApkNullCheckBehindRedexWrapperKeepsEnum) {
+  EXPECT_FALSE(bar_boxed_through_in_apk_null_check(
+      kNullCheckBody, /* no_optimizations */ true, kCheckNotNullParameter,
+      /* wrap_null_checks */ true));
+}
+
+// An unknown helper of the same shape is summarized from its code alone, so
+// one that lets its argument escape keeps the enum.
+TEST_F(OptimizeEnumsTest, inApkHelperLettingArgumentEscapeKeepsEnum) {
+  EXPECT_FALSE(bar_boxed_through_in_apk_null_check(
+      R"(
+        (load-param-object v0)
+        (load-param-object v1)
+        (sput-object v0 "LSink;.sink:Ljava/lang/Object;")
+        (return-void)
+      )",
+      /* no_optimizations */ false,
+      "LUtil;.checkNotNull:(Ljava/lang/Object;Ljava/lang/String;)V"));
+}
+
+// The switch-map cleanup, which runs for enums that are not boxed too, leaves
+// a method marked `no_optimizations` as it is.
+TEST_F(OptimizeEnumsTest, noOptimizationsSwitchMapUserIsUnchanged) {
+  DexStoresVector stores({create_enum_store()});
+  auto* enum_cls = type_class(type::java_lang_Enum());
+  auto* ordinal = dynamic_cast<DexMethod*>(
+      DexMethod::get_method("Ljava/lang/Enum;.ordinal:()I"));
+  enum_cls->remove_method(ordinal);
+  ordinal->set_access(ACC_PUBLIC | ACC_FINAL);
+  ordinal->set_virtual(true);
+  enum_cls->add_method(ordinal);
+
+  ClassCreator gc(DexType::make_type("LFoo$1;"));
+  gc.set_super(type::java_lang_Object());
+  gc.set_access(ACC_FINAL | ACC_SYNTHETIC);
+  gc.add_field(DexField::make_field("LFoo$1;.$SwitchMap$Bar:[I")
+                   ->make_concrete(ACC_STATIC | ACC_FINAL | ACC_SYNTHETIC));
+  gc.add_method(assembler::method_from_string(R"(
+    (method (static constructor) "LFoo$1;.<clinit>:()V"
+     (
+      (const v0 2)
+      (new-array v0 "[I")
+      (move-result-pseudo-object v1)
+      (sput-object v1 "LFoo$1;.$SwitchMap$Bar:[I")
+      (sget-object "LFoo$1;.$SwitchMap$Bar:[I")
+      (move-result-pseudo-object v1)
+      (sget-object "LBar;.Y:LBar;")
+      (move-result-pseudo-object v2)
+      (invoke-virtual (v2) "Ljava/lang/Enum;.ordinal:()I")
+      (move-result v3)
+      (const v4 1)
+      (aput v4 v1 v3)
+      (return-void)
+     )
+    )
+  )"));
+  ClassCreator pc(DexType::make_type("LPrebuilt;"));
+  pc.set_super(type::java_lang_Object());
+  pc.set_access(ACC_PUBLIC);
+  auto* is_y = assembler::method_from_string(R"(
+    (method (public static) "LPrebuilt;.isY:(LBar;)I"
+     (
+      (load-param-object v0)
+      (sget-object "LFoo$1;.$SwitchMap$Bar:[I")
+      (move-result-pseudo-object v1)
+      (invoke-virtual (v0) "Ljava/lang/Enum;.ordinal:()I")
+      (move-result v2)
+      (aget v1 v2)
+      (move-result-pseudo v3)
+      (switch v3 (:y))
+      (const v4 0)
+      (return v4)
+      (:y 1)
+      (const v4 1)
+      (return v4)
+     )
+    )
+  )");
+  is_y->rstate.set_no_optimizations();
+  pc.add_method(is_y);
+  stores[0].add_classes({gc.create(), pc.create()});
+  const auto before = assembler::to_string(is_y->get_code());
+  walk::code(build_class_scope(stores),
+             [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  optimize_enums::OptimizeEnumsPass pass;
+  PassManager manager({&pass});
+  ConfigFiles conf(Json::nullValue);
+  conf.parse_global_config();
+  manager.run_passes(stores, conf);
+
+  is_y->get_code()->clear_cfg();
+  EXPECT_EQ(assembler::to_string(is_y->get_code()), before);
 }
 
 /* Create an enum with constants A and B whose <clinit> runs `clinit_prefix`

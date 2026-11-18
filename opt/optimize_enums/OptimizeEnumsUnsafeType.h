@@ -43,6 +43,7 @@ enum class UnsafeType {
   kUsageCastEnumArrayToObject,
   kUsageUsedInInstanceOf,
   kUsageUsedEnumEntries,
+  kUsageNoOptimizationsMethod,
 };
 
 inline std::ostream& operator<<(std::ostream& os, const UnsafeType& u) {
@@ -127,6 +128,9 @@ inline std::ostream& operator<<(std::ostream& os, const UnsafeType& u) {
     break;
   case UnsafeType::kUsageUsedEnumEntries:
     os << "UsageUsedEnumEntries";
+    break;
+  case UnsafeType::kUsageNoOptimizationsMethod:
+    os << "UsageNoOptimizationsMethod";
     break;
   }
   return os;

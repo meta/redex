@@ -10,7 +10,9 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "Creators.h"
 #include "IRAssembler.h"
+#include "MethodOverrideGraph.h"
 #include "RedexTest.h"
 #include "Show.h"
 #include "TypeUtil.h"
@@ -426,4 +428,58 @@ TEST_F(LocalPointersTest, returnEscapedValue) {
                 UnorderedElementsAre(Pointee(Eq(*invoke_insn))));
     EXPECT_TRUE(exit_env.may_have_escaped(invoke_insn));
   }
+}
+
+// interface Listener { default void onEvent(Object event) {} }  // kept
+// static void notify(Listener listener, Object event) {
+//   listener.onEvent(event);
+// }
+// No class in the app overrides `onEvent`, but `Listener` is kept, so a
+// `java.lang.reflect.Proxy` created at runtime may implement it and hand
+// `event` to its `InvocationHandler`.
+TEST_F(LocalPointersTest, argumentToKeptInterfaceDefaultMethodEscapes) {
+  ClassCreator ic(DexType::make_type("LListener;"));
+  ic.set_super(type::java_lang_Object());
+  ic.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  auto* on_event = assembler::method_from_string(R"(
+    (method (public) "LListener;.onEvent:(Ljava/lang/Object;)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (return-void)
+      )
+    )
+  )");
+  on_event->rstate.set_root();
+  ic.add_method(on_event);
+  auto* listener = ic.create();
+  listener->rstate.set_root();
+
+  ClassCreator nc(DexType::make_type("LNotifier;"));
+  nc.set_super(type::java_lang_Object());
+  nc.set_access(ACC_PUBLIC);
+  auto* notify = assembler::method_from_string(R"(
+    (method (public static) "LNotifier;.notify:(LListener;Ljava/lang/Object;)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (invoke-interface (v0 v1) "LListener;.onEvent:(Ljava/lang/Object;)V")
+        (return-void)
+      )
+    )
+  )");
+  nc.add_method(notify);
+  Scope scope{listener, nc.create()};
+  for (auto* method : {on_event, notify}) {
+    method->get_code()->build_cfg();
+    method->get_code()->cfg().calculate_exit_block();
+  }
+
+  auto override_graph = method_override_graph::build_graph(scope);
+  call_graph::Graph call_graph(
+      ptrs::EscapeCallGraphStrategy(*override_graph, scope));
+  ptrs::SummaryMap summaries;
+  ptrs::analyze_scope(scope, call_graph, &summaries);
+  EXPECT_THAT(unordered_unsafe_unwrap(summaries.at(notify).escaping_parameters),
+              UnorderedElementsAre(0, 1));
 }

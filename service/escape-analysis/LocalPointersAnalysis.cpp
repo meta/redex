@@ -496,10 +496,15 @@ call_graph::CallSites EscapeCallGraphStrategy::get_callsites(
       }
       continue;
     }
+    if (insn->opcode() != OPCODE_INVOKE_SUPER &&
+        m_root_and_dynamic.dynamic_methods.count(callee) != 0u) {
+      // A class created at runtime, such as a `java.lang.reflect.Proxy`, may
+      // implement the method, even when no class in the app overrides it.
+      continue;
+    }
     if (is_definitely_virtual(callee) &&
         insn->opcode() != OPCODE_INVOKE_SUPER) {
-      if (m_root_and_dynamic.dynamic_methods.count(callee) != 0u ||
-          m_big_virtuals.count_unsafe(callee) != 0u) {
+      if (m_big_virtuals.count_unsafe(callee) != 0u) {
         continue;
       }
       const auto& overriding_methods =

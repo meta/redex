@@ -37,6 +37,13 @@ bool is_enum_values(const DexMethodRef* method);
  */
 bool is_enum_entries(const DexFieldRef* field);
 
+/**
+ * Whether `field_ref` is an enum's synthetic values array field, usually
+ * `$VALUES`. It is recognized by its type, as shrinkers that ran on a library
+ * before Redex may have renamed it.
+ */
+bool is_enum_values_field(const DexFieldRef* field_ref);
+
 constexpr const char* KT_ENUM_ENTRIES_TYPE = "Lkotlin/enums/EnumEntries;";
 constexpr const char* ENUM_VALUES_FIELD = "$VALUES";
 constexpr const char* ENUM_ENTRIES_FIELD = "$ENTRIES";

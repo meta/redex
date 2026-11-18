@@ -59,6 +59,21 @@ UnorderedSet<const DexType*> discard_primitives(const EnumTypes& types) {
   return res;
 }
 
+bool is_static_field_on_enum_class(const DexFieldRef* fref) {
+  const auto* field = fref->as_def();
+  if ((field == nullptr) || !is_static(field)) {
+    return false;
+  }
+  auto* container = type_class(field->get_class());
+  return (container != nullptr) && is_enum(container);
+}
+
+bool is_enum_constant_field(const DexFieldRef* field_ref) {
+  return is_static_field_on_enum_class(field_ref) &&
+         check_required_access_flags(enum_field_access(),
+                                     field_ref->as_def()->get_access());
+}
+
 /**
  * Inspect instructions to reject enum class that may be casted to another type.
  */
@@ -146,7 +161,7 @@ class EnumUpcastDetector {
       process_sget_object(insn);
       break;
     case OPCODE_SPUT_OBJECT:
-      process_isput_object(insn, env);
+      process_sput_object(insn, env);
       break;
     default:
       break;
@@ -178,8 +193,40 @@ class EnumUpcastDetector {
                            UnsafeType::kUsageCastISPutObject);
   }
 
+  // Whether this is the <clinit> of the class that declares `field`.
+  bool in_declaring_clinit(const DexFieldRef* field) const {
+    return field->get_class() == m_method->get_class() &&
+           method::is_clinit(m_method);
+  }
+
+  void process_sput_object(const IRInstruction* insn,
+                           const EnumTypeEnvironment* env) const {
+    DexFieldRef* field = insn->get_field();
+    // The transformation deletes the constant, values array and `$ENTRIES`
+    // fields and removes their stores from the enum's own <clinit> only.
+    if (!in_declaring_clinit(field)) {
+      if (is_enum_values_field(field)) {
+        reject(insn, field->get_class(), UnsafeType::kUsageUsedValuesField);
+      } else if (is_enum_entries(field)) {
+        reject(insn, field->get_class(), UnsafeType::kUsageUsedEnumEntries);
+      } else if (is_enum_constant_field(field)) {
+        reject(insn, field->get_class(),
+               UnsafeType::kUsageConstantSetOutsideClinit);
+      }
+    }
+    process_isput_object(insn, env);
+  }
+
   void process_sget_object(const IRInstruction* insn) const {
     DexFieldRef* field = insn->get_field();
+    // The transformation deletes the values array field and rewrites only
+    // `values()`, which is not analyzed, and the enum's own <clinit>.
+    if (is_enum_values_field(field) && !in_declaring_clinit(field)) {
+      TRACE(ENUM, 5, "sget_object values array %s in %s", SHOW(field),
+            SHOW(m_method));
+      reject(insn, field->get_class(), UnsafeType::kUsageUsedValuesField);
+      return;
+    }
     if (!is_enum_entries(field)) {
       return;
     }
@@ -507,15 +554,6 @@ bool is_static_method_on_enum_class(const DexMethodRef* ref) {
     return false;
   }
   auto* container = type_class(method->get_class());
-  return (container != nullptr) && is_enum(container);
-}
-
-bool is_static_field_on_enum_class(const DexFieldRef* fref) {
-  const auto* field = fref->as_def();
-  if ((field == nullptr) || !is_static(field)) {
-    return false;
-  }
-  auto* container = type_class(field->get_class());
   return (container != nullptr) && is_enum(container);
 }
 } // namespace
@@ -907,6 +945,16 @@ bool is_enum_values(const DexMethodRef* method) {
   }
   return type::make_array_component_type(proto->get_rtype()) ==
          method->get_class();
+}
+
+bool is_enum_values_field(const DexFieldRef* field_ref) {
+  if (!is_static_field_on_enum_class(field_ref)) {
+    return false;
+  }
+  const auto* field = field_ref->as_def();
+  return check_required_access_flags(synth_access(), field->get_access()) &&
+         type::get_array_component_type(field->get_type()) ==
+             field->get_class();
 }
 
 bool is_enum_entries(const DexFieldRef* field) {

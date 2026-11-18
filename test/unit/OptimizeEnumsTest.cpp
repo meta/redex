@@ -864,6 +864,174 @@ TEST_F(OptimizeEnumsTest, noOptimizationsSwitchMapUserIsUnchanged) {
   EXPECT_EQ(assembler::to_string(is_y->get_code()), before);
 }
 
+/* Run the usage analysis with `method` added to Bar and return the reasons
+that keep Bar. */
+std::set<optimize_enums::UnsafeType> reasons_with_bar_method(
+    const char* method) {
+  auto store = create_enum_store();
+  auto* bar = type_class(DexType::get_type("LBar;"));
+  bar->add_method(assembler::method_from_string(method));
+  DexStoresVector stores({std::move(store)});
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](DexMethod*, IRCode& code) {
+    if (!code.cfg_built()) {
+      code.build_cfg();
+    }
+  });
+
+  auto* bar_type = bar->get_type();
+  optimize_enums::Config config(100);
+  config.candidate_enums.insert(bar_type);
+  std::mutex reasons_mutex;
+  std::set<optimize_enums::UnsafeType> bar_reasons;
+  optimize_enums::reject_unsafe_enums(
+      scope, &config, [&](const DexType* type, optimize_enums::UnsafeType u) {
+        std::lock_guard<std::mutex> lock(reasons_mutex);
+        if (type == bar_type) {
+          bar_reasons.insert(u);
+        }
+      });
+  EXPECT_EQ(config.candidate_enums.count_unsafe(bar_type) == 0,
+            !bar_reasons.empty());
+  return bar_reasons;
+}
+
+// `Bar.first()` reads `$VALUES` itself instead of calling `values()`, as
+// once an accessor has been inlined. Boxing deletes `$VALUES`, so the enum is
+// kept.
+TEST_F(OptimizeEnumsTest, valuesArrayReadOutsideValuesKeepsEnum) {
+  EXPECT_EQ(reasons_with_bar_method(R"(
+    (method (public static) "LBar;.first:()LBar;"
+      (
+        (sget-object "LBar;.$VALUES:[LBar;")
+        (move-result-pseudo-object v0)
+        (const v1 0)
+        (aget-object v0 v1)
+        (move-result-pseudo-object v0)
+        (return-object v0)
+      )
+    )
+  )"),
+            std::set<optimize_enums::UnsafeType>{
+                optimize_enums::UnsafeType::kUsageUsedValuesField});
+}
+
+// A store to `$VALUES` outside <clinit>, which only hand-written bytecode
+// contains, would be left behind when boxing deletes the field.
+TEST_F(OptimizeEnumsTest, valuesArrayWrittenOutsideClinitKeepsEnum) {
+  EXPECT_EQ(reasons_with_bar_method(R"(
+    (method (public static) "LBar;.reset:()V"
+      (
+        (const v0 0)
+        (new-array v0 "[LBar;")
+        (move-result-pseudo-object v0)
+        (sput-object v0 "LBar;.$VALUES:[LBar;")
+        (return-void)
+      )
+    )
+  )"),
+            std::set<optimize_enums::UnsafeType>{
+                optimize_enums::UnsafeType::kUsageUsedValuesField});
+}
+
+/* Run the pass on Bar after removing its values array, as a first
+OptimizeEnums run that deletes an unused `values()` followed by
+RemoveUnusedFieldsPass leaves it, and giving it javac's `$assertionsDisabled`
+field, written in <clinit> and read by `Bar.assertionsOn()`. `clinit_tail` runs
+at the end of <clinit>. Return whether Bar is boxed. */
+bool bar_with_only_assertions_field_boxed(const std::string& clinit_tail) {
+  auto store = create_enum_store();
+  auto* bar = type_class(DexType::get_type("LBar;"));
+  bar->remove_field(DexField::get_field("LBar;.$VALUES:[LBar;")->as_def());
+  bar->remove_method(DexMethod::get_method("LBar;.$values:()[LBar;")->as_def());
+  bar->add_field(DexField::make_field("LBar;.$assertionsDisabled:Z")
+                     ->make_concrete(ACC_STATIC | ACC_FINAL | ACC_SYNTHETIC));
+  auto* clinit = bar->get_clinit();
+  clinit->get_code()->clear_cfg();
+  clinit->set_code(assembler::ircode_from_string(R"(
+    (
+      (const v0 1)
+      (sput-boolean v0 "LBar;.$assertionsDisabled:Z")
+      (r-const v0 2132351567)
+      (const-string "Y")
+      (move-result-pseudo-object v1)
+      (const v2 0)
+      (new-instance "LBar;")
+      (move-result-pseudo-object v3)
+      (invoke-direct (v3 v1 v2 v0) "LBar;.<init>:(Ljava/lang/String;II)V")
+      (sput-object v3 "LBar;.Y:LBar;")
+      (r-const v0 2132351568)
+      (const-string "Z")
+      (move-result-pseudo-object v1)
+      (const v2 1)
+      (new-instance "LBar;")
+      (move-result-pseudo-object v3)
+      (invoke-direct (v3 v1 v2 v0) "LBar;.<init>:(Ljava/lang/String;II)V")
+      (sput-object v3 "LBar;.Z:LBar;")
+  )" + clinit_tail + ")"));
+  bar->add_method(assembler::method_from_string(R"(
+    (method (public static) "LBar;.assertionsOn:()Z"
+      (
+        (sget-boolean "LBar;.$assertionsDisabled:Z")
+        (move-result-pseudo v0)
+        (return v0)
+      )
+    )
+  )"));
+  DexStoresVector stores({std::move(store)});
+  walk::code(build_class_scope(stores), [](DexMethod*, IRCode& code) {
+    if (!code.cfg_built()) {
+      code.build_cfg();
+    }
+  });
+
+  optimize_enums::OptimizeEnumsPass pass;
+  PassManager manager({&pass});
+  ConfigFiles conf(Json::nullValue);
+  conf.parse_global_config();
+  manager.run_passes(stores, conf);
+  return bar->get_super_class() == type::java_lang_Object();
+}
+
+// Boxing deletes the enum's static synthetic field as its values array. When
+// the only one is javac's `$assertionsDisabled`, deleting it would leave
+// `Bar.assertionsOn()` reading a field that no longer exists.
+TEST_F(OptimizeEnumsTest, onlySyntheticFieldNotValuesArrayKeepsEnum) {
+  EXPECT_FALSE(bar_with_only_assertions_field_boxed("(return-void)"));
+}
+
+// The same, with an `assert` in <clinit> that reads `$assertionsDisabled`.
+TEST_F(OptimizeEnumsTest, assertionsFieldReadInClinitKeepsEnum) {
+  EXPECT_FALSE(bar_with_only_assertions_field_boxed(R"(
+    (sget-boolean "LBar;.$assertionsDisabled:Z")
+    (move-result-pseudo v0)
+    (if-nez v0 :done)
+    (new-instance "Ljava/lang/AssertionError;")
+    (move-result-pseudo-object v1)
+    (invoke-direct (v1) "Ljava/lang/AssertionError;.<init>:()V")
+    (throw v1)
+    (:done)
+    (return-void)
+  )"));
+}
+
+// Boxing deletes the constant fields. A store to one outside <clinit>, which
+// only hand-written bytecode contains, would be left behind.
+TEST_F(OptimizeEnumsTest, constantWrittenOutsideClinitKeepsEnum) {
+  EXPECT_EQ(reasons_with_bar_method(R"(
+    (method (public static) "LBar;.swap:()V"
+      (
+        (sget-object "LBar;.Z:LBar;")
+        (move-result-pseudo-object v0)
+        (sput-object v0 "LBar;.Y:LBar;")
+        (return-void)
+      )
+    )
+  )"),
+            std::set<optimize_enums::UnsafeType>{
+                optimize_enums::UnsafeType::kUsageConstantSetOutsideClinit});
+}
+
 /* Create an enum with constants A and B whose <clinit> runs `clinit_prefix`
 and then passes the given ordinals to the constructor, like this hand-written
 Java-like code:

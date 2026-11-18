@@ -158,18 +158,20 @@ const api::AndroidSDK* get_min_sdk_api(ConfigFiles& conf, PassManager& mgr) {
 // OptimizeEnumsPass's holder fields, by the value whose boxed object they hold.
 using EnumUtilsFields = InsertOnlyConcurrentMap<int32_t, DexField*>;
 
+// Every OptimizeEnumsPass run creates its own holders, so several holders can
+// hold the same value; the first of them in scope order provides its field.
 EnumUtilsFields get_enum_utils_fields(const Scope& scope) {
   EnumUtilsFields fields;
-  walk::parallel::classes(scope, [&](DexClass* cls) {
+  for (auto* cls : scope) {
     if (!enum_utils::is_holder(cls->get_type())) {
-      return;
+      continue;
     }
     for (auto* field : cls->get_sfields()) {
       if (auto value = enum_utils::boxed_value(field)) {
         fields.insert({*value, field});
       }
     }
-  });
+  }
   return fields;
 }
 

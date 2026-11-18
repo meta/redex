@@ -71,6 +71,8 @@ public class MainActivity extends Activity {
     System.out.println(R.color.simple + 1);
     System.out.println((long)R.string.styled_text);
     Resources resources = getResources();
+    System.out.println(R.dimen.text_size / 2);
+    System.out.println(R.dimen.text_size / resources.getInteger(R.integer.loop_count));
     System.out.println(resources.getBoolean(R.bool.should_log));
   }
 }

@@ -488,7 +488,8 @@ bool ResourceIdAnalyzer::analyze_binop(const IRInstruction* insn,
                                        ConstantEnvironment* env) {
   if (ResourceIdAnalyzer::is_src_known(insn, env, 0) ||
       ResourceIdAnalyzer::is_src_known(insn, env, 1)) {
-    env->set(insn->dest(), ConstantValue::top());
+    env->set(insn->has_move_result_pseudo() ? RESULT_REGISTER : insn->dest(),
+             ConstantValue::top());
     return true;
   }
   return false;
@@ -506,7 +507,8 @@ bool ResourceIdAnalyzer::analyze_unop(const IRInstruction* insn,
 bool ResourceIdAnalyzer::analyze_binop_lit(const IRInstruction* insn,
                                            ConstantEnvironment* env) {
   if (ResourceIdAnalyzer::is_src_known(insn, env, 0)) {
-    env->set(insn->dest(), ConstantValue::top());
+    env->set(insn->has_move_result_pseudo() ? RESULT_REGISTER : insn->dest(),
+             ConstantValue::top());
     return true;
   }
   return false;

@@ -324,6 +324,44 @@ struct AnalyzeScopeResult {
 };
 
 /*
+ * A call graph that lets `analyze_scope` summarize every method with code: each
+ * such method is a root, and a call gets edges only when they reach every
+ * method that can run for it. A call that may reach a native method, a method
+ * of a class created at runtime, an overridable or unsummarized external
+ * method, or one of more than `big_override_threshold` overrides gets none, so
+ * `analyze_scope` treats it as a call to unknown code.
+ */
+class EscapeCallGraphStrategy : public call_graph::MultipleCalleeStrategy {
+ public:
+  static constexpr uint32_t DEFAULT_BIG_OVERRIDE_THRESHOLD = 5;
+
+  EscapeCallGraphStrategy(
+      const method_override_graph::Graph& method_override_graph,
+      const Scope& scope,
+      uint32_t big_override_threshold = DEFAULT_BIG_OVERRIDE_THRESHOLD);
+
+  call_graph::CallSites get_callsites(const DexMethod* method) const override;
+
+  call_graph::RootAndDynamic get_roots() const override;
+
+ protected:
+  // Whether the external method `callee`, which cannot be overridden, has a
+  // summary that `analyze_scope` can use. `analyze_scope` itself provides only
+  // the one of `Object.<init>`.
+  virtual bool has_external_summary(const DexMethod* callee) const;
+
+  // Whether `insn`, a call to `callee`, neither lets an object escape nor
+  // returns one, so that it needs no summary.
+  virtual bool is_object_free_call(const IRInstruction* /* insn */,
+                                   const DexMethod* /* callee */) const {
+    return false;
+  }
+
+ private:
+  call_graph::RootAndDynamic m_root_and_dynamic;
+};
+
+/*
  * Analyze all methods in scope, making sure to analyze the callees before
  * their callers.
  *

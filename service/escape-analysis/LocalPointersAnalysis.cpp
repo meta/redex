@@ -10,6 +10,8 @@
 #include <ostream>
 
 #include "Debug.h"
+#include "MethodUtil.h"
+#include "Resolver.h"
 #include "Show.h"
 #include "TypeUtil.h"
 #include "Walkers.h"
@@ -382,6 +384,12 @@ std::pair<std::unique_ptr<FixpointIterator>, EscapeSummary> analyze_method(
       auto& callee_summary = invoke_to_summary_map[invoke_insn];
       const auto* callee = edge->callee()->method();
       auto it = summary_map.find(callee);
+      // A callee without a summary contributes none; `analyze_scope` gives one
+      // to every method with code before using it, so only an external callee
+      // could lack one, and the call graph must not lead to such a callee.
+      assert_log(callee == nullptr || it != summary_map.end() ||
+                     callee->get_code() != nullptr,
+                 "No summary for %s", SHOW(callee));
       if (it != summary_map.end()) {
         callee_summary.join_with(it->second);
       } else if (callee == nullptr &&
@@ -406,6 +414,89 @@ std::pair<std::unique_ptr<FixpointIterator>, EscapeSummary> analyze_method(
       !type::is_primitive(method->get_proto()->get_rtype());
   auto summary = get_escape_summary(*fp_iter, *code, result_may_be_pointer);
   return std::make_pair(std::move(fp_iter), std::move(summary));
+}
+
+EscapeCallGraphStrategy::EscapeCallGraphStrategy(
+    const method_override_graph::Graph& method_override_graph,
+    const Scope& scope,
+    uint32_t big_override_threshold)
+    : call_graph::MultipleCalleeStrategy(
+          method_override_graph, scope, big_override_threshold) {
+  // A method that no root reaches would get no edges, and so no summary that
+  // uses its callees' summaries.
+  m_root_and_dynamic = MultipleCalleeStrategy::get_roots();
+  walk::code(m_scope, [&](DexMethod* method, IRCode&) {
+    m_root_and_dynamic.roots.insert(method);
+  });
+}
+
+bool EscapeCallGraphStrategy::has_external_summary(
+    const DexMethod* callee) const {
+  return callee == method::java_lang_Object_ctor();
+}
+
+call_graph::CallSites EscapeCallGraphStrategy::get_callsites(
+    const DexMethod* method) const {
+  call_graph::CallSites callsites;
+  const auto* code = method->get_code();
+  if (code == nullptr) {
+    return callsites;
+  }
+  always_assert(code->cfg_built());
+  for (const auto& mie : cfg::ConstInstructionIterable(code->cfg())) {
+    auto* insn = mie.insn;
+    if (!opcode::is_an_invoke(insn->opcode())) {
+      continue;
+    }
+    auto* callee = resolve_invoke_method_deprecated(insn, method);
+    if (callee == nullptr) {
+      if (is_array_clone(insn->get_method())) {
+        // `analyze_scope` gives array clones their summary itself.
+        callsites.emplace_back(/* callee */ nullptr, insn);
+      }
+      continue;
+    }
+    if (is_object_free_call(insn, callee)) {
+      // A null callee gets the empty summary.
+      callsites.emplace_back(/* callee */ nullptr, insn);
+      continue;
+    }
+    if (callee->is_external()) {
+      if ((opcode::is_invoke_super(insn->opcode()) ||
+           !may_be_overridden(callee)) &&
+          has_external_summary(callee)) {
+        callsites.emplace_back(callee, insn);
+      }
+      continue;
+    }
+    if (is_definitely_virtual(callee) &&
+        insn->opcode() != OPCODE_INVOKE_SUPER) {
+      if (m_root_and_dynamic.dynamic_methods.count(callee) != 0u ||
+          m_big_virtuals.count_unsafe(callee) != 0u) {
+        continue;
+      }
+      const auto& overriding_methods =
+          get_ordered_overriding_methods_with_code_or_native(callee);
+      if (is_native(callee) ||
+          std::any_of(overriding_methods.begin(), overriding_methods.end(),
+                      [](const auto* m) { return is_native(m); })) {
+        continue;
+      }
+      if (callee->get_code() != nullptr) {
+        callsites.emplace_back(callee, insn);
+      }
+      for (const auto* overriding_method : overriding_methods) {
+        callsites.emplace_back(overriding_method, insn);
+      }
+    } else if (callee->is_concrete() && !is_native(callee)) {
+      callsites.emplace_back(callee, insn);
+    }
+  }
+  return callsites;
+}
+
+call_graph::RootAndDynamic EscapeCallGraphStrategy::get_roots() const {
+  return m_root_and_dynamic;
 }
 
 AnalyzeScopeResult analyze_scope(

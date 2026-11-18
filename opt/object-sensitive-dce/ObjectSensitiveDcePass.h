@@ -9,6 +9,7 @@
 
 #include <optional>
 
+#include "LocalPointersAnalysis.h"
 #include "Pass.h"
 #include "Trace.h"
 
@@ -32,7 +33,10 @@ class ObjectSensitiveDcePass final : public Pass {
     bind("escape_summaries", {std::nullopt}, m_external_escape_summaries_file,
          "TODO: Document me!",
          Configurable::bindflags::optionals::skip_empty_string);
-    bind("big_override_threshold", UINT32_C(5), m_big_override_threshold);
+    bind(
+        "big_override_threshold",
+        local_pointers::EscapeCallGraphStrategy::DEFAULT_BIG_OVERRIDE_THRESHOLD,
+        m_big_override_threshold);
 
     if (!m_external_escape_summaries_file ||
         !m_external_side_effect_summaries_file) {

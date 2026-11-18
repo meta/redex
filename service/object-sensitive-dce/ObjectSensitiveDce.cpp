@@ -27,7 +27,7 @@ namespace uv = used_vars;
 
 namespace {
 
-class CallGraphStrategy final : public call_graph::MultipleCalleeStrategy {
+class CallGraphStrategy final : public ptrs::EscapeCallGraphStrategy {
  public:
   explicit CallGraphStrategy(const method_override_graph::Graph& graph,
                              const Scope& scope,
@@ -35,25 +35,26 @@ class CallGraphStrategy final : public call_graph::MultipleCalleeStrategy {
                              const ptrs::SummaryMap& escape_summaries,
                              const side_effects::SummaryMap& effect_summaries,
                              uint32_t big_override_threshold)
-      : call_graph::MultipleCalleeStrategy(
-            graph, scope, big_override_threshold),
+      : ptrs::EscapeCallGraphStrategy(graph, scope, big_override_threshold),
         m_pure_methods(pure_methods),
         m_escape_summaries(escape_summaries),
-        m_effect_summaries(effect_summaries) {
-    // XXX(jezng): We make every single method a root in order that all methods
-    // are seen as reachable. Unreachable methods will not have `get_callsites`
-    // run on them and will not have their outgoing edges added to the call
-    // graph, which means that the dead code removal will not optimize them
-    // fully. I'm not sure why these "unreachable" methods are not ultimately
-    // removed by RMU, but as it stands, properly optimizing them is a size win
-    // for us.
-    m_root_and_dynamic = MultipleCalleeStrategy::get_roots();
-    walk::code(m_scope, [&](DexMethod* method, IRCode&) {
-      m_root_and_dynamic.roots.insert(method);
-    });
+        m_effect_summaries(effect_summaries) {}
+
+ private:
+  // A pure call that returns no object interacts with no object and has no
+  // side effects, so it gets the empty summaries.
+  bool is_object_free_call(const IRInstruction* insn,
+                           const DexMethod* callee) const override {
+    return is_pure(insn) && !type::is_object(callee->get_proto()->get_rtype());
   }
 
-  bool is_pure(IRInstruction* insn) const {
+  bool has_external_summary(const DexMethod* callee) const override {
+    return ptrs::EscapeCallGraphStrategy::has_external_summary(callee) ||
+           ((m_escape_summaries.count(callee) != 0u) &&
+            (m_effect_summaries.count(callee) != 0u));
+  }
+
+  bool is_pure(const IRInstruction* insn) const {
     // This is what LocalDce does.
     auto* ref = insn->get_method();
     auto* const meth = resolve_method_deprecated(ref, opcode_to_search(insn));
@@ -66,97 +67,9 @@ class CallGraphStrategy final : public call_graph::MultipleCalleeStrategy {
     return m_pure_methods.count(ref) != 0u;
   }
 
-  call_graph::CallSites get_callsites(const DexMethod* method) const override {
-    call_graph::CallSites callsites;
-    auto* code = const_cast<IRCode*>(method->get_code());
-    if (code == nullptr) {
-      return callsites;
-    }
-    always_assert(code->cfg_built());
-    for (auto& mie : InstructionIterable(code->cfg())) {
-      auto* insn = mie.insn;
-      if (!opcode::is_an_invoke(insn->opcode())) {
-        continue;
-      }
-      auto* callee = resolve_invoke_method_deprecated(insn, method);
-      if (callee == nullptr) {
-        if (ptrs::is_array_clone(insn->get_method())) {
-          // We'll synthesize appropriate summaries for array clone methods on
-          // the fly.
-          callsites.emplace_back(/* callee */ nullptr, insn);
-        }
-        continue;
-      }
-      if (is_pure(insn) && !type::is_object(callee->get_proto()->get_rtype())) {
-        // By including this in the call-graph with an empty callee, it will by
-        // default get trivial summaries, representing no interactions with
-        // objects, and no side effects.
-        callsites.emplace_back(/* callee */ nullptr, insn);
-        continue;
-      }
-      if (callee->is_external()) {
-        if ((opcode::is_invoke_super(insn->opcode()) ||
-             !ptrs::may_be_overridden(callee)) &&
-            has_summaries(callee)) {
-          callsites.emplace_back(callee, insn);
-        }
-        continue;
-      }
-
-      if (is_definitely_virtual(callee) &&
-          insn->opcode() != OPCODE_INVOKE_SUPER) {
-        if (m_root_and_dynamic.dynamic_methods.count(callee) != 0u) {
-          continue;
-        }
-
-        // For true virtual callees, add the callee itself and all of its
-        // overrides if they are not in big virtuals.
-        if (m_big_virtuals.count_unsafe(callee) != 0u) {
-          continue;
-        }
-        const auto& overriding_methods =
-            get_ordered_overriding_methods_with_code_or_native(callee);
-        if (is_native(callee) ||
-            std::any_of(overriding_methods.begin(), overriding_methods.end(),
-                        [](auto* method) { return is_native(method); })) {
-          continue;
-        }
-        if (callee->get_code() != nullptr) {
-          callsites.emplace_back(callee, insn);
-        }
-        for (const auto* overriding_method : overriding_methods) {
-          callsites.emplace_back(overriding_method, insn);
-        }
-      } else if (callee->is_concrete() && !is_native(callee)) {
-        callsites.emplace_back(callee, insn);
-      }
-    }
-    return callsites;
-  }
-
-  // XXX(jezng): We make every single method a root in order that all methods
-  // are seen as reachable. Unreachable methods will not have `get_callsites`
-  // run on them and will not have their outgoing edges added to the call graph,
-  // which means that the dead code removal will not optimize them fully. I'm
-  // not sure why these "unreachable" methods are not ultimately removed by RMU,
-  // but as it stands, properly optimizing them is a size win for us.
-  call_graph::RootAndDynamic get_roots() const override {
-    return m_root_and_dynamic;
-  }
-
- private:
-  bool has_summaries(DexMethod* method) const {
-    if ((m_escape_summaries.count(method) != 0u) &&
-        (m_effect_summaries.count(method) != 0u)) {
-      return true;
-    }
-    return method == method::java_lang_Object_ctor();
-  }
-
   const UnorderedSet<DexMethodRef*>& m_pure_methods;
   const ptrs::SummaryMap& m_escape_summaries;
   const side_effects::SummaryMap& m_effect_summaries;
-  call_graph::RootAndDynamic m_root_and_dynamic;
 };
 
 } // namespace

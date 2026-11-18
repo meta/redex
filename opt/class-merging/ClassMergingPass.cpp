@@ -82,6 +82,43 @@ bool verify_model_spec(const std::vector<ModelSpec>& model_specs,
   return true;
 }
 
+/**
+ * Rejects models that share a merging target, or where one model's root is a
+ * merging target of another model. A model makes its merger classes extend its
+ * roots and the targets above the classes it merges, so a class that another
+ * model merges away could still have subclasses. Classes of overlapping
+ * hierarchies belong in one model.
+ */
+void check_models_do_not_overlap(const std::vector<ModelSpec>& model_specs) {
+  UnorderedMap<const DexType*, const ModelSpec*> target_models;
+  for (const auto& spec : model_specs) {
+    if (!spec.enabled) {
+      continue;
+    }
+    for (const auto* type : UnorderedIterable(spec.merging_targets)) {
+      auto [it, inserted] = target_models.emplace(type, &spec);
+      always_assert_log(inserted,
+                        "[ClassMerging] Wrong specification: models %s and %s "
+                        "overlap at %s; put their classes into one model",
+                        it->second->name.c_str(), spec.name.c_str(),
+                        SHOW(type));
+    }
+  }
+  for (const auto& spec : model_specs) {
+    if (!spec.enabled) {
+      continue;
+    }
+    for (const auto* root : spec.roots) {
+      auto it = target_models.find(root);
+      always_assert_log(it == target_models.end() || it->second == &spec,
+                        "[ClassMerging] Wrong specification: models %s and %s "
+                        "overlap at %s; put their classes into one model",
+                        it->second->name.c_str(), spec.name.c_str(),
+                        SHOW(root));
+    }
+  }
+}
+
 strategy::Strategy get_merging_strategy(const std::string& merging_strategy) {
   const static UnorderedMap<std::string, strategy::Strategy>
       string_to_strategy = {
@@ -297,6 +334,13 @@ void ClassMergingPass::run_pass(DexStoresVector& stores,
 
   auto scope = build_class_scope(stores);
   TypeSystem type_system(scope);
+  for (ModelSpec& model_spec : m_model_specs) {
+    if (model_spec.enabled && model_spec.merging_targets.empty()) {
+      class_merging::load_roots_subtypes_as_merging_targets(type_system,
+                                                            &model_spec);
+    }
+  }
+  check_models_do_not_overlap(m_model_specs);
   // Built once, before the spec loop, and shared across specs -- like
   // type_system -- so every spec reads the same pre-merge scope even though
   // merge_model mutates `scope` between iterations.
@@ -311,10 +355,6 @@ void ClassMergingPass::run_pass(DexStoresVector& stores,
             "Change include_primary_dex to true because the apk will be single "
             "dex");
       model_spec.include_primary_dex = true;
-    }
-    if (model_spec.merging_targets.empty()) {
-      class_merging::load_roots_subtypes_as_merging_targets(type_system,
-                                                            &model_spec);
     }
     if (model_spec.merging_targets.empty()) {
       continue;

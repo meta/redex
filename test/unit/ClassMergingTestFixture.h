@@ -7,14 +7,21 @@
 
 #pragma once
 
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "ClassMergingPass.h"
+#include "ConfigFiles.h"
 #include "DexClass.h"
+#include "DexStore.h"
 #include "IRAssembler.h"
 #include "IRTemplate.h"
+#include "MethodProfiles.h"
+#include "PassManager.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "ScopeHelper.h"
 #include "TypeUtil.h"
 
@@ -91,6 +98,46 @@ class ClassMergingTest : public RedexTest {
       m_hot_methods.push_back(run);
     }
     return cls;
+  }
+
+  UnorderedMap<std::string, int64_t> run_merging(
+      const std::vector<Json::Value>& models,
+      bool preserve_unanimous_field_types = false) {
+    auto tmp_dir = redex::make_tmp_dir("class_merging_test_%%%%%%%%");
+    const auto api_file = tmp_dir.path + "/api.txt";
+    {
+      std::ofstream out(api_file);
+      out << "Ljava/lang/Object; 1 Ljava/lang/Object; 1 0\n"
+          << "  M Ljava/lang/Object;.<init>:()V 1\n";
+    }
+    Json::Value json;
+    json["android_sdk_api_21_file"] = api_file;
+    json["ClassMergingPass"]["preserve_unanimous_field_types"] =
+        preserve_unanimous_field_types;
+    for (const auto& model : models) {
+      json["ClassMergingPass"]["models"].append(model);
+    }
+    ConfigFiles conf(json);
+    conf.parse_global_config();
+    method_profiles::Stats hot_stats;
+    hot_stats.appear_percent = 100.0;
+    hot_stats.call_count = 100.0;
+    UnorderedMap<const DexMethodRef*, method_profiles::Stats> manual_hot_stats;
+    for (auto* method : m_hot_methods) {
+      manual_hot_stats[method] = hot_stats;
+    }
+    conf.get_method_profiles() = method_profiles::MethodProfiles::initialize(
+        "manual_hot", manual_hot_stats);
+    RedexOptions options;
+    options.min_sdk = 21;
+    class_merging::ClassMergingPass pass;
+    PassManager mgr({&pass}, conf, options);
+    DexStore store("classes");
+    store.add_classes(m_scope);
+    DexStoresVector stores{store};
+    mgr.run_passes(stores, conf);
+    m_scope = build_class_scope(stores);
+    return mgr.get_pass_info().at(0).metrics;
   }
 
   Scope m_scope;

@@ -455,6 +455,32 @@ def extract_dex_number(dexfilename: str) -> int:
     return int(m.group(2))
 
 
+def module_dex_glob(directory: str, store_name: str) -> typing.List[str]:
+    """
+    Return the dexes of an application module in dex order: classes.dex,
+    classes2.dex, ...; <store_name>.dex, <store_name>2.dex, ...; or
+    <prefix>-1.dex, <prefix>-2.dex, ...
+    """
+
+    def dex_number(path: str) -> int:
+        m = re.fullmatch(
+            rf"(?:classes|{re.escape(store_name)})(\d*)\.dex", basename(path)
+        )
+        if m is None:
+            return extract_dex_number(path)
+        return int(m.group(1)) if m.group(1) else 1
+
+    dexes = sorted(glob.glob(join(directory, "*.dex")), key=dex_number)
+    # Every unpacker names a module's dexes with one of the schemes above, so no
+    # two of them get the same number. Equal numbers mean a directory that mixes
+    # schemes, where nothing says which dex comes first; reject it rather than
+    # guess.
+    numbers = [dex_number(d) for d in dexes]
+    if len(set(numbers)) != len(numbers):
+        raise Exception(f"Ambiguous dex order: {dexes}")
+    return dexes
+
+
 def dex_glob(directory: str) -> typing.List[str]:
     """
     Return the dexes in a given directory, with the primary dex first.

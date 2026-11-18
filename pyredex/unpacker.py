@@ -33,6 +33,7 @@ from pyredex.utils import (
     ensure_libs_dir,
     get_xz_path,
     make_temp_dir,
+    module_dex_glob,
     remove_signature_files,
 )
 
@@ -148,10 +149,11 @@ class ApplicationModule(object):
         return self.canary_prefix
 
     def write_redex_metadata(self, path: str, metadata_file: str) -> None:
-        files = []
-        for x in abs_glob(path, "*.dex"):
-            files.append(x)
-        metadata = {"id": self.name, "requires": self.dependencies, "files": files}
+        metadata = {
+            "id": self.name,
+            "requires": self.dependencies,
+            "files": module_dex_glob(path, self.name),
+        }
         with open(metadata_file, "w") as store_metadata:
             json.dump(metadata, store_metadata)
 

@@ -13,6 +13,7 @@
 #include "Debug.h"
 #include "DeterministicContainers.h"
 #include "DexAccess.h"
+#include "EnumUpcastAnalysis.h"
 #include "IROpcode.h"
 #include "Resolver.h"
 #include "Show.h"
@@ -267,6 +268,73 @@ bool calls_method_handle(const DexMethod* method) {
   });
 }
 
+bool is_constant_of(const DexClass* cls, const DexField* field) {
+  return field != nullptr && field->get_class() == cls->get_type() &&
+         check_required_access_flags(optimize_enums::enum_field_access(),
+                                     field->get_access());
+}
+
+// Whether `<clinit>` has assigned `field` on every path to the state `env`.
+bool is_assigned(const ConstantEnvironment& env, DexField* field) {
+  auto heap_ptr = env.get(field).maybe_get<AbstractHeapPointer>();
+  return heap_ptr && heap_ptr->get_constant();
+}
+
+// The constants of `cls` that `<clinit>` has not assigned on every path to the
+// state `env`.
+UnorderedSet<const DexField*> unassigned_constants(
+    const DexClass* cls, const ConstantEnvironment& env) {
+  UnorderedSet<const DexField*> unassigned;
+  for (auto* field : cls->get_sfields()) {
+    if (is_constant_of(cls, field) && !is_assigned(env, field)) {
+      unassigned.insert(field);
+    }
+  }
+  return unassigned;
+}
+
+/**
+ * Whether `insn` reads one of the constants in `unassigned`, or all of `cls`'s
+ * constants at once through its values array, `values()` or
+ * `valueOf(String)`, which see them only once every one is assigned.
+ */
+bool reads_unassigned_constant(
+    const DexClass* cls,
+    const IRInstruction* insn,
+    const UnorderedSet<const DexField*>& unassigned) {
+  if (insn->opcode() == OPCODE_SGET_OBJECT) {
+    const auto* field = resolve_field(insn->get_field(), FieldSearch::Static);
+    return field != nullptr && (unassigned.count(field) != 0u ||
+                                (field->get_class() == cls->get_type() &&
+                                 optimize_enums::is_enum_values_field(field)));
+  }
+  if (!insn->has_method()) {
+    return false;
+  }
+  const auto* method = insn->get_method();
+  return method->get_class() == cls->get_type() &&
+         (optimize_enums::is_enum_values(method) ||
+          optimize_enums::is_enum_valueof(method));
+}
+
+/**
+ * Whether `insn` reads one of `cls`'s constants before `<clinit>` has assigned
+ * it on every path, given the state `env` before `insn`. Such a read sees
+ * null, as in `enum E { A(E.B == null), B(false); }`, but would see the boxed
+ * constant once the enum is boxed.
+ */
+bool may_read_unassigned_constant(const DexClass* cls,
+                                  const IRInstruction* insn,
+                                  const ConstantEnvironment& env) {
+  if (env.is_bottom() ||
+      (insn->opcode() != OPCODE_SGET_OBJECT && !insn->has_method())) {
+    return false;
+  }
+  const auto unassigned = unassigned_constants(cls, env);
+  return !unassigned.empty() &&
+         reads_unassigned_constant(cls, insn, unassigned);
+}
+
 } // namespace
 
 namespace optimize_enums {
@@ -306,6 +374,11 @@ EnumAttributes analyze_enum_clinit(const DexClass* cls,
     auto last_insn = b->get_last_insn();
     for (auto& mie : InstructionIterable(b)) {
       auto* insn = mie.insn;
+      if (may_read_unassigned_constant(cls, insn, env)) {
+        TRACE(ENUM, 2, "\t%s may read a constant before assigning it: %s",
+              SHOW(cls), SHOW(insn));
+        return EnumAttributes();
+      }
       fp_iter->analyze_instruction(insn, &env, insn == last_insn->insn);
       if (opcode::is_a_return(insn->opcode())) {
         return_env.join_with(env);

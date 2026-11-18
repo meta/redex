@@ -1202,6 +1202,223 @@ TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsConstructorMethodHandleCall) {
   }
 }
 
+// enum E {
+//   A, B;
+//   static final boolean B_WAS_NULL = E.B == null;  // placed before A and B
+// }
+// The read of B before <clinit> assigns it sees null. Once boxed, it would see
+// B's boxed ordinal, so the enum is kept.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsReadBeforeAssignment) {
+  auto store = create_enum_store();
+  ClassCreator cc(DexType::make_type("LForward;"));
+  cc.set_super(type::java_lang_Enum());
+  cc.set_access(ACC_PUBLIC | ACC_FINAL | ACC_ENUM);
+  for (const char* constant :
+       {"LForward;.A:LForward;", "LForward;.B:LForward;"}) {
+    cc.add_field(DexField::make_field(constant)->make_concrete(
+        ACC_PUBLIC | ACC_STATIC | ACC_ENUM));
+  }
+  cc.add_field(DexField::make_field("LForward;.B_WAS_NULL:Z")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL));
+  cc.add_method(assembler::method_from_string(R"(
+    (method (private constructor) "LForward;.<init>:(Ljava/lang/String;I)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (load-param v2)
+        (invoke-direct (v0 v1 v2) "Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V")
+        (return-void)
+      )
+    )
+  )"));
+  cc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LForward;.<clinit>:()V"
+      (
+        (sget-object "LForward;.B:LForward;")
+        (move-result-pseudo-object v3)
+        (const v4 0)
+        (if-nez v3 :assigned)
+        (const v4 1)
+        (:assigned)
+        (sput-boolean v4 "LForward;.B_WAS_NULL:Z")
+        (const-string "A")
+        (move-result-pseudo-object v0)
+        (const v1 0)
+        (new-instance "LForward;")
+        (move-result-pseudo-object v2)
+        (invoke-direct (v2 v0 v1) "LForward;.<init>:(Ljava/lang/String;I)V")
+        (sput-object v2 "LForward;.A:LForward;")
+        (const-string "B")
+        (move-result-pseudo-object v0)
+        (const v1 1)
+        (new-instance "LForward;")
+        (move-result-pseudo-object v2)
+        (invoke-direct (v2 v0 v1) "LForward;.<init>:(Ljava/lang/String;I)V")
+        (sput-object v2 "LForward;.B:LForward;")
+        (return-void)
+      )
+    )
+  )"));
+  auto* cls = cc.create();
+  for (auto* m : cls->get_all_methods()) {
+    m->get_code()->build_cfg();
+  }
+  auto attributes =
+      optimize_enums::analyze_enum_clinit(cls, /*support_kt_19_enum_entries*/
+                                          false);
+  EXPECT_TRUE(attributes.m_constants_map.empty());
+}
+
+/* Create the enum `LMode;` with constants FAST and SLOW, its values array, a
+static fields `sink` and `ready` and the given extra `methods`, and analyze its
+<clinit>, which runs `middle` after assigning FAST and before creating SLOW, as
+code in SLOW's arguments does:
+
+enum Mode { FAST, SLOW(middle); ... }
+
+Return the number of constants found, which is 0 when the enum is kept. */
+size_t constants_with_code_before_slow(
+    const std::string& middle, const std::vector<std::string>& methods = {}) {
+  auto store = create_enum_store();
+  ClassCreator cc(DexType::make_type("LMode;"));
+  cc.set_super(type::java_lang_Enum());
+  cc.set_access(ACC_PUBLIC | ACC_FINAL | ACC_ENUM);
+  for (const char* constant : {"LMode;.FAST:LMode;", "LMode;.SLOW:LMode;"}) {
+    cc.add_field(DexField::make_field(constant)->make_concrete(
+        ACC_PUBLIC | ACC_STATIC | ACC_FINAL | ACC_ENUM));
+  }
+  cc.add_field(DexField::make_field("LMode;.$VALUES:[LMode;")
+                   ->make_concrete(ACC_STATIC | ACC_FINAL | ACC_SYNTHETIC));
+  cc.add_field(DexField::make_field("LMode;.sink:Ljava/lang/Object;")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  cc.add_field(DexField::make_field("LMode;.ready:Z")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  cc.add_method(assembler::method_from_string(R"(
+    (method (private constructor) "LMode;.<init>:(Ljava/lang/String;I)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (load-param v2)
+        (invoke-direct (v0 v1 v2) "Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V")
+        (return-void)
+      )
+    )
+  )"));
+  for (const auto& method : methods) {
+    cc.add_method(assembler::method_from_string(method));
+  }
+  cc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LMode;.<clinit>:()V"
+      (
+        (const-string "FAST")
+        (move-result-pseudo-object v1)
+        (const v2 0)
+        (new-instance "LMode;")
+        (move-result-pseudo-object v3)
+        (invoke-direct (v3 v1 v2) "LMode;.<init>:(Ljava/lang/String;I)V")
+        (sput-object v3 "LMode;.FAST:LMode;")
+  )" + middle + R"(
+        (const-string "SLOW")
+        (move-result-pseudo-object v1)
+        (const v2 1)
+        (new-instance "LMode;")
+        (move-result-pseudo-object v4)
+        (invoke-direct (v4 v1 v2) "LMode;.<init>:(Ljava/lang/String;I)V")
+        (sput-object v4 "LMode;.SLOW:LMode;")
+        (return-void)
+      )
+    )
+  )"));
+  auto* cls = cc.create();
+  for (auto* m : cls->get_all_methods()) {
+    m->get_code()->build_cfg();
+  }
+  return optimize_enums::analyze_enum_clinit(cls,
+                                             /*support_kt_19_enum_entries*/
+                                             false)
+      .m_constants_map.size();
+}
+
+/* `values()` and `valueOf(String)` of `LMode;`, as javac generates them. */
+std::vector<std::string> mode_values_methods() {
+  return {R"(
+            (method (public static) "LMode;.values:()[LMode;"
+              (
+                (sget-object "LMode;.$VALUES:[LMode;")
+                (move-result-pseudo-object v0)
+                (invoke-virtual (v0) "[LMode;.clone:()Ljava/lang/Object;")
+                (move-result-object v0)
+                (check-cast v0 "[LMode;")
+                (move-result-pseudo-object v0)
+                (return-object v0)
+              )
+            )
+          )",
+          R"(
+            (method (public static) "LMode;.valueOf:(Ljava/lang/String;)LMode;"
+              (
+                (load-param-object v0)
+                (const-class "LMode;")
+                (move-result-pseudo-object v1)
+                (invoke-static (v1 v0) "Ljava/lang/Enum;.valueOf:(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;")
+                (move-result-object v0)
+                (check-cast v0 "LMode;")
+                (move-result-pseudo-object v0)
+                (return-object v0)
+              )
+            )
+          )"};
+}
+
+// Before SLOW is assigned, `values()` throws, as the values array is still
+// null, but would return the boxed constants once Mode is boxed.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsValuesCallBeforeAllAssigned) {
+  EXPECT_EQ(constants_with_code_before_slow(R"(
+              (invoke-static () "LMode;.values:()[LMode;")
+              (move-result-object v0)
+              (sput-object v0 "LMode;.sink:Ljava/lang/Object;")
+            )",
+                                            mode_values_methods()),
+            0);
+}
+
+// Likewise `valueOf("SLOW")`, which looks the name up in the values array.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsValueOfCallBeforeAllAssigned) {
+  EXPECT_EQ(constants_with_code_before_slow(R"(
+              (const-string "SLOW")
+              (move-result-pseudo-object v0)
+              (invoke-static (v0) "LMode;.valueOf:(Ljava/lang/String;)LMode;")
+              (move-result-object v0)
+              (sput-object v0 "LMode;.sink:Ljava/lang/Object;")
+            )",
+                                            mode_values_methods()),
+            0);
+}
+
+// Likewise a read of the values array itself, which is still null.
+TEST_F(OptimizeEnumsTest,
+       clinitAnalysisRejectsValuesArrayReadBeforeAllAssigned) {
+  EXPECT_EQ(constants_with_code_before_slow(R"(
+              (sget-object "LMode;.$VALUES:[LMode;")
+              (move-result-pseudo-object v0)
+              (sput-object v0 "LMode;.sink:Ljava/lang/Object;")
+            )"),
+            0);
+}
+
+// A read of SLOW in code that never runs cannot see null.
+TEST_F(OptimizeEnumsTest, clinitAnalysisAcceptsReadInUnreachableCode) {
+  EXPECT_EQ(constants_with_code_before_slow(R"(
+              (const v0 0)
+              (if-eqz v0 :skip)
+              (sget-object "LMode;.SLOW:LMode;")
+              (move-result-pseudo-object v0)
+              (sput-object v0 "LMode;.sink:Ljava/lang/Object;")
+              (:skip)
+            )"),
+            2);
+}
+
 /* An enum whose synthetic `$values()` never returns (not javac output):
 
   enum Tab {

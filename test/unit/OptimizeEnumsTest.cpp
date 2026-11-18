@@ -15,6 +15,7 @@
 
 #include "ControlFlow.h"
 #include "Creators.h"
+#include "DexCallSite.h"
 #include "EnumClinitAnalysis.h"
 #include "EnumConfig.h"
 #include "EnumUpcastAnalysis.h"
@@ -22,6 +23,7 @@
 #include "OptimizeEnums.h"
 #include "OptimizeEnumsUnsafeType.h"
 #include "RedexTest.h"
+#include "Show.h"
 #include "TypeUtil.h"
 #include "Walkers.h"
 
@@ -536,17 +538,21 @@ TEST_F(OptimizeEnumsTest, constantOfTwoDimensionalArrayIsFormattedByName) {
   EXPECT_EQ(name_helpers, 1u) << show(method->get_code()->cfg());
 }
 
-/* Create an enum with constants A and B whose <clinit> passes the given
-ordinals to the constructor, like this hand-written Java-like code:
+/* Create an enum with constants A and B whose <clinit> runs `clinit_prefix`
+and then passes the given ordinals to the constructor, like this hand-written
+Java-like code:
 
 enum E {
   A("A", 0), B("B", ordinal_b);  // javac would pass ordinal 1 for B
 }
 */
-DexClass* create_two_constant_enum(const std::string& name, int ordinal_b) {
+DexClass* create_two_constant_enum(const std::string& name,
+                                   int ordinal_b,
+                                   const std::string& clinit_prefix = "") {
   auto with_names = [&](std::string s_expr) {
     boost::replace_all(s_expr, "LE;", name);
     boost::replace_all(s_expr, "ORDINAL_B", std::to_string(ordinal_b));
+    boost::replace_all(s_expr, "CLINIT_PREFIX", clinit_prefix);
     return s_expr;
   };
   ClassCreator cc(DexType::make_type(name));
@@ -571,6 +577,7 @@ DexClass* create_two_constant_enum(const std::string& name, int ordinal_b) {
   cc.add_method(assembler::method_from_string(with_names(R"(
     (method (public static) "LE;.<clinit>:()V"
       (
+        CLINIT_PREFIX
         (const-string "A")
         (move-result-pseudo-object v0)
         (const v1 0)
@@ -627,4 +634,76 @@ TEST_F(OptimizeEnumsTest, clinitAnalysisAcceptsConsecutiveOrdinals) {
       optimize_enums::analyze_enum_clinit(cls, /*support_kt_19_enum_entries*/
                                           false);
   EXPECT_EQ(attributes.m_constants_map.size(), 2);
+}
+
+// enum E {
+//   A, B;
+//   static final long START;
+//   static { START = (long) NOW.invokeExact(); }  // NOW is a MethodHandle
+// }
+// The analysis cannot model a method handle call, which may run any code, so
+// the enum is kept.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsMethodHandleCall) {
+  auto store = create_enum_store();
+  auto* cls = create_two_constant_enum("LHandleCall;", 1, R"(
+    (const v3 0)
+    (invoke-polymorphic (v3) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;")
+  )");
+  auto attributes =
+      optimize_enums::analyze_enum_clinit(cls, /*support_kt_19_enum_entries*/
+                                          false);
+  EXPECT_TRUE(attributes.m_constants_map.empty());
+}
+
+// Likewise a call site, which `invoke-custom` calls through a bootstrap
+// method. S-expressions cannot spell `invoke-custom`, so it replaces a
+// placeholder call.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsCallSite) {
+  auto store = create_enum_store();
+  auto* cls = create_two_constant_enum("LCallSite;", 1, R"(
+    (invoke-static () "LCallSite;.placeholder:()V")
+  )");
+  for (auto& mie :
+       cfg::InstructionIterable(cls->get_clinit()->get_code()->cfg())) {
+    if (mie.insn->has_method() &&
+        mie.insn->get_method()->str() == "placeholder") {
+      mie.insn->set_opcode(OPCODE_INVOKE_CUSTOM)
+          ->set_callsite(new DexCallSite(
+              nullptr, DexString::make_string("run"),
+              DexProto::make_proto(type::_void(),
+                                   DexTypeList::make_type_list({})),
+              {}));
+    }
+  }
+  auto attributes =
+      optimize_enums::analyze_enum_clinit(cls, /*support_kt_19_enum_entries*/
+                                          false);
+  EXPECT_TRUE(attributes.m_constants_map.empty());
+}
+
+// A signature-polymorphic call in the constructor is just as unsupported as
+// one in <clinit>. An ordinary Java enum constructor can make this call.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsConstructorMethodHandleCall) {
+  auto store = create_enum_store();
+  auto* cls = create_two_constant_enum("LHandleCtor;", 1);
+  auto* ctor = cls->get_ctors().front();
+  ctor->set_code(assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (load-param-object v1)
+      (load-param v2)
+      (invoke-direct (v0 v1 v2) "Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V")
+      (sget-object "LHandles;.NOW:Ljava/lang/invoke/MethodHandle;")
+      (move-result-pseudo-object v3)
+      (invoke-polymorphic (v3) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;")
+      (return-void)
+    )
+  )"));
+  ctor->get_code()->build_cfg();
+  const auto before = show(ctor->get_code()->cfg());
+  for (size_t run = 0; run < 2; ++run) {
+    const auto attributes = optimize_enums::analyze_enum_clinit(cls, false);
+    EXPECT_TRUE(attributes.m_constants_map.empty());
+    EXPECT_EQ(show(ctor->get_code()->cfg()), before);
+  }
 }

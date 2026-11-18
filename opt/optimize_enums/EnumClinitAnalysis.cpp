@@ -7,10 +7,13 @@
 
 #include "EnumClinitAnalysis.h"
 
+#include <algorithm>
+
 #include "ConstantPropagationAnalysis.h"
 #include "Debug.h"
 #include "DeterministicContainers.h"
 #include "DexAccess.h"
+#include "IROpcode.h"
 #include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
@@ -250,6 +253,20 @@ bool validate_result(const DexClass* cls,
   return false;
 }
 
+// Whether `method` makes a method handle call or calls through a call site,
+// either of which may run any code.
+bool calls_method_handle(const DexMethod* method) {
+  const auto* code = method->get_code();
+  if (code == nullptr) {
+    return false;
+  }
+  auto ii = cfg::ConstInstructionIterable(code->cfg());
+  return std::any_of(ii.begin(), ii.end(), [](const auto& mie) {
+    return opcode::is_invoke_polymorphic(mie.insn->opcode()) ||
+           opcode::is_invoke_custom(mie.insn->opcode());
+  });
+}
+
 } // namespace
 
 namespace optimize_enums {
@@ -265,6 +282,14 @@ EnumAttributes analyze_enum_clinit(const DexClass* cls,
   auto* code = cls->get_clinit()->get_code();
   always_assert(code->cfg_built());
   auto& cfg = code->cfg();
+  // The analysis cannot model such calls in <clinit> or in the constructors it
+  // follows, so it leaves the enum unanalyzed.
+  const auto& ctors = cls->get_ctors();
+  if (calls_method_handle(cls->get_clinit()) ||
+      std::any_of(ctors.begin(), ctors.end(), calls_method_handle)) {
+    TRACE(ENUM, 2, "\t%s makes a method handle call", SHOW(cls));
+    return EnumAttributes();
+  }
   auto fp_iter = std::make_unique<cp::intraprocedural::FixpointIterator>(
       cfg,
       CombinedAnalyzer(cls->get_type(), nullptr, nullptr, nullptr, nullptr,

@@ -591,7 +591,8 @@ void EnumFixpointIterator::analyze_instruction(const IRInstruction* insn,
       EnumTypes types;
       EnumTypes array_types = env->get(insn->src(0));
       for (const auto* const array_type : array_types.elements()) {
-        auto* const type = type::make_array_element_type(array_type);
+        // Reading `rows[0]` from a `Bar[][]` yields a `Bar[]`, not a `Bar`.
+        auto* const type = type::make_array_component_type(array_type);
         if ((type != nullptr) && !type::is_primitive(type)) {
           types.add(type);
         }

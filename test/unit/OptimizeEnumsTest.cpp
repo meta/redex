@@ -462,6 +462,80 @@ TEST_F(OptimizeEnumsTest, rejectionReasonsAreComplete) {
   }
 }
 
+namespace {
+/* Run the pass on Bar and a class `LRows;` whose method `show` takes a
+`Bar[][] rows` and formats what `read` reads from it, like
+
+  static String show(Bar[][] rows) { return String.valueOf(rows[0][0]); }
+
+Returns `show` after the pass. */
+DexMethod* run_pass_on_two_dimensional_array_user(const std::string& read) {
+  auto store = create_enum_store();
+  ClassCreator rc(DexType::make_type("LRows;"));
+  rc.set_super(type::java_lang_Object());
+  rc.set_access(ACC_PUBLIC);
+  rc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LRows;.show:([[LBar;)Ljava/lang/String;"
+      (
+        (load-param-object v0)
+        (const v1 0)
+)" + read + R"(
+        (invoke-static (v2) "Ljava/lang/String;.valueOf:(Ljava/lang/Object;)Ljava/lang/String;")
+        (move-result-object v3)
+        (return-object v3)
+      )
+    )
+  )"));
+  auto* rows = rc.create();
+  store.add_classes({rows});
+  DexStoresVector stores({std::move(store)});
+  walk::code(build_class_scope(stores),
+             [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  optimize_enums::OptimizeEnumsPass pass;
+  PassManager manager({&pass});
+  Json::Value conf_obj = Json::nullValue;
+  ConfigFiles dummy_config(conf_obj);
+  dummy_config.parse_global_config();
+  manager.run_passes(stores, dummy_config);
+  // Boxing Bar changes the proto of `show`, the only method of `LRows;`.
+  auto* show = only(rows->get_dmethods());
+  show->get_code()->build_cfg();
+  return show;
+}
+} // namespace
+
+// `String.valueOf(rows[0])` hands a whole row, a `Bar[]`, to code that sees it
+// as an Object, so Bar must stay an enum.
+TEST_F(OptimizeEnumsTest, rowOfTwoDimensionalArrayFormattedAsObjectKeepsEnum) {
+  run_pass_on_two_dimensional_array_user(R"(
+        (aget-object v0 v1)
+        (move-result-pseudo-object v2)
+  )");
+  EXPECT_TRUE(is_enum(type_class(DexType::get_type("LBar;"))));
+}
+
+// `String.valueOf(rows[0][0])` formats one constant, so once Bar is boxed it
+// must still print the constant's name, not its ordinal.
+TEST_F(OptimizeEnumsTest, constantOfTwoDimensionalArrayIsFormattedByName) {
+  auto* method = run_pass_on_two_dimensional_array_user(R"(
+        (aget-object v0 v1)
+        (move-result-pseudo-object v2)
+        (aget-object v2 v1)
+        (move-result-pseudo-object v2)
+  )");
+  ASSERT_FALSE(is_enum(type_class(DexType::get_type("LBar;"))));
+  size_t name_helpers = 0;
+  for (const auto& mie : cfg::InstructionIterable(method->get_code()->cfg())) {
+    if (mie.insn->opcode() == OPCODE_INVOKE_STATIC &&
+        mie.insn->get_method()->get_name()->str() ==
+            "redex$OE$String_valueOf") {
+      ++name_helpers;
+    }
+  }
+  EXPECT_EQ(name_helpers, 1u) << show(method->get_code()->cfg());
+}
+
 /* Create an enum with constants A and B whose <clinit> passes the given
 ordinals to the constructor, like this hand-written Java-like code:
 

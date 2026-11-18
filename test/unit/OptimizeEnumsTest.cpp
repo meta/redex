@@ -20,6 +20,7 @@
 #include "EnumConfig.h"
 #include "EnumUpcastAnalysis.h"
 #include "IRAssembler.h"
+#include "InlineEnumValues.h"
 #include "OptimizeEnums.h"
 #include "OptimizeEnumsUnsafeType.h"
 #include "RedexTest.h"
@@ -1031,4 +1032,101 @@ TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsConstructorMethodHandleCall) {
     EXPECT_TRUE(attributes.m_constants_map.empty());
     EXPECT_EQ(show(ctor->get_code()->cfg()), before);
   }
+}
+
+/* An enum whose synthetic `$values()` never returns (not javac output):
+
+  enum Tab {
+    A;
+    private static final Map<String, Tab> MAP = new HashMap<>();
+    private static Tab[] $values() { throw new IllegalStateException(); }
+    static { $VALUES = $values(); MAP.put("a", A); }
+  }
+
+OptimizeEnums' own inline_enum_values step inlines `$values()` into <clinit>,
+which leaves the rest of <clinit> unreachable. The usage analysis that runs
+next requires every block to be reachable.
+*/
+TEST_F(OptimizeEnumsTest, inlinedNonReturningValuesLeavesNoUnreachableBlocks) {
+  auto store = create_enum_store();
+  ClassCreator tc(DexType::make_type("LTab;"));
+  tc.set_super(type::java_lang_Enum());
+  tc.set_access(ACC_PUBLIC | ACC_FINAL | ACC_ENUM);
+  tc.add_field(
+      DexField::make_field("LTab;.A:LTab;")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL | ACC_ENUM));
+  tc.add_field(DexField::make_field("LTab;.$VALUES:[LTab;")
+                   ->make_concrete(ACC_PRIVATE | ACC_STATIC | ACC_FINAL |
+                                   ACC_SYNTHETIC));
+  tc.add_field(DexField::make_field("LTab;.MAP:Ljava/util/Map;")
+                   ->make_concrete(ACC_PRIVATE | ACC_STATIC | ACC_FINAL));
+  tc.add_method(assembler::method_from_string(R"(
+    (method (private constructor) "LTab;.<init>:(Ljava/lang/String;I)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (load-param v2)
+        (invoke-direct (v0 v1 v2) "Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V")
+        (return-void)
+      )
+    )
+  )"));
+  tc.add_method(assembler::method_from_string(R"(
+    (method (private static synthetic) "LTab;.$values:()[LTab;"
+      (
+        (new-instance "Ljava/lang/IllegalStateException;")
+        (move-result-pseudo-object v0)
+        (invoke-direct (v0) "Ljava/lang/IllegalStateException;.<init>:()V")
+        (throw v0)
+      )
+    )
+  )"));
+  tc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LTab;.<clinit>:()V"
+      (
+        (new-instance "LTab;")
+        (move-result-pseudo-object v0)
+        (const-string "A")
+        (move-result-pseudo-object v1)
+        (const v2 0)
+        (invoke-direct (v0 v1 v2) "LTab;.<init>:(Ljava/lang/String;I)V")
+        (sput-object v0 "LTab;.A:LTab;")
+        (invoke-static () "LTab;.$values:()[LTab;")
+        (move-result-object v3)
+        (sput-object v3 "LTab;.$VALUES:[LTab;")
+        (new-instance "Ljava/util/HashMap;")
+        (move-result-pseudo-object v4)
+        (invoke-direct (v4) "Ljava/util/HashMap;.<init>:()V")
+        (const-string "a")
+        (move-result-pseudo-object v1)
+        (sget-object "LTab;.A:LTab;")
+        (move-result-pseudo-object v0)
+        (invoke-interface (v4 v1 v0) "Ljava/util/Map;.put:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;")
+        (sput-object v4 "LTab;.MAP:Ljava/util/Map;")
+        (return-void)
+      )
+    )
+  )"));
+  auto* tab = tc.create();
+  store.add_classes({tab});
+  DexStoresVector stores({std::move(store)});
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  ASSERT_EQ(inline_enum_values::run(tab), inline_enum_values::Result::kChanged);
+
+  auto* tab_type = DexType::get_type("LTab;");
+  optimize_enums::Config config(100);
+  config.candidate_enums.insert(tab_type);
+  optimize_enums::reject_unsafe_enums(scope, &config, [](auto, auto) {});
+  EXPECT_EQ(inline_enum_values::run(tab),
+            inline_enum_values::Result::kIneligible);
+
+  optimize_enums::OptimizeEnumsPass first_pass;
+  optimize_enums::OptimizeEnumsPass second_pass;
+  PassManager manager({&first_pass, &second_pass});
+  ConfigFiles conf(Json::nullValue);
+  conf.parse_global_config();
+  manager.run_passes(stores, conf);
+  EXPECT_EQ(tab->get_super_class(), type::java_lang_Enum());
 }

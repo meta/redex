@@ -129,6 +129,12 @@ Result run(DexClass* cls) {
                                        /* needs_receiver_cast */ nullptr,
                                        /* needs_init_class */ nullptr,
                                        clinit_cfg->get_registers_size());
+    // A `$values()` that cannot return leaves the rest of `<clinit>`
+    // unreachable, and the analyses that run next require every block to be
+    // reachable.
+    if (inlined) {
+      clinit_cfg->simplify();
+    }
   }
 
   if (!inlined) {

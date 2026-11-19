@@ -41,6 +41,19 @@ DexClass* create_user(const std::string& code) {
   return creator.create();
 }
 
+size_t run_pass_on(const std::vector<DexClass*>& classes) {
+  DexStore store("classes");
+  store.add_classes(classes);
+  std::vector<DexStore> stores;
+  stores.emplace_back(std::move(store));
+  VerticalMergingPass pass;
+  PassManager manager({&pass});
+  ConfigFiles config(Json::nullValue);
+  config.parse_global_config();
+  manager.run_passes(stores, config);
+  return stores[0].get_dexen()[0].size();
+}
+
 constexpr const char* kNewImpl = R"(
   (
     (new-instance "Lcom/redextest/Impl;")
@@ -50,7 +63,7 @@ constexpr const char* kNewImpl = R"(
   )
 )";
 
-class VerticalMergingNoOptimizationsTest : public RedexTest {
+class VerticalMergingTest : public RedexTest {
  protected:
   void SetUp() override {
     create_object_class();
@@ -69,18 +82,7 @@ class VerticalMergingNoOptimizationsTest : public RedexTest {
     impl = impl_creator.create();
   }
 
-  size_t run_pass(DexClass* user) {
-    DexStore store("classes");
-    store.add_classes({base, impl, user});
-    std::vector<DexStore> stores;
-    stores.emplace_back(std::move(store));
-    VerticalMergingPass pass;
-    PassManager manager({&pass});
-    ConfigFiles config(Json::nullValue);
-    config.parse_global_config();
-    manager.run_passes(stores, config);
-    return stores[0].get_dexen()[0].size();
-  }
+  size_t run_pass(DexClass* user) { return run_pass_on({base, impl, user}); }
 
   DexClass* base{nullptr};
   DexMethod* base_init{nullptr};
@@ -90,13 +92,13 @@ class VerticalMergingNoOptimizationsTest : public RedexTest {
 } // namespace
 
 // Without the protected constructor, `Base` merges with its only subclass.
-TEST_F(VerticalMergingNoOptimizationsTest, mergesWithoutProtectedMethods) {
+TEST_F(VerticalMergingTest, mergesWithoutProtectedMethods) {
   EXPECT_EQ(run_pass(create_user(kNewImpl)), 2);
 }
 
 // Merging `Base` with `Impl` would move or rewrite `Base`'s constructor, which
 // is excluded from optimization.
-TEST_F(VerticalMergingNoOptimizationsTest, keepsClassOfProtectedMethod) {
+TEST_F(VerticalMergingTest, keepsClassOfProtectedMethod) {
   base_init->rstate.set_no_optimizations();
   auto* user = create_user(kNewImpl);
 
@@ -106,8 +108,7 @@ TEST_F(VerticalMergingNoOptimizationsTest, keepsClassOfProtectedMethod) {
 }
 
 // Merging `Impl` away would rewrite the protected method that creates it.
-TEST_F(VerticalMergingNoOptimizationsTest,
-       keepsTypesReferencedByProtectedCode) {
+TEST_F(VerticalMergingTest, keepsTypesReferencedByProtectedCode) {
   auto* user = create_user(kNewImpl);
   auto* use = user->get_dmethods().front();
   use->rstate.set_no_optimizations();

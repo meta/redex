@@ -1501,9 +1501,9 @@ def get_compression_list() -> typing.List[CompressionEntry]:
             True,
             [],
             ["redex-class-sizes.csv"],
+            "redex-class-sizes.csv.zst",
             None,
-            None,
-            CompressionLevel.DEFAULT,  # May be large.
+            CompressionLevel.FAST,  # May be large.
         ),
         CompressionEntry(
             "Redex Class to Files Map",

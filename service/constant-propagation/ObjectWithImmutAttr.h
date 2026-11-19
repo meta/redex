@@ -437,6 +437,9 @@ class ObjectWithImmutAttrDomain final
     if (is_bottom()) {
       return true;
     }
+    if (other.is_bottom()) {
+      return false;
+    }
     if (is_top()) {
       return other.is_top();
     }

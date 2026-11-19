@@ -154,3 +154,16 @@ TEST_F(ConstantValueTest, nonTopLow6bitIsNotNezOnly) {
   EXPECT_TRUE(non_top_low6bit.is_nez());
   EXPECT_FALSE(non_top_low6bit.is_nez_only());
 }
+
+// Meeting two objects that are never the same object gives Bottom of the
+// object kind, which no object is below.
+TEST_F(ConstantValueTest, objectIsNotLeqBottomOfItsKind) {
+  ObjectWithImmutAttrDomain object(
+      ObjectWithImmutAttr(DexType::make_type("LFoo;"), 0));
+  ObjectWithImmutAttrDomain bottom(
+      ObjectWithImmutAttr(DexType::make_type("LFoo;"), 0));
+  bottom.set_to_bottom();
+  EXPECT_FALSE(object.leq(bottom));
+  EXPECT_FALSE(ConstantValue(object).leq(ConstantValue(bottom)));
+  EXPECT_TRUE(bottom.leq(object));
+}

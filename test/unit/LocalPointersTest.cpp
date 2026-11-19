@@ -483,3 +483,106 @@ TEST_F(LocalPointersTest, argumentToKeptInterfaceDefaultMethodEscapes) {
   EXPECT_THAT(unordered_unsafe_unwrap(summaries.at(notify).escaping_parameters),
               UnorderedElementsAre(0, 1));
 }
+
+TEST_F(LocalPointersTest, argumentToInvokeSuperOfAbstractMethodEscapes) {
+  // `Sub` was compiled against a version of `Base` in which `make` had code.
+  ClassCreator bc(DexType::make_type("LBase;"));
+  bc.set_super(type::java_lang_Object());
+  bc.set_access(ACC_PUBLIC | ACC_ABSTRACT);
+  auto* base_make =
+      DexMethod::make_method(
+          "LBase;.make:(Ljava/lang/Object;)Ljava/lang/Object;")
+          ->make_concrete(ACC_PUBLIC | ACC_ABSTRACT, /* is_virtual */ true);
+  bc.add_method(base_make);
+  auto* base = bc.create();
+
+  ClassCreator sc(DexType::make_type("LSub;"));
+  sc.set_super(base->get_type());
+  sc.set_access(ACC_PUBLIC | ACC_ABSTRACT);
+  auto* sub_make = assembler::method_from_string(R"(
+    (method (public) "LSub;.make:(Ljava/lang/Object;)Ljava/lang/Object;"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (invoke-super (v0 v1) "LBase;.make:(Ljava/lang/Object;)Ljava/lang/Object;")
+        (move-result-object v2)
+        (return-object v2)
+      )
+    )
+  )");
+  sc.add_method(sub_make);
+  Scope scope{base, sc.create()};
+  sub_make->get_code()->build_cfg();
+  sub_make->get_code()->cfg().calculate_exit_block();
+
+  auto override_graph = method_override_graph::build_graph(scope);
+  call_graph::Graph call_graph(
+      ptrs::EscapeCallGraphStrategy(*override_graph, scope));
+  ptrs::SummaryMap summaries;
+  ptrs::analyze_scope(scope, call_graph, &summaries);
+  const auto& summary = summaries.at(sub_make);
+  EXPECT_THAT(unordered_unsafe_unwrap(summary.escaping_parameters),
+              UnorderedElementsAre(0, 1));
+  EXPECT_THAT(unordered_unsafe_unwrap(summary.returned_parameters),
+              UnorderedElementsAre(ptrs::ESCAPED_FRESH_RETURN));
+}
+
+TEST_F(LocalPointersTest,
+       argumentToInvokeSuperOfInterfaceDefaultMethodEscapes) {
+  // `C.make` calls `I.super.make(o)`, which runs `I.make`; `B.make`, which an
+  // `invoke-super` search through the superclass finds instead, is abstract.
+  ClassCreator ic(DexType::make_type("LI;"));
+  ic.set_super(type::java_lang_Object());
+  ic.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  auto* i_make = assembler::method_from_string(R"(
+    (method (public) "LI;.make:(Ljava/lang/Object;)Ljava/lang/Object;"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (sput-object v1 "LI;.kept:Ljava/lang/Object;")
+        (return-object v1)
+      )
+    )
+  )");
+  ic.add_method(i_make);
+  auto* i_cls = ic.create();
+
+  ClassCreator bc(DexType::make_type("LB;"));
+  bc.set_super(type::java_lang_Object());
+  bc.set_access(ACC_PUBLIC | ACC_ABSTRACT);
+  auto* b_make =
+      DexMethod::make_method("LB;.make:(Ljava/lang/Object;)Ljava/lang/Object;")
+          ->make_concrete(ACC_PUBLIC | ACC_ABSTRACT, /* is_virtual */ true);
+  bc.add_method(b_make);
+  auto* b_cls = bc.create();
+
+  ClassCreator cc(DexType::make_type("LC;"));
+  cc.set_super(b_cls->get_type());
+  cc.add_interface(i_cls->get_type());
+  cc.set_access(ACC_PUBLIC);
+  auto* c_make = assembler::method_from_string(R"(
+    (method (public) "LC;.make:(Ljava/lang/Object;)Ljava/lang/Object;"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (invoke-super (v0 v1) "LI;.make:(Ljava/lang/Object;)Ljava/lang/Object;")
+        (move-result-object v2)
+        (return-object v2)
+      )
+    )
+  )");
+  cc.add_method(c_make);
+  Scope scope{i_cls, b_cls, cc.create()};
+  for (auto* method : {i_make, c_make}) {
+    method->get_code()->build_cfg();
+    method->get_code()->cfg().calculate_exit_block();
+  }
+
+  auto override_graph = method_override_graph::build_graph(scope);
+  call_graph::Graph call_graph(
+      ptrs::EscapeCallGraphStrategy(*override_graph, scope));
+  ptrs::SummaryMap summaries;
+  ptrs::analyze_scope(scope, call_graph, &summaries);
+  EXPECT_THAT(unordered_unsafe_unwrap(summaries.at(c_make).escaping_parameters),
+              Contains(1));
+}

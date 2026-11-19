@@ -328,8 +328,8 @@ struct AnalyzeScopeResult {
  * such method is a root, and a call gets edges only when they reach every
  * method that can run for it. A call that may reach a native method, a method
  * of a class created at runtime, an overridable or unsummarized external
- * method, or one of more than `big_override_threshold` overrides gets none, so
- * `analyze_scope` treats it as a call to unknown code.
+ * method, an abstract method, or one of more than `big_override_threshold`
+ * overrides gets none, so `analyze_scope` treats it as a call to unknown code.
  */
 class EscapeCallGraphStrategy : public call_graph::MultipleCalleeStrategy {
  public:

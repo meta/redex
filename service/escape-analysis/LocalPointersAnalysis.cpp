@@ -520,7 +520,8 @@ call_graph::CallSites EscapeCallGraphStrategy::get_callsites(
       for (const auto* overriding_method : overriding_methods) {
         callsites.emplace_back(overriding_method, insn);
       }
-    } else if (callee->is_concrete() && !is_native(callee)) {
+    } else if (callee->get_code() != nullptr) {
+      // An `invoke-super` may resolve to an abstract method, which has no code.
       callsites.emplace_back(callee, insn);
     }
   }

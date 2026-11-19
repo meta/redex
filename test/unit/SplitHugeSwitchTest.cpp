@@ -313,14 +313,11 @@ TEST_F(SplitHugeSwitchTest, Split2) {
       (:L3)
       (const v2 3)
       (if-gt v0 v2 :L4)
-      (goto :L5)
+      (invoke-static (v0) "LFoo;.bar$split_switch_clone:(I)V")
+      (return-void)
 
       (:L4)
       (invoke-static (v0) "LFoo;.bar$split_switch_cloner$0:(I)V")
-      (return-void)
-
-      (:L5)
-      (invoke-static (v0) "LFoo;.bar$split_switch_clone:(I)V")
       (return-void)
     ))";
   const auto* split1_res = R"(
@@ -388,23 +385,17 @@ TEST_F(SplitHugeSwitchTest, Split3) {
       (:L2)
       (const v2 2)
       (if-gt v0 v2 :L3)
-      (goto :L6)
+      (invoke-static (v0) "LFoo;.bar$split_switch_clone:(I)V")
+      (return-void)
 
       (:L3)
       (const v2 3)
       (if-gt v0 v2 :L4)
-      (goto :L5)
-
-      (:L4)
-      (invoke-static (v0) "LFoo;.bar$split_switch_cloner$1:(I)V")
-      (return-void)
-
-      (:L5)
       (invoke-static (v0) "LFoo;.bar$split_switch_cloner$0:(I)V")
       (return-void)
 
-      (:L6)
-      (invoke-static (v0) "LFoo;.bar$split_switch_clone:(I)V")
+      (:L4)
+      (invoke-static (v0) "LFoo;.bar$split_switch_cloner$1:(I)V")
       (return-void)
     ))";
   const auto* split1_res = R"(

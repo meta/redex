@@ -375,10 +375,12 @@ void Exporter::capture_pre_lowering(DexStoresVector& stores,
 
   // 4) Parallel per-method capture. The CFG was cleared by PassManager before
   // the backend. It is rebuilt on a copy of the code, never on the code
-  // itself: building and linearizing a CFG is not idempotent -- some methods
-  // come out of every round trip in the other of two layouts -- so a round
-  // trip here would change the DEX that ships, and only in builds that emit
-  // dexvt. Anchors found in the copy are mapped back to the code's own entries.
+  // itself: building and linearizing a CFG can change the code -- simplify()
+  // folds blocks and moves positions, and code laid out some other way, such
+  // as switch cases in ascending key order, changes on its first round trip --
+  // so a round trip here would change the DEX that ships, and only in builds
+  // that emit dexvt. Anchors found in the copy are mapped back to the code's
+  // own entries.
   // The file of the position entries that mark gotos in a method's copy.
   const DexString* goto_mark_file = DexString::make_string("dexvt goto mark");
   walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {

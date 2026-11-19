@@ -13,6 +13,7 @@
 #include <stack>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
 #include "CppUtil.h"
@@ -1795,6 +1796,54 @@ ConstInstructionIterator ControlFlowGraph::find_insn(const IRInstruction* insn,
   return iterable.end();
 }
 
+namespace {
+
+// Returns the successor edges of `b` in an order that depends only on what each
+// edge is, not on the order in which edges were added to or moved into `b`'s
+// successor list. Linearization visits successors in this order, so
+// retargeting an edge to the block it already enters, or adding the same edges
+// in another order, does not change the layout. Branches come in case-key order
+// or throws in catch order (a block never has both, see `EdgeType`), then ghost
+// edges, and the edges into the goto's target come last, the goto itself after
+// them.
+// (`source_blocks::impl::get_sorted_edges` has a different order, which
+// source-block numbering and thus profiles depend on.)
+CompactEdgeVector get_succs_in_linearization_order(const Block* b) {
+  CompactEdgeVector result = b->succs();
+  if (result.size() < 2) {
+    return result;
+  }
+  const Block* goto_target = b->goes_to();
+  auto sort_key = [goto_target](const Edge* e) {
+    // Outside a cycle, the weak topological ordering lays out right after `b`'s
+    // chain the last chain it reaches for the first time, where the goto can
+    // fall through. An earlier edge into the goto's target would reach that
+    // target first, so all of them come last, e.g. a switch case that shares
+    // the default block.
+    bool to_goto_target = e->target() == goto_target;
+    // TODO: Visiting switch cases in ascending case-key order usually lays
+    // their blocks out in descending order, which is annoying for writing
+    // tests. We may be able to use fewer debug positions if we emit them in
+    // ascending order.
+    int64_t index = e->type() == EDGE_THROW ? e->throw_info()->index
+                                            : e->case_key().value_or(0);
+    return std::make_tuple(to_goto_target, e->type() == EDGE_GOTO,
+                           e->type() == EDGE_GHOST, index);
+  };
+  std::sort(result.begin(), result.end(), [&](const Edge* e1, const Edge* e2) {
+    auto key1 = sort_key(e1);
+    auto key2 = sort_key(e2);
+    // Case keys and catch indices are distinct. Only ghost edges can share a
+    // key, and they all lead to the exit block.
+    redex_assert(e1 == e2 || key1 != key2 ||
+                 (e1->type() == EDGE_GHOST && e2->type() == EDGE_GHOST));
+    return key1 < key2;
+  });
+  return result;
+}
+
+} // namespace
+
 std::vector<Block*> ControlFlowGraph::order(
     LinearizationStrategy* custom_strategy, bool assume_no_unreachable_blocks) {
   if (!assume_no_unreachable_blocks) {
@@ -1944,18 +1993,13 @@ sparta::WeakTopologicalOrdering<BlockChain*> ControlFlowGraph::build_wto(
         std::vector<BlockChain*> result;
         result.reserve(chain->size());
 
-        // TODO: Sort the outputs by edge type, case key, and throw index
-        //  * We may be able to use fewer debug positions if we emit case blocks
-        //    in the original order.
-        //  * Right now, it seems the switches are being output in reverse
-        //    order, which is annoying for writing tests.
         const auto& end = chain->end();
         for (auto it = chain->begin(); it != end;) {
           Block* b = *it;
           const auto& next_it = std::next(it);
           Block* next = (next_it == end) ? nullptr : *next_it;
 
-          for (Edge* e : b->succs()) {
+          for (Edge* e : get_succs_in_linearization_order(b)) {
             if (e->target() == next) {
               // The most common intra-chain edge is a GOTO to the very next
               // block. Let's cheaply detect this case and filter it early,
@@ -2000,7 +2044,7 @@ void ControlFlowGraph::insert_branches_and_targets(
   for (auto it = ordering.begin(); it != ordering.end(); ++it) {
     Block* b = *it;
 
-    for (const Edge* edge : b->succs()) {
+    for (const Edge* edge : get_succs_in_linearization_order(b)) {
       if (edge->type() == EDGE_BRANCH) {
         auto branch_it = b->get_conditional_branch();
         always_assert_log(branch_it != b->end(), "block %zu %s", b->id(),

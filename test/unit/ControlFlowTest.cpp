@@ -3437,3 +3437,150 @@ TEST_F(ControlFlowTest, insert_after_param_loads) {
   )");
   EXPECT_CODE_EQ(without_params.get(), expected_without_params.get());
 }
+
+namespace {
+
+const char* const k_three_way_switch = R"(
+  (
+    (load-param v0)
+    (switch v0 (:c0 :c1 :c2))
+    (return v0)
+
+    (:c0 0)
+    (const v0 10)
+    (return v0)
+
+    (:c1 1)
+    (const v0 11)
+    (return v0)
+
+    (:c2 2)
+    (const v0 12)
+    (return v0)
+  )
+)";
+
+std::unique_ptr<IRCode> build_and_linearize(const char* code_str) {
+  auto code = assembler::ircode_from_string(code_str);
+  code->build_cfg();
+  code->clear_cfg();
+  return code;
+}
+
+} // namespace
+
+// Retargeting an edge to the block it already enters leaves the CFG
+// unchanged, so it must leave the linearized code unchanged too.
+TEST_F(ControlFlowTest, noop_retarget_keeps_layout) {
+  auto unedited = build_and_linearize(k_three_way_switch);
+
+  auto edited = assembler::ircode_from_string(k_three_way_switch);
+  edited->build_cfg();
+  auto& cfg = edited->cfg();
+  auto* case0 = cfg.get_succ_edge_if(
+      cfg.entry_block(), [](const Edge* e) { return e->case_key() == 0; });
+  ASSERT_NE(case0, nullptr);
+  cfg.set_edge_target(case0, case0->target());
+  edited->clear_cfg();
+
+  EXPECT_CODE_EQ(edited.get(), unedited.get());
+}
+
+// Two CFGs with the same blocks and edges linearize to the same code, no matter
+// in which order their edges were added.
+TEST_F(ControlFlowTest, layout_ignores_edge_insertion_order) {
+  auto unedited = build_and_linearize(k_three_way_switch);
+
+  auto edited = assembler::ircode_from_string(k_three_way_switch);
+  edited->build_cfg();
+  auto& cfg = edited->cfg();
+  auto* switch_block = cfg.entry_block();
+  std::vector<Edge*> old_edges(switch_block->succs().begin(),
+                               switch_block->succs().end());
+  // Re-add every successor edge in reverse order, then delete the originals.
+  for (auto it = old_edges.rbegin(); it != old_edges.rend(); ++it) {
+    Edge* e = *it;
+    if (e->case_key()) {
+      cfg.add_edge(switch_block, e->target(), *e->case_key());
+    } else {
+      cfg.add_edge(switch_block, e->target(), e->type());
+    }
+  }
+  for (Edge* e : old_edges) {
+    cfg.delete_edge(e);
+  }
+  edited->clear_cfg();
+
+  EXPECT_CODE_EQ(edited.get(), unedited.get());
+}
+
+// Building a CFG from linearized code and linearizing it again reproduces the
+// same code: the layout of the last instruction of a try region that falls
+// through to non-throwing code must not alternate between round trips.
+TEST_F(ControlFlowTest, linearize_round_trip_is_fixpoint) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param v1)
+      (invoke-static (v1) "LFoo;.f0:(I)V")
+      (.try_start c0)
+      (invoke-static (v1) "LFoo;.f1:(I)V")
+      (add-int/lit v1 v1 5)
+      (return-void)
+      (.try_end c0)
+
+      (.catch (c0))
+      (move-exception v2)
+      (throw v2)
+    )
+  )");
+  code->build_cfg();
+  code->clear_cfg();
+  auto once = assembler::to_string(code.get());
+  code->build_cfg();
+  code->clear_cfg();
+  EXPECT_EQ(assembler::to_string(code.get()), once);
+}
+
+// The block after a try region is laid out right after it, so the try falls
+// through to it, even when one of the catch handlers resumes there too:
+//   try { f(); } catch (ExA e) {} catch (Throwable t) { g(t); return 2; }
+//   return 1;
+TEST_F(ControlFlowTest, goto_target_shared_with_catch_falls_through) {
+  auto code = build_and_linearize(R"(
+    (
+      (load-param v0)
+      (.try_start t0)
+      (invoke-static (v0) "LFoo;.f0:(I)V")
+      (.try_end t0)
+
+      (.catch (t0 t1) "LExA;")
+      (const v1 1)
+      (return v1)
+
+      (.catch (t1))
+      (move-exception v2)
+      (invoke-static (v2) "LFoo;.g:(Ljava/lang/Throwable;)V")
+      (const v1 2)
+      (return v1)
+    )
+  )");
+  auto expected = assembler::ircode_from_string(R"(
+    (
+      (load-param v0)
+      (.try_start t0)
+      (invoke-static (v0) "LFoo;.f0:(I)V")
+      (.try_end t0)
+
+      (.catch (t0 t1) "LExA;")
+      (const v1 1)
+      (return v1)
+
+      (.catch (t1))
+      (move-exception v2)
+      (invoke-static (v2) "LFoo;.g:(Ljava/lang/Throwable;)V")
+      (const v1 2)
+      (return v1)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected.get());
+}

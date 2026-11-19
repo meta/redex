@@ -255,10 +255,9 @@ const DexMethod* find_method(DexClass* cls, const std::string& needle) {
   return nullptr;
 }
 
-// A try region whose last throwing instruction falls through into code that
-// cannot throw. Building a CFG and linearizing it moves that code behind the
-// catch handler, and doing it again moves it back, so the layout depends on how
-// many round trips the method went through.
+// A switch whose cases are written in ascending key order. Building a CFG and
+// linearizing it lays them out in descending order, so the method's code
+// changes if it goes through such a round trip.
 DexClass* create_round_trip_class() {
   ClassCreator cc(DexType::make_type("LFlip;"));
   cc.set_super(type::java_lang_Object());
@@ -266,15 +265,20 @@ DexClass* create_round_trip_class() {
     (method (public static) "LFlip;.m:(I)V"
       (
         (load-param v1)
-        (invoke-static (v1) "LFoo;.f0:(I)V")
-        (.try_start c0)
-        (invoke-static (v1) "LFoo;.f1:(I)V")
-        (add-int/lit v1 v1 5)
+        (switch v1 (:c0 :c1 :c2))
         (return-void)
-        (.try_end c0)
-        (.catch (c0))
-        (move-exception v2)
-        (throw v2)
+
+        (:c0 0)
+        (invoke-static (v1) "LFoo;.f0:(I)V")
+        (return-void)
+
+        (:c1 1)
+        (invoke-static (v1) "LFoo;.f1:(I)V")
+        (return-void)
+
+        (:c2 2)
+        (invoke-static (v1) "LFoo;.f2:(I)V")
+        (return-void)
       )
     )
   )"));
@@ -917,9 +921,9 @@ TEST_F(DexVtTest, blockLedByALongConditionalBranchStartsAtItsFirstInstruction) {
   }
 }
 
-// Capturing must not touch the code it describes: one more CFG round trip
-// would ship the other layout of a method like this one, and only in builds
-// that emit dexvt.
+// Capturing must not touch the code it describes: a CFG round trip lays out
+// the switch cases of a method like this one in another order, which would
+// ship only in builds that emit dexvt.
 TEST_F(DexVtTest, captureLeavesCodeUntouched) {
   auto* cls = create_round_trip_class();
   auto* code = cls->get_dmethods().front()->get_code();

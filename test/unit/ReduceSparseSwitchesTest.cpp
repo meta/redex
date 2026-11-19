@@ -169,6 +169,10 @@ TEST_F(ReduceSparseSwitchesTest,
   DexStoresVector stores;
   stores.emplace_back("classes");
   stores.back().add_classes({creator.create()});
+  // Linearize once, so that `original` shows the layout that the round trip
+  // through the pass manager reproduces.
+  method->get_code()->build_cfg();
+  method->get_code()->clear_cfg();
   method->get_code()->build_cfg();
   const auto original = show(method->get_code()->cfg());
 
@@ -1110,9 +1114,6 @@ TEST_F(ReduceSparseSwitchesTest, trivial_switch_case) {
   auto stats = ReduceSparseSwitchesPass::trivial_transformation(
       method->get_code()->cfg());
   method->get_code()->clear_cfg();
-  // Rebuild an extra time to work around an ordering quirk in switch cases.
-  method->get_code()->build_cfg();
-  method->get_code()->clear_cfg();
 
   EXPECT_EQ(stats.removed_trivial_switch_cases, 1);
   EXPECT_EQ(stats.removed_trivial_switches, 0);
@@ -1122,9 +1123,9 @@ TEST_F(ReduceSparseSwitchesTest, trivial_switch_case) {
       (load-param v0)
       (switch v0 (:L0 :L1))
       (return-void)
-      (:L0 0)
+      (:L0 100)
       (return-void)
-      (:L1 100)
+      (:L1 0)
       (return-void)
     )
   )";
@@ -1148,9 +1149,6 @@ TEST_F(ReduceSparseSwitchesTest, trivial_switch) {
 
   auto stats = ReduceSparseSwitchesPass::trivial_transformation(
       method->get_code()->cfg());
-  method->get_code()->clear_cfg();
-  // Rebuild an extra time to work around an ordering quirk in switch cases.
-  method->get_code()->build_cfg();
   method->get_code()->clear_cfg();
 
   EXPECT_EQ(stats.removed_trivial_switch_cases, 1);
@@ -1192,9 +1190,6 @@ TEST_F(ReduceSparseSwitchesTest, splittingEvenSizeSwitch) {
   auto stats = ReduceSparseSwitchesPass::splitting_transformation(
       4, 2, method->get_code()->cfg());
   method->get_code()->clear_cfg();
-  // Rebuild an extra time to work around an ordering quirk in switch cases.
-  method->get_code()->build_cfg();
-  method->get_code()->clear_cfg();
 
   EXPECT_EQ(stats.splitting_transformations, 1);
   EXPECT_EQ(stats.splitting_transformations_packed_segments, 1);
@@ -1208,14 +1203,14 @@ TEST_F(ReduceSparseSwitchesTest, splittingEvenSizeSwitch) {
       (switch v0 (:L0 :L1))
       (return-void)
 
-      (:L0 0)
+      (:L0 50)
       (return-void)
-      (:L1 50)
+      (:L1 0)
       (return-void)
 
-      (:L2 100)
+      (:L2 101)
       (return-void)
-      (:L3 101)
+      (:L3 100)
       (return-void)
     )
   )";
@@ -1249,9 +1244,6 @@ TEST_F(ReduceSparseSwitchesTest, splittingEvenSizeSwitch2) {
   auto stats = ReduceSparseSwitchesPass::splitting_transformation(
       4, 2, method->get_code()->cfg());
   method->get_code()->clear_cfg();
-  // Rebuild an extra time to work around an ordering quirk in switch cases.
-  method->get_code()->build_cfg();
-  method->get_code()->clear_cfg();
 
   EXPECT_EQ(stats.splitting_transformations, 1);
   EXPECT_EQ(stats.splitting_transformations_packed_segments, 2);
@@ -1265,14 +1257,14 @@ TEST_F(ReduceSparseSwitchesTest, splittingEvenSizeSwitch2) {
       (switch v0 (:L0 :L1))
       (return-void)
 
-      (:L0 100)
+      (:L0 101)
       (return-void)
-      (:L1 101)
+      (:L1 100)
       (return-void)
 
-      (:L2 0)
+      (:L2 1)
       (return-void)
-      (:L3 1)
+      (:L3 0)
       (return-void)
     )
   )";
@@ -1311,9 +1303,6 @@ TEST_F(ReduceSparseSwitchesTest, splittingOddSizeSwitch) {
   auto stats = ReduceSparseSwitchesPass::splitting_transformation(
       5, 2, method->get_code()->cfg());
   method->get_code()->clear_cfg();
-  // Rebuild an extra time to work around an ordering quirk in switch cases.
-  method->get_code()->build_cfg();
-  method->get_code()->clear_cfg();
 
   EXPECT_EQ(stats.splitting_transformations, 1);
   EXPECT_EQ(stats.splitting_transformations_packed_segments, 1);
@@ -1327,16 +1316,16 @@ TEST_F(ReduceSparseSwitchesTest, splittingOddSizeSwitch) {
       (switch v0 (:L0 :L1))
       (return-void)
 
-      (:L0 0)
+      (:L0 50)
       (return-void)
-      (:L1 50)
+      (:L1 0)
       (return-void)
 
-      (:L2 100)
+      (:L2 104)
       (return-void)
       (:L3 102)
       (return-void)
-      (:L4 104)
+      (:L4 100)
       (return-void)
     )
   )";
@@ -1370,9 +1359,6 @@ TEST_F(ReduceSparseSwitchesTest, splittingPerfectly) {
   auto stats = ReduceSparseSwitchesPass::splitting_transformation(
       4, 2, method->get_code()->cfg());
   method->get_code()->clear_cfg();
-  // Rebuild an extra time to work around an ordering quirk in switch cases.
-  method->get_code()->build_cfg();
-  method->get_code()->clear_cfg();
 
   EXPECT_EQ(stats.splitting_transformations, 1);
   EXPECT_EQ(stats.splitting_transformations_packed_segments, 2);
@@ -1385,14 +1371,14 @@ TEST_F(ReduceSparseSwitchesTest, splittingPerfectly) {
       (switch v0 (:L0 :L1))
       (return-void)
 
-      (:L0 100)
+      (:L0 101)
       (return-void)
-      (:L1 101)
+      (:L1 100)
       (return-void)
 
-      (:L2 0)
+      (:L2 1)
       (return-void)
-      (:L3 1)
+      (:L3 0)
       (return-void)
     )
   )";
@@ -1445,24 +1431,24 @@ TEST_F(ReduceSparseSwitchesTest, multiplexing) {
       (switch v1 (:L1 :L2 :L3 :L4))
     (:L0)
       (return-void)
-    (:L1 0)
-      (switch v0 (:L5 :L6))
-      (goto :L0)
-    (:L2 1)
-      (const v1 9)
-      (if-ne v0 v1 :L0)
-      (return-void)
-    (:L3 2)
-      (const v1 6)
-      (if-ne v0 v1 :L0)
-      (return-void)
-    (:L4 3)
+    (:L1 3)
       (const v1 3)
       (if-ne v0 v1 :L0)
       (return-void)
-    (:L5 0)
+    (:L2 2)
+      (const v1 6)
+      (if-ne v0 v1 :L0)
       (return-void)
-    (:L6 12)
+    (:L3 1)
+      (const v1 9)
+      (if-ne v0 v1 :L0)
+      (return-void)
+    (:L4 0)
+      (switch v0 (:L5 :L6))
+      (goto :L0)
+    (:L5 12)
+      (return-void)
+    (:L6 0)
       (return-void)
     )
   )";
@@ -1519,24 +1505,24 @@ TEST_F(ReduceSparseSwitchesTest, multiplexing_shr) {
       (switch v1 (:L1 :L2 :L3 :L4))
     (:L0)
       (return-void)
-    (:L1 0)
-      (switch v0 (:L5 :L6))
-      (goto :L0)
-    (:L2 1)
-      (const v1 18)
-      (if-ne v0 v1 :L0)
-      (return-void)
-    (:L3 2)
-      (const v1 12)
-      (if-ne v0 v1 :L0)
-      (return-void)
-    (:L4 3)
+    (:L1 3)
       (const v1 6)
       (if-ne v0 v1 :L0)
       (return-void)
-    (:L5 0)
+    (:L2 2)
+      (const v1 12)
+      (if-ne v0 v1 :L0)
       (return-void)
-    (:L6 24)
+    (:L3 1)
+      (const v1 18)
+      (if-ne v0 v1 :L0)
+      (return-void)
+    (:L4 0)
+      (switch v0 (:L5 :L6))
+      (goto :L0)
+    (:L5 24)
+      (return-void)
+    (:L6 0)
       (return-void)
     )
   )";

@@ -2139,15 +2139,12 @@ MethodItemEntry* ControlFlowGraph::create_catch(
     Block* block,
     UnorderedMap<MethodItemEntry*, Block*>* catch_to_containing_block) {
   using EdgeVector = std::vector<Edge*>;
-  EdgeVector throws = get_succ_edges_of_type(block, EDGE_THROW);
+  EdgeVector throws = block->get_outgoing_throws_in_order();
   if (throws.empty()) {
     // No need to create a catch if there are no throws
     return nullptr;
   }
 
-  std::sort(throws.begin(), throws.end(), [](const Edge* e1, const Edge* e2) {
-    return e1->throw_info()->index < e2->throw_info()->index;
-  });
   const auto& throws_end = throws.end();
 
   // recurse through `throws` adding catch entries to blocks at the ends of

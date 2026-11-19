@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <iterator>
 #include <vector>
 
 #include "Debug.h"
@@ -56,6 +57,41 @@ std::vector<typename GraphInterface::NodeId> postorder_sort(
   }
 
   return postorder;
+}
+
+/*
+ * Iterative depth-first preorder from the entry: each node comes before
+ * everything first reached through it, and successors are visited in the order
+ * GraphInterface::successors returns them.
+ */
+template <class GraphInterface>
+std::vector<typename GraphInterface::NodeId> preorder_sort(
+    const typename GraphInterface::Graph& graph) {
+  using NodeId = typename GraphInterface::NodeId;
+  std::vector<NodeId> stack{GraphInterface::entry(graph)};
+  UnorderedSet<NodeId> visited;
+  std::vector<NodeId> preorder;
+
+  while (!stack.empty()) {
+    NodeId curr = stack.back();
+    stack.pop_back();
+    if (!visited.insert(curr).second) {
+      continue;
+    }
+    preorder.push_back(curr);
+    // Push in reverse, so that the first successor is popped first.
+    const auto& succs = GraphInterface::successors(graph, curr);
+    for (auto it = std::make_reverse_iterator(succs.end());
+         it != std::make_reverse_iterator(succs.begin());
+         ++it) {
+      const auto& target = GraphInterface::target(graph, *it);
+      if (!visited.contains(target)) {
+        stack.push_back(target);
+      }
+    }
+  }
+
+  return preorder;
 }
 
 } // namespace graph

@@ -19,6 +19,7 @@
 #include "CppUtil.h"
 #include "DexAccess.h"
 #include "DexClass.h"
+#include "GraphUtil.h"
 #include "MethodOverrideGraph.h"
 #include "TypeUtil.h"
 
@@ -39,6 +40,19 @@ namespace mog = method_override_graph;
 namespace {
 
 using DexTypeSetC = std::set<const DexType*, dextypes_comparator>;
+
+// The class hierarchy as a graph from java.lang.Object to its subclasses, with
+// each class's children in TypeSet order.
+struct ClassHierarchyGraph {
+  using Graph = ClassHierarchy;
+  using NodeId = const DexType*;
+  using EdgeId = const DexType*;
+  static NodeId entry(const Graph&) { return type::java_lang_Object(); }
+  static const TypeSet& successors(const Graph& graph, const NodeId& type) {
+    return get_children(graph, type);
+  }
+  static NodeId target(const Graph&, const EdgeId& child) { return child; }
+};
 
 } // namespace
 
@@ -61,24 +75,8 @@ VirtualScopes::VirtualScopes(const Scope& scope) {
   // in TypeSet (dextypes_comparator) order. The dfs_order keys are therefore
   // exactly the set of types legacy roots scopes for.
   UnorderedMap<const DexType*, size_t> dfs_order;
-  {
-    std::vector<const DexType*> st{type::java_lang_Object()};
-    size_t next = 0;
-    while (!st.empty()) {
-      const auto* t = st.back();
-      st.pop_back();
-      if (!dfs_order.emplace(t, next).second) {
-        continue;
-      }
-      next++;
-      auto hit = hierarchy.find(t);
-      if (hit != hierarchy.end()) {
-        for (auto cit = hit->second.rbegin(); cit != hit->second.rend();
-             ++cit) {
-          st.push_back(*cit);
-        }
-      }
-    }
+  for (const auto* t : ::graph::preorder_sort<ClassHierarchyGraph>(hierarchy)) {
+    dfs_order.emplace(t, dfs_order.size());
   }
 
   // ESCAPED: a type is escaped if it -- or any ancestor or descendant --

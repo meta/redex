@@ -399,9 +399,12 @@ size_t record_code_reference(const Scope& scope,
             return;
           } else {
             DexClass* cls = type_class(type);
-            if ((cls != nullptr) && !is_abstract(cls)) {
-              // If a type is referenced and not an abstract type then
-              // add it to don't use this type as mergeable.
+            // A class literal is the type's identity, which code can compare
+            // or key a map on, so unlike other type references it keeps even
+            // an abstract type from being merged away.
+            if ((cls != nullptr) &&
+                (!is_abstract(cls) || opcode::is_const_class(insn->opcode()))) {
+              // Keep the referenced type from being the mergeable.
               record_dont_merge_state(type, kConditional, dont_merge_status);
               TRACE(VMERGE, 9, "dont_merge %s as mergeable for type usage: %s",
                     SHOW(type), SHOW(insn));

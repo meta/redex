@@ -116,3 +116,87 @@ TEST_F(VerticalMergingTest, keepsTypesReferencedByProtectedCode) {
   EXPECT_EQ(run_pass(user), 3);
   EXPECT_EQ(impl->get_super_class(), base->get_type());
 }
+
+// Java: `map.put(Base.class, a); map.put(Impl.class, b);`. Merging the abstract
+// `Base` into its only subclass would make both literals the same class.
+TEST_F(VerticalMergingTest, keepsAbstractClassWithClassLiteral) {
+  auto* user = create_user(R"(
+    (
+      (const-class "Lcom/redextest/Base;")
+      (move-result-pseudo-object v0)
+      (const-class "Lcom/redextest/Impl;")
+      (move-result-pseudo-object v1)
+      (new-instance "Lcom/redextest/Impl;")
+      (move-result-pseudo-object v2)
+      (invoke-direct (v2) "Lcom/redextest/Impl;.<init>:()V")
+      (return-object v0)
+    )
+  )");
+
+  EXPECT_EQ(run_pass(user), 3);
+  EXPECT_EQ(impl->get_super_class(), base->get_type());
+}
+
+// An array class literal names its element type's identity too.
+TEST_F(VerticalMergingTest, keepsAbstractClassWithArrayClassLiteral) {
+  auto* user = create_user(R"(
+    (
+      (const-class "[Lcom/redextest/Base;")
+      (move-result-pseudo-object v0)
+      (new-instance "Lcom/redextest/Impl;")
+      (move-result-pseudo-object v1)
+      (invoke-direct (v1) "Lcom/redextest/Impl;.<init>:()V")
+      (return-object v0)
+    )
+  )");
+
+  EXPECT_EQ(run_pass(user), 3);
+  EXPECT_EQ(impl->get_super_class(), base->get_type());
+}
+
+// A cast to the abstract `Base` does not observe its identity, so `Base` still
+// merges into its only subclass.
+TEST_F(VerticalMergingTest, mergesAbstractClassUsedInCast) {
+  auto* user = create_user(R"(
+    (
+      (new-instance "Lcom/redextest/Impl;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "Lcom/redextest/Impl;.<init>:()V")
+      (check-cast v0 "Lcom/redextest/Base;")
+      (move-result-pseudo-object v1)
+      (return-object v1)
+    )
+  )");
+
+  EXPECT_EQ(run_pass(user), 2);
+}
+
+// `Child` is abstract, has no methods and is never instantiated, so it could
+// merge into `Parent`, but `Child.class` would then be `Parent.class`.
+TEST_F(VerticalMergingTest, keepsAbstractSubclassWithClassLiteral) {
+  ClassCreator parent_creator(DexType::make_type("Lcom/redextest/Parent;"));
+  parent_creator.set_access(ACC_PUBLIC);
+  parent_creator.set_super(type::java_lang_Object());
+  add_init(parent_creator, "Lcom/redextest/Parent;",
+           "Ljava/lang/Object;.<init>:()V");
+  auto* parent = parent_creator.create();
+
+  ClassCreator child_creator(DexType::make_type("Lcom/redextest/Child;"));
+  child_creator.set_access(ACC_PUBLIC | ACC_ABSTRACT);
+  child_creator.set_super(parent->get_type());
+  auto* child = child_creator.create();
+
+  auto* user = create_user(R"(
+    (
+      (new-instance "Lcom/redextest/Parent;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "Lcom/redextest/Parent;.<init>:()V")
+      (const-class "Lcom/redextest/Child;")
+      (move-result-pseudo-object v1)
+      (return-object v1)
+    )
+  )");
+
+  EXPECT_EQ(run_pass_on({parent, child, user}), 3);
+  EXPECT_EQ(child->get_super_class(), parent->get_type());
+}

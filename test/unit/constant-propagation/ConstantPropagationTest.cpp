@@ -337,6 +337,49 @@ TEST_F(ConstantPropagationTest, JumpToImmediateNext) {
   EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
+// An analysis that tracks r-const as a resource id finds neither successor of
+// `if-nez` on it feasible, so the transform counts that branch. A branch on a
+// const has one feasible successor and is not counted. (When resource ids are
+// modeled as non-zero, the r-const case stops being a trigger.)
+TEST_F(ConstantPropagationTest, BranchWithBothSuccessorsInfeasible) {
+  auto run =
+      [](const std::string& load_opcode,
+         const std::function<void(const IRInstruction*, ConstantEnvironment*)>&
+             analyzer) {
+        auto code = assembler::ircode_from_string("((" + load_opcode +
+                                                  " v0 2131230721)" + R"(
+      (if-nez v0 :non_zero)
+      (const v1 0)
+      (return v1)
+      (:non_zero)
+      (const v1 1)
+      (return v1)
+    ))");
+        code->build_cfg();
+        cp::NullCheckMethods null_check_methods;
+        cp::intraprocedural::FixpointIterator intra_cp(
+            code->cfg(), analyzer,
+            cp::intraprocedural::make_default_no_throw_analyzer(
+                &null_check_methods));
+        intra_cp.run(ConstantEnvironment());
+        cp::Transform tf(cp::Transform::Config(), null_check_methods);
+        tf.legacy_apply_constants_and_prune_unreachable(
+            intra_cp, cp::WholeProgramState(), code->cfg(), nullptr, nullptr);
+        return tf.get_stats();
+      };
+
+  using RConstAwareAnalyzer =
+      InstructionAnalyzerCombiner<cp::ResourceIdAnalyzer,
+                                  cp::PrimitiveAnalyzer>;
+  auto r_const_stats = run("r-const", RConstAwareAnalyzer(nullptr, nullptr));
+  EXPECT_EQ(r_const_stats.branches_removed, 1);
+  EXPECT_EQ(r_const_stats.branches_with_both_successors_infeasible, 1);
+
+  auto const_stats = run("const", cp::ConstantPrimitiveAnalyzer());
+  EXPECT_EQ(const_stats.branches_removed, 1);
+  EXPECT_EQ(const_stats.branches_with_both_successors_infeasible, 0);
+}
+
 TEST_F(ConstantPropagationTest, InstanceOfNull) {
   auto code = assembler::ircode_from_string(R"(
     (

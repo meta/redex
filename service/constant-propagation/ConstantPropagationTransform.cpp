@@ -1135,6 +1135,16 @@ void Transform::eliminate_dead_branch(
     if (intra_cp.analyze_edge(edge, env).is_bottom()) {
       TRACE(CONSTP, 2, "Removing conditional branch %s", SHOW(insn));
       ++m_stats.branches_removed;
+      // A reachable branch has a feasible successor. When the analysis finds
+      // neither successor feasible, the removed edge is just the first one.
+      if (edge == succs.front() && !env.is_bottom() &&
+          intra_cp.analyze_edge(succs.back(), env).is_bottom()) {
+        TRACE(CONSTP, 2,
+              "Both successors of conditional branch %s in B%zu "
+              "are infeasible",
+              SHOW(insn), block->id());
+        ++m_stats.branches_with_both_successors_infeasible;
+      }
       // We delete the infeasible edge, and then the cfg will rewrite the
       // remaining branch into a goto and remove the if- instruction.
       m_edge_deletes.push_back(edge);
@@ -1683,6 +1693,8 @@ void Transform::Stats::log_metrics(ScopedMetrics& sm, bool with_scope) const {
   sm.set_metric("class_cast_replaced", class_cast_replaced);
   sm.set_metric("kotlin_areequal_swapped", kotlin_areequal_swapped);
   sm.set_metric("kotlin_areequal_replaced", kotlin_areequal_replaced);
+  sm.set_metric("branches_with_both_successors_infeasible",
+                branches_with_both_successors_infeasible);
 }
 
 } // namespace constant_propagation

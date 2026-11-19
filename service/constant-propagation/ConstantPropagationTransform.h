@@ -69,6 +69,9 @@ class Transform final {
     size_t class_cast_replaced{0};
     size_t kotlin_areequal_swapped{0};
     size_t kotlin_areequal_replaced{0};
+    // Conditional branches in reachable code for which the analysis finds
+    // neither successor feasible.
+    size_t branches_with_both_successors_infeasible{0};
 
     Stats& operator+=(const Stats& that) {
       branches_removed += that.branches_removed;
@@ -83,6 +86,8 @@ class Transform final {
       class_cast_replaced += that.class_cast_replaced;
       kotlin_areequal_swapped += that.kotlin_areequal_swapped;
       kotlin_areequal_replaced += that.kotlin_areequal_replaced;
+      branches_with_both_successors_infeasible +=
+          that.branches_with_both_successors_infeasible;
       return *this;
     }
 

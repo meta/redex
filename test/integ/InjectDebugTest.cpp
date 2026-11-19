@@ -17,6 +17,8 @@
 #include "DexLoader.h"
 #include "DexPosition.h"
 #include "DexStore.h"
+#include "IRAssembler.h"
+#include "IRCode.h"
 #include "RedexContext.h"
 #include "RedexTestUtils.h"
 // NOLINTNEXTLINE(facebook-unused-include-check)
@@ -164,21 +166,32 @@ TEST_F(InjectDebugTest, TestMethods) {
       });
 }
 
-// Check that general code data is unmodified by comparing instructions
+// Check that general code data is unmodified by comparing instructions, with
+// their branch targets and try regions. Both sides are laid out again through
+// the CFG first, without debug information: inject-debug lays out each method
+// that way, which may order its blocks differently than the input dex.
 TEST_F(InjectDebugTest, TestCodeItems) {
   inject();
   test_dex_equality_helper(
       [](const DexClasses& classes) -> std::vector<std::string> {
-        std::vector<std::string> instructions;
+        std::vector<std::string> methods;
         for (int i = 0; i < classes.size(); ++i) {
           for (DexMethod* dex_method : classes[i]->get_dmethods()) {
-            for (DexInstruction* dex_instr :
-                 dex_method->get_dex_code()->get_instructions()) {
-              instructions.push_back(show(dex_instr));
+            dex_method->balloon();
+            auto* code = dex_method->get_code();
+            code->build_cfg();
+            code->clear_cfg();
+            for (auto it = code->begin(); it != code->end();) {
+              if (it->type == MFLOW_POSITION || it->type == MFLOW_DEBUG) {
+                it = code->erase_and_dispose(it);
+              } else {
+                ++it;
+              }
             }
+            methods.push_back(assembler::to_string(code));
           }
         }
-        return instructions;
+        return methods;
       });
 }
 

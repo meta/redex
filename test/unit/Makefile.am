@@ -40,6 +40,7 @@ endef
 check_PROGRAMS = \
     aliased_registers_test \
     analysis_usage_test \
+    anno_kill_test \
     api_utils_test \
     armv7_jit_loop_checker_test \
     array_propagation_test \
@@ -243,6 +244,8 @@ check_PROGRAMS = \
 aliased_registers_test_SOURCES = AliasedRegistersTest.cpp
 
 analysis_usage_test_SOURCES = AnalysisUsageTest.cpp
+
+anno_kill_test_SOURCES = AnnoKillTest.cpp
 
 api_utils_test_SOURCES = ApiUtilsTest.cpp ScopeHelper.cpp
 api_utils_test_LDADD = $(COMMON_MOCK_TEST_LIBS)

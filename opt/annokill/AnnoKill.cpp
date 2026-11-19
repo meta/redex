@@ -65,6 +65,15 @@ AnnoKill::AnnoKill(Scope& scope,
     }
   }
 
+  // ART uses these build-visible annotations to select native calling
+  // conventions.
+  for (const auto* name : {"Ldalvik/annotation/optimization/FastNative;",
+                           "Ldalvik/annotation/optimization/CriticalNative;"}) {
+    if (auto* type = DexType::get_type(name)) {
+      m_keep.insert(type);
+    }
+  }
+
   // Load annotations we know and want dead.
   for (auto const& anno_name : kill) {
     DexType* anno = DexType::get_type(anno_name);

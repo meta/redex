@@ -10,6 +10,7 @@ import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
+from .core import instance_kind_names
 from .sqlite_export import (
     DOMINATOR_ALGORITHM,
     DOMINATOR_TREE_VERSION,
@@ -213,7 +214,14 @@ def neighbors(
         yield from _neighbors_in_direction(connection, node, "retained")
 
 
+def _instance_kinds_sql() -> str:
+    return ", ".join(f"'{kind}'" for kind in sorted(instance_kind_names()))
+
+
 def _create_path_tables(connection: sqlite3.Connection) -> None:
+    # Each path step stands for one node: an annotation or seed instance is
+    # keyed by its node ID, a class, field or method by its name, with
+    # instance_id -1.
     connection.executescript(
         """
         DROP TABLE IF EXISTS temp.path_seen;
@@ -222,23 +230,36 @@ def _create_path_tables(connection: sqlite3.Connection) -> None:
         CREATE TEMP TABLE path_seen(
           kind TEXT NOT NULL,
           name TEXT NOT NULL,
+          instance_id INTEGER NOT NULL,
           parent_kind TEXT,
           parent_name TEXT,
-          PRIMARY KEY(kind, name)
+          parent_instance_id INTEGER,
+          PRIMARY KEY(kind, name, instance_id)
         ) WITHOUT ROWID;
         CREATE TEMP TABLE path_frontier(
           kind TEXT NOT NULL,
           name TEXT NOT NULL,
-          PRIMARY KEY(kind, name)
+          instance_id INTEGER NOT NULL,
+          PRIMARY KEY(kind, name, instance_id)
         ) WITHOUT ROWID;
         CREATE TEMP TABLE path_next(
           kind TEXT NOT NULL,
           name TEXT NOT NULL,
+          instance_id INTEGER NOT NULL,
           parent_kind TEXT NOT NULL,
           parent_name TEXT NOT NULL,
-          PRIMARY KEY(kind, name)
+          parent_instance_id INTEGER NOT NULL,
+          PRIMARY KEY(kind, name, instance_id)
         ) WITHOUT ROWID;
         """
+    )
+
+
+def _path_instance_id(node: str) -> str:
+    """The path step's instance_id of the nodes row aliased `node`."""
+    return (
+        f"CASE WHEN {node}.kind IN ({_instance_kinds_sql()}) "
+        f"THEN {node}.id ELSE -1 END"
     )
 
 
@@ -255,20 +276,36 @@ def _advance_path_frontier(
         edge_join = "edge.retainer_id = current.id"
         neighbor_id = "edge.retained_id"
         index = "edges_by_retainer"
+    neighbor_instance_id = _path_instance_id("neighbor")
     connection.execute("DELETE FROM path_next")
     connection.execute(
         f"""
-        INSERT OR IGNORE INTO path_next(kind, name, parent_kind, parent_name)
-        SELECT neighbor.kind, neighbor.name, current.kind, current.name
-        FROM path_frontier AS frontier
-        JOIN nodes AS current
-          ON current.kind = frontier.kind AND current.name = frontier.name
+        WITH current(id, kind, name, instance_id) AS (
+          SELECT node.id, node.kind, node.name, -1
+          FROM path_frontier AS frontier
+          JOIN nodes AS node INDEXED BY nodes_by_kind_name
+            ON node.kind = frontier.kind AND node.name = frontier.name
+          WHERE frontier.instance_id = -1
+          UNION ALL
+          SELECT node.id, node.kind, node.name, node.id
+          FROM path_frontier AS frontier
+          JOIN nodes AS node ON node.id = frontier.instance_id
+          WHERE frontier.instance_id != -1
+        )
+        INSERT OR IGNORE INTO path_next(
+          kind, name, instance_id, parent_kind, parent_name, parent_instance_id
+        )
+        SELECT neighbor.kind, neighbor.name, {neighbor_instance_id},
+               current.kind, current.name, current.instance_id
+        FROM current
         JOIN edges AS edge INDEXED BY {index} ON {edge_join}
         JOIN nodes AS neighbor ON neighbor.id = {neighbor_id}
         LEFT JOIN path_seen AS seen
           ON seen.kind = neighbor.kind AND seen.name = neighbor.name
+          AND seen.instance_id = {neighbor_instance_id}
         WHERE seen.kind IS NULL
-        ORDER BY neighbor.kind, neighbor.name, current.kind, current.name
+        ORDER BY neighbor.kind, neighbor.name, {neighbor_instance_id},
+                 current.kind, current.name, current.instance_id
         """
     )
     has_next = connection.execute("SELECT EXISTS(SELECT 1 FROM path_next)").fetchone()[
@@ -276,13 +313,18 @@ def _advance_path_frontier(
     ]
     connection.execute(
         """
-        INSERT INTO path_seen(kind, name, parent_kind, parent_name)
-        SELECT kind, name, parent_kind, parent_name FROM path_next
+        INSERT INTO path_seen(
+          kind, name, instance_id, parent_kind, parent_name, parent_instance_id
+        )
+        SELECT kind, name, instance_id, parent_kind, parent_name,
+               parent_instance_id
+        FROM path_next
         """
     )
     connection.execute("DELETE FROM path_frontier")
     connection.execute(
-        "INSERT INTO path_frontier(kind, name) SELECT kind, name FROM path_next"
+        "INSERT INTO path_frontier(kind, name, instance_id) "
+        "SELECT kind, name, instance_id FROM path_next"
     )
     return bool(has_next)
 
@@ -291,34 +333,43 @@ def _start_path_search(
     connection: sqlite3.Connection,
     start: tuple[str, str],
 ) -> None:
+    """Start from the named node, or from every instance of an annotation
+    type or keep rule."""
     _create_path_tables(connection)
-    connection.execute(
-        "INSERT INTO path_seen(kind, name) VALUES (?, ?)",
-        start,
-    )
-    connection.execute(
-        "INSERT INTO path_frontier(kind, name) VALUES (?, ?)",
-        start,
-    )
+    start_instance_id = _path_instance_id("node")
+    for table in ("path_seen", "path_frontier"):
+        connection.execute(
+            f"""
+            INSERT OR IGNORE INTO {table}(kind, name, instance_id)
+            SELECT node.kind, node.name, {start_instance_id}
+            FROM nodes AS node INDEXED BY nodes_by_kind_name
+            WHERE node.kind = ? AND node.name = ?
+            """,
+            start,
+        )
 
 
 def _path_from_seen(
     connection: sqlite3.Connection,
-    end: tuple[str, str],
+    end: tuple[str, str, int],
 ) -> list[dict[str, object]]:
     path = []
-    node: tuple[str, str] | None = end
+    node: tuple[str, str, int] | None = end
     while node is not None:
         path.append(node)
         parent = connection.execute(
-            "SELECT parent_kind, parent_name FROM path_seen "
-            "WHERE kind = ? AND name = ?",
+            "SELECT parent_kind, parent_name, parent_instance_id FROM path_seen "
+            "WHERE kind = ? AND name = ? AND instance_id = ?",
             node,
         ).fetchone()
         node = (
             None
             if parent["parent_kind"] is None
-            else (parent["parent_kind"], parent["parent_name"])
+            else (
+                parent["parent_kind"],
+                parent["parent_name"],
+                parent["parent_instance_id"],
+            )
         )
     path.reverse()
     return [
@@ -329,25 +380,32 @@ def _path_from_seen(
 
 def _path_frontier_root(
     connection: sqlite3.Connection,
-) -> tuple[str, str] | None:
+) -> tuple[str, str, int] | None:
     row = connection.execute(
         """
-        SELECT frontier.kind, frontier.name
+        SELECT frontier.kind, frontier.name, frontier.instance_id
         FROM path_frontier AS frontier
-        WHERE NOT EXISTS (
-          SELECT 1
-          FROM nodes AS raw
-          JOIN edges AS edge INDEXED BY edges_by_retained
-            ON edge.retained_id = raw.id
-          WHERE raw.kind = frontier.kind AND raw.name = frontier.name
-        )
-        ORDER BY frontier.kind, frontier.name
+        WHERE CASE
+          WHEN frontier.instance_id = -1 THEN NOT EXISTS (
+            SELECT 1
+            FROM nodes AS raw
+            JOIN edges AS edge INDEXED BY edges_by_retained
+              ON edge.retained_id = raw.id
+            WHERE raw.kind = frontier.kind AND raw.name = frontier.name
+          )
+          ELSE NOT EXISTS (
+            SELECT 1
+            FROM edges AS edge INDEXED BY edges_by_retained
+            WHERE edge.retained_id = frontier.instance_id
+          )
+        END
+        ORDER BY frontier.kind, frontier.name, frontier.instance_id
         LIMIT 1
         """
     ).fetchone()
     if row is None:
         return None
-    return row["kind"], row["name"]
+    return row["kind"], row["name"], row["instance_id"]
 
 
 def shortest_path(
@@ -356,15 +414,20 @@ def shortest_path(
     end: tuple[str, str],
 ) -> list[dict[str, object]] | None:
     _start_path_search(connection, start)
-    while start != end:
+    while True:
+        # Of several reached instances of the end, follow the first.
+        reached = connection.execute(
+            "SELECT kind, name, instance_id FROM path_seen "
+            "WHERE kind = ? AND name = ? ORDER BY instance_id LIMIT 1",
+            end,
+        ).fetchone()
+        if reached is not None:
+            return _path_from_seen(
+                connection,
+                (reached["kind"], reached["name"], reached["instance_id"]),
+            )
         if not _advance_path_frontier(connection, toward_retainers=False):
             return None
-        if connection.execute(
-            "SELECT 1 FROM path_seen WHERE kind = ? AND name = ?",
-            end,
-        ).fetchone():
-            break
-    return _path_from_seen(connection, end)
 
 
 def path_to_root(

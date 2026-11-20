@@ -210,7 +210,8 @@ def _add_subcommands(parser: argparse.ArgumentParser) -> None:
         help="Find a shortest retainer-to-retained path",
         description=(
             "Find an unweighted shortest path following reachability edges from "
-            "retainer to retained node."
+            "retainer to retained node. An annotation type or keep rule endpoint "
+            "stands for any of its instances."
         ),
     )
     path.add_argument("from_name", metavar="from")
@@ -223,7 +224,8 @@ def _add_subcommands(parser: argparse.ArgumentParser) -> None:
         help="Find a shortest path from a node to any root",
         description=(
             "Find an unweighted shortest path following retainer edges from the "
-            "selected node to any zero-predecessor root."
+            "selected node to any zero-predecessor root. For an annotation type or "
+            "keep rule, the path starts at any of its instances."
         ),
     )
     path_to_root.add_argument("name")

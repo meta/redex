@@ -435,6 +435,64 @@ class GraphQueryTest(unittest.TestCase):
             result.stderr,
         )
 
+    def _write_json_adapter_db(self, directory):
+        # @JsonAdapter(FooAdapter.class) class Foo {} and
+        # @JsonAdapter(BarAdapter.class) class Bar {}, each kept by its own
+        # rule: one annotation node per instance, each naming its own adapter.
+        graph = ReachabilityGraph()
+        for owner in ("Foo", "Bar"):
+            seed = ReachableObject(
+                ReachableObjectType.SEED, f"KEEP: -keep class {owner}"
+            )
+            cls = ReachableObject(ReachableObjectType.CLASS, f"L{owner};")
+            anno = ReachableObject(ReachableObjectType.ANNO, "LJsonAdapter;")
+            adapter = ReachableObject(ReachableObjectType.CLASS, f"L{owner}Adapter;")
+            for node in (seed, cls, anno, adapter):
+                graph.add_node(node)
+            graph.add_edge(cls, seed)
+            graph.add_edge(anno, cls)
+            graph.add_edge(adapter, anno)
+        return self._write_graph_db(graph, directory)
+
+    def test_paths_keep_annotation_instances_apart(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_file = self._write_json_adapter_db(temp_dir)
+            to_root = json.loads(
+                self._run_db(db_file, "json", "path-to-root", "LFooAdapter;")
+            )
+            no_path = json.loads(
+                self._run_db(db_file, "json", "path", "LBar;", "LFooAdapter;")
+            )
+            from_type = json.loads(
+                self._run_db(
+                    db_file,
+                    "json",
+                    "path",
+                    "LJsonAdapter;",
+                    "LBarAdapter;",
+                    "--from-kind",
+                    "anno",
+                )
+            )
+
+        self.assertEqual(
+            [
+                ("CLASS", "LFooAdapter;"),
+                ("ANNO", "LJsonAdapter;"),
+                ("CLASS", "LFoo;"),
+                ("SEED", "KEEP: -keep class Foo"),
+            ],
+            [(row["type"], row["name"]) for row in to_root],
+        )
+        self.assertEqual(
+            [{"status": "no path", "step": "", "type": "", "name": ""}], no_path
+        )
+        # A path from an annotation type starts at any of its instances.
+        self.assertEqual(
+            [("ANNO", "LJsonAdapter;"), ("CLASS", "LBarAdapter;")],
+            [(row["type"], row["name"]) for row in from_type],
+        )
+
     def test_dominated_disambiguates_class_and_annotation_names(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             graph = ReachabilityGraph()

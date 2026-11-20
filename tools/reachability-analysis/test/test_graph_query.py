@@ -103,6 +103,49 @@ class GraphQueryTest(unittest.TestCase):
 
         self.assertEqual([], json.loads(output))
 
+    def test_roots_list_an_instance_that_nothing_retains(self):
+        # Two instances of one annotation type: one carried by a kept class,
+        # one that nothing retains. The second is a root, although its name
+        # is shared with a retained instance.
+        graph = ReachabilityGraph()
+        root = ReachableObject(ReachableObjectType.SEED, "<SEED>")
+        kept = ReachableObject(ReachableObjectType.CLASS, "LKept;")
+        held_marker = ReachableObject(ReachableObjectType.ANNO, "LMarker;")
+        loose_marker = ReachableObject(ReachableObjectType.ANNO, "LMarker;")
+        for node in (root, kept, held_marker, loose_marker):
+            graph.add_node(node)
+        graph.add_edge(kept, root)
+        graph.add_edge(held_marker, kept)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_file = self._write_graph_db(graph, temp_dir)
+            output = self._run_db(db_file, "json", "roots")
+
+        self.assertEqual(
+            [
+                {"type": "ANNO", "name": "LMarker;"},
+                {"type": "SEED", "name": "<SEED>"},
+            ],
+            json.loads(output),
+        )
+
+    def test_roots_list_each_root_instance_of_one_name(self):
+        # One keep rule in two config files: two seeds with one printed name,
+        # each keeping its own class.
+        graph = ReachabilityGraph()
+        first = ReachableObject(ReachableObjectType.SEED, "KEEP: r")
+        second = ReachableObject(ReachableObjectType.SEED, "KEEP: r")
+        a = ReachableObject(ReachableObjectType.CLASS, "LA;")
+        b = ReachableObject(ReachableObjectType.CLASS, "LB;")
+        for node in (first, second, a, b):
+            graph.add_node(node)
+        graph.add_edge(a, first)
+        graph.add_edge(b, second)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_file = self._write_graph_db(graph, temp_dir)
+            output = self._run_db(db_file, "json", "roots")
+
+        self.assertEqual([{"type": "SEED", "name": "KEEP: r"}] * 2, json.loads(output))
+
     def test_rejects_invalid_catalog_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_file = self._copy_db(temp_dir)
@@ -163,6 +206,42 @@ class GraphQueryTest(unittest.TestCase):
             ],
             json.loads(output),
         )
+
+    def test_semantic_roots_lists_each_seed_instance(self):
+        # `-keep class Foo` in two config files: two seeds with one printed
+        # name, both keeping LFoo;.
+        graph = ReachabilityGraph()
+        foo = ReachableObject(ReachableObjectType.CLASS, "LFoo;")
+        graph.add_node(foo)
+        for _ in range(2):
+            seed = ReachableObject(ReachableObjectType.SEED, "KEEP: -keep class Foo")
+            graph.add_node(seed)
+            graph.add_edge(foo, seed)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_file = self._write_graph_db(graph, temp_dir)
+            output = self._run_db(db_file, "json", "semantic-roots")
+
+        row = {"type": "CLASS", "name": "LFoo;", "reason": "KEEP: -keep class Foo"}
+        self.assertEqual([row, row], json.loads(output))
+
+    def test_neighbors_lists_each_seed_instance(self):
+        # One keep rule in two config files: two seeds with one printed name,
+        # both keeping LA;.
+        graph = ReachabilityGraph()
+        a = ReachableObject(ReachableObjectType.CLASS, "LA;")
+        graph.add_node(a)
+        for _ in range(2):
+            seed = ReachableObject(ReachableObjectType.SEED, "KEEP: r")
+            graph.add_node(seed)
+            graph.add_edge(a, seed)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_file = self._write_graph_db(graph, temp_dir)
+            output = self._run_db(
+                db_file, "json", "neighbors", "LA;", "--direction", "retainers"
+            )
+
+        row = {"direction": "retainer", "type": "SEED", "name": "KEEP: r"}
+        self.assertEqual([row, row], json.loads(output))
 
     def test_neighbors_labels_both_edge_directions(self):
         output = self._run("csv", "neighbors", "LFoo;")

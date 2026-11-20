@@ -71,22 +71,40 @@ def roots(
     kind: str | None,
     limit: int | None,
 ) -> Iterator[dict[str, object]]:
+    # An annotation or seed instance is a root when that instance has no
+    # retainer, and each such instance is its own row; a class, field or
+    # method is a root when no node of its name has one.
+    instance_list = ", ".join(f"'{kind}'" for kind in sorted(instance_kind_names()))
     cursor = connection.execute(
-        """
+        f"""
         WITH logical_nodes(kind, name) AS (
           SELECT DISTINCT kind, name FROM nodes
-        )
-        SELECT node.kind AS type, node.name AS name
-        FROM logical_nodes AS node
-        WHERE (:kind IS NULL OR node.kind = :kind)
-          AND NOT EXISTS (
+          WHERE kind NOT IN ({instance_list})
+        ),
+        root_nodes(kind, name) AS (
+          SELECT node.kind, node.name
+          FROM logical_nodes AS node
+          WHERE NOT EXISTS (
             SELECT 1
             FROM nodes AS raw
             JOIN edges AS edge INDEXED BY edges_by_retained
               ON edge.retained_id = raw.id
             WHERE raw.kind = node.kind AND raw.name = node.name
           )
-        ORDER BY node.kind, node.name
+          UNION ALL
+          SELECT instance.kind, instance.name
+          FROM nodes AS instance
+          WHERE instance.kind IN ({instance_list})
+            AND NOT EXISTS (
+              SELECT 1
+              FROM edges AS edge INDEXED BY edges_by_retained
+              WHERE edge.retained_id = instance.id
+            )
+        )
+        SELECT kind AS type, name
+        FROM root_nodes
+        WHERE (:kind IS NULL OR kind = :kind)
+        ORDER BY kind, name
         LIMIT :limit
         """,
         {
@@ -105,8 +123,10 @@ def semantic_roots(
         WITH logical_nodes(kind, name) AS (
           SELECT DISTINCT kind, name FROM nodes
         ),
-        seed_roots(type, name, reason) AS (
-          SELECT DISTINCT target.kind, target.name, seed.name
+        -- One row per seed instance: one keep rule in two config files is
+        -- two seeds of one name.
+        seed_roots(type, name, seed_id, reason) AS (
+          SELECT DISTINCT target.kind, target.name, seed.id, seed.name
           FROM nodes AS target
           JOIN edges AS edge INDEXED BY edges_by_retained
             ON edge.retained_id = target.id
@@ -127,7 +147,7 @@ def semantic_roots(
             )
         )
         SELECT type, name, reason FROM seed_roots
-        UNION
+        UNION ALL
         SELECT type, name, reason FROM literal_roots
         ORDER BY type, name, reason
         """
@@ -183,16 +203,22 @@ def _neighbors_in_direction(
         join = "edge.retainer_id = selected.id"
         neighbor_id = "edge.retained_id"
         index = "edges_by_retainer"
+    # One row per neighbor: an annotation or seed instance is its own, a
+    # class, field or method is one per name.
     cursor = connection.execute(
         f"""
-        SELECT DISTINCT :direction AS direction,
-               neighbor.kind AS type,
-               neighbor.name AS name
-        FROM nodes AS selected
-        JOIN edges AS edge INDEXED BY {index} ON {join}
-        JOIN nodes AS neighbor ON neighbor.id = {neighbor_id}
-        WHERE selected.kind = :kind AND selected.name = :name
-        ORDER BY neighbor.kind, neighbor.name
+        SELECT direction, type, name FROM (
+          SELECT DISTINCT :direction AS direction,
+                 neighbor.kind AS type,
+                 neighbor.name AS name,
+                 CASE WHEN neighbor.kind IN ({_instance_kinds_sql()})
+                   THEN neighbor.id ELSE -1 END AS instance_id
+          FROM nodes AS selected
+          JOIN edges AS edge INDEXED BY {index} ON {join}
+          JOIN nodes AS neighbor ON neighbor.id = {neighbor_id}
+          WHERE selected.kind = :kind AND selected.name = :name
+        )
+        ORDER BY type, name
         """,
         {
             "direction": direction,

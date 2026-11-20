@@ -215,6 +215,74 @@ class TestGraphDeserialization(unittest.TestCase):
         with self.assertRaises(KeyError):
             graph.get_nodes("LFoo;.missing:()V")
 
+    def test_combined_graph_looks_up_the_graph_s_own_method_nodes(self):
+        # class Foo { void bar() {} }, kept by -keep class Foo { void bar(); },
+        # with the override graph's methods.
+        graph = core.ReachabilityGraph()
+        rule = "KEEP: -keep class Foo { void bar(); }"
+        seed = core.ReachableObject(core.ReachableObjectType.SEED, rule)
+        foo = core.ReachableObject(core.ReachableObjectType.CLASS, "LFoo;")
+        methods = {
+            name: core.ReachableObject(core.ReachableObjectType.METHOD, name)
+            for name in (
+                "LFoo;.bar:()V",
+                "LBar;.bar:()V",
+                "LBaz;.bar:()V",
+                "LQux;.bar:()V",
+            )
+        }
+        for node in (seed, foo, *methods.values()):
+            graph.add_node(node)
+        graph.add_edge(methods["LFoo;.bar:()V"], seed)
+        graph.add_edge(foo, methods["LFoo;.bar:()V"])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            graph_file = os.path.join(temp_dir, "reachability-graph")
+            graph.dump(graph_file)
+            combined = core.CombinedGraph(
+                graph_file, os.environ["METHOD_OVERRIDE_GRAPH_FILE"]
+            )
+
+        loaded = combined.reachability_graph
+        [bar] = combined.node("LFoo;.bar:()V")
+        [kept] = loaded.get_seed(rule)
+        loaded_foo = loaded.get_node("LFoo;")
+        self.assertIn(bar, kept.succs)
+        self.assertEqual(
+            ["LBar;.bar:()V", "LBaz;.bar:()V"],
+            sorted(method.name for method in bar.overridden_by),
+        )
+        self.assertEqual([kept, bar], analysis.shortest_path(kept, bar))
+        self.assertEqual([kept], analysis.get_dominators(loaded, bar))
+        self.assertIn(loaded_foo, analysis.get_dominated(loaded, {bar}))
+
+    def test_combined_graph_skips_overrides_the_graph_does_not_hold(self):
+        # The override graph is dumped before the sweep, so it names
+        # LQux;.bar:()V, which marking did not retain.
+        graph = core.ReachabilityGraph()
+        main = core.ReachableObject(core.ReachableObjectType.METHOD, "LMain;.main:()V")
+        methods = {
+            name: core.ReachableObject(core.ReachableObjectType.METHOD, name)
+            for name in ("LFoo;.bar:()V", "LBar;.bar:()V", "LBaz;.bar:()V")
+        }
+        for node in (main, *methods.values()):
+            graph.add_node(node)
+        graph.add_edge(methods["LFoo;.bar:()V"], main)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            graph_file = os.path.join(temp_dir, "reachability-graph")
+            graph.dump(graph_file)
+            combined = core.CombinedGraph(
+                graph_file, os.environ["METHOD_OVERRIDE_GRAPH_FILE"]
+            )
+
+        loaded = combined.reachability_graph
+        [loaded_main] = loaded.get_nodes("LMain;.main:()V")
+        self.assertEqual(
+            ["LBar;.bar:()V", "LBaz;.bar:()V", "LFoo;.bar:()V"],
+            sorted(node.name for node in loaded_main.succs),
+        )
+        with self.assertRaises(KeyError):
+            loaded.get_nodes("LQux;.bar:()V")
+
     def test_method_override_graph(self):
         """
         Check that we are able to recover the same graph serialized in

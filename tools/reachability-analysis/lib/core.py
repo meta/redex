@@ -387,31 +387,57 @@ class MethodOverrideGraph(AbstractGraph):
         child.parents.append(method)
 
 
+class _ReachabilityGraphWithOverrides(ReachabilityGraph):
+    """A reachability graph whose method nodes carry their override graph
+    edges. Each method node is made as it is read, so it is the one node
+    that the graph's lookup table, records and edges all hold."""
+
+    def __init__(self, method_override):
+        super().__init__()
+        self._method_override = method_override
+
+    def read_node(self, mapping):
+        node = super().read_node(mapping)
+        if node.type == ReachableObjectType.METHOD:
+            return ReachableMethod(node, self._method_override)
+        return node
+
+
 class CombinedGraph(object):
     def __init__(self, reachability, method_override):
-        self.reachability_graph = ReachabilityGraph()
-        self.reachability_graph.load(reachability)
         self.method_override_graph = MethodOverrideGraph()
         self.method_override_graph.load(method_override)
-
-        # extract information from the override graph
-        for type, name in self.reachability_graph.nodes:
-            if type == ReachableObjectType.METHOD:
-                self.reachability_graph.nodes[(type, name)] = [
-                    ReachableMethod(node, self.method_override_graph)
-                    for node in self.reachability_graph.nodes[(type, name)]
-                ]
+        self.reachability_graph = _ReachabilityGraphWithOverrides(
+            self.method_override_graph
+        )
+        self.reachability_graph.load(reachability)
 
         for method in list(self.method_override_graph.nodes.keys()):
-            method_node = self.reachability_graph.get_node(method)
+            method_node = self._method(method)
+            if method_node is None:
+                continue
             for child in method_node.overridden_by:
                 # find child in reachability graph, then build edge
-                method_child = self.reachability_graph.get_node(child.name)
+                method_child = self._method(child.name)
+                if method_child is None:
+                    continue
                 for pred in method_node.preds:
                     if pred.type == ReachableObjectType.METHOD:
                         self.reachability_graph.add_edge(method_child, pred)
 
         self.nodes = self.reachability_graph.nodes
+
+    def _method(self, name):
+        """The graph's node of a method, or None for one marking did not
+        retain: the override graph is written before the sweep, so it can
+        name methods the reachability graph does not hold."""
+        nodes = self.reachability_graph.nodes.get((ReachableObjectType.METHOD, name))
+        if nodes is None:
+            return None
+        # A method has one node per name; only annotation and seed nodes are
+        # per instance.
+        [node] = nodes
+        return node
 
     @staticmethod
     def from_everstore(reachability, method_override):

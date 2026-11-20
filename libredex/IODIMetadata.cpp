@@ -188,7 +188,10 @@ void IODIMetadata::write(
   size_t max_layer{0};
   size_t layered_count{0};
 
-  for (const auto& [method, layer] : UnorderedIterable(m_iodi_method_layers)) {
+  for (const auto& [method, layer] : unordered_to_ordered(
+           m_iodi_method_layers, [](const auto& left, const auto& right) {
+             return compare_dexmethods(left.first, right.first);
+           })) {
     count += 1;
     always_assert_log(count != 0, "Too many entries found, overflowed");
 

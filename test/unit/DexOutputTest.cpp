@@ -6,10 +6,85 @@
  */
 
 #include "DexOutput.h"
+#include "Creators.h"
+#include "IODIMetadata.h"
 #include "IODIPlan.h"
+#include "RedexTest.h"
+#include "TypeUtil.h"
+#include <cstring>
 #include <gtest/gtest.h>
 #include <json/reader.h>
 #include <json/value.h>
+
+class IODIMetadataTest : public RedexTest {};
+
+TEST_F(IODIMetadataTest, SerializationUsesMethodIdentityNotInsertionOrder) {
+  ClassCreator creator(DexType::make_type("LOrderedIodi;"));
+  creator.set_super(type::java_lang_Object());
+  std::vector<DexMethod*> methods;
+  for (size_t i = 0; i < 16; ++i) {
+    auto name = std::string("m") + (i < 10 ? "0" : "") + std::to_string(i);
+    auto* method = DexMethod::make_method("LOrderedIodi;." + name + ":()V")
+                       ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+    creator.add_method(method);
+    methods.push_back(method);
+  }
+  creator.create();
+  ClassCreator second(DexType::make_type("LSecondOrderedIodi;"));
+  second.set_super(type::java_lang_Object());
+  auto* other = DexMethod::make_method("LSecondOrderedIodi;.a:()V")
+                    ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  second.add_method(other);
+  second.create();
+  std::vector<std::pair<std::string, uint64_t>> expected;
+  for (size_t i = 0; i < methods.size(); ++i) {
+    auto name =
+        std::string("OrderedIodi.m") + (i < 10 ? "0" : "") + std::to_string(i);
+    if (i % 3 != 0) {
+      name += "@" + std::to_string(i % 3);
+    }
+    expected.emplace_back(name, i + 1);
+  }
+  methods.push_back(other);
+  expected.emplace_back("SecondOrderedIodi.a@1", methods.size());
+  std::string first;
+  for (bool reverse : {false, true}) {
+    IODIMetadata metadata;
+    UnorderedMap<DexMethod*, uint64_t> ids;
+    for (size_t i = 0; i < methods.size(); ++i) {
+      const size_t index = reverse ? methods.size() - i - 1 : i;
+      metadata.set_iodi_layer(methods[index], index % 3);
+      ids.emplace(methods[index], index + 1);
+    }
+    std::ostringstream stream;
+    metadata.write(stream, ids);
+    const auto bytes = stream.str();
+    if (!reverse) {
+      first = bytes;
+    } else {
+      EXPECT_EQ(first, bytes);
+    }
+    ASSERT_GE(bytes.size(), 16u);
+    uint32_t count;
+    std::memcpy(&count, bytes.data() + 8, sizeof(count));
+    ASSERT_EQ(count, expected.size());
+    size_t offset = 16;
+    std::vector<std::pair<std::string, uint64_t>> actual;
+    for (uint32_t i = 0; i < count; ++i) {
+      ASSERT_GE(bytes.size() - offset, 10u);
+      uint16_t length;
+      uint64_t id;
+      std::memcpy(&length, bytes.data() + offset, sizeof(length));
+      std::memcpy(&id, bytes.data() + offset + 2, sizeof(id));
+      offset += 10;
+      ASSERT_GE(bytes.size() - offset, length);
+      actual.emplace_back(bytes.substr(offset, length), id);
+      offset += length;
+    }
+    EXPECT_EQ(actual, expected);
+    EXPECT_EQ(offset, bytes.size());
+  }
+}
 
 TEST(DexOutput, checkMethodInstructionSizeLimit) {
 

@@ -7,11 +7,17 @@
 
 #include "DexOutput.h"
 #include "Creators.h"
+#include "DexPosition.h"
 #include "IODIMetadata.h"
 #include "IODIPlan.h"
+#include "IRAssembler.h"
+#include "InstructionLowering.h"
+#include "RedexOptions.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "TypeUtil.h"
 #include <cstring>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <json/reader.h>
 #include <json/value.h>
@@ -84,6 +90,60 @@ TEST_F(IODIMetadataTest, SerializationUsesMethodIdentityNotInsertionOrder) {
     EXPECT_EQ(actual, expected);
     EXPECT_EQ(offset, bytes.size());
   }
+}
+
+class MethodSymbolOrderTest : public RedexTest {};
+
+TEST_F(MethodSymbolOrderTest, EmitsRecordsInDexMethodIndexOrder) {
+  ClassCreator creator(DexType::make_type("LOrderedSymbols;"));
+  creator.set_super(type::java_lang_Object());
+  std::vector<uint32_t> expected_indices;
+  std::vector<std::string> expected_names;
+  for (uint32_t i = 0; i < 16; ++i) {
+    expected_indices.push_back(i);
+    expected_names.push_back(std::string("m") + (i < 10 ? "0" : "") +
+                             std::to_string(i));
+    const size_t index = (i * 7) % 16;
+    const auto name =
+        std::string("m") + (index < 10 ? "0" : "") + std::to_string(index);
+    auto* method =
+        DexMethod::make_method(std::string("LOrderedSymbols;.") + name + ":()V")
+            ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+    method->set_code(assembler::ircode_from_string("((return-void))"));
+    creator.add_method(method);
+  }
+  DexStore store("classes");
+  store.add_classes({creator.create()});
+  DexStoresVector stores;
+  stores.push_back(std::move(store));
+  instruction_lowering::normalize_cfg(stores);
+  instruction_lowering::run(stores);
+  auto& classes = stores[0].get_dexen()[0];
+  auto temp = redex::make_tmp_dir("symbol-order-%%%%-%%%%");
+  redex::create_directories(temp.path + "/meta");
+  ConfigFiles config(Json::Value(Json::objectValue), temp.path);
+  const auto dex_path = temp.path + "/classes.dex";
+  std::unique_ptr<PositionMapper> mapper(
+      PositionMapper::make(temp.path + "/positions"));
+  DexOutput output(dex_path.c_str(), &classes,
+                   std::make_shared<GatheredTypes>(&classes), true, 0,
+                   &stores[0].get_name(), 0, DebugInfoKind::PerMethodDebug,
+                   nullptr, config, mapper.get(), nullptr, nullptr);
+  output.prepare(SortMode::DEFAULT, {SortMode::DEFAULT}, config, "dex\n035");
+  output.write();
+  std::ifstream input(config.metafile("redex-method-id-map.txt"));
+  uint32_t method_index;
+  uint32_t signature_word;
+  std::string name;
+  std::string class_name;
+  std::vector<uint32_t> indices;
+  std::vector<std::string> names;
+  while (input >> method_index >> signature_word >> name >> class_name) {
+    indices.push_back(method_index);
+    names.push_back(name);
+  }
+  EXPECT_EQ(indices, expected_indices);
+  EXPECT_EQ(names, expected_names);
 }
 
 TEST(DexOutput, checkMethodInstructionSizeLimit) {

@@ -2472,7 +2472,10 @@ void write_method_mapping(const std::string& filename,
   assert_log(fd, "Can't open method mapping file %s: %s\n", filename.c_str(),
              strerror(errno));
   UnorderedSet<DexClass*> classes_in_dex(classes->begin(), classes->end());
-  for (const auto& it : UnorderedIterable(dodx->method_to_idx())) {
+  for (const auto& it : unordered_to_ordered(
+           dodx->method_to_idx(), [](const auto& left, const auto& right) {
+             return left.second < right.second;
+           })) {
     auto* method = it.first;
     auto idx = it.second;
 

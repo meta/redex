@@ -173,3 +173,23 @@ TEST(GraphUtilTest, preorder_loop) {
   const auto& sorted = preorder_sort<GraphInterface>(graph);
   EXPECT_EQ(sorted, std::vector<uint32_t>({0, 1, 2}));
 }
+
+/*
+ *  +-> 1 <-+
+ *  |       |
+ *  0       |
+ *  |       |
+ *  +-> 2 --+
+ *
+ * The search reaches 1 through 2 as well, so 1 must be finished before 2;
+ * otherwise the edge 2 -> 1 would point backwards in the reverse postorder
+ * although the graph has no cycle.
+ */
+TEST(GraphUtilTest, postorder_reverse_is_topological) {
+  GraphInterface::Graph graph;
+  graph.add_edge(0, 1);
+  graph.add_edge(0, 2);
+  graph.add_edge(2, 1);
+  const auto& sorted = postorder_sort<GraphInterface>(graph);
+  EXPECT_EQ(sorted, std::vector<uint32_t>({1, 2, 0}));
+}

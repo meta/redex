@@ -16,44 +16,39 @@
 namespace graph {
 
 /*
- * Iterative implementation of a postorder sort.
+ * Iterative depth-first postorder. In its reverse, every edge that is not a
+ * back edge goes from an earlier node to a later one.
  */
 template <class GraphInterface>
 std::vector<typename GraphInterface::NodeId> postorder_sort(
     const typename GraphInterface::Graph& graph) {
   using NodeId = typename GraphInterface::NodeId;
-  enum State { UNVISITED, VISITING, VISITED };
-  NodeId entry = GraphInterface::entry(graph);
-  std::vector<NodeId> stack{entry};
-  UnorderedMap<NodeId, State> states{{entry, UNVISITED}};
+  enum State { VISITING, VISITED };
+  std::vector<NodeId> stack{GraphInterface::entry(graph)};
+  UnorderedMap<NodeId, State> states;
   std::vector<NodeId> postorder;
 
   while (!stack.empty()) {
-    const auto& curr = stack.back();
-    auto state_it = states.find(curr);
-    always_assert(state_it != states.end());
-    switch (state_it->second) {
-    case UNVISITED: {
-      state_it->second = VISITING;
+    auto curr = stack.back();
+    auto [state_it, first_visit] = states.emplace(curr, VISITING);
+    if (first_visit) {
+      // Mark a node when the search enters it, not when it is pushed: a node
+      // pushed by its parent may be entered first from a sibling explored
+      // earlier, and must then finish before that sibling.
       for (auto const& s : GraphInterface::successors(graph, curr)) {
         const auto& target = GraphInterface::target(graph, s);
         if (!states.count(target)) {
-          states[target] = UNVISITED;
           stack.push_back(target);
         }
       }
-      break;
+      continue;
     }
-    case VISITING: {
+    stack.pop_back();
+    if (state_it->second == VISITING) {
       state_it->second = VISITED;
       postorder.push_back(curr);
-      stack.pop_back();
-      break;
     }
-    case VISITED: {
-      not_reached();
-    }
-    }
+    // Otherwise this is a further stack entry of a node already finished.
   }
 
   return postorder;

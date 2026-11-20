@@ -6,37 +6,74 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Set
+from collections import Counter
+from collections.abc import Hashable, Mapping, Set
 
-from .core import ReachabilityGraph, ReachableObject, ReachableObjectType
+from .core import (
+    INSTANCE_TYPES,
+    ReachabilityGraph,
+    ReachableObject,
+    ReachableObjectType,
+)
 
 NEW_NODE_MARKER = "<NEW>"
 
-NodeKey = tuple[int, str]
+# A node of the diff. A class, field or method is one node per name:
+# (type, name, -1). Each annotation or seed instance is its own node:
+# (type, name, its index in `node_records`).
+NodeKey = tuple[int, str, int]
 
 
-def _node_key(node: ReachableObject) -> NodeKey:
-    return (node.type, node.name)
+def _node_keys(graph: ReachabilityGraph) -> dict[ReachableObject, NodeKey]:
+    return {
+        node: (node.type, node.name, index if node.type in INSTANCE_TYPES else -1)
+        for index, node in enumerate(graph.node_records)
+    }
+
+
+def _identity(node: ReachableObject) -> Hashable:
+    """What matches a node across graphs. A class, field or method is its
+    name. An annotation or seed instance is its name and the names of its
+    retainers: an annotation instance is retained by the class that carries
+    it, and a seed by nothing."""
+    if node.type not in INSTANCE_TYPES:
+        return node.type, node.name
+    return (
+        node.type,
+        node.name,
+        frozenset((retainer.type, retainer.name) for retainer in node.preds),
+    )
 
 
 def newly_retained_keys(
     old_graph: ReachabilityGraph, new_graph: ReachabilityGraph
 ) -> set[NodeKey]:
-    return set(new_graph.nodes) - set(old_graph.nodes)
+    """The new graph's nodes that match no old node. Each old node matches
+    one new node: of several instances with one identity, as many as the old
+    graph has count as old, the first in record order, and the rest as new.
+    Such instances are indistinguishable, so which of them is new is
+    arbitrary."""
+    unmatched = Counter(_identity(node) for node in old_graph.node_records)
+    new_keys = set()
+    for node, key in _node_keys(new_graph).items():
+        identity = _identity(node)
+        if unmatched[identity]:
+            unmatched[identity] -= 1
+        else:
+            new_keys.add(key)
+    return new_keys
 
 
 def _logical_adjacency(
-    graph: ReachabilityGraph,
+    keys: Mapping[ReachableObject, NodeKey],
 ) -> tuple[dict[NodeKey, set[NodeKey]], dict[NodeKey, set[NodeKey]]]:
-    keys = set(graph.nodes)
-    predecessors = {key: set() for key in keys}
-    successors = {key: set() for key in keys}
+    predecessors = {key: set() for key in keys.values()}
+    successors = {key: set() for key in keys.values()}
 
-    for node in graph.node_records:
-        node_key = _node_key(node)
+    for node, node_key in keys.items():
         for predecessor in node.preds:
-            predecessor_key = _node_key(predecessor)
-            if node_key not in keys or predecessor_key not in keys:
+            predecessor_key = keys.get(predecessor)
+            if predecessor_key is None:
                 continue
             predecessors[node_key].add(predecessor_key)
             successors[predecessor_key].add(node_key)
@@ -71,7 +108,7 @@ def build_diff_graph(
     if marker_key in new_graph.nodes:
         raise ValueError(f"Input graph already contains marker node {marker_key}")
 
-    predecessors, successors = _logical_adjacency(new_graph)
+    predecessors, successors = _logical_adjacency(_node_keys(new_graph))
     ancestor_candidates = _closure(new_keys, predecessors)
     roots = {key for key in ancestor_candidates if not predecessors[key]}
     rooted_ancestors = _closure(roots, successors, ancestor_candidates)
@@ -80,8 +117,7 @@ def build_diff_graph(
 
     copied_nodes = {}
     for key in sorted(kept_keys):
-        source = new_graph.nodes[key]
-        copied = ReachableObject(source.type, source.name)
+        copied = ReachableObject(key[0], key[1])
         output.add_node(copied)
         copied_nodes[key] = copied
 

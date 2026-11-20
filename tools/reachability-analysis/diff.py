@@ -45,7 +45,7 @@ def main(argv: Sequence[str]) -> None:
     logger.info(
         "Wrote %d newly retained nodes and %d total output nodes to %s",
         new_node_count,
-        len(output_graph.nodes),
+        len(output_graph.node_records),
         args.output,
     )
 

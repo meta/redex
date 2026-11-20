@@ -3,10 +3,14 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
+import tempfile
 import unittest
 
 from lib.core import ReachabilityGraph, ReachableObject, ReachableObjectType
-from lib.reachability_diff import build_diff_graph, NEW_NODE_MARKER
+from lib.reachability_diff import build_diff_graph, NEW_NODE_MARKER, newly_retained_keys
+from lib.sqlite_export import export_graph
+from lib.sqlite_query import dominators, new_nodes, open_database
 
 
 def add_node(graph, node_type, name):
@@ -109,6 +113,106 @@ class ReachabilityDiffTest(unittest.TestCase):
         copied_anno = result.get_anno("LAnno;")
         self.assertIn(result.get_seed("root"), copied_anno.preds)
         self.assertIn(result.get_node("LNew;"), copied_anno.succs)
+
+    def test_annotation_instances_stay_apart(self):
+        def add_json_adapter_class(graph, owner):
+            # @JsonAdapter(<owner>Adapter.class) class <owner> {}, kept by its
+            # own rule.
+            seed = add_node(
+                graph, ReachableObjectType.SEED, f"KEEP: -keep class {owner}"
+            )
+            cls = add_node(graph, ReachableObjectType.CLASS, f"L{owner};")
+            anno = add_node(graph, ReachableObjectType.ANNO, "LJsonAdapter;")
+            adapter = add_node(graph, ReachableObjectType.CLASS, f"L{owner}Adapter;")
+            graph.add_edge(cls, seed)
+            graph.add_edge(anno, cls)
+            graph.add_edge(adapter, anno)
+
+        old_graph = ReachabilityGraph()
+        add_json_adapter_class(old_graph, "Foo")
+        new_graph = ReachabilityGraph()
+        add_json_adapter_class(new_graph, "Foo")
+        add_json_adapter_class(new_graph, "Bar")
+
+        result = build_diff_graph(old_graph, new_graph)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            graph_file = os.path.join(temp_dir, "diff.graph")
+            db_file = os.path.join(temp_dir, "diff.sqlite")
+            result.dump(graph_file)
+            export_graph(graph_file, db_file)
+            connection = open_database(db_file)
+            try:
+                adapter_dominators = dominators(connection, ("CLASS", "LBarAdapter;"))
+            finally:
+                connection.close()
+
+        self.assertEqual(
+            [
+                {"type": "ANNO", "name": "LJsonAdapter;"},
+                {"type": "CLASS", "name": "LBar;"},
+                {"type": "SEED", "name": "KEEP: -keep class Bar"},
+            ],
+            adapter_dominators,
+        )
+        # Foo's annotation instance is in both graphs, so nothing of Foo is new.
+        self.assertNotIn((ReachableObjectType.CLASS, "LFoo;"), result.nodes)
+
+    def test_new_nodes_lists_each_new_annotation_instance(self):
+        def add_json_adapter_class(graph, owner):
+            # @JsonAdapter(<owner>Adapter.class) class <owner> {}
+            cls = add_node(graph, ReachableObjectType.CLASS, f"L{owner};")
+            anno = add_node(graph, ReachableObjectType.ANNO, "LJsonAdapter;")
+            graph.add_edge(anno, cls)
+
+        old_graph = ReachabilityGraph()
+        new_graph = ReachabilityGraph()
+        add_json_adapter_class(new_graph, "Bar")
+        add_json_adapter_class(new_graph, "Baz")
+
+        result = build_diff_graph(old_graph, new_graph)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            graph_file = os.path.join(temp_dir, "diff.graph")
+            db_file = os.path.join(temp_dir, "diff.sqlite")
+            result.dump(graph_file)
+            export_graph(graph_file, db_file)
+            connection = open_database(db_file)
+            try:
+                rows = list(new_nodes(connection, None))
+            finally:
+                connection.close()
+
+        self.assertEqual(len(newly_retained_keys(old_graph, new_graph)), len(rows))
+        self.assertEqual(
+            [
+                {"type": "ANNO", "name": "LJsonAdapter;"},
+                {"type": "ANNO", "name": "LJsonAdapter;"},
+                {"type": "CLASS", "name": "LBar;"},
+                {"type": "CLASS", "name": "LBaz;"},
+            ],
+            rows,
+        )
+
+    def test_each_old_instance_matches_one_new_instance(self):
+        # `-keep class Foo` in one configuration file, then in two.
+        def add_keep_rules(graph, count):
+            cls = add_node(graph, ReachableObjectType.CLASS, "LFoo;")
+            for _ in range(count):
+                seed = add_node(
+                    graph, ReachableObjectType.SEED, "KEEP: -keep class Foo"
+                )
+                graph.add_edge(cls, seed)
+
+        old_graph = ReachabilityGraph()
+        add_keep_rules(old_graph, 1)
+        new_graph = ReachabilityGraph()
+        add_keep_rules(new_graph, 2)
+
+        self.assertEqual(
+            {(ReachableObjectType.SEED, "KEEP: -keep class Foo")},
+            {key[:2] for key in newly_retained_keys(old_graph, new_graph)},
+        )
+        self.assertEqual(1, len(newly_retained_keys(old_graph, new_graph)))
+        self.assertNotEqual([], build_diff_graph(old_graph, new_graph).node_records)
 
     def test_empty_diff_produces_empty_graph(self):
         old_graph = ReachabilityGraph()

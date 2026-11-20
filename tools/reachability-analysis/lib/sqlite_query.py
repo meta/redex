@@ -611,9 +611,10 @@ def new_nodes(
     if marker_exists is None:
         raise ValueError("input is not a reachability-diff graph: no <NEW> marker")
 
+    # One row per new node: each new annotation or seed instance is its own.
     cursor = connection.execute(
         """
-        SELECT DISTINCT node.kind AS type, node.name AS name
+        SELECT node.kind AS type, node.name AS name
         FROM nodes AS marker
         JOIN edges AS edge INDEXED BY edges_by_retained
           ON edge.retained_id = marker.id

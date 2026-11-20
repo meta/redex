@@ -34,6 +34,13 @@
   FOR_EACH(java_lang_Double, "Ljava/lang/Double;")                       \
   FOR_EACH(java_lang_RuntimeException, "Ljava/lang/RuntimeException;")   \
   FOR_EACH(dalvik_annotation_Signature, "Ldalvik/annotation/Signature;") \
+  FOR_EACH(dalvik_annotation_EnclosingClass,                             \
+           "Ldalvik/annotation/EnclosingClass;")                         \
+  FOR_EACH(dalvik_annotation_EnclosingMethod,                            \
+           "Ldalvik/annotation/EnclosingMethod;")                        \
+  FOR_EACH(dalvik_annotation_InnerClass,                                 \
+           "Ldalvik/annotation/"                                         \
+           "InnerClass;")                                                \
   FOR_EACH(dalvik_annotation_MemberClasses,                              \
            "Ldalvik/annotation/"                                         \
            "MemberClasses;")                                             \

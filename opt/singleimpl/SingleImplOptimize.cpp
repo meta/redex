@@ -26,6 +26,7 @@
 #include "SingleImplDefs.h"
 #include "Trace.h"
 #include "TypeReference.h"
+#include "TypeUtil.h"
 #include "WorkQueue.h"
 
 namespace {
@@ -616,15 +617,13 @@ void OptimizationImpl::rewrite_annotations(Scope& scope,
     }
   };
 
-  auto* enclosing_method =
-      DexType::get_type("Ldalvik/annotation/EnclosingMethod;");
-  auto* enclosing_class =
-      DexType::get_type("Ldalvik/annotation/EnclosingClass;");
-  if (must_set_method_annotations(config) && enclosing_method != nullptr) {
-    types_to_rewrite.emplace(enclosing_method, rewrite_enclosing_method);
+  if (must_set_method_annotations(config)) {
+    types_to_rewrite.emplace(type::dalvik_annotation_EnclosingMethod(),
+                             rewrite_enclosing_method);
   }
-  if (must_set_interface_annotations(config) && enclosing_class != nullptr) {
-    types_to_rewrite.emplace(enclosing_class, rewrite_enclosing_class);
+  if (must_set_interface_annotations(config)) {
+    types_to_rewrite.emplace(type::dalvik_annotation_EnclosingClass(),
+                             rewrite_enclosing_class);
   }
   if (types_to_rewrite.empty()) {
     return;

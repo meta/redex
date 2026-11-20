@@ -14,6 +14,13 @@ from collections import namedtuple
 OffsetLine = namedtuple("OffsetLine", "offset line")
 
 
+def method_key(method_index, dex_signature4):
+    """A method's key in the debug line map: its method_id index in the high
+    32 bits and the first four bytes of its dex's signature, read
+    little-endian, in the low ones."""
+    return (method_index << 32) | dex_signature4
+
+
 class DebugLineMap(object):
     def __init__(self, method_id_map):
         self.method_id_map = method_id_map

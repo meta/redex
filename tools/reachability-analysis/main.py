@@ -51,10 +51,10 @@ def main(argv):
             graph.list_nodes(input_str[2:])
             continue
 
-        # Search for the node and print it
+        # Search for the nodes and print them
         try:
-            node = graph.get_node(input_str)
-            print(repr(node))
+            for node in graph.get_nodes(input_str):
+                print(repr(node))
         except KeyError:
             print(f"Cannot find a node named '{input_str}'")
 

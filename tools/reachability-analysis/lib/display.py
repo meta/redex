@@ -38,7 +38,7 @@ def inject_scripts():
         function print_node(node_name) {
             var kernel = Jupyter.notebook.kernel;
             var new_cell = Jupyter.notebook.insert_cell_below();
-            new_cell.set_text("display.display_node(graph.get_node('" + node_name + "'))");
+            new_cell.set_text("for node in graph.get_nodes('" + node_name + "'):\\n    display.display_node(node)");
             new_cell.execute();
         }
     """

@@ -337,8 +337,8 @@ class ReachabilityHprof:
         self, graph: ReachabilityGraph, node_type: int
     ) -> Mapping[ReachableObject, ObjectId]:
         ret = {}
-        for (nt, _), node in graph.nodes.items():
-            if nt != node_type:
+        for node in graph.node_records:
+            if node.type != node_type:
                 continue
 
             object_id = self.hprof.next_object_id()

@@ -59,7 +59,7 @@ class ReachabilityDiffTest(unittest.TestCase):
         self.assertNotIn((ReachableObjectType.CLASS, "LUnrelated;"), result.nodes)
 
         copied_new = result.get_node("LNew;")
-        marker = result.get_anno(NEW_NODE_MARKER)
+        [marker] = result.get_anno(NEW_NODE_MARKER)
         self.assertEqual({copied_new}, set(marker.preds))
         self.assertIn(marker, copied_new.succs)
         self.assertIn(result.get_node("LAncestor;"), copied_new.preds)
@@ -110,8 +110,9 @@ class ReachabilityDiffTest(unittest.TestCase):
 
         self.assertIn((ReachableObjectType.SEED, "root"), result.nodes)
         self.assertIn((ReachableObjectType.ANNO, "LAnno;"), result.nodes)
-        copied_anno = result.get_anno("LAnno;")
-        self.assertIn(result.get_seed("root"), copied_anno.preds)
+        [copied_anno] = result.get_anno("LAnno;")
+        [copied_root] = result.get_seed("root")
+        self.assertIn(copied_root, copied_anno.preds)
         self.assertIn(result.get_node("LNew;"), copied_anno.succs)
 
     def test_annotation_instances_stay_apart(self):

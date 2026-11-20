@@ -71,6 +71,28 @@ class TestAnalysis(unittest.TestCase):
         grouped = analysis.group_members_by_class(graph)
         self.assertDictEqual(grouped, {foo: {foo_bar, foo_baz}})
 
+    def test_group_members_by_class_skips_an_owner_without_a_class_node(self):
+        graph = core.ReachabilityGraph()
+        foo = ReachableObject(ReachableObjectType.CLASS, "LFoo;")
+        foo_bar = ReachableObject(ReachableObjectType.FIELD, "LFoo;.bar:I")
+        # Two instances of @Retention, whose class is outside the app.
+        retention = "Ljava/lang/annotation/Retention;"
+        value = ReachableObject(
+            ReachableObjectType.METHOD,
+            f"{retention}.value:()Ljava/lang/annotation/RetentionPolicy;",
+        )
+        for node in (
+            foo,
+            foo_bar,
+            value,
+            ReachableObject(ReachableObjectType.ANNO, retention),
+            ReachableObject(ReachableObjectType.ANNO, retention),
+        ):
+            graph.add_node(node)
+
+        grouped = analysis.group_members_by_class(graph)
+        self.assertDictEqual(grouped, {foo: {foo_bar}})
+
     def test_rank_counts_past_a_member_that_retains_its_class(self):
         graph = core.ReachabilityGraph()
         root = ReachableObject(ReachableObjectType.SEED, "KEEP: -keep class A")

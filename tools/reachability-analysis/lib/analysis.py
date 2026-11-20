@@ -54,12 +54,17 @@ def group_by_common_keys(d):
     return grouped_keys
 
 
+def _all_nodes(graph):
+    for nodes in graph.nodes.values():
+        yield from nodes
+
+
 def find_nodes(graph, filter_fn):
     """
     Find all nodes whose names pass the predicate :filter_fn.
     """
     nodes = set()
-    for node in list(graph.nodes.values()):
+    for node in _all_nodes(graph):
         if filter_fn(node.name):
             nodes.add(node)
     return nodes
@@ -70,7 +75,7 @@ def find_nodes_in_packages(graph, pkg_prefixes):
     Find all nodes that fall under the list of :pkg_prefixes.
     """
     nodes = set()
-    for node in list(graph.nodes.values()):
+    for node in _all_nodes(graph):
         for pkg_prefix in pkg_prefixes:
             # If we have an array, use its base type
             base_type = node.name.lstrip("[")
@@ -121,14 +126,17 @@ def group_members_by_class(graph):
     Return a map of class -> set of members in that class.
     """
     grouped_members = defaultdict(set)
-    for (ty, name), node in list(graph.nodes.items()):
-        if ty in [ReachableObjectType.FIELD, ReachableObjectType.METHOD]:
-            cls, sep, _ = name.partition(";")
+    for node in _all_nodes(graph):
+        if node.type in [ReachableObjectType.FIELD, ReachableObjectType.METHOD]:
+            cls, sep, _ = node.name.partition(";")
             cls += ";"
-            try:
-                cls_node = graph.get_node(cls)
-            except KeyError:
+            # An owner outside the app has no class node.
+            cls_nodes = graph.nodes.get((ReachableObjectType.CLASS, cls))
+            if cls_nodes is None:
                 continue
+            # A class has one node per name; only annotation and seed nodes are
+            # per instance.
+            [cls_node] = cls_nodes
             grouped_members[cls_node].add(node)
     return grouped_members
 
@@ -161,13 +169,13 @@ def get_dominated(graph, query_set):
                 if successor not in visited and successor not in query_set
             )
 
-    seeds = [node for node in list(graph.nodes.values()) if len(node.preds) == 0]
+    seeds = [node for node in _all_nodes(graph) if len(node.preds) == 0]
 
     for seed in seeds:
         mark(seed)
 
     closure = set()
-    for node in list(graph.nodes.values()):
+    for node in _all_nodes(graph):
         if node not in visited:
             closure.add(node)
 
@@ -218,9 +226,7 @@ def get_dominators(graph, target):
     """Return target's proper dominators, ordered from nearest to root."""
     ancestors = _get_ancestors(target)
     roots = [
-        node
-        for node in graph.nodes.values()
-        if node in ancestors and len(node.preds) == 0
+        node for node in _all_nodes(graph) if node in ancestors and len(node.preds) == 0
     ]
 
     virtual_root = object()

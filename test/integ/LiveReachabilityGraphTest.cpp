@@ -1,0 +1,94 @@
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
+#include <gtest/gtest.h>
+
+#include <memory>
+#include <set>
+#include <sstream>
+#include <string>
+
+#include "DexClass.h"
+#include "MethodOverrideGraph.h"
+#include "Reachability.h"
+#include "RedexTest.h"
+#include "TypeUtil.h"
+#include "Walkers.h"
+
+using namespace reachability;
+
+namespace {
+
+constexpr const char* kKeepRule = R"(
+  -keepclasseswithmembers public class LiveReachabilityGraphTest {
+    public void entry();
+  }
+)";
+
+std::string label(const ReachableObject& obj) {
+  std::ostringstream os;
+  os << obj;
+  return os.str();
+}
+
+} // namespace
+
+class LiveReachabilityGraphTest : public RedexIntegrationTest {
+ protected:
+  void SetUp() override {
+    create_object_class();
+    auto* cls = type_class(type::java_lang_Object());
+    // To make the assertion in reachability analysis happy.
+    cls->set_external();
+  }
+
+  // Marks the code the keep rule reaches, recording the live graph.
+  std::unique_ptr<ReachableObjects> compute_live_graph() {
+    auto pg_config =
+        process_and_get_proguard_config(stores[0].get_dexen(), kKeepRule);
+    always_assert(pg_config->ok);
+
+    int num_ignore_check_strings = 0;
+    IgnoreSets ig_sets;
+    ReachableAspects reachable_aspects;
+    auto scope = build_class_scope(stores);
+    walk::parallel::code(scope, [&](auto*, auto& code) { code.build_cfg(); });
+    auto mog = method_override_graph::build_graph(scope);
+    auto reachables = compute_reachable_objects(
+        scope, *mog, ig_sets, &num_ignore_check_strings, &reachable_aspects,
+        /* record_reachability */ true);
+    walk::parallel::code(scope, [&](auto*, auto& code) { code.clear_cfg(); });
+    return reachables;
+  }
+
+  // The retainers the live graph records for the class named `descriptor`.
+  std::set<std::string> retainers_of_class(const ReachableObjects& reachables,
+                                           const std::string& descriptor) {
+    const auto* cls = type_class(DexType::get_type(descriptor));
+    always_assert_log(cls != nullptr, "No class %s", descriptor.c_str());
+    const auto& graph = reachables.retainers_of();
+    std::set<std::string> result;
+    if (graph.count(ReachableObject(cls)) == 0u) {
+      return result;
+    }
+    for (const auto& retainer :
+         UnorderedIterable(graph.at_unsafe(ReachableObject(cls)))) {
+      result.insert(label(retainer));
+    }
+    return result;
+  }
+};
+
+TEST_F(LiveReachabilityGraphTest, SeedWithoutKeepReasonHasSeedRetainer) {
+  auto reachables = compute_live_graph();
+
+  // The test records no keep reasons. The kept methods of the kept class
+  // retain it, so only the generic seed connects it to a root.
+  EXPECT_EQ(retainers_of_class(*reachables, "LLiveReachabilityGraphTest;")
+                .count("<SEED>"),
+            1u);
+}

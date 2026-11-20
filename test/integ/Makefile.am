@@ -38,6 +38,7 @@ check_PROGRAMS = \
     iodi_test \
     ip_reflection_analysis_test \
     lift_vmethods_test \
+    live_reachability_graph_test \
     method_override_graph_test \
     monotonic_fixpoint_test \
     partial_application_test \
@@ -92,6 +93,7 @@ TESTS = \
     iodi_test \
     ip_reflection_analysis_test \
     lift_vmethods_test \
+    live_reachability_graph_test \
     method_override_graph_test \
     peephole_test \
     points_to_semantics_test \
@@ -166,6 +168,9 @@ EXTRA_ip_reflection_analysis_test_DEPENDENCIES = ip_reflection_analysis_test-cla
 
 lift_vmethods_test_SOURCES = LiftVirtualMethodsTest.cpp
 EXTRA_lift_vmethods_test_DEPENDENCIES = lift_vmethods_test-class.dex
+
+live_reachability_graph_test_SOURCES = LiveReachabilityGraphTest.cpp
+EXTRA_live_reachability_graph_test_DEPENDENCIES = live_reachability_graph_test-class.dex
 
 method_override_graph_test_SOURCES = MethodOverrideGraphTest.cpp
 EXTRA_method_override_graph_test_DEPENDENCIES = method_override_graph_test-class.dex
@@ -294,6 +299,9 @@ ip_reflection_analysis_test-class.jar: IPReflectionAnalysisTest.java
 	$(create_jar)
 
 lift_vmethods_test-class.jar: LiftVirtualMethodsTest.java
+	$(create_jar)
+
+live_reachability_graph_test-class.jar: LiveReachabilityGraphTest.java
 	$(create_jar)
 
 method_override_graph_test-class.jar: MethodOverrideGraphTest.java

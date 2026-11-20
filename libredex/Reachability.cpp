@@ -2041,6 +2041,7 @@ void ReachableObjects::record_is_seed(Seed* seed) {
   m_retainers_of.update(
       ReachableObject(seed),
       [&](const ReachableObject&, ReachableObjectSet& set, bool /* exists */) {
+        bool has_reason = false;
         for (const auto& reason : UnorderedIterable(keep_reasons)) {
           // -keepnames rules are irrelevant when analyzing reachability
           if (reason->type == keep_reason::KEEP_RULE &&
@@ -2048,6 +2049,14 @@ void ReachableObjects::record_is_seed(Seed* seed) {
             continue;
           }
           set.emplace(reason);
+          has_reason = true;
+        }
+        // The kept methods of a seed class retain it, so a seed class without
+        // a recorded reason still needs a root above it, or it would sit in a
+        // loop with them that no root reaches. The generic seed stands in for
+        // the unrecorded reason.
+        if (!has_reason) {
+          set.emplace(ReachableObject());
         }
       });
 }

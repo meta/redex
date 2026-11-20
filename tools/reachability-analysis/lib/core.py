@@ -52,6 +52,17 @@ class ReachableObjectType(object):
             return "SEED"
 
 
+# Kinds whose name is shared by many objects: an annotation node is one
+# annotation instance, named by its type, and a seed node is one keep reason.
+# Each instance retains only what it names, so instances stay separate nodes.
+INSTANCE_TYPES = frozenset((ReachableObjectType.ANNO, ReachableObjectType.SEED))
+
+
+def instance_kind_names() -> frozenset[str]:
+    """INSTANCE_TYPES as the SQL export names kinds."""
+    return frozenset(ReachableObjectType.to_string(t) for t in INSTANCE_TYPES)
+
+
 # Aside from classes and annotations, the other nodes will never have collisions
 # in their node names. Thus, we are able to infer their node type just by
 # looking at their names. The functions below help with that.

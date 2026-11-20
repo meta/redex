@@ -10,7 +10,7 @@ import array
 import sqlite3
 from collections.abc import Iterator
 
-from .core import ReachabilityGraph
+from .core import instance_kind_names, ReachabilityGraph
 
 
 _KINDS = ("ANNO", "CLASS", "FIELD", "METHOD", "SEED")
@@ -30,13 +30,14 @@ def _logical_nodes(
     representative_ids = array.array("I")
     kind_codes = array.array("B")
     previous: tuple[str, str] | None = None
+    instance_kinds = instance_kind_names()
     logical_id = -1
     for raw_id, kind, name in connection.execute(
         "SELECT id, kind, name FROM nodes INDEXED BY nodes_by_kind_name "
         "ORDER BY kind, name, id"
     ):
         identity = kind, name
-        if identity != previous:
+        if identity != previous or kind in instance_kinds:
             logical_id += 1
             representative_ids.append(raw_id)
             kind_codes.append(_KIND_CODES[kind])

@@ -235,7 +235,10 @@ def _add_subcommands(parser: argparse.ArgumentParser) -> None:
         description=(
             "List the selected node and every root-reachable node that becomes "
             "unreachable when the selected node is cut. Permanently rootless nodes "
-            "are excluded. This is the dominated set, not the dominator chain."
+            "are excluded. This is the dominated set, not the dominator chain. "
+            "For an annotation type or keep rule with several instances, the "
+            "union of what each instance dominates, which can be less than what "
+            "becomes unreachable when all of them are cut."
         ),
     )
     dominated.add_argument("name")
@@ -246,7 +249,9 @@ def _add_subcommands(parser: argparse.ArgumentParser) -> None:
         help="List a node's proper dominators",
         description=(
             "List every node through which all root-to-target paths pass, ordered "
-            "from the immediate dominator toward the root. The target is omitted."
+            "from the immediate dominator toward the root. The target is omitted. "
+            "For an annotation type or keep rule with several instances, the "
+            "nodes that dominate all of them."
         ),
     )
     dominators.add_argument("name")
@@ -258,7 +263,10 @@ def _add_subcommands(parser: argparse.ArgumentParser) -> None:
         description=(
             "Report the number of nodes that become unreachable from roots when "
             "the selected node is cut. This is a node count, not a byte or size "
-            "estimate; the graph contains no size data."
+            "estimate; the graph contains no size data. For an annotation type or "
+            "keep rule with several instances, the size of the union of what each "
+            "instance dominates, which can be less than what becomes unreachable "
+            "when all of them are cut."
         ),
     )
     retained_count.add_argument("name")
@@ -269,7 +277,9 @@ def _add_subcommands(parser: argparse.ArgumentParser) -> None:
         help="List nodes with the largest dominance cut-sets",
         description=(
             "List nodes by descending dominator-tree subtree node count. "
-            "Counts are nodes, not byte or size estimates."
+            "Counts are nodes, not byte or size estimates. Each instance of an "
+            "annotation type or keep rule is its own row; `retained-count` "
+            "answers for all instances of one together."
         ),
     )
     top_retained.add_argument("--top", type=_nonnegative_int, default=20)

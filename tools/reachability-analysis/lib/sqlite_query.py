@@ -383,43 +383,59 @@ def path_to_root(
 def _dom_stats(
     connection: sqlite3.Connection,
     node: tuple[str, str],
-) -> sqlite3.Row:
-    row = connection.execute(
+    limit: int,
+) -> list[sqlite3.Row]:
+    """Up to `limit` dom_stats rows of a node: one for a class, field or
+    method, one per instance for an annotation type or keep rule."""
+    rows = connection.execute(
         """
         SELECT stats.node_id, stats.retained_count
         FROM nodes AS selected INDEXED BY nodes_by_kind_name
         JOIN dom_stats AS stats ON stats.node_id = selected.id
         WHERE selected.kind = :kind AND selected.name = :name
-        LIMIT 1
+        LIMIT :limit
         """,
-        {"kind": node[0], "name": node[1]},
-    ).fetchone()
-    if row is None:
+        {"kind": node[0], "name": node[1], "limit": limit},
+    ).fetchall()
+    if not rows:
         raise ValueError(f"Node {node[1]!r} is not reachable from any root")
-    return row
+    return rows
+
+
+def _dominated_subtree(instances: int) -> str:
+    """The dominator subtrees of every dom_stats row of (:kind, :name). With
+    several instances they are deduplicated: an instance can lie in another
+    instance's subtree."""
+    union = "UNION" if instances > 1 else "UNION ALL"
+    return f"""
+        WITH RECURSIVE subtree(node_id) AS (
+          SELECT stats.node_id
+          FROM nodes AS selected INDEXED BY nodes_by_kind_name
+          JOIN dom_stats AS stats ON stats.node_id = selected.id
+          WHERE selected.kind = :kind AND selected.name = :name
+          {union}
+          SELECT child.node_id
+          FROM subtree
+          JOIN dom_stats AS child INDEXED BY dom_stats_by_idom
+            ON child.idom_id = subtree.node_id
+        )
+        """
 
 
 def dominated(
     connection: sqlite3.Connection,
     blocked: tuple[str, str],
 ) -> Iterator[dict[str, object]]:
-    node_id = _dom_stats(connection, blocked)["node_id"]
+    instances = len(_dom_stats(connection, blocked, 2))
     cursor = connection.execute(
-        """
-        WITH RECURSIVE subtree(node_id) AS (
-          VALUES(:node_id)
-          UNION ALL
-          SELECT child.node_id
-          FROM subtree
-          JOIN dom_stats AS child INDEXED BY dom_stats_by_idom
-            ON child.idom_id = subtree.node_id
-        )
+        _dominated_subtree(instances)
+        + """
         SELECT node.kind AS type, node.name AS name
         FROM subtree
         JOIN nodes AS node ON node.id = subtree.node_id
         ORDER BY node.kind, node.name
         """,
-        {"node_id": node_id},
+        {"kind": blocked[0], "name": blocked[1]},
     )
     return _rows(cursor)
 
@@ -428,11 +444,18 @@ def retained_count(
     connection: sqlite3.Connection,
     blocked: tuple[str, str],
 ) -> dict[str, object]:
-    stats = _dom_stats(connection, blocked)
+    rows = _dom_stats(connection, blocked, 2)
+    if len(rows) == 1:
+        count = rows[0]["retained_count"]
+    else:
+        count = connection.execute(
+            _dominated_subtree(len(rows)) + "SELECT COUNT(*) FROM subtree",
+            {"kind": blocked[0], "name": blocked[1]},
+        ).fetchone()[0]
     return {
         "type": blocked[0],
         "name": blocked[1],
-        "retained_count": stats["retained_count"],
+        "retained_count": count,
     }
 
 
@@ -467,14 +490,10 @@ def top_retained(
     return _rows(cursor)
 
 
-def dominators(
-    connection: sqlite3.Connection,
-    target: tuple[str, str],
-) -> list[dict[str, object]]:
-    """The target's chain in the materialized dominator tree, so `dominators`,
-    `dominated`, `retained-count` and `top-retained` answer from one tree."""
-    node_id = _dom_stats(connection, target)["node_id"]
-    cursor = connection.execute(
+def _dominator_chain(connection: sqlite3.Connection, node_id: int) -> list[sqlite3.Row]:
+    """A node's proper dominators in the materialized dominator tree, nearest
+    first."""
+    return connection.execute(
         """
         WITH RECURSIVE chain(node_id, depth) AS (
           SELECT idom_id, 1 FROM dom_stats WHERE node_id = :node_id
@@ -483,14 +502,40 @@ def dominators(
           FROM chain
           JOIN dom_stats AS stats ON stats.node_id = chain.node_id
         )
-        SELECT node.kind AS type, node.name AS name
+        SELECT node.id AS id, node.kind AS type, node.name AS name
         FROM chain
         JOIN nodes AS node ON node.id = chain.node_id
         ORDER BY chain.depth
         """,
         {"node_id": node_id},
-    )
-    return list(_rows(cursor))
+    ).fetchall()
+
+
+def dominators(
+    connection: sqlite3.Connection,
+    target: tuple[str, str],
+) -> list[dict[str, object]]:
+    """The target's chain in the materialized dominator tree, so `dominators`,
+    `dominated`, `retained-count` and `top-retained` answer from one tree. For an annotation
+    type or keep rule with several instances, the nodes that dominate every
+    instance."""
+    # SQLite reads a negative LIMIT as no limit.
+    instances = [row["node_id"] for row in _dom_stats(connection, target, -1)]
+    first = _dominator_chain(connection, instances[0])
+    common = {row["id"] for row in first}
+    for node_id in instances[1:]:
+        # An instance that is itself a root has an empty chain, and once the
+        # intersection is empty no node dominates every instance.
+        if not common:
+            return []
+        common &= {row["id"] for row in _dominator_chain(connection, node_id)}
+    common.difference_update(instances)
+    # One row per node of the chain: each annotation or seed instance is its own.
+    return [
+        {"type": row["type"], "name": row["name"]}
+        for row in first
+        if row["id"] in common
+    ]
 
 
 def new_nodes(

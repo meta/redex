@@ -751,6 +751,143 @@ class GraphQueryTest(unittest.TestCase):
         self.assertIn("target", result.stderr)
         self.assertIn("not reachable from any root", result.stderr)
 
+    def _write_annotation_instances_db(self, directory):
+        # Two classes each carry an instance of the same annotation type, and
+        # each instance names a class nothing else retains. The dump keeps one
+        # node per instance.
+        graph = ReachabilityGraph()
+        root = ReachableObject(ReachableObjectType.SEED, "<SEED>")
+        first = ReachableObject(ReachableObjectType.CLASS, "LFirst;")
+        second = ReachableObject(ReachableObjectType.CLASS, "LSecond;")
+        first_marker = ReachableObject(ReachableObjectType.ANNO, "LMarker;")
+        second_marker = ReachableObject(ReachableObjectType.ANNO, "LMarker;")
+        named_by_first = ReachableObject(ReachableObjectType.CLASS, "LNamedByFirst;")
+        named_by_second = ReachableObject(ReachableObjectType.CLASS, "LNamedBySecond;")
+        for node in (
+            root,
+            first,
+            second,
+            first_marker,
+            second_marker,
+            named_by_first,
+            named_by_second,
+        ):
+            graph.add_node(node)
+        graph.add_edge(first, root)
+        graph.add_edge(second, root)
+        graph.add_edge(first_marker, first)
+        graph.add_edge(second_marker, second)
+        graph.add_edge(named_by_first, first_marker)
+        graph.add_edge(named_by_second, second_marker)
+        return self._write_graph_db(graph, directory)
+
+    def test_dominators_lists_each_instance_in_a_chain(self):
+        # @Adapter class B, retained through A's @Adapter instance, and
+        # @Adapter class C, retained through B's.
+        graph = ReachabilityGraph()
+        seed = ReachableObject(ReachableObjectType.SEED, "<SEED>")
+        a = ReachableObject(ReachableObjectType.CLASS, "LA;")
+        first = ReachableObject(ReachableObjectType.ANNO, "LAdapter;")
+        b = ReachableObject(ReachableObjectType.CLASS, "LB;")
+        second = ReachableObject(ReachableObjectType.ANNO, "LAdapter;")
+        c = ReachableObject(ReachableObjectType.CLASS, "LC;")
+        chain = (seed, a, first, b, second, c)
+        for node in chain:
+            graph.add_node(node)
+        for retainer, retained in zip(chain, chain[1:]):
+            graph.add_edge(retained, retainer)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_file = self._write_graph_db(graph, temp_dir)
+            output = self._run_db(db_file, "json", "dominators", "LC;")
+
+        self.assertEqual(
+            [
+                {"type": "ANNO", "name": "LAdapter;"},
+                {"type": "CLASS", "name": "LB;"},
+                {"type": "ANNO", "name": "LAdapter;"},
+                {"type": "CLASS", "name": "LA;"},
+                {"type": "SEED", "name": "<SEED>"},
+            ],
+            json.loads(output),
+        )
+
+    def test_annotation_instances_dominate_separately(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_file = self._write_annotation_instances_db(temp_dir)
+            dominated = json.loads(
+                self._run_db(db_file, "json", "dominated", "LFirst;")
+            )
+            count = json.loads(
+                self._run_db(db_file, "json", "retained-count", "LFirst;")
+            )
+            dominators = json.loads(
+                self._run_db(db_file, "json", "dominators", "LNamedByFirst;")
+            )
+            marker_count = json.loads(
+                self._run_db(
+                    db_file, "json", "retained-count", "LMarker;", "--kind", "anno"
+                )
+            )
+            marker_dominated = json.loads(
+                self._run_db(db_file, "json", "dominated", "LMarker;", "--kind", "anno")
+            )
+            marker_dominators = json.loads(
+                self._run_db(
+                    db_file, "json", "dominators", "LMarker;", "--kind", "anno"
+                )
+            )
+
+        self.assertEqual(
+            [
+                {"type": "ANNO", "name": "LMarker;"},
+                {"type": "CLASS", "name": "LFirst;"},
+                {"type": "CLASS", "name": "LNamedByFirst;"},
+            ],
+            dominated,
+        )
+        self.assertEqual(3, count[0]["retained_count"])
+        self.assertEqual(
+            [
+                {"type": "ANNO", "name": "LMarker;"},
+                {"type": "CLASS", "name": "LFirst;"},
+                {"type": "SEED", "name": "<SEED>"},
+            ],
+            dominators,
+        )
+        # Both instances together dominate themselves and what each names;
+        # each instance is its own row.
+        self.assertEqual(4, marker_count[0]["retained_count"])
+        self.assertEqual(
+            [
+                {"type": "ANNO", "name": "LMarker;"},
+                {"type": "ANNO", "name": "LMarker;"},
+                {"type": "CLASS", "name": "LNamedByFirst;"},
+                {"type": "CLASS", "name": "LNamedBySecond;"},
+            ],
+            marker_dominated,
+        )
+        # Only what lies above both instances dominates the annotation type.
+        self.assertEqual([{"type": "SEED", "name": "<SEED>"}], marker_dominators)
+
+    def test_nothing_dominates_instances_when_one_is_a_root(self):
+        graph = ReachabilityGraph()
+        root = ReachableObject(ReachableObjectType.SEED, "<SEED>")
+        held = ReachableObject(ReachableObjectType.CLASS, "LHeld;")
+        held_marker = ReachableObject(ReachableObjectType.ANNO, "LMarker;")
+        loose_marker = ReachableObject(ReachableObjectType.ANNO, "LMarker;")
+        for node in (root, held, held_marker, loose_marker):
+            graph.add_node(node)
+        graph.add_edge(held, root)
+        graph.add_edge(held_marker, held)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_file = self._write_graph_db(graph, temp_dir)
+            dominators = json.loads(
+                self._run_db(
+                    db_file, "json", "dominators", "LMarker;", "--kind", "anno"
+                )
+            )
+        self.assertEqual([], dominators)
+
     def test_new_nodes_returns_marker_predecessors_and_filters_kind(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             graph_file = os.path.join(temp_dir, "diff.graph")

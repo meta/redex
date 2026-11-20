@@ -12,7 +12,7 @@ from .dominator_tree import compute_dominator_stats, iter_dominator_rows
 
 
 SCHEMA_VERSION = 2
-DOMINATOR_TREE_VERSION = "1"
+DOMINATOR_TREE_VERSION = "2"
 SOURCE_FORMAT = (
     f"Redex reachability graph binary v{ReachabilityGraph.expected_version()}"
 )

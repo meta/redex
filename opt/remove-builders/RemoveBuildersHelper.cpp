@@ -1011,6 +1011,14 @@ bool tainted_reg_escapes(
       size_t args_reg_start{0};
       if (invoked == nullptr) {
         TRACE(BUILDERS, 5, "Unable to resolve %s", SHOW(insn));
+        // The callee is code that is not known here, and it may keep any of
+        // its arguments.
+        for (auto reg : insn->srcs()) {
+          if (tainted[reg]) {
+            TRACE(BUILDERS, 5, "Escaping instruction: %s", SHOW(insn));
+            return true;
+          }
+        }
         continue;
       }
 

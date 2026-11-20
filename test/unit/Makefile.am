@@ -183,6 +183,7 @@ check_PROGRAMS = \
     reg_alloc_test \
     registers_test \
     remark_test \
+    remove_builders_test \
     remove_null_check_string_arg_test \
     remove_recursive_locks_test \
     remove_redundant_check_casts_test \
@@ -598,6 +599,8 @@ reg_alloc_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 registers_test_SOURCES = RegistersTest.cpp OpcodeList.cpp
 
 remark_test_SOURCES = RemarkTest.cpp
+
+remove_builders_test_SOURCES = RemoveBuildersTest.cpp
 
 remove_null_check_string_arg_test_SOURCES = RemoveNullCheckStringArgTest.cpp ScopeHelper.cpp
 

@@ -21,6 +21,7 @@
 #include "DeterministicContainers.h"
 #include "DexInstruction.h"
 #include "DexPosition.h"
+#include "GraphUtil.h"
 #include "IRList.h"
 #include "InstructionLowering.h"
 #include "RedexContext.h"
@@ -1842,6 +1843,35 @@ CompactEdgeVector get_succs_in_linearization_order(const Block* b) {
   return result;
 }
 
+// The CFG as a graph whose successors come in linearization order.
+struct LinearizationOrderGraph : public GraphInterface {
+  static CompactEdgeVector successors(const Graph&, const NodeId& b) {
+    return get_succs_in_linearization_order(b);
+  }
+};
+
+// Whether the goto `e` puts its target into the chain of its source (see
+// `build_chains`). A block that starts with a move-result stays with the block
+// before it, so for such a source the try region compared is that of the
+// nearest block before it that does not start with a move-result.
+bool goto_continues_chain(const Edge* e) {
+  const Block* target = e->target();
+  if (target->starts_with_move_result()) {
+    return true;
+  }
+  // Walk back only along gotos: a block has at most one goto successor, so the
+  // walk can only come back to where it started, and stops there.
+  const Block* src = e->src();
+  while (src->starts_with_move_result() && src->preds().size() == 1) {
+    const Edge* pred = src->preds().front();
+    if (pred->type() != EDGE_GOTO || pred->src() == e->src()) {
+      break;
+    }
+    src = pred->src();
+  }
+  return target->same_try(src);
+}
+
 } // namespace
 
 std::vector<Block*> ControlFlowGraph::order(
@@ -1905,7 +1935,7 @@ void ControlFlowGraph::build_chains(
                             m_blocks.count(goto_block->id()) > 0,
                         "bogus block reference %zu -> %zu in %s",
                         goto_edge->src()->id(), goto_block->id(), SHOW(*this));
-      if (goto_block->starts_with_move_result() || goto_block->same_try(b)) {
+      if (goto_continues_chain(goto_edge)) {
         // If the goto edge leads to a block with a move-result(-pseudo), then
         // that block must be placed immediately after this one because we can't
         // insert anything between an instruction and its move-result(-pseudo).
@@ -1953,21 +1983,45 @@ void ControlFlowGraph::build_chains(
     redex_assert(it != m_blocks.cend());
     redex_assert(it->second == m_entry_block);
   }
+  // This also chains an entry block that starts with a move-result (invalid
+  // code that IRTypeChecker reports), which the loop below skips. It stays
+  // first only if no other block's goto enters it.
   handle_block(m_entry_block);
 
   std::vector<Block*> move_result_blocks_out_of_order;
 
-  for (const auto& entry : m_blocks) {
-    // Must not handle blocks that start with a move-result. These need to go
-    // into the same chain as the owner.
-    if (entry.second->starts_with_move_result()) {
-      if (ControlFlowGraph::s_DEBUG) {
-        move_result_blocks_out_of_order.push_back(entry.second);
+  // A chain started at a block that a goto continues into would cut the goto
+  // sequence leading into it, and the block before the cut would need a goto.
+  // So chains start first at the blocks that no goto continues into, and only
+  // then at the blocks left over, which a cycle of such gotos leads into.
+  auto continues_a_chain = [](const Block* b) {
+    return std::any_of(b->preds().begin(), b->preds().end(),
+                       [b](const Edge* e) {
+                         return e->type() == EDGE_GOTO && e->src() != b &&
+                                goto_continues_chain(e);
+                       });
+  };
+  // Both rounds take blocks in depth-first preorder from the entry block, with
+  // each block's successors in linearization order, rather than in block id
+  // order, so that chains depend only on the graph, not on when its blocks
+  // were created.
+  auto blocks = graph::preorder_sort<LinearizationOrderGraph>(*this);
+  for (bool chain_heads_only : {true, false}) {
+    for (Block* b : blocks) {
+      // Must not handle blocks that start with a move-result. These need to go
+      // into the same chain as the owner.
+      if (b->starts_with_move_result()) {
+        if (ControlFlowGraph::s_DEBUG && chain_heads_only) {
+          move_result_blocks_out_of_order.push_back(b);
+        }
+        continue;
       }
-      continue;
+      if (block_to_chain->count(b) != 0 ||
+          (chain_heads_only && continues_a_chain(b))) {
+        continue;
+      }
+      handle_block(b);
     }
-
-    handle_block(entry.second);
   }
 
   // All postponed move-result blocks should be in a chain now, or they were

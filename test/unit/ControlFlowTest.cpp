@@ -2758,8 +2758,8 @@ std::string sanitize(const std::string& s) {
 
 } // namespace
 
-// Chains are created in block order. Ensure that chains are created correctly
-// when the entry block is not first block on destruction.
+// The entry block always starts the first chain. Ensure that chains are created
+// correctly when the entry block is not the first block in id order.
 TEST_F(ControlFlowTest, entry_not_first_block_order_first) {
   auto code = assembler::ircode_from_string(R"(
     (
@@ -3583,4 +3583,169 @@ TEST_F(ControlFlowTest, goto_target_shared_with_catch_falls_through) {
     )
   )");
   EXPECT_CODE_EQ(code.get(), expected.get());
+}
+
+// For
+//
+//   static int lastIndexOf(int[] a, int x) {
+//     for (int i = a.length - 1; i >= 0; i--) {
+//       if (a[i] == x) return i;
+//     }
+//     return -1;
+//   }
+//
+// the loop's exit test falls through to `return -1`, although the entry block
+// reaches `return -1` first, through its branch. The exit test needs no goto.
+TEST_F(ControlFlowTest, goto_sequence_reached_in_the_middle_stays_together) {
+  const char* const code_str = R"(
+    (
+      (load-param-object v4)
+      (load-param v5)
+      (array-length v4)
+      (move-result-pseudo v0)
+      (const v1 -1)
+      (add-int v0 v0 v1)
+      (if-ltz v0 :exit)
+
+      (:loop)
+      (add-int/lit v2 v0 -1)
+      (aget v4 v0)
+      (move-result-pseudo v3)
+      (if-ne v5 v3 :next)
+      (return v0)
+
+      (:next)
+      (if-gez v2 :continue)
+
+      (:exit)
+      (return v1)
+
+      (:continue)
+      (move v0 v2)
+      (goto :loop)
+    )
+  )";
+  auto code = build_and_linearize(code_str);
+  auto expected = assembler::ircode_from_string(code_str);
+  EXPECT_CODE_EQ(code.get(), expected.get());
+}
+
+// Each block of the cycle between `:a` and `:b` has a goto into it from the
+// other, and branches enter the cycle at both, so neither starts a chain until
+// all other blocks have started theirs.
+TEST_F(ControlFlowTest, goto_cycle_entered_by_branches_gets_a_chain) {
+  auto code = build_and_linearize(R"(
+    (
+      (load-param v0)
+      (if-eqz v0 :a)
+      (if-gtz v0 :b)
+      (return-void)
+
+      (:a)
+      (const v1 0)
+      (goto :b)
+
+      (:b)
+      (const v1 1)
+      (goto :a)
+    )
+  )");
+  auto expected = assembler::ircode_from_string(R"(
+    (
+      (load-param v0)
+      (if-eqz v0 :a)
+      (if-gtz v0 :b)
+      (return-void)
+
+      (:a)
+      (const v1 0)
+
+      (:b)
+      (const v1 1)
+      (goto :a)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected.get());
+}
+
+// Invalid code whose entry block starts with a move-result is still laid out,
+// so that IRTypeChecker can report it, also when the entry block is its own
+// only predecessor.
+TEST_F(ControlFlowTest, entry_move_result_loop_is_laid_out) {
+  auto code = build_and_linearize(R"(
+    (
+      (:loop)
+      (move-result v0)
+      (if-eqz v0 :loop)
+      (return-void)
+    )
+  )");
+  auto expected = assembler::ircode_from_string(R"(
+    (
+      (:loop)
+      (move-result v0)
+      (if-eqz v0 :loop)
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected.get());
+}
+
+// The same CFG linearizes to the same code no matter in which order its blocks
+// were created. Here the blocks that the cases jump to come before the cases
+// in one input and after them in the other, so their block ids differ.
+TEST_F(ControlFlowTest, layout_ignores_block_creation_order) {
+  auto targets_first = build_and_linearize(R"(
+    (
+      (load-param v0)
+      (switch v0 (:c1 :c2))
+      (:default)
+      (return-void)
+
+      (:r1)
+      (const v1 1)
+      (return-void)
+
+      (:r2)
+      (const v1 2)
+      (return-void)
+
+      (:c1 1)
+      (const v1 9)
+      (if-ne v0 v1 :default)
+      (goto :r1)
+
+      (:c2 2)
+      (const v1 6)
+      (if-ne v0 v1 :default)
+      (goto :r2)
+    )
+  )");
+  auto cases_first = build_and_linearize(R"(
+    (
+      (load-param v0)
+      (switch v0 (:c1 :c2))
+      (:default)
+      (return-void)
+
+      (:c1 1)
+      (const v1 9)
+      (if-ne v0 v1 :default)
+      (goto :r1)
+
+      (:c2 2)
+      (const v1 6)
+      (if-ne v0 v1 :default)
+      (goto :r2)
+
+      (:r1)
+      (const v1 1)
+      (return-void)
+
+      (:r2)
+      (const v1 2)
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(targets_first.get(), cases_first.get());
 }

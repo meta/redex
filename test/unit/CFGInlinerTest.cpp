@@ -467,13 +467,12 @@ TEST_F(CFGInlinerTest, both_multi_block) {
       (if-ge v3 v4 :true)
 
       (move v2 v4)
-      (goto :exit)
+      (:exit)
+      (return-void)
 
       (:true)
       (move v2 v3)
-
-      (:exit)
-      (return-void)
+      (goto :exit)
     )
   )";
   test_inliner(caller_str, callee_str, expected_str);

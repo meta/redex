@@ -1412,9 +1412,6 @@ TEST_F(ReduceSparseSwitchesTest, multiplexing) {
   auto stats = ReduceSparseSwitchesPass::multiplexing_transformation(
       5, method->get_code()->cfg());
   method->get_code()->clear_cfg();
-  // Rebuild an extra time to work around an ordering quirk in switch cases.
-  method->get_code()->build_cfg();
-  method->get_code()->clear_cfg();
 
   EXPECT_EQ(stats.multiplexing.size(), 1);
   EXPECT_EQ(unordered_any(stats.multiplexing)->first, 4);
@@ -1484,9 +1481,6 @@ TEST_F(ReduceSparseSwitchesTest, multiplexing_shr) {
 
   auto stats = ReduceSparseSwitchesPass::multiplexing_transformation(
       5, method->get_code()->cfg());
-  method->get_code()->clear_cfg();
-  // Rebuild an extra time to work around an ordering quirk in switch cases.
-  method->get_code()->build_cfg();
   method->get_code()->clear_cfg();
 
   EXPECT_EQ(stats.multiplexing.size(), 1);

@@ -2275,6 +2275,12 @@ TEST_F(DedupBlocksTest, blockWithIterativeLimit2) {
       (invoke-direct (v4 v2) "Ljava/lang/Throwable;.<init>:(I)V")
       (goto :g)
 
+      (:i)
+      (new-instance "Ljava/lang/Throwable;")
+      (move-result-pseudo-object v6)
+      (invoke-direct (v6 v2) "Ljava/lang/Throwable;.<init>:(I)V")
+      (goto :m)
+
       (:j)
       (const-class "LTestClass")
       (move-result-pseudo-object v5)
@@ -2288,12 +2294,6 @@ TEST_F(DedupBlocksTest, blockWithIterativeLimit2) {
       (:l)
       (move-exception v6)
       (monitor-exit v5)
-      (goto :m)
-
-      (:i)
-      (new-instance "Ljava/lang/Throwable;")
-      (move-result-pseudo-object v6)
-      (invoke-direct (v6 v2) "Ljava/lang/Throwable;.<init>:(I)V")
 
       (:m)
       (throw v6)

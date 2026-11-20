@@ -107,7 +107,7 @@ TEST_F(SourceBlocksDedupTest, source_blocks_dedup_useSwitch) {
    OPCODE: MUL_DOUBLE v0, v0, v2\n\
    OPCODE: DOUBLE_TO_INT v0, v0\n\
    OPCODE: SWITCH v0\n\
-   succs: (branch 2 B3) (branch 0 B4) (branch 1 B5) (goto B1)\n\
+   succs: (branch 2 B3) (branch 1 B4) (branch 0 B5) (goto B1)\n\
  Block B1:\n\
    preds: (goto B0)\n\
    POSITION: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I(SourceBlocksDedupTest.java:31)\n\
@@ -127,19 +127,19 @@ TEST_F(SourceBlocksDedupTest, source_blocks_dedup_useSwitch) {
    SOURCE-BLOCKS: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I@5()\n\
    succs: (goto B6)\n\
  Block B4:\n\
-   preds: (branch 0 B0)\n\
-   SOURCE-BLOCKS: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I@3()\n\
-   POSITION: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I(SourceBlocksDedupTest.java:23)\n\
-   succs: (goto B6)\n\
- Block B5:\n\
    preds: (branch 1 B0)\n\
    SOURCE-BLOCKS: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I@4()\n\
    POSITION: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I(SourceBlocksDedupTest.java:26)\n\
    succs: (goto B6)\n\
+ Block B5:\n\
+   preds: (branch 0 B0)\n\
+   SOURCE-BLOCKS: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I@3()\n\
+   POSITION: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I(SourceBlocksDedupTest.java:23)\n\
+   succs: (goto B6)\n\
  Block B6:\n\
    preds: (goto B3) (goto B4) (goto B5)\n\
    SOURCE-BLOCKS: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I@4294967295()\n\
-   POSITION: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I(SourceBlocksDedupTest.java:28)\n\
+   POSITION: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I(SourceBlocksDedupTest.java:23)\n\
    OPCODE: INVOKE_VIRTUAL v4, Lcom/facebook/redextest/SourceBlocksDedupTest;.someFunc:()V\n\
    POSITION: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I(SourceBlocksDedupTest.java:29)\n\
    succs: (goto B2)\n");
@@ -543,7 +543,7 @@ TEST_F(SourceBlocksDedupTest, source_blocks_chain) {
    OPCODE: MUL_DOUBLE v0, v0, v2\n\
    OPCODE: DOUBLE_TO_INT v0, v0\n\
    OPCODE: SWITCH v0\n\
-   succs: (branch 1 B3) (branch 0 B4) (branch 2 B5) (goto B1)\n\
+   succs: (branch 2 B3) (branch 1 B4) (branch 0 B5) (goto B1)\n\
  Block B1:\n\
    preds: (goto B0)\n\
    POSITION: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I(SourceBlocksDedupTest.java:31)\n\
@@ -558,25 +558,25 @@ TEST_F(SourceBlocksDedupTest, source_blocks_chain) {
    OPCODE: RETURN v0\n\
    succs:\n\
  Block B3:\n\
+   preds: (branch 2 B0)\n\
+   POSITION: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I(SourceBlocksDedupTest.java:28)\n\
+   SOURCE-BLOCKS: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I@5()\n\
+   succs: (goto B6)\n\
+ Block B4:\n\
    preds: (branch 1 B0)\n\
    SOURCE-BLOCKS: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I@4()\n\
    POSITION: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I(SourceBlocksDedupTest.java:26)\n\
    succs: (goto B6)\n\
- Block B4:\n\
+ Block B5:\n\
    preds: (branch 0 B0)\n\
    SOURCE-BLOCKS: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I@3()\n\
    POSITION: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I(SourceBlocksDedupTest.java:23)\n\
-   succs: (goto B6)\n\
- Block B5:\n\
-   preds: (branch 2 B0)\n\
-   POSITION: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I(SourceBlocksDedupTest.java:28)\n\
-   SOURCE-BLOCKS: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I@5()\n\
    succs: (goto B6)\n\
  Block B6:\n\
    preds: (goto B3) (goto B4) (goto B5)\n\
    SOURCE-BLOCKS: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I@100() "
       "Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I@100() Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I@100()\n\
-   POSITION: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I(SourceBlocksDedupTest.java:28)\n\
+   POSITION: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I(SourceBlocksDedupTest.java:23)\n\
    OPCODE: INVOKE_VIRTUAL v4, Lcom/facebook/redextest/SourceBlocksDedupTest;.someFunc:()V\n\
    POSITION: Lcom/facebook/redextest/SourceBlocksDedupTest;.useSwitch:()I(SourceBlocksDedupTest.java:29)\n\
    succs: (goto B2)\n");

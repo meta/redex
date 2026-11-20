@@ -160,12 +160,12 @@ TEST_F(ImmutableTest, abstract_domain) {
     EXPECT_TRUE(x.equals(i100));
   }
   {
-    // Integer{100} meet CachedInteger{100} => Integer{100}
+    // Integer{100} meet CachedInteger{100} => CachedInteger{100}
     auto i100 = create_integer_abstract_value(100, false);
     auto ci100 = create_integer_abstract_value(100, true);
     auto x = ci100;
     x.meet_with(i100);
-    EXPECT_TRUE(x.equals(i100));
+    EXPECT_TRUE(x.equals(ci100));
   }
   {
     // CachedInteger{100} meet CachedInteger{100} => CachedInteger{100}

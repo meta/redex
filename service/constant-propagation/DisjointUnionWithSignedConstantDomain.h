@@ -287,9 +287,6 @@ bool DisjointUnionWithSignedConstantDomain<IsObject, Domains...>::leq(
   if (other.is_nez_only() && this->is_object()) {
     return true;
   }
-  if (other.is_object_with_immutable_attr() && this->is_singleton_object()) {
-    return true;
-  }
   return boost::apply_visitor(sparta::duad_impl::leq_visitor(), this->m_variant,
                               other.m_variant);
 }

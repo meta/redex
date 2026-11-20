@@ -5,6 +5,11 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <algorithm>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 #include <gtest/gtest.h>
 
 #include "AbstractDomainPropertyTest.h"
@@ -137,6 +142,82 @@ TEST_F(ConstantValueTest, join) {
 
   EXPECT_EQ(join(sd_a, sd_b), nez);
   EXPECT_EQ(join(sd_b, sd_a), nez);
+}
+
+TEST_F(ConstantValueTest, SingletonNotLeqObjectWithImmutAttr) {
+  EXPECT_FALSE(sod.leq(owia));
+  EXPECT_FALSE(owia.leq(sod));
+}
+
+namespace {
+
+ConstantValue make_object_with_immut_attr(
+    std::string_view type,
+    const std::vector<std::pair<std::string_view, int64_t>>& attrs,
+    bool jvm_cached_singleton = false) {
+  std::vector<ImmutableAttr> immutable_attrs;
+  immutable_attrs.reserve(attrs.size());
+  for (const auto& [field, value] : attrs) {
+    immutable_attrs.emplace_back(ImmutableAttr::Attr(dynamic_cast<DexField*>(
+                                     DexField::make_field(field))),
+                                 SignedConstantDomain(value));
+  }
+  std::sort(immutable_attrs.begin(), immutable_attrs.end(),
+            [](const auto& a, const auto& b) { return a.attr < b.attr; });
+  ObjectWithImmutAttr object(DexType::make_type(type),
+                             static_cast<uint32_t>(immutable_attrs.size()));
+  object.jvm_cached_singleton = jvm_cached_singleton;
+  for (const auto& immutable_attr : immutable_attrs) {
+    object.write_value(immutable_attr.attr, immutable_attr.value);
+  }
+  return ObjectWithImmutAttrDomain(std::move(object));
+}
+
+} // namespace
+
+TEST_F(ConstantValueTest, LeqAgreesWithJoin) {
+  const std::vector<ConstantValue> values = {
+      ConstantValue::top(),
+      ConstantValue::bottom(),
+      one,
+      zero,
+      nez,
+      scd_not_only_nez,
+      sod,
+      SingletonObjectDomain(
+          dynamic_cast<DexField*>(DexField::make_field("LFoo;.baz:LFoo;"))),
+      sd_a,
+      sd_b,
+      owia,
+      make_object_with_immut_attr("LBar;", {{"LBar;.ordinal:I", 3}}),
+      make_object_with_immut_attr("LBar;", {{"LBar;.ordinal:I", 4}}),
+      make_object_with_immut_attr(
+          "LBar;", {{"LBar;.ordinal:I", 4}, {"LBar;.code:I", 7}}),
+      make_object_with_immut_attr("Ljava/lang/Integer;",
+                                  {{"Ljava/lang/Integer;.value:I", 5}},
+                                  /* jvm_cached_singleton */ true),
+      make_object_with_immut_attr("Ljava/lang/Integer;",
+                                  {{"Ljava/lang/Integer;.value:I", 5}}),
+  };
+  for (const auto& a : values) {
+    for (const auto& b : values) {
+      EXPECT_EQ(a.leq(b), a.join(b) == b)
+          << "leq(" << a << ", " << b << ") is " << a.leq(b)
+          << ", but their join is " << a.join(b);
+    }
+  }
+}
+
+TEST_F(ConstantValueTest, MeetOfCachedAndUncachedBoxedIntegerIsCached) {
+  auto cached = make_object_with_immut_attr(
+      "Ljava/lang/Integer;", {{"Ljava/lang/Integer;.value:I", 5}},
+      /* jvm_cached_singleton */ true);
+  auto uncached = make_object_with_immut_attr(
+      "Ljava/lang/Integer;", {{"Ljava/lang/Integer;.value:I", 5}});
+  EXPECT_EQ(meet(cached, uncached), cached);
+  EXPECT_EQ(meet(uncached, cached), cached);
+  EXPECT_TRUE(meet(cached, uncached).leq(cached));
+  EXPECT_TRUE(meet(cached, uncached).leq(uncached));
 }
 
 TEST_F(ConstantValueTest, nonTopBitsetIsNotNezOnly) {

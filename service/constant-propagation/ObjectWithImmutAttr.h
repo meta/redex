@@ -256,21 +256,17 @@ struct ObjectWithImmutAttr {
     return true;
   }
 
+  // Agrees with the join: objects with different sets of attributes join to
+  // Top, and a cached boxed object (one specific instance) is below an
+  // uncached one with the same value, which may be any instance.
   bool leq(const ObjectWithImmutAttr& other) const {
     redex_assert(type == other.type);
-    if (jvm_cached_singleton && !other.jvm_cached_singleton) {
-      return false;
-    }
-    if (attributes.size() > other.attributes.size()) {
+    if (!same_attrs(other) ||
+        (!jvm_cached_singleton && other.jvm_cached_singleton)) {
       return false;
     }
     for (size_t idx = 0; idx < attributes.size(); idx++) {
-      const auto& attr1 = attributes[idx];
-      const auto& attr2 = other.attributes[idx];
-      if (attr1.attr != attr2.attr) {
-        return false;
-      }
-      if (!attr1.value.leq(attr2.value)) {
+      if (!attributes[idx].value.leq(other.attributes[idx].value)) {
         return false;
       }
     }
@@ -297,7 +293,7 @@ struct ObjectWithImmutAttr {
       const auto& attr2 = other.attributes[idx];
       attr1.value.meet_with(attr2.value);
     }
-    jvm_cached_singleton &= other.jvm_cached_singleton;
+    jvm_cached_singleton |= other.jvm_cached_singleton;
   }
 
   bool operator==(const ObjectWithImmutAttr& other) const {

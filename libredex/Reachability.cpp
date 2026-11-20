@@ -438,10 +438,11 @@ void TransitiveClosureMarkerWorker::push(const DexMethodRef* parent,
 
 void TransitiveClosureMarkerWorker::push_if_class_instantiable(
     const DexMethod* method) {
-  if ((method == nullptr) ||
-      m_shared_state->reachable_objects->marked(method)) {
+  if (method == nullptr) {
     return;
   }
+  // A method that is already marked still gets the conditional edge, so the
+  // recorded graph does not depend on marking order.
   TRACE(REACH, 4,
         "Conditionally marking method if declaring class is instantiable: %s",
         SHOW(method));
@@ -462,9 +463,11 @@ void TransitiveClosureMarkerWorker::push_if_class_instantiable(
 
 void TransitiveClosureMarkerWorker::push_if_class_instantiable(
     const DexField* field) {
-  if ((field == nullptr) || m_shared_state->reachable_objects->marked(field)) {
+  if (field == nullptr) {
     return;
   }
+  // A field that is already marked still gets the conditional edge, so the
+  // recorded graph does not depend on marking order.
   TRACE(REACH, 4,
         "Conditionally marking field if declaring class is instantiable: %s",
         SHOW(field));
@@ -541,10 +544,11 @@ void TransitiveClosureMarkerWorker::push_if_method_returning(
 
 void TransitiveClosureMarkerWorker::push_if_class_retained(
     const DexMethod* method) {
-  if ((method == nullptr) ||
-      m_shared_state->reachable_objects->marked(method)) {
+  if (method == nullptr) {
     return;
   }
+  // A method that is already marked still gets the conditional edge, so the
+  // recorded graph does not depend on marking order.
   TRACE(REACH, 4,
         "Conditionally marking method if declaring class is retained: %s",
         SHOW(method));
@@ -557,9 +561,11 @@ void TransitiveClosureMarkerWorker::push_if_class_retained(
 
 void TransitiveClosureMarkerWorker::push_if_class_retained(
     const DexField* field) {
-  if ((field == nullptr) || m_shared_state->reachable_objects->marked(field)) {
+  if (field == nullptr) {
     return;
   }
+  // A field that is already marked still gets the conditional edge, so the
+  // recorded graph does not depend on marking order.
   TRACE(REACH, 4,
         "Conditionally marking field if declaring class is retained: %s",
         SHOW(field));

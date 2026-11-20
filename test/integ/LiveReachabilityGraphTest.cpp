@@ -65,18 +65,30 @@ class LiveReachabilityGraphTest : public RedexIntegrationTest {
     return reachables;
   }
 
+  // The retainers the live graph records for the method named `name`.
+  std::set<std::string> retainers_of_method(const ReachableObjects& reachables,
+                                            const std::string& name) {
+    const auto* method = DexMethod::get_method(name);
+    always_assert_log(method != nullptr, "No method %s", name.c_str());
+    return retainers_of(reachables, ReachableObject(method));
+  }
+
   // The retainers the live graph records for the class named `descriptor`.
   std::set<std::string> retainers_of_class(const ReachableObjects& reachables,
                                            const std::string& descriptor) {
     const auto* cls = type_class(DexType::get_type(descriptor));
     always_assert_log(cls != nullptr, "No class %s", descriptor.c_str());
+    return retainers_of(reachables, ReachableObject(cls));
+  }
+
+  std::set<std::string> retainers_of(const ReachableObjects& reachables,
+                                     const ReachableObject& object) {
     const auto& graph = reachables.retainers_of();
     std::set<std::string> result;
-    if (graph.count(ReachableObject(cls)) == 0u) {
+    if (graph.count(object) == 0u) {
       return result;
     }
-    for (const auto& retainer :
-         UnorderedIterable(graph.at_unsafe(ReachableObject(cls)))) {
+    for (const auto& retainer : UnorderedIterable(graph.at_unsafe(object))) {
       result.insert(label(retainer));
     }
     return result;
@@ -110,5 +122,16 @@ TEST_F(LiveReachabilityGraphTest, MembersRetainTheirOwnClass) {
   // inherits the method.
   EXPECT_EQ(
       retainers_of_class(*reachables, "LChild;").count("LChild;.inherited:()V"),
+      1u);
+}
+
+TEST_F(LiveReachabilityGraphTest,
+       ConditionalRetainerDoesNotDependOnMarkingOrder) {
+  auto reachables = compute_live_graph();
+
+  // call() is kept because Target is instantiable and entry() calls it. The
+  // call marks it first, and the class must still be recorded as a retainer.
+  EXPECT_EQ(
+      retainers_of_method(*reachables, "LTarget;.call:()V").count("LTarget;"),
       1u);
 }

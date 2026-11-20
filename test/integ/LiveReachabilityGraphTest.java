@@ -13,6 +13,7 @@ public class LiveReachabilityGraphTest {
   public void entry() {
     Child.inherited();
     new Annotated().run();
+    new Target().call();
   }
 }
 
@@ -39,4 +40,10 @@ enum Severity {
 @Level(Severity.HIGH)
 class Annotated {
   void run() {}
+}
+
+// entry() calls call() directly, so call() is marked before the walk asks
+// whether Target is instantiable.
+class Target {
+  void call() {}
 }

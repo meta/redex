@@ -161,10 +161,6 @@ class ReachableObjects {
   template <class Object>
   void record_reachability(Object* parent, Object* object);
 
-  void record_reachability(const DexFieldRef* member, const DexClass* cls);
-
-  void record_reachability(const DexMethodRef* member, const DexClass* cls);
-
   static constexpr size_t MARK_SLOTS = 127;
 
   ConcurrentSet<const DexClass*,

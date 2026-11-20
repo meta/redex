@@ -1995,28 +1995,6 @@ std::unique_ptr<ReachableObjects> compute_reachable_objects(
   return reachable_objects;
 }
 
-void ReachableObjects::record_reachability(const DexMethodRef* member,
-                                           const DexClass* cls) {
-  // Each class member trivially retains its containing class; let's filter out
-  // this uninteresting information from our diagnostics.
-  if (member->get_class() == cls->get_type()) {
-    return;
-  }
-  m_retainers_of.update(ReachableObject(cls),
-                        [&](const ReachableObject&, ReachableObjectSet& set,
-                            bool /* exists */) { set.emplace(member); });
-}
-
-void ReachableObjects::record_reachability(const DexFieldRef* member,
-                                           const DexClass* cls) {
-  if (member->get_class() == cls->get_type()) {
-    return;
-  }
-  m_retainers_of.update(ReachableObject(cls),
-                        [&](const ReachableObject&, ReachableObjectSet& set,
-                            bool /* exists */) { set.emplace(member); });
-}
-
 template <class Object>
 void ReachableObjects::record_reachability(Object* parent, Object* object) {
   if (parent == object) {
@@ -2632,8 +2610,8 @@ class RemovedEdgeRecorder {
 
   /*
    * `owner` is the class declaring `source`, or `source` itself when that is a
-   * class. Edges to it are dropped, mirroring how the reachability graph
-   * suppresses the trivial member-to-own-class reference.
+   * class. Edges to it are dropped, so that a removed member cannot keep its
+   * own removed class from being a root.
    */
   void record(const ReachableObject& source,
               const DexClass* owner,

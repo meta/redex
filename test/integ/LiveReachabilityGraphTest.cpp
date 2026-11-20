@@ -92,3 +92,23 @@ TEST_F(LiveReachabilityGraphTest, SeedWithoutKeepReasonHasSeedRetainer) {
                 .count("<SEED>"),
             1u);
 }
+
+TEST_F(LiveReachabilityGraphTest, MembersRetainTheirOwnClass) {
+  auto reachables = compute_live_graph();
+
+  // The annotation keeps the field Severity.HIGH, and a live field keeps its
+  // class: Severity is retained only by its own members. Without the edge
+  // from Severity.HIGH, Severity and its members would sit in a loop that no
+  // root reaches.
+  auto severity = retainers_of_class(*reachables, "LSeverity;");
+  EXPECT_EQ(severity.count("LSeverity;.HIGH:LSeverity;"), 1u);
+  for (const auto& retainer : severity) {
+    EXPECT_EQ(retainer.rfind("LSeverity;.", 0), 0u) << retainer;
+  }
+
+  // A live method reference keeps the class it names, here one that only
+  // inherits the method.
+  EXPECT_EQ(
+      retainers_of_class(*reachables, "LChild;").count("LChild;.inherited:()V"),
+      1u);
+}

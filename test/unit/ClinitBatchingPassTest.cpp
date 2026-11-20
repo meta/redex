@@ -11,6 +11,10 @@
 #include "ConfigFiles.h"
 #include "Creators.h"
 #include "DexClass.h"
+#include "DexUtil.h"
+#include "EarlyClassLoadsAnalysis.h"
+#include "IRAssembler.h"
+#include "MethodOverrideGraph.h"
 #include "PassManager.h"
 #include "RedexTest.h"
 #include "RedexTestUtils.h"
@@ -116,7 +120,50 @@ class ClinitBatchingPassTest : public RedexTest {
     PassManager manager(passes, conf);
     manager.run_passes(stores, conf);
   }
+
+  // Runs the early class loads analysis with `attach_code` as the body of
+  // attachBaseContext and `classes` added to the scope.
+  clinit_batching::EarlyClassLoadsResult run_early_class_loads_analysis(
+      const std::vector<DexClass*>& classes, const char* attach_code);
 };
+
+clinit_batching::EarlyClassLoadsResult
+ClinitBatchingPassTest::run_early_class_loads_analysis(
+    const std::vector<DexClass*>& classes, const char* attach_code) {
+  if (type_class(type::java_lang_Object()) == nullptr) {
+    create_object_class();
+  }
+  auto* attach =
+      DexMethod::get_method(
+          "Lcom/facebook/redextest/TestApplication;.attachBaseContext:"
+          "(Landroid/content/Context;)V")
+          ->as_def();
+  attach->set_code(assembler::ircode_from_string(attach_code));
+  auto scope = build_class_scope(stores);
+  scope.insert(scope.end(), classes.begin(), classes.end());
+  for (auto* cls : scope) {
+    for (auto* method : cls->get_all_methods()) {
+      if (method->get_code() != nullptr && !method->get_code()->cfg_built()) {
+        method->get_code()->build_cfg();
+      }
+    }
+  }
+  m_apk_dir = redex::make_tmp_dir("clinit_batching_unit_test_%%%%%%%%");
+  auto* manifest_path_env = std::getenv("manifest");
+  always_assert_log(manifest_path_env, "manifest env var must be set.\n");
+  redex::copy_file(manifest_path_env, m_apk_dir.path + "/AndroidManifest.xml");
+  Json::Value cfg(Json::objectValue);
+  cfg["apk_dir"] = m_apk_dir.path;
+  ConfigFiles conf(cfg);
+  auto graph = method_override_graph::build_graph(scope);
+  auto* orchestrator =
+      DexMethod::get_method(
+          "Lcom/facebook/test/ClinitBatchingOrchestrator;.initAllStatics:()V")
+          ->as_def();
+  return clinit_batching::EarlyClassLoadsAnalysis(orchestrator, conf,
+                                                  graph.get())
+      .run();
+}
 
 TEST_F(ClinitBatchingPassTest, test_skeleton_runs_without_crashing) {
   // Verify the pass skeleton can be instantiated and run without crashing.
@@ -135,4 +182,42 @@ TEST_F(ClinitBatchingPassTest, test_config_binding) {
   // get_metric requires m_current_pass_info), so we verify the config is
   // accepted without crashing.
   run_pass(config);
+}
+
+// `I.go()` is declared only in the undefined superinterface of `I`, so its
+// target is unknown, although the call in attachBaseContext dispatches to
+// `Impl.go()`, which loads `Early` before the orchestrator runs.
+TEST_F(ClinitBatchingPassTest, EarlyClassLoadsReportUnknownEarlyCallTarget) {
+  auto* early = assembler::class_from_string(R"(
+    (class (public) "LEarly;"
+      (field (public static) "LEarly;.f:I")
+    )
+  )");
+  auto* intf = assembler::class_from_string(R"(
+    (interface (public) "LI;" extends "LUndefined;")
+  )");
+  auto* impl = assembler::class_from_string(R"(
+    (class (public) "LImpl;" implements "LI;"
+      (method (public constructor) "LImpl;.<init>:()V"
+        ((load-param-object v0) (return-void)))
+      (method (public) "LImpl;.go:()V"
+        ((load-param-object v0)
+         (sget "LEarly;.f:I")
+         (move-result-pseudo v1)
+         (return-void)))
+    )
+  )");
+  auto result = run_early_class_loads_analysis({early, intf, impl}, R"(
+    ((load-param-object v0)
+     (load-param-object v1)
+     (new-instance "LImpl;")
+     (move-result-pseudo-object v2)
+     (invoke-direct (v2) "LImpl;.<init>:()V")
+     (invoke-interface (v2) "LI;.go:()V")
+     (invoke-static () "Lcom/facebook/test/ClinitBatchingOrchestrator;.initAllStatics:()V")
+     (return-void))
+  )");
+
+  ASSERT_FALSE(result.error_message) << *result.error_message;
+  EXPECT_EQ(result.unknown_early_call, DexMethod::get_method("LI;.go:()V"));
 }

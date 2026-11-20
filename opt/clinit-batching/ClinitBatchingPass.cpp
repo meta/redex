@@ -885,6 +885,16 @@ void ClinitBatchingPass::run_pass(DexStoresVector& stores,
                         ? early_result.error_message->c_str()
                         : "");
 
+  if (early_result.unknown_early_call != nullptr) {
+    TRACE(CLINIT_BATCHING,
+          1,
+          "ClinitBatchingPass: not batching: the target of the early call to "
+          "%s is unknown",
+          SHOW(early_result.unknown_early_call));
+    mgr.set_metric("skipped_unknown_early_call", 1);
+    return;
+  }
+
   always_assert_log(
       early_result.orchestrator_encountered,
       "ClinitBatchingPass: orchestrator method %s not encountered in "

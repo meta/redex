@@ -559,7 +559,7 @@ void EarlyClassLoadsAnalysis::walk_callgraph(
     }
   }
 
-  while (!worklist.empty()) {
+  while (!worklist.empty() && result.unknown_early_call == nullptr) {
     const DexMethod* method = worklist.front();
     worklist.pop();
 
@@ -643,6 +643,9 @@ void EarlyClassLoadsAnalysis::walk_callgraph(
                           : MethodSearch::Interface;
         auto* base_callee = resolve_method(callee_ref, search);
         if (base_callee == nullptr) {
+          if (result.unknown_early_call == nullptr) {
+            result.unknown_early_call = callee_ref;
+          }
           return;
         }
 

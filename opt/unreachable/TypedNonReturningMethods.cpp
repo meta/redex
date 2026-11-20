@@ -124,6 +124,16 @@ UnorderedSet<const DexProto*> gather_dex_protos(const DexClasses& dex) {
   return res;
 }
 
+// The dexes that reference a candidate, by whether the reference can change.
+struct References {
+  // Instructions in methods without `no_optimizations`, which can reference
+  // the typed method instead.
+  UnorderedSet<size_t> retargetable_dexen;
+  // Annotations, static values, method handles and instructions in
+  // `no_optimizations` methods, which must keep the original signature.
+  UnorderedSet<size_t> fixed_dexen;
+};
+
 // A non-returning method to type, with its new signature and the `unreachable`
 // instructions of its call sites, each of which becomes the result of the call
 // before it.
@@ -176,6 +186,12 @@ class Analysis {
       m_typed_protos.emplace(method, typed);
     }
     check_references();
+    for (auto* method : candidates) {
+      auto it = m_references.find(method);
+      if (it != m_references.end() && !it->second.fixed_dexen.empty()) {
+        m_rejected.insert(method);
+      }
+    }
     stats->rejected_methods = m_rejected.size();
 
     std::vector<Selection> selected;
@@ -242,17 +258,21 @@ class Analysis {
                                                                    : nullptr;
   }
 
+  // Records which dexes reference each candidate, and whether each reference
+  // can be changed to reference the typed method.
   void check_references() {
-    InsertOnlyConcurrentSet<DexMethod*> rejected;
-    ConcurrentMap<DexMethod*, UnorderedSet<size_t>> referencing_dexen;
-    auto reject_all = [&](const std::vector<DexMethodRef*>& refs) {
+    ConcurrentMap<DexMethod*, References> references;
+    auto add_fixed = [&](const std::vector<DexMethodRef*>& refs, size_t dex) {
       for (auto* ref : refs) {
         if (auto* method = get_candidate(ref)) {
-          rejected.insert(method);
+          references.update(method, [&](DexMethod*, References& r, bool) {
+            r.fixed_dexen.insert(dex);
+          });
         }
       }
     };
     walk::parallel::classes(m_scope, [&](DexClass* cls) {
+      auto dex = m_xdexes.get_dex_idx(cls->get_type());
       // References from metadata: class and member annotations, parameter
       // annotations and static values.
       std::vector<DexMethodRef*> metadata_refs;
@@ -265,9 +285,8 @@ class Analysis {
       for (auto* method : cls->get_all_methods()) {
         method->gather_methods_from_annos(metadata_refs);
       }
-      reject_all(metadata_refs);
+      add_fixed(metadata_refs, dex);
 
-      auto dex = m_xdexes.get_dex_idx(cls->get_type());
       for (auto* method : cls->get_all_methods()) {
         auto* code = method->get_code();
         if (code == nullptr) {
@@ -279,31 +298,23 @@ class Analysis {
             // References from call sites and method handles.
             std::vector<DexMethodRef*> indirect_refs;
             insn->gather_methods(indirect_refs);
-            reject_all(indirect_refs);
+            add_fixed(indirect_refs, dex);
             continue;
           }
           auto* nonreturning_method = get_candidate(insn->get_method());
           if (nonreturning_method == nullptr) {
             continue;
           }
-          if (method->rstate.no_optimizations()) {
-            rejected.insert(nonreturning_method);
-          } else {
-            referencing_dexen.update(
-                nonreturning_method,
-                [&](DexMethod*, auto& dexen, bool) { dexen.insert(dex); });
-          }
+          bool fixed = method->rstate.no_optimizations();
+          references.update(
+              nonreturning_method, [&](DexMethod*, References& r, bool) {
+                (fixed ? r.fixed_dexen : r.retargetable_dexen).insert(dex);
+              });
         }
       }
     });
-    insert_unordered_iterable(m_rejected, rejected);
-    for (auto& [method, dexen] : UnorderedIterable(referencing_dexen)) {
-      m_referencing_dexen.emplace(method, std::move(dexen));
-    }
-    // The definition is also in a dex.
-    for (auto& [method, _] : UnorderedIterable(m_typed_protos)) {
-      m_referencing_dexen[method].insert(
-          m_xdexes.get_dex_idx(method->get_class()));
+    for (auto& [method, refs] : UnorderedIterable(references)) {
+      m_references.emplace(method, std::move(refs));
     }
   }
 
@@ -319,8 +330,11 @@ class Analysis {
   // new signature adds to the dexes that reference it.
   bool select_if_profitable(DexMethod* method) {
     auto* typed = m_typed_protos.at(method);
+    auto typed_dexen = m_references.at(method).retargetable_dexen;
+    // The definition is also in a dex.
+    typed_dexen.insert(m_xdexes.get_dex_idx(method->get_class()));
     std::vector<size_t> adding_dexen;
-    for (auto dex : unordered_to_ordered(m_referencing_dexen.at(method))) {
+    for (auto dex : unordered_to_ordered(typed_dexen)) {
       if (get_dex_protos(dex).count(typed) == 0u) {
         adding_dexen.push_back(dex);
       }
@@ -345,7 +359,7 @@ class Analysis {
   UnorderedMap<DexMethod*, std::vector<IRInstruction*>> m_sites;
   UnorderedSet<const DexMethod*> m_rejected;
   UnorderedMap<const DexMethod*, DexProto*> m_typed_protos;
-  UnorderedMap<const DexMethod*, UnorderedSet<size_t>> m_referencing_dexen;
+  UnorderedMap<const DexMethod*, References> m_references;
   UnorderedMap<size_t, UnorderedSet<const DexProto*>> m_dex_protos;
 };
 

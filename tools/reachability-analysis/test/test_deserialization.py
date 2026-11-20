@@ -79,6 +79,22 @@ class TestGraphDeserialization(unittest.TestCase):
             with open(first_file, "rb") as first, open(second_file, "rb") as second:
                 self.assertEqual(first.read(), second.read())
 
+    def test_refuses_a_graph_of_another_format_version(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            graph_file = os.path.join(temp_dir, "graph")
+            with open(os.environ["REACHABILITY_GRAPH_FILE"], "rb") as source:
+                data = bytearray(source.read())
+            # The version follows the 4-byte magic number.
+            data[4:8] = (1).to_bytes(4, "little")
+            with open(graph_file, "wb") as output:
+                output.write(data)
+
+            with self.assertRaisesRegex(
+                core.GraphFormatError,
+                "Unsupported graph format version 1; this tool reads version 2",
+            ):
+                core.ReachabilityGraph().load(graph_file)
+
     def test_dump_preserves_duplicate_node_records(self):
         graph = core.ReachabilityGraph()
         cls = core.ReachableObject(core.ReachableObjectType.CLASS, "LFoo;")

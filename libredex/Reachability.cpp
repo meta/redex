@@ -2794,7 +2794,7 @@ void dump_graph(std::ostream& os, const ReachableObjectGraph& retainers_of) {
     __builtin_unreachable();
   };
 
-  bs::write_header(os, /* version */ 1);
+  bs::write_header(os, GRAPH_FORMAT_VERSION);
   bs::GraphWriter<ReachableObject, ReachableObjectHash> gw(
       write_reachable_object,
       [&](const ReachableObject& obj) -> std::vector<ReachableObject> {

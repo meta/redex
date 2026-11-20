@@ -104,8 +104,8 @@ TEST_F(RemovedReachabilityGraphPlumbingTest, OnRunEmitsAWellFormedArtifact) {
   EXPECT_FALSE(boost::filesystem::exists(meta / "reachability-graph"));
   EXPECT_FALSE(boost::filesystem::exists(meta / "method-override-graph"));
 
-  // Header of the version-1 binary graph format, unchanged from the existing
-  // reachability graph.
+  // Header of the version-2 binary graph format, the same as the live
+  // reachability graph's.
   std::ifstream is(path.string(), std::ios::binary);
   ASSERT_TRUE(is.is_open());
   uint32_t magic = 0;
@@ -116,7 +116,7 @@ TEST_F(RemovedReachabilityGraphPlumbingTest, OnRunEmitsAWellFormedArtifact) {
   is.read(reinterpret_cast<char*>(&node_count), sizeof(node_count));
   ASSERT_TRUE(is.good());
   EXPECT_EQ(magic, 0xfaceb000);
-  EXPECT_EQ(version, 1u);
+  EXPECT_EQ(version, 2u);
   EXPECT_GT(node_count, 0u);
 
   // The reported node count has to describe the file that was written.
@@ -246,6 +246,6 @@ TEST_F(RemovedReachabilityGraphPlumbingTest, TheLiveGraphSwitchStillWorks) {
   is.read(reinterpret_cast<char*>(&node_count), sizeof(node_count));
   ASSERT_TRUE(is.good());
   EXPECT_EQ(magic, 0xfaceb000);
-  EXPECT_EQ(version, 1u);
+  EXPECT_EQ(version, 2u);
   EXPECT_GT(node_count, 0u);
 }

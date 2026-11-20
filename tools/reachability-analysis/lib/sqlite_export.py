@@ -13,6 +13,9 @@ from .dominator_tree import compute_dominator_stats, iter_dominator_rows
 
 SCHEMA_VERSION = 2
 DOMINATOR_TREE_VERSION = "1"
+SOURCE_FORMAT = (
+    f"Redex reachability graph binary v{ReachabilityGraph.expected_version()}"
+)
 DOMINATOR_ALGORITHM = "cooper-harvey-kennedy"
 _BATCH_SIZE = 10000
 EDGE_DIRECTION = (
@@ -84,7 +87,7 @@ def export_graph(input_filename, output_filename):
                 (
                     ("schema_version", str(SCHEMA_VERSION)),
                     ("source_graph", os.path.abspath(input_filename)),
-                    ("source_format", "Redex reachability graph binary v1"),
+                    ("source_format", SOURCE_FORMAT),
                     ("edge_direction", EDGE_DIRECTION),
                     ("dominator_tree_version", DOMINATOR_TREE_VERSION),
                     ("dominator_algorithm", DOMINATOR_ALGORITHM),

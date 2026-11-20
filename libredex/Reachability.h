@@ -768,6 +768,13 @@ ObjectCounts count_objects(const DexStoresVector& stores);
 ReachableObjectGraph compute_removed_reachability_graph(
     const Scope& scope, const ReachableObjects& reachables);
 
+// The format version dump_graph writes. From version 2 on, the live graph
+// records that a used field or method retains its class, gives every seed
+// class a SEED retainer, records a member's conditional retainer whether or
+// not the member was already marked, and records the method whose
+// instance-of or check-cast keeps a class as that class's retainer.
+constexpr uint32_t GRAPH_FORMAT_VERSION = 2;
+
 void dump_graph(std::ostream& os, const ReachableObjectGraph& retainers_of);
 
 bool consider_dynamically_referenced(const DexClass* cls);

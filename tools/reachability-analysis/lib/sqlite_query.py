@@ -15,10 +15,10 @@ from .sqlite_export import (
     DOMINATOR_TREE_VERSION,
     EDGE_DIRECTION,
     SCHEMA_VERSION,
+    SOURCE_FORMAT,
 )
 
 
-SOURCE_FORMAT = "Redex reachability graph binary v1"
 KINDS = ("ANNO", "CLASS", "FIELD", "METHOD", "SEED")
 
 

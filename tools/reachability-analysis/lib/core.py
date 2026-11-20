@@ -160,7 +160,11 @@ class AbstractGraph(object):
             raise GraphFormatError("Magic number mismatch")
         version = _read_uint32(mapping, "version")
         if version != self.expected_version():
-            raise GraphFormatError("Version mismatch")
+            raise GraphFormatError(
+                f"Unsupported graph format version {version}; this tool reads "
+                f"version {self.expected_version()}. Regenerate the graph with "
+                "a matching Redex."
+            )
 
     def iter_serialized_records(self, fn):
         """Yield node IDs, nodes, and adjacency IDs without building the graph."""
@@ -215,7 +219,8 @@ class AbstractGraph(object):
 class ReachabilityGraph(AbstractGraph):
     @staticmethod
     def expected_version():
-        return 1
+        # GRAPH_FORMAT_VERSION in libredex/Reachability.h.
+        return 2
 
     def read_node(self, mapping):
         node_type = struct.unpack("<B", _read_exact(mapping, 1, "node type"))[0]

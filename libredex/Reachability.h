@@ -274,7 +274,7 @@ class MethodReferencesGatherer {
     bool may_throw_if_uninstantiable{true};
   };
   std::optional<InstantiableDependency> get_instantiable_dependency(
-      const IRInstruction* insn, References* refs) const;
+      const IRInstruction* insn) const;
   struct ReturningDependency {
     UnorderedSet<const DexMethod*> methods;
   };
@@ -315,7 +315,6 @@ struct ConditionallyMarked {
   struct MarkedItems {
     ConcurrentSet<const DexField*> fields;
     ConcurrentSet<const DexMethod*> methods;
-    ConcurrentSet<const DexClass*> classes;
     ConcurrentSet<DexType*> directly_instantiable_types;
   };
 
@@ -330,6 +329,11 @@ struct ConditionallyMarked {
   // If the class is not abstract and has a constructor, or has a derived class
   // that does.
   MarkedItems if_class_instantiable;
+
+  // For each class, the methods whose walk stepped over an instruction naming
+  // it because it was not instantiable yet; they retain it once it is.
+  ConcurrentMap<const DexClass*, UnorderedSet<const DexMethod*>>
+      stepped_over_referrers_if_class_instantiable;
 
   ConcurrentMap<const DexClass*, MethodReferencesGatherers>
       method_references_gatherers_if_class_instantiable;
@@ -395,7 +399,9 @@ struct References {
   bool method_references_gatherer_dependency_if_instance_method_callable{false};
   std::vector<const DexType*> new_instances;
   UnorderedSet<const DexMethod*> invoke_super_targets;
-  std::vector<const DexClass*> classes_if_instantiable;
+  // The classes of the instructions that the walk stepped over because the
+  // class was not instantiable yet.
+  std::vector<const DexClass*> stepped_over_classes_if_instantiable;
   bool returns{false};
 
   // Whether this instance contains any entries that can only arise from
@@ -579,7 +585,8 @@ class TransitiveClosureMarkerWorker {
 
   void push_if_class_instantiable(const DexMethod* method);
 
-  void push_if_class_instantiable(const DexClass* cls);
+  void push_class_if_instantiable(const DexMethod* referrer,
+                                  const DexClass* cls);
 
   void push_if_class_instantiable(
       const DexClass* cls,

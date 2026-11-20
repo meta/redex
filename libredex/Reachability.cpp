@@ -479,15 +479,24 @@ void TransitiveClosureMarkerWorker::push_if_class_instantiable(
   }
 }
 
-void TransitiveClosureMarkerWorker::push_if_class_instantiable(
-    const DexClass* cls) {
-  if ((cls == nullptr) || m_shared_state->reachable_objects->marked(cls)) {
-    return;
-  }
+void TransitiveClosureMarkerWorker::push_class_if_instantiable(
+    const DexMethod* referrer, const DexClass* cls) {
+  // get_instantiable_dependency returns a dependency, the only way a class
+  // gets here, only for a class that is neither null nor external.
+  // instantiable() never visits an external class, so its referrers would
+  // never be read.
+  redex_assert(!cls->is_external());
+  // A class that is already marked still gets the edge from each referrer, so
+  // the recorded graph does not depend on marking order. Register the
+  // referrer before checking instantiability: otherwise another worker can
+  // finish visiting the instantiable class in between, and the edge is lost.
   TRACE(REACH, 4, "Conditionally marking class if instantiable: %s", SHOW(cls));
-  m_shared_state->cond_marked->if_class_instantiable.classes.insert(cls);
+  m_shared_state->cond_marked->stepped_over_referrers_if_class_instantiable
+      .update(cls, [&](auto*, auto& referrers, bool) {
+        referrers.insert(referrer);
+      });
   if (m_shared_state->reachable_aspects->instantiable_types.count(cls) != 0u) {
-    push(cls, cls);
+    push(referrer, cls);
   }
 }
 
@@ -726,8 +735,8 @@ MethodReferencesGatherer::MethodReferencesGatherer(
                               : default_gather_mie_with_gather_methods) {}
 
 std::optional<MethodReferencesGatherer::InstantiableDependency>
-MethodReferencesGatherer::get_instantiable_dependency(const IRInstruction* insn,
-                                                      References* refs) const {
+MethodReferencesGatherer::get_instantiable_dependency(
+    const IRInstruction* insn) const {
   auto op = insn->opcode();
   InstantiableDependency res;
   if (opcode::is_an_ifield_op(op)) {
@@ -743,14 +752,8 @@ MethodReferencesGatherer::get_instantiable_dependency(const IRInstruction* insn,
   } else if (opcode::is_instance_of(op)) {
     res.cls = type_class(insn->get_type());
     res.may_throw_if_uninstantiable = false;
-    if ((res.cls != nullptr) && !res.cls->is_external()) {
-      refs->classes_if_instantiable.push_back(res.cls);
-    }
   } else if (opcode::is_check_cast(op)) {
     res.cls = type_class(insn->get_type());
-    if ((res.cls != nullptr) && !res.cls->is_external()) {
-      refs->classes_if_instantiable.push_back(res.cls);
-    }
   }
   auto is_class_instantiable = [this](const auto* cls) -> bool {
     if (!m_shared_state->cfg_gathering_check_instantiable ||
@@ -1036,7 +1039,7 @@ void MethodReferencesGatherer::advance(const Advance& advance,
   auto advance_in_block = [this, refs](auto* block, auto& it) {
     for (; it != block->end(); ++it) {
       if (it->type == MFLOW_OPCODE) {
-        auto instantiable_dep = get_instantiable_dependency(it->insn, refs);
+        auto instantiable_dep = get_instantiable_dependency(it->insn);
         if (instantiable_dep) {
           return std::make_optional<Dependency>(*instantiable_dep);
         }
@@ -1135,6 +1138,14 @@ void MethodReferencesGatherer::advance(const Advance& advance,
         visit_throw_succs_if_last_insn(block, it);
         continue;
       }
+      // The walk steps over this instruction without gathering its type, so
+      // the class is kept only once it is instantiable, with this method as
+      // its retainer. An instruction the walk does not step over has its type
+      // gathered, which retains the class directly. get_instantiable_dependency
+      // returns a dependency only for a class that is neither null nor
+      // external.
+      refs->stepped_over_classes_if_instantiable.push_back(
+          instantiable_dep->cls);
       m_instructions_visited++;
       queue.push((CFGNeedle){block, std::next(it)});
       continue;
@@ -1266,8 +1277,9 @@ void TransitiveClosureMarkerWorker::gather_and_push(
   base_invoke_virtual_target(
       refs.base_invoke_virtual_targets_if_class_instantiable);
   instance_callable(refs.invoke_super_targets);
-  for (const auto* iface_cls : refs.classes_if_instantiable) {
-    push_if_class_instantiable(iface_cls);
+  for (const auto* stepped_over_cls :
+       refs.stepped_over_classes_if_instantiable) {
+    push_class_if_instantiable(meth, stepped_over_cls);
   }
   dynamically_referenced(refs.classes_dynamically_referenced);
   directly_instantiable(refs.new_instances);
@@ -1332,7 +1344,8 @@ bool References::maybe_from_code() const {
          !method_references_gatherer_dependencies_if_class_instantiable
               .empty() ||
          method_references_gatherer_dependency_if_instance_method_callable ||
-         !invoke_super_targets.empty() || returns;
+         !invoke_super_targets.empty() ||
+         !stepped_over_classes_if_instantiable.empty() || returns;
 }
 
 template <class Parent>
@@ -1429,8 +1442,12 @@ void TransitiveClosureMarkerWorker::visit_instantiable(const DexClass* cls) {
     instantiable(intf);
   }
   auto* cond_marked = m_shared_state->cond_marked;
-  if (cond_marked->if_class_instantiable.classes.count(cls) != 0u) {
-    push(cls, cls);
+  // instantiable() published cls before queuing this visit, so a referrer
+  // registered after this read sees it and pushes itself.
+  const auto referrers =
+      cond_marked->stepped_over_referrers_if_class_instantiable.get(cls, {});
+  for (const auto* referrer : UnorderedIterable(referrers)) {
+    push(referrer, cls);
   }
   for (auto const& f : cls->get_ifields()) {
     if (cond_marked->if_class_instantiable.fields.count(f) != 0u) {

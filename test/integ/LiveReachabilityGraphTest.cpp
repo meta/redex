@@ -47,7 +47,9 @@ class LiveReachabilityGraphTest : public RedexIntegrationTest {
   }
 
   // Marks the code the keep rule reaches, recording the live graph.
-  std::unique_ptr<ReachableObjects> compute_live_graph() {
+  std::unique_ptr<ReachableObjects> compute_live_graph(
+      bool prune_unreferenced_interfaces = false,
+      bool prune_uninstantiable_insns = false) {
     auto pg_config =
         process_and_get_proguard_config(stores[0].get_dexen(), kKeepRule);
     always_assert(pg_config->ok);
@@ -60,7 +62,9 @@ class LiveReachabilityGraphTest : public RedexIntegrationTest {
     auto mog = method_override_graph::build_graph(scope);
     auto reachables = compute_reachable_objects(
         scope, *mog, ig_sets, &num_ignore_check_strings, &reachable_aspects,
-        /* record_reachability */ true);
+        /* record_reachability */ true, /* relaxed_keep_class_members */ false,
+        /* relaxed_keep_interfaces */ prune_unreferenced_interfaces,
+        /* cfg_gathering_check_instantiable */ prune_uninstantiable_insns);
     walk::parallel::code(scope, [&](auto*, auto& code) { code.clear_cfg(); });
     return reachables;
   }
@@ -134,4 +138,32 @@ TEST_F(LiveReachabilityGraphTest,
   EXPECT_EQ(
       retainers_of_method(*reachables, "LTarget;.call:()V").count("LTarget;"),
       1u);
+}
+
+TEST_F(LiveReachabilityGraphTest, InstanceOfRetainsTheClassItNames) {
+  // prune_uninstantiable_insns makes the walk step over the instance-of, and
+  // prune_unreferenced_interfaces keeps CheckedImpl from retaining Checked.
+  auto reachables = compute_live_graph(/* prune_unreferenced_interfaces */ true,
+                                       /* prune_uninstantiable_insns */ true);
+
+  // Checked is kept because checks() tests for it and CheckedImpl is
+  // instantiable. The walk reaches the instance-of before make() makes
+  // Checked instantiable, and must still record checks() as its retainer.
+  EXPECT_EQ(retainers_of_class(*reachables, "LChecked;"),
+            std::set<std::string>{
+                "LLiveReachabilityGraphTest;.checks:(Ljava/lang/Object;)Z"});
+}
+
+TEST_F(LiveReachabilityGraphTest, CheckCastRetainsTheMarkedClassItNames) {
+  // As above, for a check-cast of a class that is already marked.
+  auto reachables = compute_live_graph(/* prune_unreferenced_interfaces */ true,
+                                       /* prune_uninstantiable_insns */ true);
+
+  // entry() marks Cast with an array of it. casts() still retains Cast once
+  // makeCast() makes it instantiable.
+  EXPECT_EQ(retainers_of_class(*reachables, "LCast;"),
+            (std::set<std::string>{
+                "LLiveReachabilityGraphTest;.casts:(Ljava/lang/Object;)"
+                "Ljava/lang/Object;",
+                "LLiveReachabilityGraphTest;.entry:()V"}));
 }

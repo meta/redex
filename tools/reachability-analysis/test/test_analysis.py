@@ -71,6 +71,27 @@ class TestAnalysis(unittest.TestCase):
         grouped = analysis.group_members_by_class(graph)
         self.assertDictEqual(grouped, {foo: {foo_bar, foo_baz}})
 
+    def test_rank_counts_past_a_member_that_retains_its_class(self):
+        graph = core.ReachabilityGraph()
+        root = ReachableObject(ReachableObjectType.SEED, "KEEP: -keep class A")
+        a = ReachableObject(ReachableObjectType.CLASS, "LA;")
+        a_f = ReachableObject(ReachableObjectType.FIELD, "LA;.f:LB;")
+        b = ReachableObject(ReachableObjectType.CLASS, "LB;")
+        b_init = ReachableObject(ReachableObjectType.METHOD, "LB;.<init>:()V")
+        for node in (root, a, a_f, b, b_init):
+            graph.add_node(node)
+        graph.add_edge(a, root)
+        graph.add_edge(a_f, a)
+        graph.add_edge(b, a_f)
+        graph.add_edge(a, a_f)
+        graph.add_edge(b_init, b)
+
+        leaked = {a, a_f, b, b_init}
+        [(ranked, (score, dominated))] = analysis.rank([root], leaked)
+        self.assertIs(root, ranked)
+        self.assertEqual(1.0, score)
+        self.assertSetEqual(leaked, dominated)
+
     def test_get_dominated_handles_a_deep_graph(self):
         graph = core.ReachabilityGraph()
         nodes = [

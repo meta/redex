@@ -342,7 +342,7 @@ class Ranker(object):
                 node = queue.popleft()
 
                 if node in visited or node not in self.leaked_set:
-                    return
+                    continue
                 visited.add(node)
 
                 if self.counts[node] == 1:

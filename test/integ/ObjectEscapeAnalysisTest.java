@@ -90,6 +90,26 @@ public class ObjectEscapeAnalysisTest {
     return e.getX() + f.getX();
   }
 
+  static class T {
+    int x;
+
+    public T(int x) {
+      this.x = x;
+    }
+
+    public int getX() {
+      return this.x;
+    }
+  }
+
+  public static int reduceTo42WithManyBuilders() {
+    T t1 = new T(10);
+    T t2 = new T(10);
+    T t3 = new T(11);
+    T t4 = new T(11);
+    return t1.getX() + t2.getX() + t3.getX() + t4.getX();
+  }
+
   abstract static class Base {
     public Base() {}
 

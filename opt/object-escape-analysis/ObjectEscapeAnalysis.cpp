@@ -734,6 +734,8 @@ struct Stats {
   size_t inlined_methods_removed{0};
   size_t inlinable_methods_kept{0};
   alignas(CACHE_LINE_SIZE) std::atomic<size_t> reg_allocs{0};
+  alignas(CACHE_LINE_SIZE) std::atomic<size_t> stackify_du_computations{0};
+  alignas(CACHE_LINE_SIZE) std::atomic<size_t> stackify_batch_fallbacks{0};
 };
 
 struct ReducedMethodVariant {
@@ -924,10 +926,8 @@ class RootMethodReducer {
       m_stats->stackify_overlapping_lifetimes++;
       return std::nullopt;
     }
-    while (auto opt_p = find_inlinable_new_instance()) {
-      if (!stackify(opt_p->first, opt_p->second)) {
-        return std::nullopt;
-      }
+    if (!stackify_all_inlinable_new_instances()) {
+      return std::nullopt;
     }
 
     insn = find_incomplete_marker_methods();
@@ -1171,12 +1171,16 @@ class RootMethodReducer {
     return nullptr;
   }
 
-  std::optional<std::pair<IRInstruction*, live_range::Uses>>
-  find_inlinable_new_instance() const {
+  // Find all inlinable new-instance instructions with a single DU chain
+  // computation, in CFG order.
+  std::vector<std::pair<IRInstruction*, live_range::Uses>>
+  find_all_inlinable_new_instances() const {
     bool throwing_check_cast = false;
     auto du_chains = get_augmented_du_chains_for_inlinable_new_instances(
         &throwing_check_cast);
     always_assert(!throwing_check_cast);
+    m_stats->stackify_du_computations++;
+    std::vector<std::pair<IRInstruction*, live_range::Uses>> res;
     auto& cfg = m_method->get_code()->cfg();
     for (auto& mie : InstructionIterable(cfg)) {
       auto* insn = mie.insn;
@@ -1190,9 +1194,44 @@ class RootMethodReducer {
           !has_incomplete_marker(uses)) {
         continue;
       }
-      return std::make_optional(std::make_pair(insn, std::move(uses)));
+      res.emplace_back(insn, std::move(uses));
     }
-    return std::nullopt;
+    return res;
+  }
+
+  // Stackify all inlinable new-instance instructions. Candidates share a single
+  // DU chain computation and are stackified in CFG order. A candidate is only
+  // stackified with precomputed uses when none of its uses were modified by an
+  // earlier stackify in the same batch and no unreachable code was pruned
+  // since; otherwise DU chains are recomputed for the remaining candidates.
+  bool stackify_all_inlinable_new_instances() {
+    for (;;) {
+      auto candidates = find_all_inlinable_new_instances();
+      UnorderedSet<IRInstruction*> modified_insns;
+      bool completed = true;
+      for (auto& [insn, uses] : candidates) {
+        if (unordered_any_of(uses, [&](const auto& use) {
+              return modified_insns.count(use.insn) != 0u;
+            })) {
+          completed = false;
+          break;
+        }
+        UnorderedSet<IRInstruction*> newly_modified_insns;
+        uint32_t num_pruned_insns = 0;
+        if (!stackify(insn, uses, &newly_modified_insns, &num_pruned_insns)) {
+          return false;
+        }
+        if (num_pruned_insns != 0) {
+          completed = false;
+          break;
+        }
+        insert_unordered_iterable(modified_insns, newly_modified_insns);
+      }
+      if (completed) {
+        return true;
+      }
+      m_stats->stackify_batch_fallbacks++;
+    }
   }
 
   bool should_expand(
@@ -1427,9 +1466,13 @@ class RootMethodReducer {
 
   // Given a new-instance instruction whose (main) uses are as the receiver in
   // iget- and iput- instruction, transform all such field accesses into
-  // accesses to registers, one per field.
+  // accesses to registers, one per field. Records every modified or removed
+  // instruction in `modified_insns`, and the number of instructions pruned by
+  // the trailing simplification in `num_pruned_insns`.
   bool stackify(IRInstruction* new_instance_insn,
-                const live_range::Uses& new_instance_insn_uses) {
+                const live_range::Uses& new_instance_insn_uses,
+                UnorderedSet<IRInstruction*>* modified_insns,
+                uint32_t* num_pruned_insns) {
     auto& cfg = m_method->get_code()->cfg();
     UnorderedMap<DexField*, reg_t> field_regs;
     UnorderedMap<reg_t, reg_t> created_regs;
@@ -1491,6 +1534,8 @@ class RootMethodReducer {
         }
         continue;
       }
+      // Every use is modified or removed below.
+      modified_insns->insert(insn);
       if (opcode::is_move_object(opcode)) {
         auto* new_insn = (new IRInstruction(OPCODE_MOVE))
                              ->set_src(0, get_created_reg(insn->src(0)))
@@ -1560,6 +1605,7 @@ class RootMethodReducer {
     if (init_class_insn != nullptr) {
       mutation.insert_before(new_instance_insn_it, {init_class_insn});
     }
+    modified_insns->insert(new_instance_insn);
     mutation.remove(new_instance_insn_it);
 
     // Insert zero-initialization code for field registers.
@@ -1605,7 +1651,7 @@ class RootMethodReducer {
 
     // simplify to prune now unreachable code, e.g. from removed exception
     // handlers
-    cfg.simplify();
+    *num_pruned_insns = cfg.simplify();
     m_new_instances_eliminated++;
     return true;
   }
@@ -2239,7 +2285,8 @@ void ObjectEscapeAnalysisPass::run_pass(DexStoresVector& stores,
       "check-casts, %zu stackify returned objects, "
       "%zu too costly globally; %zu expanded methods; %zu "
       "calls inlined; %zu new-instances eliminated; %zu/%zu inlinable "
-      "methods removed/kept",
+      "methods removed/kept; %zu stackify DU computations with %zu batch "
+      "fallbacks",
       root_methods.size(), stats.reduced_methods,
       (size_t)stats.reduced_methods_variants, stats.selected_reduced_methods,
       stats.reprioritizations, (size_t)stats.anchors_not_inlinable_inlining,
@@ -2253,7 +2300,8 @@ void ObjectEscapeAnalysisPass::run_pass(DexStoresVector& stores,
       (size_t)stats.stackify_returns_objects, (size_t)stats.too_costly_globally,
       (size_t)stats.expanded_methods, (size_t)stats.calls_inlined,
       (size_t)stats.new_instances_eliminated, stats.inlined_methods_removed,
-      stats.inlinable_methods_kept);
+      stats.inlinable_methods_kept, (size_t)stats.stackify_du_computations,
+      (size_t)stats.stackify_batch_fallbacks);
 
   mgr.incr_metric("total_savings", stats.total_savings);
   mgr.incr_metric("root_methods", root_methods.size());
@@ -2300,6 +2348,10 @@ void ObjectEscapeAnalysisPass::run_pass(DexStoresVector& stores,
                   lost_returns_through_shrinking);
   mgr.incr_metric("method_summaries", method_summaries.size());
   mgr.incr_metric("reg_allocs", stats.reg_allocs);
+  mgr.incr_metric("stackify_du_computations",
+                  (size_t)stats.stackify_du_computations);
+  mgr.incr_metric("stackify_batch_fallbacks",
+                  (size_t)stats.stackify_batch_fallbacks);
 }
 
 static ObjectEscapeAnalysisPass s_pass;

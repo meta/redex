@@ -1119,13 +1119,15 @@ bool ClinitFieldAnalyzer::analyze_invoke(const ClinitFieldAnalyzerState& state,
     env->clear_field_environment();
     return false;
   }
-  // As in StaticFieldReadAnalysis, external and unresolved cross-class
-  // calls are assumed not to modify the tracked fields.
-  if (state.class_under_init != insn->get_method()->get_class()) {
-    auto* callee = resolve_method(insn->get_method(), opcode_to_search(insn));
-    if (callee == nullptr || callee->is_external()) {
-      return false;
-    }
+  // As in StaticFieldReadAnalysis, external cross-class calls are assumed not
+  // to modify the tracked fields. An unresolved call through an internal class
+  // is not external: it can run internal code, e.g. the implementations of an
+  // interface method declared in an undefined superinterface.
+  auto* callee_ref = insn->get_method();
+  if (state.class_under_init != callee_ref->get_class() &&
+      is_external_call(callee_ref,
+                       resolve_method(callee_ref, opcode_to_search(insn)))) {
+    return false;
   }
   if (state.clinit_only_fields == nullptr) {
     env->clear_field_environment();

@@ -205,6 +205,32 @@ TEST_F(StaticFieldTest, ClinitOpaqueCallsPreserveStaticValues) {
   EXPECT_EQ(env.get<SignedConstantDomain>(field).get_constant(), 7);
 }
 
+// `I.update()` is declared only in the undefined superinterface of `I`, so it
+// is unresolved, but the call dispatches to `Impl.update()`, which writes the
+// field.
+TEST_F(StaticFieldTest, ClinitUnresolvedCallsThroughProgramTypesInvalidate) {
+  assembler::class_from_string(R"(
+    (interface (public) "LI;" extends "LUndefined;")
+  )");
+  assembler::class_from_string(R"(
+    (class (public) "LImpl;" implements "LI;"
+      (method (public) "LImpl;.update:()V"
+        ((const v0 1) (sput v0 "LAnother;.a:J") (return-void)))
+    )
+  )");
+  auto* field =
+      type_class(DexType::get_type("LAnother;"))->get_sfields().front();
+  IRInstruction insn(OPCODE_INVOKE_INTERFACE);
+  insn.set_method(DexMethod::make_method("LI;.update:()V"));
+  ConstantEnvironment env;
+  env.set(field, SignedConstantDomain(7));
+
+  EXPECT_FALSE(cp::ClinitFieldAnalyzer::analyze_invoke(
+      cp::ClinitFieldAnalyzerState(field->get_class()), &insn, &env));
+
+  EXPECT_TRUE(env.get(field).is_top());
+}
+
 /*
  * This test should be optimized, and remove the if-statement, since we know
  * should log is much greater than 0, and as such the if-statement is not

@@ -546,6 +546,11 @@ DexField* resolve_field(const DexType* owner,
   return nullptr;
 }
 
+bool is_external_call(const DexMethodRef* ref, const DexMethod* resolved) {
+  return resolved != nullptr ? resolved->is_external()
+                             : type_class_internal(ref->get_class()) == nullptr;
+}
+
 DexMethod* find_top_impl(const DexClass* cls,
                          const DexString* name,
                          const DexProto* proto) {

@@ -295,6 +295,16 @@ DexMethod* resolve_invoke_method(const IRInstruction* insn,
                                  bool* resolved_virtual_to_interface = nullptr);
 
 /**
+ * Whether a call to `ref`, which resolves to `resolved` (nullptr if it does not
+ * resolve), is an external call: `resolved` is external, or the call does not
+ * resolve and the class `ref` names is not internal (no definition, or
+ * external), so its target is above that class, and external classes cannot
+ * extend internal ones. A virtual call may still dispatch to an internal
+ * override.
+ */
+bool is_external_call(const DexMethodRef* ref, const DexMethod* resolved);
+
+/**
  * Given a scope defined by DexClass, a name and a proto look for the vmethod
  * on the top ancestor. Essentially finds where the method was introduced.
  * Stop the search when the type is unknown.

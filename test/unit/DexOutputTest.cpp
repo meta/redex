@@ -145,6 +145,55 @@ TEST_F(MethodSymbolOrderTest, EmitsRecordsInDexMethodIndexOrder) {
   EXPECT_EQ(indices, expected_indices);
   EXPECT_EQ(names, expected_names);
 }
+class DexIoTest : public RedexTest {
+ public:
+  DexClasses classes;
+  std::string store_name{"classes"};
+  std::unique_ptr<PositionMapper> mapper{PositionMapper::make("")};
+
+  std::unique_ptr<DexOutput> make_output(const std::string& filename,
+                                         ConfigFiles& config) {
+    auto output = std::make_unique<DexOutput>(
+        filename.c_str(), &classes, std::make_shared<GatheredTypes>(&classes),
+        true, 0, &store_name, 0, DebugInfoKind::NoCustomSymbolication, nullptr,
+        config, mapper.get(), nullptr, nullptr);
+    output->prepare(SortMode::DEFAULT, {SortMode::DEFAULT}, config, "dex\n035");
+    return output;
+  }
+};
+
+TEST_F(DexIoTest, WritesCompleteDexAndRecordsItsByteCount) {
+  auto temp = redex::make_tmp_dir("dex-io-%%%%-%%%%");
+  redex::create_directories(temp.path + "/meta");
+  ConfigFiles config(Json::Value(Json::objectValue), temp.path);
+  const auto filename = temp.path + "/output.dex";
+  auto output = make_output(filename, config);
+  output->write();
+  EXPECT_GT(output->m_stats.num_bytes, 0);
+  EXPECT_EQ(redex::file_size(filename), output->m_stats.num_bytes);
+}
+
+TEST_F(DexIoTest, RejectsOpenFailureBeforeWritingSymbolFiles) {
+  auto temp = redex::make_tmp_dir("dex-io-%%%%-%%%%");
+  redex::create_directories(temp.path + "/meta");
+  ConfigFiles config(Json::Value(Json::objectValue), temp.path);
+  const auto filename = temp.path + "/missing/output.dex";
+  auto output = make_output(filename, config);
+  EXPECT_THROW(output->write(), RedexException);
+  EXPECT_FALSE(redex::exists(config.metafile("redex-full-rename-map.txt")));
+}
+
+#ifdef __linux__
+TEST_F(DexIoTest, RejectsWriteFailureBeforeWritingSymbolFiles) {
+  auto temp = redex::make_tmp_dir("dex-io-%%%%-%%%%");
+  redex::create_directories(temp.path + "/meta");
+  ConfigFiles config(Json::Value(Json::objectValue), temp.path);
+  const std::string filename("/dev/full");
+  auto output = make_output(filename, config);
+  EXPECT_THROW(output->write(), RedexException);
+  EXPECT_FALSE(redex::exists(config.metafile("redex-full-rename-map.txt")));
+}
+#endif
 
 TEST(DexOutput, checkMethodInstructionSizeLimit) {
 

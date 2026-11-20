@@ -11,6 +11,7 @@
 #include <assert.h>
 #include <bitset>
 #include <boost/filesystem.hpp>
+#include <cerrno>
 #include <fcntl.h>
 #include <fstream>
 #include <functional>
@@ -19,7 +20,6 @@
 #include <limits>
 #include <memory>
 #include <stdlib.h>
-#include <sys/stat.h>
 #include <utility>
 
 #ifdef _MSC_VER
@@ -28,8 +28,6 @@
 #define open _open
 #define write _write
 #define close _close
-#define fstat _fstat64i32
-#define stat _stat64i32
 #define O_CREAT _O_CREAT
 #define O_TRUNC _O_TRUNC
 #define O_WRONLY _O_WRONLY
@@ -2935,18 +2933,27 @@ void DexOutput::prepare(SortMode string_mode,
 }
 
 void DexOutput::write() {
-  struct stat st;
   int fd = open(m_filename, O_CREAT | O_TRUNC | O_WRONLY | O_BINARY, 0660);
-  if (fd == -1) {
-    perror("Error writing dex");
-    return;
+  always_assert_log(fd != -1, "Cannot open dex output %s: %s", m_filename,
+                    strerror(errno));
+  size_t written = 0;
+  while (written < m_offset) {
+    auto count = ::write(fd, m_output.get() + written, m_offset - written);
+    if (count == -1 && errno == EINTR) {
+      continue;
+    }
+    if (count <= 0) {
+      const auto error = errno;
+      close(fd);
+      always_assert_log(count > 0, "Cannot write dex output %s: %s", m_filename,
+                        strerror(error));
+    }
+    written += static_cast<size_t>(count);
   }
-  ::write(fd, m_output.get(), m_offset);
-  if (0 == fstat(fd, &st)) {
-    m_stats.num_bytes = st.st_size;
-  }
-  close(fd);
 
+  always_assert_log(close(fd) == 0, "Cannot close dex output %s: %s",
+                    m_filename, strerror(errno));
+  m_stats.num_bytes = static_cast<int64_t>(written);
   write_symbol_files();
 }
 

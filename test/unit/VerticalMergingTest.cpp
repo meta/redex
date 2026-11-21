@@ -570,3 +570,54 @@ TEST_F(VerticalMergingTest, keepsAbstractComponentWithOtherUse) {
 
   EXPECT_EQ(run_pass(user), 3);
 }
+
+// No `Child` is ever created, so `Child` could merge into `Parent`, which drops
+// its instance methods. But the static method `Child.call` calls the private
+// method `Child.p` without virtual dispatch, and would then call a method that
+// no longer exists.
+TEST_F(VerticalMergingTest, keepsSubclassWhosePrivateMethodIsCalled) {
+  ClassCreator parent_creator(DexType::make_type("Lcom/redextest/Parent;"));
+  parent_creator.set_access(ACC_PUBLIC);
+  parent_creator.set_super(type::java_lang_Object());
+  add_init(parent_creator, "Lcom/redextest/Parent;",
+           "Ljava/lang/Object;.<init>:()V");
+  auto* parent = parent_creator.create();
+
+  ClassCreator child_creator(DexType::make_type("Lcom/redextest/Child;"));
+  child_creator.set_access(ACC_PUBLIC | ACC_FINAL);
+  child_creator.set_super(parent->get_type());
+  add_init(child_creator, "Lcom/redextest/Child;",
+           "Lcom/redextest/Parent;.<init>:()V");
+  child_creator.add_method(assembler::method_from_string(R"(
+    (method (private) "Lcom/redextest/Child;.p:()V"
+     (
+      (load-param-object v0)
+      (return-void)
+     )
+    )
+  )"));
+  child_creator.add_method(assembler::method_from_string(R"(
+    (method (public static) "Lcom/redextest/Child;.call:(Lcom/redextest/Child;)V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Lcom/redextest/Child;.p:()V")
+      (return-void)
+     )
+    )
+  )"));
+  auto* child = child_creator.create();
+
+  auto* user = create_user(R"(
+    (
+      (new-instance "Lcom/redextest/Parent;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "Lcom/redextest/Parent;.<init>:()V")
+      (const v1 0)
+      (invoke-static (v1) "Lcom/redextest/Child;.call:(Lcom/redextest/Child;)V")
+      (return-object v0)
+    )
+  )");
+
+  EXPECT_EQ(run_pass_on({parent, child, user}), 3);
+  EXPECT_EQ(child->get_super_class(), parent->get_type());
+}

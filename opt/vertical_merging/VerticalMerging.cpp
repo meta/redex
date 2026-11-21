@@ -664,6 +664,50 @@ void remove_unrenamable_collisions(ClassMap* mergeable_to_merger) {
 }
 
 /**
+ * Merging a class into its superclass drops its instance methods and moves its
+ * static methods into the superclass. A virtual call of a dropped method is
+ * redirected to the superclass (see `resolve_virtual_calls_to_merger`), but a
+ * call without virtual dispatch that names the class, from code that stays,
+ * would name a method that no longer exists, so such a class is not merged.
+ */
+void remove_nonvirtual_calls_of_dropped_methods(const Scope& scope,
+                                                ClassMap* mergeable_to_merger) {
+  // The class `type` if merging drops its instance methods, or nullptr.
+  auto get_dropping = [&](const DexType* type) -> DexClass* {
+    auto* cls = type_class(type);
+    // A null `cls`, of a type without a class, is not a key, so it is never
+    // dereferenced.
+    auto it = mergeable_to_merger->find(cls);
+    if (it == mergeable_to_merger->end() ||
+        cls->get_super_class() != it->second->get_type()) {
+      return nullptr;
+    }
+    return cls;
+  };
+  ConcurrentSet<DexClass*> to_delete;
+  walk::parallel::code(scope, [&](DexMethod* caller, IRCode& code) {
+    if (!is_static(caller) && get_dropping(caller->get_class()) != nullptr) {
+      return;
+    }
+    for (const auto& mie : cfg::InstructionIterable(code.cfg())) {
+      auto* insn = mie.insn;
+      if (!opcode::is_invoke_direct(insn->opcode())) {
+        continue;
+      }
+      auto* callee_ref = insn->get_method();
+      if (auto* cls = get_dropping(callee_ref->get_class())) {
+        TRACE(VMERGE, 5, "Exclude %s: %s calls %s without virtual dispatch",
+              SHOW(cls), SHOW(caller), SHOW(callee_ref));
+        to_delete.insert(cls);
+      }
+    }
+  });
+  for (DexClass* cls : UnorderedIterable(to_delete)) {
+    mergeable_to_merger->erase(cls);
+  }
+}
+
+/**
  * A field that cannot be renamed keeps its type and its class from being merged
  * away. A static field's value can name classes as class literals and
  * type-like strings, like code does.
@@ -1147,6 +1191,7 @@ size_t VerticalMergingPass::merge_round(
 
   remove_both_have_clinit(&mergeable_to_merger);
   remove_unrenamable_collisions(&mergeable_to_merger);
+  remove_nonvirtual_calls_of_dropped_methods(scope, &mergeable_to_merger);
   resolve_virtual_calls_to_merger(scope, mergeable_to_merger);
 
   merge_classes(scope, mergeable_to_merger);

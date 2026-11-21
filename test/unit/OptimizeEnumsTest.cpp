@@ -595,6 +595,29 @@ TEST_F(OptimizeEnumsTest, rowStoredIntoTwoDimensionalArrayLetsEnumBeBoxed) {
   }
 }
 
+// `Bar[] row = {Bar.Y};` with the array built by filled-new-array: Bar is
+// boxed, so the array becomes an `Integer[]`.
+TEST_F(OptimizeEnumsTest, arrayBuiltByFilledNewArrayIsBoxed) {
+  auto* make = run_pass_on_rows_maker(R"(
+    (method (public static) "LRows;.make:()[LBar;"
+      (
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v0)
+        (filled-new-array (v0) "[LBar;")
+        (move-result-object v1)
+        (return-object v1)
+      )
+    )
+  )");
+  EXPECT_FALSE(is_enum(type_class(DexType::get_type("LBar;"))));
+  make->get_code()->build_cfg();
+  for (const auto& mie : cfg::InstructionIterable(make->get_code()->cfg())) {
+    if (mie.insn->opcode() == OPCODE_FILLED_NEW_ARRAY) {
+      EXPECT_EQ(show(mie.insn->get_type()), "[Ljava/lang/Integer;");
+    }
+  }
+}
+
 /* Run the usage analysis with `LUser;.x_of_y`, which reads `Bar.Y.x`, and
 return the reasons that keep Bar, or an empty set if Bar can be boxed. */
 std::set<optimize_enums::UnsafeType> reasons_with_user_method(

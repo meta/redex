@@ -827,7 +827,8 @@ class CodeTransformer final {
         update_invoke_valueof(env, cfg, block, mie, prev_sb);
       }
     } break;
-    case OPCODE_NEW_ARRAY: {
+    case OPCODE_NEW_ARRAY:
+    case OPCODE_FILLED_NEW_ARRAY: {
       const auto* array_type = insn->get_type();
       const auto* new_type = try_convert_to_int_type(array_type);
       if (new_type != nullptr) {

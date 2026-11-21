@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -16,6 +18,7 @@
 #include "DexClass.h"
 #include "MethodSplittingConfig.h"
 #include "MethodSplittingStats.h"
+#include "RegionPlan.h"
 #include "SplittableClosures.h"
 
 struct ConfigFiles;
@@ -28,13 +31,26 @@ using DexStoresVector = std::vector<DexStore>;
 
 namespace method_splitting_impl {
 
+// A region split's plan, and the continuation read from the live CFG
+// (`live_continuation`). The continuation discovery found is provisional: an
+// earlier split in the same method may have redirected an out-edge of a region
+// block.
+struct RegionEmission {
+  const RegionPlan* plan;
+  cfg::Block* continuation;
+};
+
 class SplitMethod {
  public:
-  // Creates a new static method according to a splittable closure.
-  static SplitMethod create(const SplittableClosure& splittable_closure,
-                            DexType* target_type,
-                            const DexString* split_name,
-                            const std::vector<const DexType*>& arg_types);
+  // Creates a new static method according to a splittable closure. A region
+  // split takes its plan and its live continuation; a suffix split takes
+  // nullopt.
+  static SplitMethod create(
+      const SplittableClosure& splittable_closure,
+      DexType* target_type,
+      const DexString* split_name,
+      const std::vector<const DexType*>& arg_types,
+      std::optional<RegionEmission> region = std::nullopt);
 
   // Adds the new method to its parent class.
   void add_to_target();
@@ -48,16 +64,27 @@ class SplitMethod {
   SplitMethod(const SplittableClosure& splittable_closure,
               DexMethod* new_method,
               cfg::Block* launchpad_template,
-              std::unique_ptr<SourceBlock> launchpad_sb)
+              std::unique_ptr<SourceBlock> launchpad_sb,
+              std::optional<RegionEmission> region)
       : m_splittable_closure(splittable_closure),
         m_new_method(new_method),
         m_launchpad_template(launchpad_template),
-        m_launchpad_sb(std::move(launchpad_sb)) {}
+        m_launchpad_sb(std::move(launchpad_sb)),
+        m_region(region) {}
+
+  static SplitMethod create_region_split(
+      const SplittableClosure& splittable_closure,
+      DexType* target_type,
+      const DexString* split_name,
+      const std::vector<const DexType*>& arg_types,
+      RegionEmission region);
 
   const SplittableClosure& m_splittable_closure;
   DexMethod* m_new_method;
   cfg::Block* m_launchpad_template;
   std::unique_ptr<SourceBlock> m_launchpad_sb;
+  // nullopt for a suffix split.
+  std::optional<RegionEmission> m_region;
 };
 
 // What splitting needs from the pass that runs it: the min-sdk level, a

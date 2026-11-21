@@ -15,6 +15,7 @@
 #include "DexPosition.h"
 #include "DexStore.h"
 #include "DexUtil.h"
+#include "IRTypeChecker.h"
 #include "InitClassesWithSideEffects.h"
 #include "InterDexPassMetrics.h"
 #include "MethodClosures.h"
@@ -133,10 +134,17 @@ const DexString* get_split_method_name(
                                 name_infix + std::to_string(index));
 }
 
-DexProto* get_split_proto(const DexMethod* method,
+// The proto of `splittable_closure`'s split: its arguments, and the host's
+// return type for a suffix, which returns from the host, or void for a region,
+// which hands control back to the host.
+DexProto* get_split_proto(const SplittableClosure& splittable_closure,
                           const std::vector<const DexType*>& arg_types) {
+  auto* rtype = splittable_closure.is_region()
+                    ? type::_void()
+                    : splittable_closure.method_closures->method->get_proto()
+                          ->get_rtype();
   return DexProto::make_proto(
-      method->get_proto()->get_rtype(),
+      rtype,
       // TODO: Remove overhead.
       DexTypeList::make_type_list(std::vector<const DexType*>(arg_types)));
 }
@@ -155,7 +163,7 @@ ConcurrentSet<DexMethod*> split_splittable_closures(
     AtomicMap<std::string, size_t>* uniquifiers,
     Stats* stats,
     UnorderedMap<DexClasses*, std::unique_ptr<DexState>>* dex_states,
-    ConcurrentSet<DexMethod*>* concurrent_added_methods,
+    InsertOnlyConcurrentMap<DexMethod*, SplitKind>* concurrent_added_methods,
     ConcurrentSet<DexMethod*>* concurrent_split_methods,
     InsertOnlyConcurrentSet<const DexMethod*>* concurrent_hot_methods,
     InsertOnlyConcurrentMap<DexMethod*, DexMethod*>*
@@ -203,8 +211,8 @@ ConcurrentSet<DexMethod*> split_splittable_closures(
     auto record = [stats](const SplittableClosure& sc, CandidateFate fate,
                           const DexMethod* split = nullptr) {
       stats->record(
-          SplitKind::Suffix, [&sc] { return sc.head_ids(); }, sc.net_terms,
-          fate, sc.covered_code_units, split);
+          sc.kind, [&sc] { return sc.head_ids(); }, sc.net_terms, fate,
+          sc.covered_code_units, split);
     };
     for (auto it = ranked_splittable_closures.begin();
          it != ranked_splittable_closures.end();
@@ -234,7 +242,7 @@ ConcurrentSet<DexMethod*> split_splittable_closures(
       // split shares, such as `$init$` for `<init>`. Reusing it would replace
       // that method's code. Unlike `DexMethod::get_unique_name`, which appends
       // its own suffix, this keeps the splits' index numbering.
-      auto* split_proto = get_split_proto(method, arg_types);
+      auto* split_proto = get_split_proto(*splittable_closure, arg_types);
       while (DexMethod::get_method(method->get_class(), split_name,
                                    split_proto) != nullptr) {
         split_name = get_split_method_name(*splittable_closure, name_infix,
@@ -306,7 +314,7 @@ ConcurrentSet<DexMethod*> split_splittable_closures(
       concurrent_split_methods->insert(method);
       affected_methods.insert(method);
       affected_methods.insert(new_method);
-      concurrent_added_methods->insert(new_method);
+      concurrent_added_methods->emplace(new_method, splittable_closure->kind);
       record(*splittable_closure, CandidateFate::Emitted, new_method);
       if (splittable_closure->below_legacy_floors) {
         stats->suffix_sub_floor_emitted++;
@@ -363,7 +371,7 @@ class SplitRun {
       InsertOnlyConcurrentMap<DexMethod*, DexMethod*>*
           concurrent_new_hot_split_methods) {
     Result result;
-    ConcurrentSet<DexMethod*> concurrent_added_methods;
+    InsertOnlyConcurrentMap<DexMethod*, SplitKind> concurrent_added_methods;
     result.revisit = split_splittable_closures(
         fix_new_hot_split_registration, m_dexen, m_min_sdk,
         m_init_classes_with_side_effects, m_reserved_trefs, m_reserved_mrefs,
@@ -372,12 +380,14 @@ class SplitRun {
         concurrent_new_hot_split_methods);
     // Transfer per-iteration newly-emitted splits into Stats. Sort by
     // method identity so the append order is deterministic across
-    // runs (ConcurrentSet iteration is not).
-    auto sorted =
-        unordered_to_ordered(concurrent_added_methods, compare_dexmethods);
+    // runs (ConcurrentMap iteration is not).
+    auto sorted = unordered_to_ordered(
+        concurrent_added_methods, [](const auto& a, const auto& b) {
+          return compare_dexmethods(a.first, b.first);
+        });
     stats->added_methods.reserve(stats->added_methods.size() + sorted.size());
-    for (auto* m : sorted) {
-      stats->added_methods.emplace_back(m, SplitKind::Suffix);
+    for (const auto& [m, kind] : sorted) {
+      stats->added_methods.emplace_back(m, kind);
     }
     return result;
   }
@@ -536,11 +546,11 @@ std::unique_ptr<IRCode> clone_host_cfg(DexMethod* method) {
   // boundary unless the caller explicitly truncates it. For suffix
   // splits the boundary IS the original method's return so no
   // truncation is needed. For region splits, the caller must walk
-  // the region's exit edges in `split_cfg`, delete them, and append
-  // a `return-*` instruction -- otherwise the split body double-
-  // executes the rejoin code AND the launchpad's `goto rejoin`
-  // executes it again. See `apply_code_changes` below for the canonical
-  // truncation pattern.
+  // the region's exit edges in `split_cfg` and send each one to a
+  // block holding a `return-*` instruction -- otherwise the split
+  // body runs the continuation's code, and then the call block's `goto`
+  // to the continuation runs it a second time. See `create_region_split`
+  // below for the canonical truncation pattern.
   method->get_code()->cfg().deep_copy(&split_code->cfg());
   return split_code;
 }
@@ -709,12 +719,158 @@ void edit_host_switch(
   }
 }
 
+// A fresh return block in the split, standing in for the region's exit from
+// `sb_donor`. Its SourceBlock is modeled on `sb_donor`'s: that is recorded in
+// `pending_source_blocks` and applied once the split method exists. It needs
+// no position of its own: layout places it right after `sb_donor`, whose
+// position is still in force there.
+cfg::Block* emit_return_block(
+    cfg::ControlFlowGraph& split_cfg,
+    cfg::Block* sb_donor,
+    std::vector<std::pair<cfg::Block*, cfg::Block*>>& pending_source_blocks) {
+  auto* rb = split_cfg.create_block();
+  pending_source_blocks.emplace_back(rb, sb_donor);
+  rb->push_back(new IRInstruction(OPCODE_RETURN_VOID));
+  return rb;
+}
+
 } // namespace
+
+// Builds the split method for a region closure by copying the WHOLE source
+// method and trimming the copy. `deep_copy` brings DexPositions, SourceBlocks
+// and try/catch markers across with their parent chains remapped. The copy then
+// keeps only the region's block, redirects the edge leaving the region to a
+// fresh return block, and routes the fresh entry to the region head. After
+// trimming, no copied region block has an edge into the copied continuation, so
+// nothing runs twice.
+SplitMethod SplitMethod::create_region_split(
+    const SplittableClosure& splittable_closure,
+    DexType* target_type,
+    const DexString* split_name,
+    const std::vector<const DexType*>& arg_types,
+    RegionEmission region) {
+  const auto& closures = splittable_closure.closures;
+  auto* method = splittable_closure.method_closures->method;
+
+  // `deep_copy` clears the destination, so new (entry/return) blocks are built
+  // after it.
+  auto split_code = clone_host_cfg(method);
+  auto& split_cfg = split_code->cfg();
+
+  // Region membership by stable block id (ids survive `deep_copy`).
+  const auto& members = closures.front()->region->members;
+
+  // List the copied blocks to discard: every block outside the region, such as
+  // the hot prefix, the continuation and the original entry and exit. Take the
+  // list BEFORE creating the new entry and return blocks, so those are not on
+  // it.
+  std::vector<cfg::Block*> to_remove;
+  for (auto* b : split_cfg.blocks()) {
+    if (!members.contains(b->id())) {
+      to_remove.push_back(b);
+    }
+  }
+
+  // SourceBlocks for the blocks synthesized below. They are applied once
+  // `split_method` exists: `clone_as_synthetic` wants it as the `src` ref, and
+  // it is not created until the CFG is finished. Each entry pairs a synthesized
+  // block with the donor block whose SourceBlock it is modeled on.
+  std::vector<std::pair<cfg::Block*, cfg::Block*>> pending_source_blocks;
+
+  // A single-block region leaves by its one goto. Point that edge at a fresh
+  // return block.
+  auto* copy = split_cfg.get_block(closures.front()->target->id());
+  auto* exit = split_cfg.get_succ_edge_of_type(copy, cfg::EDGE_GOTO);
+  always_assert(exit != nullptr && copy->succs().size() == 1);
+  split_cfg.set_edge_target(
+      exit, emit_return_block(split_cfg, copy, pending_source_blocks));
+
+  // Entry block: load-param for each typed arg; const-def synthesis for args
+  // without a type (mirrors suffix path).
+  auto* split_entry_block =
+      create_split_entry_block(split_cfg, splittable_closure);
+
+  // Goto the copy of the true region HEAD (`closures.front()->target`), NOT
+  // `members.blocks().front()` (the lowest-id block need not be the head). The
+  // call block's SourceBlock is modeled on the head's.
+  cfg::Block* launchpad_template = closures.front()->target;
+  split_cfg.add_edge(split_entry_block,
+                     split_cfg.get_block(launchpad_template->id()),
+                     cfg::EDGE_GOTO);
+
+  // Drop the cloned hot prefix + continuation. After the edge redirection
+  // above, nothing in the region references them; `remove_blocks` frees their
+  // edges, clears a dangling entry/exit, and re-parents dangling positions.
+  split_cfg.remove_blocks(to_remove);
+
+  auto* split_method = make_split_method(
+      target_type, split_name, get_split_proto(splittable_closure, arg_types),
+      std::move(split_code));
+  // The entry block is synthesized and carries no position. Give it the
+  // synthetic entry position that `InstructionSequenceOutliner` gives the
+  // methods it creates, right after the load-params.
+  {
+    auto& emitted_cfg = split_method->get_code()->cfg();
+    auto* entry = emitted_cfg.entry_block();
+    emitted_cfg.insert_before(
+        entry, entry->get_first_non_param_loading_insn(),
+        DexPosition::make_synthetic_entry_position(split_method));
+  }
+  // Give the synthesized blocks SourceBlocks now that `split_method` can be
+  // named as the `src` ref.
+  for (const auto& [rb, donor] : pending_source_blocks) {
+    if (source_blocks::get_first_source_block(rb) != nullptr) {
+      continue;
+    }
+    auto sb = make_synthetic_sb(donor, split_method,
+                                splittable_closure.hot_split_kind);
+    if (sb == nullptr) {
+      continue;
+    }
+    rb->insert_before(source_blocks::find_first_block_insert_point(rb),
+                      std::move(sb));
+  }
+
+  auto launchpad_sb = make_synthetic_sb(launchpad_template, method,
+                                        splittable_closure.hot_split_kind);
+
+  // Type-check the split now, while its CFG is built. A malformed split, such
+  // as one with a parameter type its uses do not accept, then fails HERE and
+  // names the offending method. Otherwise it would surface much later as a
+  // RegAlloc "Type violation" assert (Interference.cpp) whose only context is a
+  // dump of the whole CFG.
+  //
+  // Checking every split this emits is real work. It is accepted because the
+  // failure it catches is otherwise near-impossible to diagnose.
+  //
+  // The constructor rule is PassManager's, which checks every method: from API
+  // 21 on, ART lets a superclass's `<init>` initialize a `new-instance`, as
+  // constructor inlining leaves it in a host and so in the host's splits.
+  IRTypeChecker checker(split_method);
+  checker.relaxed_init_check();
+  checker.run();
+  always_assert_log(
+      checker.good(),
+      "cold-region split %s is not type-consistent at emission: %s",
+      SHOW(split_method), checker.what().c_str());
+
+  return SplitMethod{splittable_closure, split_method, launchpad_template,
+                     std::move(launchpad_sb), region};
+}
 
 SplitMethod SplitMethod::create(const SplittableClosure& splittable_closure,
                                 DexType* target_type,
                                 const DexString* split_name,
-                                const std::vector<const DexType*>& arg_types) {
+                                const std::vector<const DexType*>& arg_types,
+                                std::optional<RegionEmission> region) {
+  always_assert(region.has_value() == splittable_closure.is_region());
+  // Region splits use their own builder, which deep-copies the method and
+  // trims to the region's blocks -- see `create_region_split`.
+  if (region) {
+    return create_region_split(splittable_closure, target_type, split_name,
+                               arg_types, *region);
+  }
+
   auto* method = splittable_closure.method_closures->method;
   auto split_code = clone_host_cfg(method);
   auto& split_cfg = split_code->cfg();
@@ -737,9 +893,9 @@ SplitMethod SplitMethod::create(const SplittableClosure& splittable_closure,
   }
   split_cfg.add_edge(split_entry_block, split_landingpad, cfg::EDGE_GOTO);
 
-  auto* split_method = make_split_method(target_type, split_name,
-                                         get_split_proto(method, arg_types),
-                                         std::move(split_code));
+  auto* split_method = make_split_method(
+      target_type, split_name, get_split_proto(splittable_closure, arg_types),
+      std::move(split_code));
 
   // When splitting many cases out of a switch, we keep the positions of the
   // switch block, but not the source-block, so we insert a synthetic one here.
@@ -750,7 +906,8 @@ SplitMethod SplitMethod::create(const SplittableClosure& splittable_closure,
 
   return SplitMethod{splittable_closure, split_method, launchpad_template,
                      make_synthetic_sb(launchpad_template, method,
-                                       splittable_closure.hot_split_kind)};
+                                       splittable_closure.hot_split_kind),
+                     std::nullopt};
 }
 
 void SplitMethod::add_to_target() {
@@ -768,7 +925,8 @@ void SplitMethod::apply_code_changes() {
   // A split taking several cases of a switch gets the switch's edges into its
   // case heads; one taking a single block gets every predecessor of that
   // block.
-  const auto edit = m_splittable_closure.switch_block != nullptr
+  const auto edit = m_region ? m_region->plan->host_switch_edit()
+                    : m_splittable_closure.switch_block != nullptr
                         ? HostSwitchEdit::DeleteGrouped
                         : HostSwitchEdit::None;
   if (edit != HostSwitchEdit::None) {
@@ -781,7 +939,13 @@ void SplitMethod::apply_code_changes() {
       cfg.set_edge_target(e, launchpad);
     }
   }
-  if (proto->is_void()) {
+  if (m_region) {
+    // Region call block: instead of returning, hand control back to the
+    // continuation so the original method continues its hot tail. With no
+    // result for the host to read there is nothing to transfer, so the goto
+    // follows the invoke directly. The continuation comes from the live CFG.
+    cfg.add_edge(launchpad, m_region->continuation, cfg::EDGE_GOTO);
+  } else if (proto->is_void()) {
     launchpad->push_back(new IRInstruction(OPCODE_RETURN_VOID));
   } else {
     auto* rtype = proto->get_rtype();

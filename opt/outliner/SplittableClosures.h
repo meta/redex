@@ -21,6 +21,7 @@
 #include "MethodSplittingStats.h"
 #include "NeverInlineEligibility.h"
 #include "RefChecker.h"
+#include "RegionPlan.h"
 
 namespace api {
 class AndroidSDK;
@@ -76,11 +77,15 @@ struct SplittableClosure {
   UnorderedSet<cfg::BlockId> grouped_heads;
   std::vector<ClosureArgument> args;
   double rank;
+  SplitKind kind{SplitKind::Suffix};
   size_t added_code_size;
   std::optional<HotSplitKind> hot_split_kind;
   bool is_large_packed_switch{false};
   bool creates_large_sparse_switch{false};
   bool destroys_large_packed_switch{false};
+  // The region split's shape. Set when this closure was produced by
+  // `RegionStrategy`; nullopt for suffix closures.
+  std::optional<RegionPlan> region_plan;
   // The net saving of a net-gated candidate, carried to emission, where the
   // candidate's fate is recorded with it.
   std::optional<ClosureNetTerms> net_terms;
@@ -91,6 +96,8 @@ struct SplittableClosure {
   bool below_legacy_floors{false};
 
   int is_switch() const { return switch_block != nullptr ? 1 : 0; }
+
+  bool is_region() const { return kind == SplitKind::Region; }
 
   // id is unique among all splittable closures where is_switch() is the same.
   size_t id() const {

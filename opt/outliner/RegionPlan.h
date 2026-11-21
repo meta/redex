@@ -9,12 +9,13 @@
 
 #include <vector>
 
+#include "ControlFlow.h"
 #include "MethodClosures.h"
 
 namespace method_splitting_impl {
 
-// The shape of one region split. It is decided once and read by the split's
-// net saving.
+// The shape of one region split. It is decided once and read by the split's net
+// saving and by the code that builds its call block.
 class RegionPlan {
  public:
   // `members` are the candidate's closures, one per region. A plan takes
@@ -30,5 +31,9 @@ class RegionPlan {
 
   HostSwitchEdit m_host_switch_edit;
 };
+
+// The block the region of `member` hands control back to, read from the live
+// CFG at emission.
+cfg::Block* live_continuation(const Closure& member);
 
 } // namespace method_splitting_impl

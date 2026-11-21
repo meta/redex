@@ -1026,6 +1026,7 @@ std::vector<SplittableClosure> to_splittable_closures(
         .is_large_packed_switch = sc.is_large_packed_switch,
         .creates_large_sparse_switch = sc.creates_large_sparse_switch,
         .destroys_large_packed_switch = sc.destroys_large_packed_switch,
+        .region_plan = std::nullopt,
         .net_terms = sc.net_terms,
         .covered_code_units = sc.covered_code_units,
         .below_legacy_floors = sc.below_legacy_floors});

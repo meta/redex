@@ -14,8 +14,10 @@
 #include "DeterministicContainers.h"
 #include "DexAccess.h"
 #include "DexAnnotation.h"
+#include "DexCallSite.h"
 #include "DexClass.h"
 #include "DexInstruction.h"
+#include "DexMethodHandle.h"
 #include "DexPosition.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
@@ -64,6 +66,8 @@ class Impl {
   void hash(const DexAnnotationSet* s);
   void hash(const DexAnnotationElement& elem);
   void hash(const DexEncodedValue* v);
+  void hash(const DexCallSite* c);
+  void hash(const DexMethodHandle* h);
   void hash(const DexProto* p);
   void hash(const DexMethodRef* m);
   void hash(const DexMethod* m);
@@ -229,9 +233,11 @@ void Impl::hash(const IRInstruction* insn) {
   } else if (insn->has_method()) {
     hash(insn->get_method());
   } else if (insn->has_callsite()) {
-    hash(insn->get_callsite() != nullptr);
+    hash(insn->get_callsite());
   } else if (insn->has_methodhandle()) {
-    hash(insn->get_methodhandle() != nullptr);
+    hash(insn->get_methodhandle());
+  } else if (insn->has_proto()) {
+    hash(insn->get_proto());
   } else if (insn->has_data()) {
     auto* data = insn->get_data();
     hash((uint32_t)data->data_size());
@@ -431,6 +437,22 @@ void Impl::hash_code_flush(
   }
 }
 
+void Impl::hash(const DexCallSite* c) {
+  hash(c->method_handle());
+  hash(c->method_name());
+  hash(c->method_type());
+  hash(c->args());
+}
+
+void Impl::hash(const DexMethodHandle* h) {
+  hash((uint8_t)h->type());
+  if (DexMethodHandle::isInvokeType(h->type())) {
+    hash(h->methodref());
+  } else {
+    hash(h->fieldref());
+  }
+}
+
 void Impl::hash(const DexProto* p) {
   hash(p->get_rtype());
   hash(p->get_args());
@@ -523,6 +545,16 @@ void Impl::hash(const DexEncodedValue* v) {
   case DEVT_METHOD: {
     const auto* f = dynamic_cast<const DexEncodedValueMethod*>(v);
     hash(f->method());
+    break;
+  }
+  case DEVT_METHOD_TYPE: {
+    const auto* t = dynamic_cast<const DexEncodedValueMethodType*>(v);
+    hash(t->proto());
+    break;
+  }
+  case DEVT_METHOD_HANDLE: {
+    const auto* h = dynamic_cast<const DexEncodedValueMethodHandle*>(v);
+    hash(h->methodhandle());
     break;
   }
   case DEVT_ARRAY: {

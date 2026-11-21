@@ -20,9 +20,12 @@
 #include "IRInstruction.h"
 #include "Lazy.h"
 #include "LiveRange.h"
+#include "MethodProfiles.h"
 #include "MethodUtil.h"
 #include "ReachableClasses.h"
 #include "Show.h"
+#include "SourceBlocks.h"
+#include "SourceBlocksUtils.h"
 #include "Trace.h"
 #include "UnreachableDefUseChains.h"
 #include "Walkers.h"
@@ -142,6 +145,25 @@ struct Selection {
   DexProto* typed_proto;
   std::vector<IRInstruction*> unreachables;
 };
+
+// The code of a stub with the signature of `method` that passes its arguments
+// to `target` and returns.
+std::unique_ptr<IRCode> make_stub_code(DexMethod* method, DexMethod* target) {
+  auto code = std::make_unique<IRCode>(method, /* temp_regs */ 0);
+  std::vector<reg_t> args;
+  for (const auto& mie : InstructionIterable(code->get_param_instructions())) {
+    args.push_back(mie.insn->dest());
+  }
+  auto* invoke = new IRInstruction(OPCODE_INVOKE_STATIC);
+  invoke->set_method(target)->set_srcs_size(args.size());
+  for (size_t i = 0; i < args.size(); ++i) {
+    invoke->set_src(i, args[i]);
+  }
+  code->push_back(invoke);
+  code->push_back(new IRInstruction(OPCODE_RETURN_VOID));
+  code->build_cfg();
+  return code;
+}
 
 class Analysis {
  public:
@@ -364,6 +386,47 @@ class Analysis {
 };
 
 } // namespace
+
+DexMethod* split_off_typed_method(DexMethod* method,
+                                  DexProto* typed_proto,
+                                  method_profiles::MethodProfiles& profiles) {
+  always_assert_log(is_static(method) && method->get_code() != nullptr, "%s",
+                    SHOW(method));
+  always_assert_log(DexMethod::get_method(method->get_class(),
+                                          method->get_name(),
+                                          typed_proto) == nullptr,
+                    "%s already has a method with the typed signature",
+                    SHOW(method));
+  auto* cls = type_class(method->get_class());
+  auto* typed_method =
+      DexMethod::make_method(method->get_class(), method->get_name(),
+                             typed_proto)
+          ->make_concrete(method->get_access(), method->release_code(),
+                          /* is_virtual */ false);
+  typed_method->rstate = method->rstate;
+  // The body keeps the original's deobfuscated name, as it does when typed in
+  // place, so that profiles and symbolication find it under the same name in
+  // both cases. The stub gets a name of its own, which must be unique.
+  const auto* original_name = method->get_deobfuscated_name_or_null();
+  if (original_name != nullptr && !original_name->str().empty()) {
+    method->set_deobfuscated_name(
+        show_deobfuscated(method->get_class()) + "." +
+        method->get_simple_deobfuscated_name() +
+        "$stub:" + show_deobfuscated(method->get_proto()));
+    typed_method->set_deobfuscated_name(original_name->str_copy());
+  }
+  cls->add_method(typed_method);
+  method->set_code(make_stub_code(method, typed_method));
+  auto* entry_source_block =
+      source_blocks::get_first_source_block_of_method(typed_method);
+  if (entry_source_block != nullptr) {
+    source_blocks::insert_synthetic_source_blocks_in_method(method, [&]() {
+      return source_blocks::clone_as_synthetic(entry_source_block, method);
+    });
+  }
+  profiles.derive_stats(typed_method, {method});
+  return typed_method;
+}
 
 Stats type_nonreturning_methods(
     const DexStoresVector& stores,

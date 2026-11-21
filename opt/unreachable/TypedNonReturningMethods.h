@@ -12,6 +12,7 @@
 #include "BaselineProfile.h"
 #include "DexClass.h"
 #include "DexStore.h"
+#include "MethodProfiles.h"
 
 /*
  * Types non-returning static methods in place.
@@ -94,5 +95,18 @@ Stats type_nonreturning_methods(
     DexType* result_type,
     const baseline_profiles::BaselineProfile& baseline_profile,
     uint32_t huge_method_max);
+
+// Moves the body of the static method `method` into a new method of its class
+// with the same name and access flags and the signature `typed_proto`, and
+// turns `method` into a stub that passes its arguments to the new method and
+// returns. The new method keeps the rstate, the deobfuscated name and, through
+// `profiles`, the profile stats of `method`; the stub is named `<name>$stub`
+// and gets a synthetic copy of the body's entry source block, if any.
+// References to `method` are left as they are. `method`'s class must not have
+// a method or method reference with the new signature yet. Returns the new
+// method.
+DexMethod* split_off_typed_method(DexMethod* method,
+                                  DexProto* typed_proto,
+                                  method_profiles::MethodProfiles& profiles);
 
 } // namespace typed_nonreturning_methods

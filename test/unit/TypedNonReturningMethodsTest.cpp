@@ -37,6 +37,7 @@
 #include "RegisterAllocation.h"
 #include "Resolver.h"
 #include "Show.h"
+#include "SourceBlocks.h"
 #include "TypeUtil.h"
 #include "TypedNonReturningMethods.h"
 #include "UnreachableLoweringPass.h"
@@ -878,6 +879,99 @@ TEST_F(TypedNonReturningMethodsTest, unreachable_split_off_without_handler) {
   EXPECT_EQ(stats.typed_methods, 1);
   EXPECT_EQ(stats.typed_call_sites, 20);
   EXPECT_EQ(get_def(TYPED_FAIL), fail);
+}
+
+// Splitting off the typed method.
+
+TEST_F(TypedNonReturningMethodsTest, split_off_typed_method_moves_the_body) {
+  // The body moves to the typed method with its flags, deobfuscated name and
+  // profile stats; the original becomes a stub with a name of its own and an
+  // entry source block cloned from the body.
+  constexpr const char* BODY = R"((
+    (load-param-object v0)
+    (.src_block "LFailures;.fail:(Ljava/lang/String;)V" 0 (0.5 1.0))
+    (new-instance "Ljava/lang/IllegalStateException;")
+    (move-result-pseudo-object v1)
+    (invoke-direct (v1 v0) "Ljava/lang/IllegalStateException;.<init>:(Ljava/lang/String;)V")
+    (throw v1)
+  ))";
+  auto* failures = add_failures_class(BODY);
+  failures->set_deobfuscated_name("Lorig/Failures;");
+  auto* fail = failures->get_dmethods().front();
+  fail->set_deobfuscated_name("Lorig/Failures;.origFail:(Ljava/lang/String;)V");
+  fail->rstate.set_dont_inline();
+  fail->get_code()->build_cfg();
+  UnorderedMap<const DexMethodRef*, method_profiles::Stats> data;
+  method_profiles::Stats stat;
+  stat.appear_percent = 100;
+  stat.call_count = 7;
+  data[fail] = stat;
+  auto profiles =
+      method_profiles::MethodProfiles::initialize("manual_hot", data);
+  auto* typed = typed_nonreturning_methods::split_off_typed_method(
+      fail,
+      DexProto::make_proto(DexType::make_type(UNREACHABLE_EXCEPTION),
+                           fail->get_proto()->get_args()),
+      profiles);
+  ASSERT_EQ(get_def(TYPED_FAIL), typed);
+  EXPECT_EQ(get_def(FAIL), fail);
+  EXPECT_EQ(typed->get_access(), fail->get_access());
+  EXPECT_EQ(show_deobfuscated(typed),
+            "Lorig/Failures;.origFail:(Ljava/lang/String;)V");
+  EXPECT_EQ(show_deobfuscated(fail),
+            "Lorig/Failures;.origFail$stub:(Ljava/lang/String;)V");
+  EXPECT_TRUE(typed->rstate.dont_inline());
+  auto typed_stats = profiles.get_method_stat("manual_hot", typed);
+  ASSERT_TRUE(typed_stats.has_value());
+  EXPECT_EQ(typed_stats->call_count, 7);
+  EXPECT_TRUE(profiles.get_method_stat("manual_hot", fail).has_value());
+  auto* stub_source_block =
+      source_blocks::get_first_source_block_of_method(fail);
+  ASSERT_NE(stub_source_block, nullptr);
+  EXPECT_EQ(stub_source_block->id, SourceBlock::kSyntheticId);
+  EXPECT_EQ(stub_source_block->src, fail->get_deobfuscated_name_or_null());
+  EXPECT_TRUE(code_is(TYPED_FAIL, BODY));
+  EXPECT_TRUE(code_is(FAIL, R"((
+    (load-param-object v0)
+    (.src_block "Lorig/Failures;.origFail$stub:(Ljava/lang/String;)V" 4294967295 (0.5 1.0))
+    (invoke-static (v0) "LFailures;.fail:(Ljava/lang/String;)Lcom/redex/UnreachableException;")
+    (return-void)
+  ))"));
+}
+
+TEST_F(TypedNonReturningMethodsTest, split_off_typed_method_passes_all_args) {
+  // Wide and primitive parameters are passed on in order, and a body without
+  // source blocks gives a stub without them.
+  constexpr const char* WIDE_FAIL = "LFailures;.fail:(JILjava/lang/String;)V";
+  constexpr const char* TYPED_WIDE_FAIL =
+      "LFailures;.fail:(JILjava/lang/String;)Lcom/redex/UnreachableException;";
+  auto* fail = add_class("LFailures;", type::java_lang_Object(),
+                         {{WIDE_FAIL, ACC_PUBLIC | ACC_STATIC, R"((
+    (load-param-wide v0)
+    (load-param v2)
+    (load-param-object v3)
+    (new-instance "Ljava/lang/IllegalStateException;")
+    (move-result-pseudo-object v4)
+    (invoke-direct (v4 v3) "Ljava/lang/IllegalStateException;.<init>:(Ljava/lang/String;)V")
+    (throw v4)
+  ))"}})
+                   ->get_dmethods()
+                   .front();
+  method_profiles::MethodProfiles profiles;
+  auto* typed = typed_nonreturning_methods::split_off_typed_method(
+      fail,
+      DexProto::make_proto(DexType::make_type(UNREACHABLE_EXCEPTION),
+                           fail->get_proto()->get_args()),
+      profiles);
+  EXPECT_EQ(get_def(TYPED_WIDE_FAIL), typed);
+  EXPECT_EQ(source_blocks::get_first_source_block_of_method(fail), nullptr);
+  EXPECT_TRUE(code_is(WIDE_FAIL, R"((
+    (load-param-wide v0)
+    (load-param v2)
+    (load-param-object v3)
+    (invoke-static (v0 v2 v3) "LFailures;.fail:(JILjava/lang/String;)Lcom/redex/UnreachableException;")
+    (return-void)
+  ))"));
 }
 
 // References and signature collisions.

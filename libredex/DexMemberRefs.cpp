@@ -61,7 +61,9 @@ std::vector<std::string_view> split_args(std::string_view args) {
     }
     if (ch == 'L') {
       auto semipos = args.find(';', end);
-      redex_assert(semipos != std::string::npos);
+      always_assert_log(semipos != std::string::npos,
+                        "Unterminated class name in %s",
+                        std::string(args).c_str());
       end = semipos + 1;
     }
     ret.emplace_back(args.substr(begin, end - begin));

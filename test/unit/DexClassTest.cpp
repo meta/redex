@@ -232,3 +232,8 @@ Methods:
 
   EXPECT_EQ(c->show_structure(), expected);
 }
+
+// A class name in a method descriptor must end with `;`.
+TEST_F(DexClassTest, makeMethodRejectsUnterminatedClassName) {
+  EXPECT_THROW(DexMethod::make_method("LFoo;.bar:(Lfoo)V"), RedexException);
+}

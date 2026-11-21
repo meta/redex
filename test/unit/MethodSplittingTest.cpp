@@ -941,6 +941,118 @@ TEST_F(MethodSplitterTest, SplitSwitchPreferCasesWithSharedCode) {
   ASSERT_TRUE(res);
 }
 
+// A suffix is still split when a switch group selected before it holds the
+// entry of a case that the suffix also holds. The group redirects only the
+// switch's edges into its cases and leaves the edge from `:other` into `:d` in
+// place, so both splits keep a caller, and the blocks they share are copied
+// into both. `:other` enters the `:d` case from outside the switch, so its
+// suffix holds that case's entry without holding the switch.
+TEST_F(MethodSplitterTest, SuffixHoldingAGroupEntryIsStillSplit) {
+  const auto* code = R"(
+    (
+      (load-param v0)
+      (load-param v1)
+      (goto :loop)
+    (:loop)
+      (if-eqz v1 :other)
+      (switch v0 (:a :b :c :d))
+    (:fallthrough)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (return v0)
+    (:a 0)
+      (add-int v0 v0 v0)
+      (goto :loop)
+    (:b 11)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (return v0)
+    (:c 22)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (return v0)
+    (:d 33)
+    (:d_body)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (if-eqz v1 :d2)
+      (goto :shared)
+    (:d2)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (goto :shared)
+    (:shared)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (return v0)
+    (:other)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (goto :d_body)
+    )
+  )";
+  auto [cls, m] = create("(II)I", code);
+  m->get_code()->build_cfg();
+  DexStoresVector stores;
+  stores.emplace_back("test_store");
+  stores.front().get_dexen().push_back({cls});
+  auto env = method_splitting_test::split_environment(
+      stores, /* normal_primary_dex */ true);
+  method_splitting_impl::Stats stats;
+  method_splitting_impl::split_methods_in_stores(stores, env, defaultConfig(),
+                                                 &stats);
+  // Three splits: the group, the `:b` case, and the suffix from `:other`. The
+  // group takes the fallthrough and cases 22 and 33, so it holds the entry of
+  // `:d` that the suffix from `:other` also holds: 15 `add-int`s, in the
+  // fallthrough, `:c`, `:d`, `:d2` and `:shared`. The suffix holds `:other`,
+  // both blocks of `:d` and `:shared`: 12 `add-int`s and no switch.
+  size_t groups = 0;
+  size_t other_suffixes = 0;
+  for (const auto& added : stats.added_methods) {
+    auto* split = added.first;
+    auto& cfg = split->get_code()->cfg();
+    // A split's CFG starts as a copy of its host's and can hold blocks it does
+    // not reach, which linearizing it drops. Count only what it reaches.
+    cfg.remove_unreachable_blocks();
+    size_t adds = 0;
+    for (const auto& mie : cfg::InstructionIterable(cfg)) {
+      adds += mie.insn->opcode() == OPCODE_ADD_INT ? 1 : 0;
+    }
+    bool has_switch = false;
+    std::vector<int32_t> case_keys;
+    for (auto* b : cfg.blocks()) {
+      auto last = b->get_last_insn();
+      if (last == b->end() || last->insn->opcode() != OPCODE_SWITCH) {
+        continue;
+      }
+      has_switch = true;
+      for (auto* e : b->succs()) {
+        if (e->case_key()) {
+          case_keys.push_back(*e->case_key());
+        }
+      }
+    }
+    std::sort(case_keys.begin(), case_keys.end());
+    if (has_switch) {
+      ++groups;
+      EXPECT_EQ(case_keys, (std::vector<int32_t>{22, 33}));
+      EXPECT_EQ(adds, 15u);
+    } else if (adds == 12) {
+      ++other_suffixes;
+    }
+  }
+  EXPECT_EQ(stats.added_methods.size(), 3u);
+  EXPECT_EQ(groups, 1u);
+  EXPECT_EQ(other_suffixes, 1u);
+}
+
 TEST_F(MethodSplitterTest, SplitSwitchPreferNotBreakingLargePackedSwitches) {
   const auto* before = R"(
     (

@@ -666,9 +666,11 @@ void remove_unrenamable_collisions(ClassMap* mergeable_to_merger) {
 /**
  * Merging a class into its superclass drops its instance methods and moves its
  * static methods into the superclass. A virtual call of a dropped method is
- * redirected to the superclass (see `resolve_virtual_calls_to_merger`), but a
- * call without virtual dispatch that names the class, from code that stays,
- * would name a method that no longer exists, so such a class is not merged.
+ * redirected to the superclass (see `resolve_virtual_calls_to_merger`), but an
+ * invoke-direct or invoke-super that names the class, from code that stays,
+ * would name a class that no longer exists, so such a class is not merged.
+ * Naming the superclass instead would change what an invoke-super calls, since
+ * it resolves from the superclass of the class whose code holds it.
  */
 void remove_nonvirtual_calls_of_dropped_methods(const Scope& scope,
                                                 ClassMap* mergeable_to_merger) {
@@ -691,7 +693,8 @@ void remove_nonvirtual_calls_of_dropped_methods(const Scope& scope,
     }
     for (const auto& mie : cfg::InstructionIterable(code.cfg())) {
       auto* insn = mie.insn;
-      if (!opcode::is_invoke_direct(insn->opcode())) {
+      if (!opcode::is_invoke_direct(insn->opcode()) &&
+          !opcode::is_invoke_super(insn->opcode())) {
         continue;
       }
       auto* callee_ref = insn->get_method();

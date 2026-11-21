@@ -621,3 +621,108 @@ TEST_F(VerticalMergingTest, keepsSubclassWhosePrivateMethodIsCalled) {
   EXPECT_EQ(run_pass_on({parent, child, user}), 3);
   EXPECT_EQ(child->get_super_class(), parent->get_type());
 }
+
+namespace {
+
+// `Parent` and its only subclass `Child`, which both define `m`, and a user
+// that creates a `Parent` and calls `Child.call` but never creates a `Child`,
+// so `Child` could merge into `Parent`, which drops its instance methods.
+struct SuperCallClasses {
+  DexClass* parent;
+  DexClass* child;
+  DexClass* user;
+};
+
+SuperCallClasses create_super_call_classes(const std::string& child_m,
+                                           const std::string& child_call) {
+  ClassCreator parent_creator(DexType::make_type("Lcom/redextest/Parent;"));
+  parent_creator.set_access(ACC_PUBLIC);
+  parent_creator.set_super(type::java_lang_Object());
+  add_init(parent_creator, "Lcom/redextest/Parent;",
+           "Ljava/lang/Object;.<init>:()V");
+  parent_creator.add_method(assembler::method_from_string(R"(
+    (method (public) "Lcom/redextest/Parent;.m:()V"
+     (
+      (load-param-object v0)
+      (return-void)
+     )
+    )
+  )"));
+  auto* parent = parent_creator.create();
+
+  ClassCreator child_creator(DexType::make_type("Lcom/redextest/Child;"));
+  child_creator.set_access(ACC_PUBLIC | ACC_FINAL);
+  child_creator.set_super(parent->get_type());
+  add_init(child_creator, "Lcom/redextest/Child;",
+           "Lcom/redextest/Parent;.<init>:()V");
+  child_creator.add_method(assembler::method_from_string(child_m));
+  child_creator.add_method(assembler::method_from_string(child_call));
+  auto* child = child_creator.create();
+
+  auto* user = create_user(R"(
+    (
+      (new-instance "Lcom/redextest/Parent;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "Lcom/redextest/Parent;.<init>:()V")
+      (const v1 0)
+      (invoke-static (v1) "Lcom/redextest/Child;.call:(Lcom/redextest/Child;)V")
+      (return-object v0)
+    )
+  )");
+  return {parent, child, user};
+}
+
+} // namespace
+
+// Java: `void m() { super.m(); }` in `Child`. javac names the direct
+// superclass, `Parent`, in the invoke-super, which merging `Child` into
+// `Parent` does not affect: the call goes away with `Child.m`.
+TEST_F(VerticalMergingTest, mergesSubclassWhoseMethodCallsSuper) {
+  auto classes = create_super_call_classes(R"(
+    (method (public) "Lcom/redextest/Child;.m:()V"
+     (
+      (load-param-object v0)
+      (invoke-super (v0) "Lcom/redextest/Parent;.m:()V")
+      (return-void)
+     )
+    )
+  )",
+                                           R"(
+    (method (public static) "Lcom/redextest/Child;.call:(Lcom/redextest/Child;)V"
+     (
+      (load-param-object v0)
+      (return-void)
+     )
+    )
+  )");
+
+  EXPECT_EQ(run_pass_on({classes.parent, classes.child, classes.user}), 2);
+}
+
+// In generated code (javac never names the current class in an invoke-super),
+// the static method `Child.call` makes an invoke-super that names `Child`
+// itself, which calls `Parent.m`. Merging `Child` into `Parent` would move
+// `call` into `Parent` and drop `Child.m`, leaving the invoke-super naming a
+// method that no longer exists.
+TEST_F(VerticalMergingTest, keepsSubclassNamedByInvokeSuper) {
+  auto classes = create_super_call_classes(R"(
+    (method (public) "Lcom/redextest/Child;.m:()V"
+     (
+      (load-param-object v0)
+      (return-void)
+     )
+    )
+  )",
+                                           R"(
+    (method (public static) "Lcom/redextest/Child;.call:(Lcom/redextest/Child;)V"
+     (
+      (load-param-object v0)
+      (invoke-super (v0) "Lcom/redextest/Child;.m:()V")
+      (return-void)
+     )
+    )
+  )");
+
+  EXPECT_EQ(run_pass_on({classes.parent, classes.child, classes.user}), 3);
+  EXPECT_EQ(classes.child->get_super_class(), classes.parent->get_type());
+}

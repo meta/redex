@@ -866,20 +866,6 @@ std::vector<SplittableClosure> to_splittable_closures(
     // Null on the top-level-switch path, which has no store context.
     const RefChecker* ref_checker) {
   std::vector<SplittableClosure> splittable_closures;
-  // We sort closures in a way that allows us to quickly prune contained
-  // closures if we found a viable containing closure.
-  std::sort(
-      scored_closures.begin(), scored_closures.end(), [](auto& a, auto& b) {
-        if (a.reduced_components.size() != b.reduced_components.size()) {
-          return a.reduced_components.size() > b.reduced_components.size();
-        }
-        if (a.is_switch() != b.is_switch()) {
-          return a.is_switch() < b.is_switch();
-        }
-        return a.id() < b.id();
-      });
-
-  // Now we do the expensive analysis of the remaining scored closures.
   auto* method = mcs->method;
   Lazy<OutlinerTypeAnalysis> ota(
       [method] { return std::make_unique<OutlinerTypeAnalysis>(method); });
@@ -922,7 +908,6 @@ std::vector<SplittableClosure> to_splittable_closures(
     }
     return std::make_unique<std::optional<reg_t>>(receiver_reg);
   });
-  UnorderedSet<const ReducedBlock*> covered;
 
   // Every scored suffix is a candidate from here on.
   stats.suffix_fates.candidates += scored_closures.size();
@@ -936,7 +921,37 @@ std::vector<SplittableClosure> to_splittable_closures(
   CandidateEvalContext ctx{ota,    liveness_fp_iter, uninitialized_objects,
                            insns,  receiver,         ref_checker,
                            config, host_compiled,    method};
-  std::erase_if(scored_closures, [&covered, &ctx, &record](auto& sc) {
+  // Selection runs in two phases. Phase 1 evaluates each candidate on its own
+  // and drops the ones that fail, without looking at overlaps. It checks the
+  // arguments, the dex references and the net-saving gates. Phase 2 then keeps,
+  // in order, each candidate none of whose entries is among a kept candidate's
+  // blocks.
+  std::erase_if(scored_closures, [&ctx, &record](auto& sc) {
+    auto fate = evaluate_candidate(sc, ctx);
+    if (fate) {
+      record(sc, *fate);
+    }
+    return fate.has_value();
+  });
+
+  // We sort closures in a way that allows us to quickly prune contained
+  // closures if we found a viable containing closure.
+  std::sort(
+      scored_closures.begin(), scored_closures.end(), [](auto& a, auto& b) {
+        if (a.reduced_components.size() != b.reduced_components.size()) {
+          return a.reduced_components.size() > b.reduced_components.size();
+        }
+        if (a.is_switch() != b.is_switch()) {
+          return a.is_switch() < b.is_switch();
+        }
+        return a.id() < b.id();
+      });
+  UnorderedSet<const ReducedBlock*> covered;
+  // Greedy: the predicate reads this set and then inserts into it, so which
+  // candidates survive depends on the order the sort above left them in. That
+  // sort must be a total order: a tie would make the kept set
+  // nondeterministic.
+  std::erase_if(scored_closures, [&covered, &record](auto& sc) {
     for (auto* c : sc.closures) {
       if (covered.count(c->reduced_block)) {
         // We already have this contained closure covered by a valid
@@ -944,10 +959,6 @@ std::vector<SplittableClosure> to_splittable_closures(
         record(sc, CandidateFate::Selection_Displaced);
         return true;
       }
-    }
-    if (auto fate = evaluate_candidate(sc, ctx)) {
-      record(sc, *fate);
-      return true;
     }
     insert_unordered_iterable(covered, sc.reduced_components);
     return false;

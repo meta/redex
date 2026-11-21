@@ -399,6 +399,47 @@ TEST_F(MethodSplitterTest, KeepsConstructorCodeBeforeReceiverInitialization) {
   EXPECT_EQ(stats.added_methods.size(), 0);
 }
 
+// Every candidate is evaluated, including one that a larger kept candidate
+// contains, so a contained candidate that fails evaluation is counted under
+// that failure. The tail from the block computing v1 and v2 reads only v0, and
+// it contains the later tails, each of which reads more values than
+// `max_live_in` allows except the last.
+TEST_F(MethodSplitterTest, ContainedCandidateIsCountedByItsEvaluationFailure) {
+  auto [cls, m] = create("(I)I", R"(
+    (
+      (load-param v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v1 v0 v0)
+      (add-int v2 v0 v0)
+      (add-int v3 v0 v0)
+      (add-int v4 v0 v0)
+      (add-int v5 v0 v0)
+      (add-int v0 v1 v2)
+      (add-int v0 v0 v3)
+      (add-int v0 v0 v4)
+      (add-int v0 v0 v5)
+      (return v0)
+    )
+  )");
+  m->get_code()->build_cfg();
+  DexStoresVector stores;
+  stores.emplace_back("test_store");
+  stores.front().get_dexen().push_back({cls});
+  auto env = method_splitting_test::split_environment(
+      stores, /* normal_primary_dex */ true);
+  auto config = defaultConfig();
+  config.max_live_in = 2;
+  method_splitting_impl::Stats stats;
+  method_splitting_impl::split_methods_in_stores(stores, env, config, &stats);
+  const auto fates = stats.snapshot().suffix_fates;
+  EXPECT_EQ(fates.recorded(), fates.candidates);
+  EXPECT_EQ(stats.added_methods.size(), 1u);
+  EXPECT_GT(
+      fates[method_splitting_impl::CandidateFate::Evaluation_TooManyLiveIns],
+      0u);
+}
+
 TEST_F(MethodSplitterTest, SplitPreselectedClosures) {
   const auto* before = R"(
     (

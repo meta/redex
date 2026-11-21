@@ -75,7 +75,9 @@ inline bool can_reach(SplitKind kind, CandidateFate fate) {
 }
 
 // How many candidates of one kind a run considered, and how many ended at each
-// fate, with the code units they carried: the code a split would take or took.
+// outcome, with the code units they carried: for a discovery outcome, the size
+// of the head's reduced node; for every later outcome, the code a split would
+// take or took.
 struct FateCounters {
   explicit FateCounters(SplitKind kind) : kind(kind) {}
 
@@ -189,12 +191,16 @@ struct Stats {
   size_t iterations{0};
 
   FateCounters suffix_fates{SplitKind::Suffix};
+  FateCounters region_fates{SplitKind::Region};
   // Emitted suffixes only a net gate's lowered size floors admit.
   AtomicStatCounter<size_t> suffix_sub_floor_emitted{0};
 
-  // Test-only sink; null in production. A record for every candidate that
-  // reached scoring.
+  // Test-only sink; null in production. A record for every candidate.
   EvaluationLog* evaluations{nullptr};
+
+  FateCounters& fates(SplitKind kind) {
+    return kind == SplitKind::Region ? region_fates : suffix_fates;
+  }
 
   // Records the final fate of a candidate: the only way a fate is counted.
   // `head_ids` returns the candidate's head-block ids; it is called only when
@@ -206,7 +212,7 @@ struct Stats {
               CandidateFate fate,
               size_t code_units,
               const DexMethod* split = nullptr) {
-    suffix_fates.record(fate, code_units);
+    fates(kind).record(fate, code_units);
     if (evaluations != nullptr) {
       evaluations->add(CandidateEvaluation{.kind = kind,
                                            .heads = head_ids(),

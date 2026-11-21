@@ -278,7 +278,7 @@ TEST_F(SplitNetSavingTest, SuffixGroupCopiesTheSwitchAndShedsItsKeys) {
 TEST_F(SplitNetSavingTest, RegionRejoinLaunchpadVoid) {
   SwitchFixture f;
   msi::Config config;
-  auto m = region_closure(f.case0);
+  auto m = region_closure(f.case0, SwitchFixture::rejoin_of(f.case0));
   auto plan = msi::RegionPlan::make({&m});
   // The call block is `invoke; goto`. The invoke (3) is compiled into the host
   // and counts against the saving; the goto (1) costs dex only. The dex also

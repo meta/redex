@@ -23,8 +23,8 @@ class RegionPlanTest : public RedexTest {};
 
 TEST_F(RegionPlanTest, MakeRefusesSeveralRegions) {
   SwitchFixture f;
-  auto c0 = region_closure(f.case0);
-  auto c1 = region_closure(f.case1);
+  auto c0 = region_closure(f.case0, SwitchFixture::rejoin_of(f.case0));
+  auto c1 = region_closure(f.case1, SwitchFixture::rejoin_of(f.case1));
   EXPECT_NO_THROW(msi::RegionPlan::make({&c0}));
   EXPECT_THROW(msi::RegionPlan::make({&c0, &c1}), RedexException);
 }

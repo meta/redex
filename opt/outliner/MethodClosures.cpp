@@ -13,7 +13,12 @@
  */
 #include "MethodClosures.h"
 
+#include <algorithm>
+
+#include "Debug.h"
 #include "Lazy.h"
+#include "Liveness.h"
+#include "MethodSplittingStats.h"
 #include "MethodUtil.h"
 #include "MonitorCount.h"
 #include "Resolver.h"
@@ -131,6 +136,15 @@ void split_blocks(DexMethod* method,
 } // namespace
 
 namespace method_splitting_impl {
+
+RegionMembers::RegionMembers(std::vector<cfg::Block*> blocks)
+    : m_blocks(std::move(blocks)) {
+  std::sort(m_blocks.begin(), m_blocks.end(), block_id_less);
+  for (auto* b : m_blocks) {
+    always_assert_log(m_ids.insert(b->id()).second, "block B%zu repeats",
+                      (size_t)b->id());
+  }
+}
 
 void normalize_cfg_for_splitting(DexMethod* method,
                                  std::optional<uint64_t> split_block_size) {
@@ -262,8 +276,184 @@ std::vector<Closure> SuffixStrategy::discover(
                          [&](auto* e) { return reachable.contains(e); })) {
       continue;
     }
-    closures.push_back((Closure){reduced_block, std::move(reachable),
-                                 std::move(srcs), target});
+    closures.push_back(Closure{
+        .reduced_block = reduced_block,
+        .reduced_components = std::move(reachable),
+        .srcs = std::move(srcs),
+        .target = target,
+        .region = std::nullopt,
+    });
+  }
+  return closures;
+}
+
+std::vector<Closure> RegionStrategy::discover(
+    DexMethod* method, const ReducedControlFlowGraph& rcfg) const {
+  std::vector<Closure> closures;
+  auto& cfg = method->get_code()->cfg();
+  // Liveness costs O(N) or more over the whole CFG. Most methods have no
+  // eligible region, so it is built only once a candidate survives the cheap
+  // filters below.
+  Lazy<LivenessFixpointIterator> liveness([&cfg] {
+    auto l = std::make_unique<LivenessFixpointIterator>(cfg);
+    l->run({});
+    return l;
+  });
+  Lazy<monitor_count::Analyzer> mca([method] {
+    return std::make_unique<monitor_count::Analyzer>(method->get_code()->cfg());
+  });
+  auto excluded_blocks = get_blocks_with_final_field_puts(method, &rcfg);
+
+  // Region heads: every cold node with a hot predecessor. Only these are
+  // candidates: the call block that replaces the head and calls the split is
+  // entered from a hot predecessor.
+  for (const auto* reduced_block : rcfg.blocks()) {
+    if (reduced_block == rcfg.entry_block() || reduced_block->is_hot) {
+      continue;
+    }
+    const bool has_hot_pred =
+        unordered_any_of(reduced_block->preds, [](const auto* pe) {
+          return pe->src != nullptr && pe->src->is_hot;
+        });
+    if (!has_hot_pred) {
+      continue;
+    }
+    // A node of several blocks is named by its lowest block id.
+    auto* entry_block = const_cast<cfg::Block*>(
+        *unordered_min_element(reduced_block->blocks, block_id_less));
+    // The ghost exit holds no code; it is not a region head.
+    if (reduced_block->blocks.size() == 1 &&
+        is_ghost_exit_block(cfg, entry_block)) {
+      continue;
+    }
+    m_stats.region_fates.candidates++;
+    auto refuse = [&](CandidateFate fate) {
+      m_stats.record(
+          SplitKind::Region,
+          [&] { return std::vector<cfg::BlockId>{entry_block->id()}; },
+          std::nullopt, fate, reduced_block->code_size);
+    };
+    // Single-block regions only: a node of several blocks is a loop.
+    if (reduced_block->blocks.size() != 1) {
+      refuse(CandidateFate::Discovery_Cycle);
+      continue;
+    }
+    // A block that ends in a return is a suffix, not a region.
+    auto branch = entry_block->branchingness();
+    if (branch == opcode::BRANCH_RETURN) {
+      refuse(CandidateFate::Discovery_Return);
+      continue;
+    }
+    // A block that ends in an `if` or a `switch` leaves by more than one edge,
+    // and a region here leaves by one, to its continuation.
+    if (branch == opcode::BRANCH_SWITCH || branch == opcode::BRANCH_IF) {
+      refuse(CandidateFate::Discovery_Branch);
+      continue;
+    }
+    // A block that starts with move-result-* / move-exception cannot
+    // have its incoming edges redirected (the move-result pairs with
+    // an invoke / throw on the predecessor side).
+    if (entry_block->starts_with_move_result() ||
+        entry_block->starts_with_move_exception()) {
+      refuse(CandidateFate::Discovery_ResultReadingHead);
+      continue;
+    }
+    // Not handled: a region on a try/catch boundary. A throw out of the region
+    // leaves the host's handler reading pre-region values, since the region's
+    // register writes happened in the split's frame. Regions that write nothing
+    // a reachable handler reads would be fine; we don't compute that.
+    auto is_throw = [](const cfg::Edge* e) {
+      return e->type() == cfg::EDGE_THROW;
+    };
+    if (std::any_of(entry_block->preds().begin(), entry_block->preds().end(),
+                    is_throw) ||
+        std::any_of(entry_block->succs().begin(), entry_block->succs().end(),
+                    is_throw)) {
+      refuse(CandidateFate::Discovery_ThrowEdge);
+      continue;
+    }
+    // Monitors. Extracting code from inside a monitor would split the monitor
+    // across the invoke, so a block entered with a monitor held is refused. A
+    // block that itself holds a `monitor-enter` or `monitor-exit` is refused
+    // too: when the matching op stays outside the block, the split and the host
+    // each hold an unbalanced monitor, which the verifier rejects. This is
+    // conservative: it also refuses a self-contained synchronized block.
+    auto expanded_preds = reduced_block->expand_preds();
+    bool bad_monitor =
+        unordered_any_of(expanded_preds, [&mca](const cfg::Edge* e) {
+          return mca->get_exit_state_at(e->src()) !=
+                 sparta::ConstantAbstractDomain<uint32_t>(0);
+        });
+    if (!bad_monitor) {
+      for (const auto& mie : InstructionIterable(entry_block)) {
+        auto op = mie.insn->opcode();
+        if (op == OPCODE_MONITOR_ENTER || op == OPCODE_MONITOR_EXIT) {
+          bad_monitor = true;
+          break;
+        }
+      }
+    }
+    if (bad_monitor) {
+      refuse(CandidateFate::Discovery_Monitor);
+      continue;
+    }
+    if (excluded_blocks.contains(reduced_block)) {
+      refuse(CandidateFate::Discovery_FinalFieldPut);
+      continue;
+    }
+    // The continuation, where the host resumes, is where the block's goto
+    // leads. The checks above leave the block no other way out: it ends in no
+    // return, `if` or `switch`, and has no throw edge. A block that ends in an
+    // uncaught `throw` has no goto, and one that jumps to itself has no
+    // continuation either.
+    cfg::Block* rejoin = entry_block->goes_to();
+    if (rejoin == nullptr || rejoin == entry_block ||
+        !can_be_region_boundary(rejoin)) {
+      refuse(CandidateFate::Discovery_NoRejoin);
+      continue;
+    }
+    redex_assert(entry_block->succs().size() == 1);
+    // The region returns no value: no register the block defines may be live at
+    // the continuation.
+    auto live_at_rejoin = liveness->get_live_in_vars_at(rejoin);
+    const auto& live_set = live_at_rejoin.elements();
+    bool has_live_out = false;
+    for (auto& mie : InstructionIterable(entry_block)) {
+      auto* insn = mie.insn;
+      // Liveness names a wide value by its LOW register only, so testing
+      // `dest()` catches wide and narrow definitions alike.
+      if (insn->has_dest() && live_set.contains(insn->dest())) {
+        has_live_out = true;
+        break;
+      }
+    }
+    if (has_live_out) {
+      refuse(CandidateFate::Discovery_TooManyLiveOuts);
+      continue;
+    }
+    // Build the Closure with RegionInfo. `RegionMembers` keeps the blocks in
+    // id order, so consumers iterate deterministically without re-sorting.
+    UnorderedSet<cfg::Block*> srcs;
+    for (const auto* pe : UnorderedIterable(reduced_block->preds)) {
+      for (const auto* e : UnorderedIterable(pe->edges)) {
+        if (e->src() != nullptr) {
+          srcs.insert(e->src());
+        }
+      }
+    }
+    UnorderedSet<const ReducedBlock*> components;
+    components.insert(reduced_block);
+    closures.push_back(Closure{
+        .reduced_block = reduced_block,
+        .reduced_components = std::move(components),
+        .srcs = std::move(srcs),
+        .target = entry_block,
+        .region =
+            RegionInfo{
+                .exits = SingleExit{.rejoin = rejoin},
+                .members = RegionMembers({entry_block}),
+            },
+    });
   }
   return closures;
 }

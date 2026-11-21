@@ -77,13 +77,20 @@ struct SwitchFixture {
   static cfg::Block* rejoin_of(cfg::Block* b) { return b->goes_to(); }
 };
 
-// The closure of a region candidate of the single block `head`.
-inline method_splitting_impl::Closure region_closure(cfg::Block* head) {
+// A region closure of the single block `head`, whose continuation is `rejoin`.
+inline method_splitting_impl::Closure region_closure(cfg::Block* head,
+                                                     cfg::Block* rejoin) {
   return method_splitting_impl::Closure{
       .reduced_block = nullptr,
       .reduced_components = {},
       .srcs = {},
       .target = head,
+      .region =
+          method_splitting_impl::RegionInfo{
+              .exits = method_splitting_impl::SingleExit{rejoin},
+              .members = method_splitting_impl::RegionMembers(
+                  std::vector<cfg::Block*>{head}),
+          },
   };
 }
 

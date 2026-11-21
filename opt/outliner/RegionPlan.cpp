@@ -13,7 +13,8 @@ namespace method_splitting_impl {
 
 RegionPlan RegionPlan::make(const std::vector<const Closure*>& members) {
   always_assert(members.size() == 1);
-  always_assert(members.front() != nullptr);
+  always_assert(members.front() != nullptr &&
+                members.front()->region.has_value());
   return RegionPlan(HostSwitchEdit::None);
 }
 

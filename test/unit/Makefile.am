@@ -142,6 +142,7 @@ check_PROGRAMS = \
     method_profiles_test \
     method_splitting_test \
     method_splitter_test_fixture_test \
+    method_splitter_region_no_live_out_test \
     method_splitter_suffix_net_gate_test \
     method_util_test \
     metrics_sink_test \
@@ -501,6 +502,10 @@ method_splitting_test_SOURCES = MethodSplittingTest.cpp
 method_splitter_test_fixture_test_SOURCES = \
 	MethodSplitterTestFixture.cpp \
 	MethodSplitterTestFixtureTest.cpp
+
+method_splitter_region_no_live_out_test_SOURCES = \
+	MethodSplitterTestFixture.cpp \
+	MethodSplitterRegionNoLiveOutTest.cpp
 
 method_splitter_suffix_net_gate_test_SOURCES = \
 	MethodSplitterTestFixture.cpp \

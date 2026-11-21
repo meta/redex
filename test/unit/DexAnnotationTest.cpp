@@ -8,7 +8,11 @@
 #include <gtest/gtest.h>
 
 #include "Creators.h"
+#include "DexAnnotation.h"
+#include "DexCallSite.h"
 #include "DexClass.h"
+#include "DexInstruction.h"
+#include "DexMethodHandle.h"
 #include "RedexTest.h"
 #include "Show.h"
 
@@ -71,4 +75,40 @@ TEST_F(DexAnnotationTest, EscapeStrings) {
     std::string expected_str("yo\\u0000sup");
     EXPECT_STREQ(escaped.c_str(), expected_str.c_str());
   }
+}
+
+// Method handles and call sites print what they refer to, not where they are in
+// memory, so equal ones print alike in any RedexContext.
+TEST_F(DexAnnotationTest, ShowMethodHandleAndCallSiteByContent) {
+  auto* bootstrap = new DexMethodHandle(
+      METHOD_HANDLE_TYPE_INVOKE_STATIC,
+      DexMethod::make_method(
+          "LBoot;.bootstrap:(Ljava/lang/invoke/MethodHandles$Lookup;"
+          "Ljava/lang/String;Ljava/lang/invoke/MethodType;)"
+          "Ljava/lang/invoke/CallSite;"));
+  auto* target = new DexMethodHandle(METHOD_HANDLE_TYPE_INVOKE_STATIC,
+                                     DexMethod::make_method("LFoo;.run:()V"));
+  g_redex->publish_methodhandle(bootstrap);
+  g_redex->publish_methodhandle(target);
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.emplace_back(new DexEncodedValueMethodHandle(target));
+  args.emplace_back(new DexEncodedValueMethodType(DexProto::make_proto("()V")));
+  DexCallSite call_site(bootstrap, DexString::make_string("run"),
+                        DexProto::make_proto("()Ljava/lang/Runnable;"),
+                        std::move(args));
+
+  EXPECT_EQ(show(target),
+            "METHODHANDLE: TYPE=4 FIELD_OR_METHOD_ID=LFoo;.run:()V");
+
+  EXPECT_EQ(show(&call_site),
+            "CALLSITE: METHODHANDLE=" + show(bootstrap) +
+                " METHODNAME=run METHODTYPE=()Ljava/lang/Runnable; ARGS=[" +
+                show(target) + ", ()V]");
+
+  // A handle to a field prints the field.
+  auto* field_handle = new DexMethodHandle(METHOD_HANDLE_TYPE_STATIC_GET,
+                                           DexField::make_field("LFoo;.bar:I"));
+  g_redex->publish_methodhandle(field_handle);
+  DexOpcodeMethodHandle const_handle(DOPCODE_CONST_METHOD_HANDLE, field_handle);
+  EXPECT_EQ(show(&const_handle), "const-method-handle LFoo;.bar:I v0");
 }

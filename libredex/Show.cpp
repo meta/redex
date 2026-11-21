@@ -219,6 +219,9 @@ std::string show_methodhandle(const DexMethodHandle* ref, bool deobfuscated) {
   if (ref == nullptr) {
     return "";
   }
+  if (!DexMethodHandle::isInvokeType(ref->type())) {
+    return show_field(ref->fieldref(), deobfuscated);
+  }
   return show_method(ref->methodref(), deobfuscated);
 }
 
@@ -1556,7 +1559,6 @@ std::ostream& operator<<(std::ostream& o, const MethodItemEntry& mie) {
 }
 
 std::ostream& operator<<(std::ostream& o, const DexMethodHandle& mh) {
-  o << "[" << &mh << "] ";
   o << "METHODHANDLE: TYPE=" << show(mh.type());
   o << " FIELD_OR_METHOD_ID=";
   if (DexMethodHandle::isInvokeType(mh.type())) {
@@ -1568,10 +1570,16 @@ std::ostream& operator<<(std::ostream& o, const DexMethodHandle& mh) {
 }
 
 std::ostream& operator<<(std::ostream& o, const DexCallSite& cs) {
-  o << "[" << &cs << "] ";
   o << "CALLSITE: METHODHANDLE=" << show(cs.method_handle());
   o << " METHODNAME=" << show(cs.method_name());
   o << " METHODTYPE=" << show(cs.method_type());
+  o << " ARGS=[";
+  const char* separator = "";
+  for (const auto& arg : cs.args()) {
+    o << separator << arg->show();
+    separator = ", ";
+  }
+  o << "]";
   return o;
 }
 

@@ -35,6 +35,27 @@ struct ReserveRefsInfo {
   }
 };
 
+// The room a dex has for more method references: the 16-bit method index
+// space minus the references the dex already holds and those reserved for
+// passes that run later. A dex that is already over the limit has no room.
+class MethodRefRoom {
+ public:
+  MethodRefRoom(size_t method_refs, size_t reserved_mrefs)
+      : m_used(method_refs + reserved_mrefs) {}
+
+  // The room of `dex`, counting the methods it defines or references.
+  static MethodRefRoom for_dex(const DexClasses& dex, size_t reserved_mrefs);
+
+  [[nodiscard]] size_t left() const;
+
+  [[nodiscard]] bool can_add(size_t count = 1) const { return count <= left(); }
+
+  void add(size_t count = 1);
+
+ private:
+  size_t m_used;
+};
+
 using MethodRefs = UnorderedSet<DexMethodRef*>;
 using FieldRefs = UnorderedSet<DexFieldRef*>;
 using TypeRefs = UnorderedSet<const DexType*>;

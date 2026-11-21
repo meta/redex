@@ -7,7 +7,9 @@
 
 #include "DexStructure.h"
 #include "Creators.h"
+#include "DexLimits.h"
 #include "DexUtil.h"
+#include "IRAssembler.h"
 #include "RedexTest.h"
 #include <gtest/gtest.h>
 
@@ -81,4 +83,40 @@ TEST_F(DexStructureTest, remove_class) {
   EXPECT_EQ(dex1.get_fref_occurrences(f3), 1);
   EXPECT_EQ(dex1.get_tref_occurrences(ty), 1);
   EXPECT_EQ(dex1.size(), 1);
+}
+
+TEST_F(DexStructureTest, method_ref_room) {
+  // Room left: the 16-bit method index space minus held and reserved refs.
+  EXPECT_EQ(MethodRefRoom(0, 0).left(), kMaxMethodRefs);
+  EXPECT_EQ(MethodRefRoom(100, 20).left(), kMaxMethodRefs - 120);
+  EXPECT_TRUE(MethodRefRoom(kMaxMethodRefs - 1, 0).can_add());
+  EXPECT_FALSE(MethodRefRoom(kMaxMethodRefs - 1, 0).can_add(2));
+  EXPECT_FALSE(MethodRefRoom(kMaxMethodRefs - 1, 1).can_add());
+  EXPECT_FALSE(MethodRefRoom(kMaxMethodRefs, 0).can_add());
+  EXPECT_TRUE(MethodRefRoom(kMaxMethodRefs, 0).can_add(0));
+  // A dex already over the limit, for example because a reserved reference
+  // was spent and is still counted as reserved, has no room.
+  EXPECT_EQ(MethodRefRoom(kMaxMethodRefs, 1).left(), 0);
+
+  MethodRefRoom room(kMaxMethodRefs - 3, 1);
+  room.add();
+  EXPECT_EQ(room.left(), 1);
+  room.add();
+  EXPECT_FALSE(room.can_add());
+  EXPECT_ANY_THROW(room.add());
+}
+
+TEST_F(DexStructureTest, method_ref_room_for_dex) {
+  // A dex's room counts each method it defines or references once.
+  auto* foo_cls = create_a_class("Lfoo;");
+  auto* m = DexMethod::make_method("Lfoo;.m:()V")
+                ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  m->set_code(assembler::ircode_from_string(R"((
+    (invoke-static () "Lbar;.n:()V")
+    (invoke-static () "Lbar;.n:()V")
+    (return-void)
+  ))"));
+  foo_cls->add_method(m);
+  EXPECT_EQ(MethodRefRoom::for_dex({foo_cls}, 5).left(),
+            kMaxMethodRefs - 2 - 5);
 }

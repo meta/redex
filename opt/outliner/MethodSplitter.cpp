@@ -14,6 +14,7 @@
 #include "DexLimits.h"
 #include "DexPosition.h"
 #include "DexStore.h"
+#include "DexStructure.h"
 #include "DexUtil.h"
 #include "IRTypeChecker.h"
 #include "InitClassesWithSideEffects.h"
@@ -35,7 +36,7 @@ using namespace method_splitting_impl;
 class DexState {
  private:
   UnorderedSet<const DexType*> m_type_refs;
-  size_t m_method_refs_count;
+  MethodRefRoom m_method_ref_room;
   size_t max_type_refs;
 
  public:
@@ -47,15 +48,13 @@ class DexState {
                init_classes_with_side_effects,
            DexClasses& dex,
            size_t reserved_trefs,
-           size_t reserved_mrefs) {
-    UnorderedSet<DexMethodRef*> method_refs;
+           size_t reserved_mrefs)
+      : m_method_ref_room(MethodRefRoom::for_dex(dex, reserved_mrefs)) {
     std::vector<const DexType*> init_classes;
     for (auto* cls : dex) {
-      cls->gather_methods(method_refs);
       cls->gather_types(m_type_refs);
       cls->gather_init_classes(init_classes);
     }
-    m_method_refs_count = method_refs.size() + reserved_mrefs;
 
     UnorderedSet<DexType*> refined_types;
     for (const auto* type : init_classes) {
@@ -90,18 +89,14 @@ class DexState {
   }
 
   bool can_insert_method_ref() {
-    if (m_method_refs_count >= kMaxMethodRefs) {
+    if (!m_method_ref_room.can_add()) {
       TRACE(MS, 2, "[invoke sequence outliner] hit kMaxMethodRefs");
       return false;
     }
     return true;
   }
 
-  void insert_method_ref() {
-    always_assert(can_insert_method_ref());
-    m_method_refs_count++;
-    always_assert(m_method_refs_count <= kMaxMethodRefs);
-  }
+  void insert_method_ref() { m_method_ref_room.add(); }
 };
 
 bool account_for_added_split_method(
@@ -1014,11 +1009,7 @@ void split_methods_in_stores(
 SplitEnvironment make_split_environment(const DexStoresVector& stores,
                                         ConfigFiles& conf,
                                         PassManager& mgr) {
-  const auto& interdex_metrics = mgr.get_interdex_metrics();
-  auto it = interdex_metrics.find(interdex::METRIC_RESERVED_MREFS);
-  size_t reserved_mrefs = it == interdex_metrics.end() ? 0 : it->second;
-  it = interdex_metrics.find(interdex::METRIC_RESERVED_TREFS);
-  size_t reserved_trefs = it == interdex_metrics.end() ? 0 : it->second;
+  auto reserved = interdex::get_interdex_reserved_refs(mgr);
   int32_t min_sdk = mgr.get_redex_options().min_sdk;
   const api::AndroidSDK* min_sdk_api{nullptr};
   if (conf.get_android_sdk_api_file(min_sdk)) {
@@ -1030,8 +1021,8 @@ SplitEnvironment make_split_environment(const DexStoresVector& stores,
       min_sdk,
       StoreRefCheckers(stores, conf.normal_primary_dex(), min_sdk_api),
       conf.create_init_class_insns(),
-      reserved_mrefs,
-      reserved_trefs,
+      reserved.mrefs,
+      reserved.trefs,
   };
 }
 

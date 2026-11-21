@@ -19,6 +19,7 @@
 #include "DexClass.h"
 #include "DexLimits.h"
 #include "DexStore.h"
+#include "DexStructure.h"
 #include "DexUtil.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
@@ -750,15 +751,15 @@ Stats run_split_dexes(DexStoresVector& stores,
         always_assert_log(method_refs.size() + reserved_mrefs <= kMaxMethodRefs,
                           "Method refs exceeded in a dex: %zu + %zu > %zu",
                           method_refs.size(), reserved_mrefs, kMaxMethodRefs);
-        size_t left = kMaxMethodRefs - method_refs.size() - reserved_mrefs;
+        MethodRefRoom room(method_refs.size(), reserved_mrefs);
         for (auto& data : dex_candidate_methods) {
           size_t required = data.switch_range->mid_cases.size() - 1;
-          if (left < required) {
+          if (!room.can_add(required)) {
             std::lock_guard<std::mutex> lock_guard(mutex);
             ++result.no_slots;
             continue;
           }
-          left -= required;
+          room.add(required);
           always_assert(data.m->get_code());
           always_assert(data.m->get_code()->cfg_built());
           size_t orig_size = data.m->get_code()->cfg().estimate_code_units();
@@ -934,12 +935,9 @@ void SplitHugeSwitchPass::run_pass(DexStoresVector& stores,
 
   // 2) Prioritize and split the candidates per dex.
 
-  const auto& interdex_metrics = mgr.get_interdex_metrics();
-  auto it = interdex_metrics.find(interdex::METRIC_RESERVED_MREFS);
-  size_t reserved_mrefs = it == interdex_metrics.end() ? 0 : it->second;
-
-  Stats result_stats = run_split_dexes(stores, candidates, method_profiles,
-                                       m_switch_size, reserved_mrefs);
+  Stats result_stats =
+      run_split_dexes(stores, candidates, method_profiles, m_switch_size,
+                      interdex::get_interdex_reserved_refs(mgr).mrefs);
 
   mgr.set_metric("created_methods", result_stats.new_methods.size());
   mgr.set_metric("no_slots", result_stats.no_slots);

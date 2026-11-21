@@ -7,6 +7,9 @@
 
 #pragma once
 
+#include "DexStructure.h"
+#include "PassManager.h"
+
 namespace interdex {
 
 constexpr const char* METRIC_COLD_START_SET_DEX_COUNT =
@@ -49,5 +52,20 @@ constexpr const char* METRIC_PLUGIN_RESERVED_TREFS = "plugin_reserved_trefs";
 constexpr const char* METRIC_PLUGIN_RESERVED_MREFS = "plugin_reserved_mrefs";
 constexpr const char* METRIC_EMIT_CANARIES = "emit_canaries";
 constexpr const char* METRIC_ORDER_INTERDEX = "order_interdex";
+
+// The headroom InterDex left free in every dex, as it published it in its
+// metrics, or none if InterDex did not run. Unlike
+// `PassManager::get_reserved_refs()`, which sums the reservations passes still
+// hold, this is what passes after InterDex must stay out of.
+inline ReserveRefsInfo get_interdex_reserved_refs(PassManager& mgr) {
+  const auto& metrics = mgr.get_interdex_metrics();
+  auto get = [&metrics](const char* name) {
+    auto it = metrics.find(name);
+    return it == metrics.end() ? size_t{0} : static_cast<size_t>(it->second);
+  };
+  return ReserveRefsInfo(get(METRIC_RESERVED_FREFS),
+                         get(METRIC_RESERVED_TREFS),
+                         get(METRIC_RESERVED_MREFS));
+}
 
 } // namespace interdex

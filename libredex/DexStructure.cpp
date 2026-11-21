@@ -72,6 +72,25 @@ size_t set_difference_size(const UnorderedSet<T>& a, const UnorderedSet<T>& b) {
 
 } // namespace
 
+MethodRefRoom MethodRefRoom::for_dex(const DexClasses& dex,
+                                     size_t reserved_mrefs) {
+  UnorderedSet<DexMethodRef*> method_refs;
+  for (const auto* cls : dex) {
+    cls->gather_methods(method_refs);
+  }
+  return MethodRefRoom(method_refs.size(), reserved_mrefs);
+}
+
+size_t MethodRefRoom::left() const {
+  return m_used >= kMaxMethodRefs ? 0 : kMaxMethodRefs - m_used;
+}
+
+void MethodRefRoom::add(size_t count) {
+  always_assert_log(can_add(count), "%zu more method refs, %zu left", count,
+                    left());
+  m_used += count;
+}
+
 /**
  * Estimates the linear alloc space consumed by the class at runtime.
  */

@@ -85,6 +85,7 @@
 #include "DexLimits.h"
 #include "DexPosition.h"
 #include "DexStoreUtil.h"
+#include "DexStructure.h"
 #include "DexUtil.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
@@ -2108,7 +2109,7 @@ class DexState {
   DexClasses& m_dex;
   size_t m_dex_id;
   UnorderedSet<const DexType*> m_type_refs;
-  size_t m_method_refs_count;
+  MethodRefRoom m_method_ref_room;
   UnorderedMap<const DexType*, size_t> m_class_ids;
   size_t max_type_refs;
 
@@ -2123,15 +2124,15 @@ class DexState {
            size_t dex_id,
            size_t reserved_trefs,
            size_t reserved_mrefs)
-      : m_mgr(mgr), m_dex(dex), m_dex_id(dex_id) {
-    UnorderedSet<DexMethodRef*> method_refs;
+      : m_mgr(mgr),
+        m_dex(dex),
+        m_dex_id(dex_id),
+        m_method_ref_room(MethodRefRoom::for_dex(dex, reserved_mrefs)) {
     std::vector<const DexType*> init_classes;
     for (auto* cls : dex) {
-      cls->gather_methods(method_refs);
       cls->gather_types(m_type_refs);
       cls->gather_init_classes(init_classes);
     }
-    m_method_refs_count = method_refs.size() + reserved_mrefs;
 
     walk::classes(dex, [&class_ids = m_class_ids](DexClass* cls) {
       class_ids.emplace(cls->get_type(), class_ids.size());
@@ -2175,7 +2176,7 @@ class DexState {
   }
 
   bool can_insert_method_ref() {
-    if (m_method_refs_count >= kMaxMethodRefs) {
+    if (!m_method_ref_room.can_add()) {
       m_mgr.incr_metric("kMaxMethodRefs", 1);
       TRACE(ISO, 2, "[invoke sequence outliner] hit kMaxMethodRefs");
       return false;
@@ -2183,11 +2184,7 @@ class DexState {
     return true;
   }
 
-  void insert_method_ref() {
-    always_assert(can_insert_method_ref());
-    m_method_refs_count++;
-    always_assert(m_method_refs_count <= kMaxMethodRefs);
-  }
+  void insert_method_ref() { m_method_ref_room.add(); }
 
   // insert at beginning of dex, but after canary class, if any
   void insert_outlined_class(DexClass* outlined_cls) {
@@ -3405,11 +3402,9 @@ void InstructionSequenceOutliner::run_pass(DexStoresVector& stores,
   mgr.incr_metric("num_ordered_methods", methods_global_order.size());
   XStoreRefs xstores(stores, config.normal_primary_dex());
   size_t dex_id{0};
-  const auto& interdex_metrics = mgr.get_interdex_metrics();
-  auto it = interdex_metrics.find(interdex::METRIC_RESERVED_MREFS);
-  size_t reserved_mrefs = it == interdex_metrics.end() ? 0 : it->second;
-  it = interdex_metrics.find(interdex::METRIC_RESERVED_TREFS);
-  size_t reserved_trefs = it == interdex_metrics.end() ? 0 : it->second;
+  auto reserved = interdex::get_interdex_reserved_refs(mgr);
+  size_t reserved_mrefs = reserved.mrefs;
+  size_t reserved_trefs = reserved.trefs;
   TRACE(
       ISO, 2,
       "[invoke sequence outliner] found %zu reserved trefs, %zu reserved mrefs",

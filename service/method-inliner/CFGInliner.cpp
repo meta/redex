@@ -105,8 +105,7 @@ void CFGInliner::inline_cfg(ControlFlowGraph* caller,
     std::vector<IRInstruction*> new_insns;
     if (needs_receiver_cast != nullptr) {
       always_assert(!needs_init_class);
-      auto param_insns = callee.get_param_instructions();
-      auto* first_load_param_insn = param_insns.front().insn;
+      auto* first_load_param_insn = callee.get_first_param_instruction();
       auto first_param_reg = first_load_param_insn->dest();
       auto* check_cast_insn = (new IRInstruction(OPCODE_CHECK_CAST))
                                   ->set_type(needs_receiver_cast)

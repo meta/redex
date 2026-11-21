@@ -48,7 +48,7 @@ bool uses_this(const DexMethod* method) {
   const auto* code = method->get_code();
   always_assert(code->cfg_built());
   const auto& cfg = code->cfg();
-  auto iterable = InstructionIterable(cfg.get_param_instructions());
+  auto* first_load_param = cfg.get_first_param_instruction();
   if (is_static(method)) {
     // MethodDevirtualizationPass may staticize companion methods, removing
     // the implicit `this` parameter.  However, @Synchronized companion
@@ -58,11 +58,10 @@ bool uses_this(const DexMethod* method) {
     //
     // Detect the kept companion instance by checking if the first proto
     // argument type matches the method's declaring class.
-    if (iterable.empty()) {
+    if (first_load_param == nullptr) {
       return false;
     }
-    auto* first_insn = iterable.begin()->insn;
-    if (first_insn->opcode() != IOPCODE_LOAD_PARAM_OBJECT) {
+    if (first_load_param->opcode() != IOPCODE_LOAD_PARAM_OBJECT) {
       // First param is a primitive — can't be the companion instance.
       return false;
     }
@@ -74,11 +73,10 @@ bool uses_this(const DexMethod* method) {
     // First proto arg IS the companion type — companion instance is kept
     // as explicit first parameter.  Fall through to analyze.
   }
-  always_assert(!iterable.empty());
+  always_assert(first_load_param != nullptr);
   live_range::MoveAwareChains chains(cfg);
   live_range::Uses first_load_param_uses;
 
-  auto* first_load_param = iterable.begin()->insn;
   first_load_param_uses =
       std::move(chains.get_def_use_chains()[first_load_param]);
   if (first_load_param_uses.empty()) {
@@ -113,11 +111,10 @@ void rewrite_this_calls_to_static(DexMethod* method) {
     return;
   }
   auto& cfg = code->cfg();
-  auto param_insns = InstructionIterable(cfg.get_param_instructions());
-  if (param_insns.empty()) {
+  auto* first_load_param = cfg.get_first_param_instruction();
+  if (first_load_param == nullptr) {
     return;
   }
-  auto* first_load_param = param_insns.begin()->insn;
 
   // Find all end-uses of `this` through move chains and rewrite same-class
   // invokes to static dispatch.

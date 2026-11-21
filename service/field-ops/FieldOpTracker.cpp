@@ -318,7 +318,7 @@ class WritesAnalyzer {
     const auto& insn_escapes = get_insn_escapes(method);
     auto* init_load_param_this =
         method::is_init(method)
-            ? method->get_code()->cfg().get_param_instructions().front().insn
+            ? method->get_code()->cfg().get_first_param_instruction()
             : nullptr;
 
     // We'll determine which fields are being written to with
@@ -419,8 +419,9 @@ FieldStatsMap analyze(const Scope& scope) {
       cfg::ScopedCFG cfg(method->get_code());
       reaching_defs::MoveAwareFixpointIterator reaching_definitions(*cfg);
       reaching_definitions.run(reaching_defs::Environment());
-      auto* first_load_param = cfg->get_param_instructions().begin()->insn;
-      always_assert(first_load_param->opcode() == IOPCODE_LOAD_PARAM_OBJECT);
+      auto* first_load_param = cfg->get_first_param_instruction();
+      always_assert(first_load_param != nullptr &&
+                    first_load_param->opcode() == IOPCODE_LOAD_PARAM_OBJECT);
       for (cfg::Block* block : cfg->blocks()) {
         auto env = reaching_definitions.get_entry_state_at(block);
         auto insns = InstructionIterable(block);

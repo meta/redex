@@ -91,14 +91,6 @@ class ConstructorAnalysisEnvironment final
   }
 };
 
-const IRInstruction* get_first_load_param(const cfg::ControlFlowGraph& cfg) {
-  const auto param_insns = InstructionIterable(cfg.get_param_instructions());
-  const auto& mie = *param_insns.begin();
-  auto* const insn = mie.insn;
-  always_assert(insn->opcode() == IOPCODE_LOAD_PARAM_OBJECT);
-  return insn;
-}
-
 class Analyzer final : public BaseIRAnalyzer<ConstructorAnalysisEnvironment> {
  public:
   Analyzer(const cfg::ControlFlowGraph& cfg,
@@ -106,8 +98,10 @@ class Analyzer final : public BaseIRAnalyzer<ConstructorAnalysisEnvironment> {
            bool relaxed)
       : BaseIRAnalyzer(cfg),
         m_declaring_type(declaring_type),
-        m_first_load_param(get_first_load_param(cfg)),
+        m_first_load_param(cfg.get_first_param_instruction()),
         m_relaxed(relaxed) {
+    always_assert(m_first_load_param != nullptr &&
+                  m_first_load_param->opcode() == IOPCODE_LOAD_PARAM_OBJECT);
     // We need to check superclass chain because dex spec allows calling
     // constructor on superclass of superclass
     // https://cs.android.com/android/platform/superproject/main/+/main:art/runtime/verifier/method_verifier.cc;l=2940
@@ -295,8 +289,9 @@ bool can_inline_inits_in_same_class(DexMethod* caller_method,
   reaching_defs::MoveAwareFixpointIterator reaching_definitions(cfg);
   reaching_definitions.run(reaching_defs::Environment());
 
-  auto* first_load_param = cfg.get_param_instructions().begin()->insn;
-  always_assert(first_load_param->opcode() == IOPCODE_LOAD_PARAM_OBJECT);
+  auto* first_load_param = cfg.get_first_param_instruction();
+  always_assert(first_load_param != nullptr &&
+                first_load_param->opcode() == IOPCODE_LOAD_PARAM_OBJECT);
   auto in_block = [&](cfg::Block* block) {
     auto env = reaching_definitions.get_entry_state_at(block);
     for (auto& mie : InstructionIterable(block)) {

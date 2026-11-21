@@ -152,14 +152,6 @@ class ConstructorAnalysisEnvironment final
   }
 };
 
-const IRInstruction* get_first_load_param(const cfg::ControlFlowGraph& cfg) {
-  const auto param_insns = InstructionIterable(cfg.get_param_instructions());
-  const auto& mie = *param_insns.begin();
-  auto* const insn = mie.insn;
-  always_assert(insn->opcode() == IOPCODE_LOAD_PARAM_OBJECT);
-  return insn;
-}
-
 class Analyzer final : public BaseIRAnalyzer<ConstructorAnalysisEnvironment> {
  public:
   Analyzer(const cfg::ControlFlowGraph& cfg,
@@ -171,8 +163,10 @@ class Analyzer final : public BaseIRAnalyzer<ConstructorAnalysisEnvironment> {
         m_declaring_type(declaring_type),
         m_get_analysis_result(get_analysis_result),
         m_super_type(type_class(declaring_type)->get_super_class()),
-        m_first_load_param(get_first_load_param(cfg)),
+        m_first_load_param(cfg.get_first_param_instruction()),
         m_analyze_ancestor_constructors(analyze_ancestor_constructors) {
+    always_assert(m_first_load_param != nullptr &&
+                  m_first_load_param->opcode() == IOPCODE_LOAD_PARAM_OBJECT);
     MonotonicFixpointIterator::run({});
   }
 

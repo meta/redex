@@ -21,14 +21,6 @@ namespace {
 using namespace uninitialized_objects;
 using namespace ir_analyzer;
 
-const IRInstruction* get_first_load_param(const cfg::ControlFlowGraph& cfg) {
-  const auto param_insns = InstructionIterable(cfg.get_param_instructions());
-  const auto& mie = *param_insns.begin();
-  auto* const insn = mie.insn;
-  always_assert(insn->opcode() == IOPCODE_LOAD_PARAM_OBJECT);
-  return insn;
-}
-
 // The allocation an uninitialized object came from: its `new-instance`, or
 // the `load-param-object` of a constructor's receiver. Several registers can
 // hold one allocation, as after `move-object v2, v1`, and its `<init>`
@@ -89,9 +81,14 @@ class Analyzer final : public BaseEdgeAwareIRAnalyzer<State> {
       : BaseEdgeAwareIRAnalyzer(method->get_code()->cfg()),
         m_init_first_load_param(
             method::is_init(method)
-                ? get_first_load_param(method->get_code()->cfg())
+                ? method->get_code()->cfg().get_first_param_instruction()
                 : nullptr),
-        m_track_new_instances(tracked == TrackedObjects::All) {}
+        m_track_new_instances(tracked == TrackedObjects::All) {
+    always_assert(
+        !method::is_init(method) ||
+        (m_init_first_load_param != nullptr &&
+         m_init_first_load_param->opcode() == IOPCODE_LOAD_PARAM_OBJECT));
+  }
 
  protected:
   void analyze_instruction_normal(const IRInstruction* /* insn */,

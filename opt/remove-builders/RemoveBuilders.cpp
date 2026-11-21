@@ -45,10 +45,9 @@ bool this_arg_escapes(DexMethod* method, bool enable_buildee_constr_change) {
 
   auto* code = method->get_code();
   auto& cfg = code->cfg();
-  auto ii = InstructionIterable(cfg.get_param_instructions());
-  always_assert(ii.begin() != ii.end());
-  auto* this_insn = ii.begin()->insn;
-  always_assert(this_insn->opcode() == IOPCODE_LOAD_PARAM_OBJECT);
+  auto* this_insn = cfg.get_first_param_instruction();
+  always_assert(this_insn != nullptr &&
+                this_insn->opcode() == IOPCODE_LOAD_PARAM_OBJECT);
   auto regs_size = cfg.get_registers_size();
   auto* this_cls = method->get_class();
   const auto& blocks = cfg.blocks_reverse_post_deprecated();

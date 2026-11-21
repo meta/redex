@@ -1025,8 +1025,7 @@ void Allocator::spill(const interference::Graph& ig,
  */
 static void dedicate_this_register(cfg::ControlFlowGraph& cfg, bool is_static) {
   always_assert(!is_static);
-  auto param_insns = cfg.get_param_instructions();
-  auto* this_insn = param_insns.begin()->insn;
+  auto* this_insn = cfg.get_first_param_instruction();
 
   bool this_needs_split{false};
   for (const auto& mie : InstructionIterable(cfg)) {
@@ -1100,7 +1099,7 @@ void Allocator::allocate(cfg::ControlFlowGraph& cfg, bool is_static) {
     // gets overwritten in the method. See check_no_overwrite_this in
     // IRTypeChecker.h for the rationale.
     if (no_overwrite_this) {
-      auto* this_insn = cfg.get_param_instructions().begin()->insn;
+      auto* this_insn = cfg.get_first_param_instruction();
       for (const auto& pair : UnorderedIterable(ig.nodes())) {
         ig.add_edge(this_insn->dest(), pair.first);
       }

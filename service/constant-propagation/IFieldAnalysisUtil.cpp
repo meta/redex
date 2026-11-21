@@ -294,7 +294,7 @@ ConcurrentSet<DexField*> get_ifields_read_in_callees(
         always_assert(code != nullptr);
         auto& cfg = code->cfg();
         check_this::ThisObjectAnalysis fixpoint(
-            &cfg, ctor, cfg.get_param_instructions().begin()->insn->dest());
+            &cfg, ctor, cfg.get_first_param_instruction()->dest());
         fixpoint.run(check_this::ThisEnvironment());
         // Only check on methods called with this object as arguments.
         auto check_methods = fixpoint.collect_method_called_on_this();

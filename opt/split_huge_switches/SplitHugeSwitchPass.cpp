@@ -285,11 +285,11 @@ DexMethod* create_split(DexMethod* orig_method,
 
 void maybe_split_entry(cfg::ControlFlowGraph& cfg) {
   auto load_param_insns = cfg.get_param_instructions();
-  redex_assert(!load_param_insns.empty());
-  always_assert(load_param_insns.begin()->type == MFLOW_OPCODE);
+  auto* first_load_param = cfg.get_first_param_instruction();
+  always_assert(first_load_param != nullptr);
   always_assert_log(
-      cfg.find_insn(load_param_insns.begin()->insn, cfg.entry_block())
-              .block() == cfg.entry_block(),
+      cfg.find_insn(first_load_param, cfg.entry_block()).block() ==
+          cfg.entry_block(),
       "Load instructions must be in the CFG's entry block");
   // TODO: Support load-param instruction in blocks other than the entry
   // block (not common)

@@ -905,9 +905,9 @@ std::vector<SplittableClosure> to_splittable_closures(
   Lazy<std::optional<reg_t>> receiver([&cfg]() {
     // Read only in an instance constructor, whose first parameter is its
     // receiver.
-    auto params = cfg.get_param_instructions();
-    always_assert(params.begin() != params.end());
-    auto receiver_reg = params.begin()->insn->dest();
+    auto* receiver = cfg.get_first_param_instruction();
+    always_assert(receiver != nullptr);
+    auto receiver_reg = receiver->dest();
     for (const auto& mie : cfg::ConstInstructionIterable(cfg)) {
       if (!opcode::is_a_load_param(mie.insn->opcode()) &&
           mie.insn->has_dest() && mie.insn->dest() == receiver_reg) {

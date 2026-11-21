@@ -80,8 +80,7 @@ std::optional<const DexType*> receiver_cast(const DexMethod* method,
 
 void insert_receiver_cast(DexMethod* method, const DexType* cast) {
   auto& cfg = method->get_code()->cfg();
-  auto receiver =
-      InstructionIterable(cfg.get_param_instructions()).begin()->insn->dest();
+  auto receiver = cfg.get_first_param_instruction()->dest();
   cfg.insert_after_param_loads(
       {(new IRInstruction(OPCODE_CHECK_CAST))
            ->set_type(const_cast<DexType*>(cast))

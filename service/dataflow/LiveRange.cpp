@@ -296,8 +296,7 @@ std::optional<UnorderedSet<const DexType*>> get_receiver_type_demands(
     const DexMethod* method) {
   always_assert(!is_static(method));
   const auto& cfg = method->get_code()->cfg();
-  auto* first_load_param =
-      InstructionIterable(cfg.get_param_instructions()).begin()->insn;
+  auto* first_load_param = cfg.get_first_param_instruction();
   MoveAwareChains chains(
       cfg, /* ignore_unreachable */ true,
       [first_load_param](auto* insn) { return insn == first_load_param; });

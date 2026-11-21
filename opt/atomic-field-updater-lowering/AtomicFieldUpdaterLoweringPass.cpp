@@ -1736,11 +1736,9 @@ Stats analyze_calls(const Scope& scope,
 
     IRInstruction* receiver_insn = nullptr;
     if (!is_static(method)) {
-      auto params = cfg.get_param_instructions();
-      auto first = params.begin();
-      if (first != params.end() &&
-          opcode::is_load_param_object(first->insn->opcode())) {
-        receiver_insn = first->insn;
+      auto* first = cfg.get_first_param_instruction();
+      if (first != nullptr && opcode::is_load_param_object(first->opcode())) {
+        receiver_insn = first;
       }
     }
     MethodAnalysis ma{method,   by_field,      ti.get_type_environments(),

@@ -1507,6 +1507,46 @@ TEST_F(MethodSplitterTest, LoopHeadedSplitRefusesALiveInItsUsesReject) {
       1u);
 }
 
+// ART accepts an `int` at the `return` of a `char` method, but a `char`
+// parameter does not hold one. So the cold tail that returns the host's `int`
+// is not split with that parameter.
+TEST_F(MethodSplitterTest, SuffixRefusesAnIntItsReturnAcceptsAsChar) {
+  auto [cls, m] = create("(I)C", R"(
+    (
+      (load-param v0)
+      (.src_block "LFoo;.bar:(I)C" 0 (1.0 1.0))
+      (invoke-static () "LFoo;.nextInt:()I")
+      (move-result v1)
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (if-eqz v0 :cold)
+      (const v2 65)
+      (return v2)
+    (:cold)
+      (.src_block "LFoo;.bar:(I)C" 1 (0.0 0.0))
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (sput v0 "LFoo;.i:I")
+      (return v1)
+    ))");
+  m->get_code()->build_cfg();
+  method_splitting_impl::Stats stats;
+  split_with(cls, {}, loop_config(), &stats);
+  EXPECT_TRUE(stats.added_methods.empty());
+  EXPECT_EQ(
+      stats.snapshot().suffix_fates
+          [method_splitting_impl::CandidateFate::Evaluation_LiveInUntypable],
+      1u);
+}
+
 // Fewer references, `long`s or `float`s never merge wider: the loop splits.
 TEST_F(MethodSplitterTest, LoopHeadedSplitAcceptsReferenceWideAndFloatLiveIns) {
   auto extra = make_accept_classes();
@@ -2335,16 +2375,16 @@ TEST_F(MethodSplitterTest, RefuseMoreLiveInsThanMaxLiveIn) {
 // int on one path and a string on the other, and every candidate only copies
 // it into a register nothing reads.
 TEST_F(MethodSplitterTest, RefuseLiveInWithoutType) {
-  auto code = [](const std::string& use) {
+  auto code = [](const std::string& other_def, const std::string& use) {
     return R"(
     (
       (load-param v0)
-      (if-eqz v0 :str)
+      (if-eqz v0 :other)
       (add-int v1 v0 v0)
       (goto :join)
-    (:str)
-      (const-string "s")
-      (move-result-pseudo-object v1)
+    (:other)
+      )" + other_def +
+           R"(
     (:join)
       (move v2 v1)
       (add-int v0 v0 v0)
@@ -2360,10 +2400,17 @@ TEST_F(MethodSplitterTest, RefuseLiveInWithoutType) {
       (return v0)
     ))";
   };
-  // The same shape with the copy read as an int: typed by its use, and split.
-  EXPECT_GT(split_count("(I)I", code("(add-int v0 v0 v2)"), defaultConfig()),
+  const std::string string_def =
+      "(const-string \"s\")\n(move-result-pseudo-object v1)";
+  // The same shape with an int on both paths: typed by its definitions, and
+  // split.
+  EXPECT_GT(split_count("(I)I", code("(const v1 7)", ""), defaultConfig()), 0u);
+  EXPECT_EQ(split_count("(I)I", code(string_def, ""), defaultConfig()), 0u);
+  // A use that reads the copy as an int names a type, but that type does not
+  // hold the string the host may pass.
+  EXPECT_EQ(split_count("(I)I", code(string_def, "(add-int v0 v0 v2)"),
+                        defaultConfig()),
             0u);
-  EXPECT_EQ(split_count("(I)I", code(""), defaultConfig()), 0u);
 }
 
 namespace {

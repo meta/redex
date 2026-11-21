@@ -711,8 +711,6 @@ NetSavingInput net_saving_input(const ScoredClosure& sc,
 struct PassedDefs {
   // The host's definitions that reach the entry. The call passes their values.
   sparta::PatriciaTreeSet<IRInstruction*> host;
-  // Whether `host` is every definition that reaches the entry.
-  bool every{false};
   // The values the call passes, as ART types them (`value_of_producers`).
   art::Value value;
 };
@@ -725,7 +723,6 @@ PassedDefs passed_defs(OutlinerTypeAnalysis& ota,
   PassedDefs passed;
   passed.host = defs;
   passed.host.filter([&](IRInstruction* def) { return !in_cover(def); });
-  passed.every = passed.host.size() == defs.size();
   passed.value = ota.value_of_producers(UnorderedSet<const IRInstruction*>(
       passed.host.begin(), passed.host.end()));
   return passed;
@@ -811,11 +808,14 @@ std::optional<CandidateFate> evaluate_candidate(ScoredClosure& sc,
     if (type == nullptr) {
       return CandidateFate::Evaluation_LiveInUntypable;
     }
-    // The uses were verified with every definition that reaches the entry,
-    // merged in the order ART chose. When the call passes only some of them, as
-    // at a loop header whose back edge is among the candidate's blocks, the
-    // declared type must still hold what it passes.
-    if (!passed.every && !art::accepts_argument(type, passed.value)) {
+    // The declared type must hold every value the call passes. The uses do not
+    // guarantee that. ART accepts some values at a use that the use's type does
+    // not hold, such as an `int` at the `return` of a `char` method. And when
+    // the call passes only some of the definitions that reach the entry, as at
+    // a loop header whose back edge is among the candidate's blocks, ART
+    // merges what it passes differently from what the uses were verified
+    // with.
+    if (!art::accepts_argument(type, passed.value)) {
       return CandidateFate::Evaluation_LiveInUntypable;
     }
     // The type demand is a meet over the uses, so it can name a type that no

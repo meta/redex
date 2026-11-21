@@ -876,6 +876,50 @@ const DexType* type_of_every_merge(const std::vector<art_oracle::Reg>& values) {
 
 } // namespace
 
+TEST_F(OutlinerTypeAnalysisTest, demand_accepts) {
+  using IT = outliner_impl::IntegralType;
+  const art::Demand none;
+  EXPECT_TRUE(none.accepts(IT::of(type::_int())));
+
+  const auto char_use = art::Demand::of_use(type::_char());
+  EXPECT_TRUE(char_use.accepts(IT::constant(65)));
+  EXPECT_TRUE(char_use.accepts(IT::of(type::_boolean())));
+  EXPECT_FALSE(char_use.accepts(IT::of(type::_byte())));
+  EXPECT_FALSE(char_use.accepts(IT::constant(-1)));
+  // `int` and `short` meet at `short`, which holds a `byte` but not a `char`.
+  auto narrowed = art::Demand::of_use(type::_int());
+  narrowed.meet_with(art::Demand::of_use(type::_short()));
+  EXPECT_TRUE(narrowed.accepts(IT::of(type::_byte())));
+  EXPECT_FALSE(narrowed.accepts(IT::of(type::_char())));
+  // A `boolean`, a `char` and 2: ART may merge the first two into `char`,
+  // which holds 2, or the `boolean` and 2 into `byte` first, which the `char`
+  // takes to `int`.
+  EXPECT_FALSE(char_use.accepts(
+      IT::join(IT::join(IT::of(type::_boolean()), IT::of(type::_char())),
+               IT::constant(2))));
+
+  // A use of a non-integral type accepts no integral value, constants
+  // included, whatever else is demanded.
+  const auto object = art::Demand::of_use(type::java_lang_Object());
+  EXPECT_FALSE(object.accepts(IT::of(type::_int())));
+  EXPECT_FALSE(object.accepts(IT::constant(0)));
+  EXPECT_FALSE(
+      art::Demand::of_use(type::_float()).accepts(IT::of(type::_int())));
+  auto mixed = art::Demand::of_use(type::_int());
+  mixed.meet_with(art::Demand::of_use(type::_float()));
+  EXPECT_FALSE(mixed.accepts(IT::constant(1)));
+
+  auto no_meet = art::Demand::of_use(type::_byte());
+  no_meet.meet_with(art::Demand::of_use(type::_char()));
+  EXPECT_TRUE(no_meet.accepts(IT::constant(65)));
+  EXPECT_TRUE(no_meet.accepts(IT::of(type::_boolean())));
+  EXPECT_FALSE(no_meet.accepts(IT::constant(200)));
+  EXPECT_FALSE(no_meet.accepts(IT::of(type::_byte())));
+
+  const auto unknown = art::Demand::unknown();
+  EXPECT_FALSE(unknown.accepts(IT::of(type::_boolean())));
+}
+
 // Checks `get_result_type` against ART's merge. The definitions are every set
 // of up to four drawn from a parameter of each integral type and the oracle's
 // constants, with at least one parameter. The answer is the type that every

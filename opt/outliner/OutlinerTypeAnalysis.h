@@ -172,6 +172,12 @@ class Demand {
   // is no use, or no one type is accepted by every use: two classes or
   // categories, or `char` beside `byte` or `short`.
   const DexType* widest() const;
+  // Whether every use accepts the integral value `value`: every integral type a
+  // use needs holds it, so with no use any value is accepted. A use that needs
+  // any other type accepts no integral value. ART would take a constant at a
+  // `float` use, and 0 at a reference use, but this answers no for those too.
+  // When the type a use needs is unknown, nothing is accepted.
+  bool accepts(const IntegralType& value) const;
 
  private:
   bool m_unknown{false};

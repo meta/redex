@@ -486,6 +486,18 @@ const DexType* Demand::widest() const {
   return *unordered_any(types);
 }
 
+bool Demand::accepts(const IntegralType& value) const {
+  if (m_unknown || m_primitives != 0 || !m_references.empty()) {
+    return false;
+  }
+  for (uint8_t k = 0; k < kNumIntegral; ++k) {
+    if ((m_integral & (1u << k)) != 0 && !value.held_by(integral_dex_type(k))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 const DexType* declare_parameter(const Demand& uses,
                                  const std::function<Value()>& supply) {
   if (const auto* t = uses.widest()) {

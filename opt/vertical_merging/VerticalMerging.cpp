@@ -88,6 +88,34 @@ void record_dont_merge_state(const DexType* type,
   }
 }
 
+/**
+ * A class literal is a class's identity, which code can compare, key a map on
+ * or lock, so the class it names, even an abstract one, must not be merged
+ * away. It may still be the merger, which keeps its name. The literal is the
+ * same value whether it is a `const-class` in code or the constant value of a
+ * static field (which `FinalInlinePassV2` makes from a `const-class` in
+ * `<clinit>`). The pass does not rewrite types in static values, so this rule
+ * also keeps those values correct.
+ */
+void record_class_literal(const DexType* type,
+                          DontMergeStatus* dont_merge_status) {
+  record_dont_merge_state(type, kConditional, dont_merge_status);
+}
+
+/**
+ * Records the class literals in an encoded value, including those nested in
+ * arrays and annotations. The only other types it gathers are the types of
+ * nested annotations, which are interfaces and never merged.
+ */
+void record_class_literals(const DexEncodedValue& value,
+                           DontMergeStatus* dont_merge_status) {
+  std::vector<const DexType*> types;
+  value.gather_types(types);
+  for (const auto* type : types) {
+    record_class_literal(type, dont_merge_status);
+  }
+}
+
 struct TypeLikeStringStats {
   size_t annotation_refs{0};
   size_t code_refs{0};
@@ -396,13 +424,13 @@ size_t record_code_reference(const Scope& scope,
           // semantic error.
           record_dont_merge_state(type, kStrict, dont_merge_status);
           continue;
+        } else if (opcode::is_const_class(insn->opcode())) {
+          record_class_literal(type, dont_merge_status);
+          TRACE(VMERGE, 9, "dont_merge %s as mergeable for class literal: %s",
+                SHOW(type), SHOW(insn));
         } else {
           DexClass* cls = type_class(type);
-          // A class literal is the type's identity, which code can compare
-          // or key a map on, so unlike other type references it keeps even
-          // an abstract type from being merged away.
-          if ((cls != nullptr) &&
-              (!is_abstract(cls) || opcode::is_const_class(insn->opcode()))) {
+          if ((cls != nullptr) && !is_abstract(cls)) {
             // Keep the referenced type from being the mergeable.
             record_dont_merge_state(type, kConditional, dont_merge_status);
             TRACE(VMERGE, 9, "dont_merge %s as mergeable for type usage: %s",
@@ -600,8 +628,9 @@ void remove_unrenamable_collisions(ClassMap* mergeable_to_merger) {
 }
 
 /**
- * Don't merge a class if it is a field's type and this field can't be
- * renamed, of if it appeared in a field value.
+ * A field that cannot be renamed keeps its type and its class from being merged
+ * away. A static field's value can name classes as class literals and
+ * type-like strings, like code does.
  */
 size_t record_field_reference(const Scope& scope,
                               bool record_type_like_string_refs,
@@ -609,19 +638,11 @@ size_t record_field_reference(const Scope& scope,
   AtomicStatCounter<size_t> type_like_string_refs{0};
   walk::parallel::fields(scope, [&](DexField* field) {
     if (auto* value = field->get_static_value()) {
+      record_class_literals(*value, dont_merge_status);
       std::vector<const DexString*> strings;
       value->gather_strings(strings);
       type_like_string_refs += record_type_like_strings(
           strings, record_type_like_string_refs, dont_merge_status);
-    }
-    if (is_static(field) && field->get_type() == type::java_lang_Class()) {
-      // Checking type which might be stored as class in field.
-      auto* value = field->get_static_value();
-      if (value != nullptr && value->evtype() == DEVT_TYPE) {
-        record_dont_merge_state(
-            dynamic_cast<DexEncodedValueType*>(value)->type(), kStrict,
-            dont_merge_status);
-      }
     }
     if (!can_rename(field)) {
       record_dont_merge_state(field->get_type(), kConditional,

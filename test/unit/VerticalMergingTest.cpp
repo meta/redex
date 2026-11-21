@@ -298,3 +298,91 @@ TEST_F(VerticalMergingTest, keepsAbstractSubclassWithNativeMethod) {
   EXPECT_EQ(run_pass_on({parent, child, user}), 3);
   EXPECT_EQ(m->get_class(), child->get_type());
 }
+
+namespace {
+
+// Every place a class literal can name a class `X`.
+enum class Site {
+  kConstClass, // `const-class` in code
+  kClassFieldValue, // `static final Class<?> TAG = X.class;`
+  kObjectFieldValue, // `static final Object TAG = X.class;`
+};
+
+// Adds a class literal naming `type` to `user`, at `site`.
+void add_class_literal(DexClass* user, Site site, DexType* type) {
+  auto add_field = [&](DexType* field_type) {
+    auto* field =
+        DexField::make_field(user->get_type(), DexString::make_string("TAG"),
+                             field_type)
+            ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+                            std::make_unique<DexEncodedValueType>(type));
+    user->add_field(field);
+  };
+  switch (site) {
+  case Site::kConstClass: {
+    auto* method = DexMethod::make_method(
+                       "Lcom/redextest/User;.literal:()Ljava/lang/Object;")
+                       ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+    method->set_code(assembler::ircode_from_string(
+        "((const-class \"" + type->str_copy() +
+        "\") (move-result-pseudo-object v0) (return-object v0))"));
+    user->add_method(method);
+    break;
+  }
+  case Site::kClassFieldValue:
+    add_field(type::java_lang_Class());
+    break;
+  case Site::kObjectFieldValue:
+    add_field(type::java_lang_Object());
+    break;
+  }
+}
+
+class VerticalMergingLiteralTest : public VerticalMergingTest,
+                                   public ::testing::WithParamInterface<Site> {
+};
+
+constexpr const char* kNewParent = R"(
+  (
+    (new-instance "Lcom/redextest/Parent;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0) "Lcom/redextest/Parent;.<init>:()V")
+    (return-object v0)
+  )
+)";
+
+} // namespace
+
+// The class a literal names keeps its identity when it absorbs its parent.
+TEST_P(VerticalMergingLiteralTest, mergesIntoClassNamedByLiteral) {
+  auto* user = create_user(kNewImpl);
+  add_class_literal(user, GetParam(), impl->get_type());
+
+  EXPECT_EQ(run_pass(user), 2);
+  EXPECT_EQ(impl->get_super_class(), type::java_lang_Object());
+}
+
+// Merging the named parent away would make the literal name its subclass.
+TEST_P(VerticalMergingLiteralTest, keepsParentNamedByLiteral) {
+  auto* user = create_user(kNewImpl);
+  add_class_literal(user, GetParam(), base->get_type());
+
+  EXPECT_EQ(run_pass(user), 3);
+  EXPECT_EQ(impl->get_super_class(), base->get_type());
+}
+
+// Merging the named subclass away would make the literal name its parent.
+TEST_P(VerticalMergingLiteralTest, keepsSubclassNamedByLiteral) {
+  auto [parent, child] = create_parent_and_abstract_child();
+  auto* user = create_user(kNewParent);
+  add_class_literal(user, GetParam(), child->get_type());
+
+  EXPECT_EQ(run_pass_on({parent, child, user}), 3);
+  EXPECT_EQ(child->get_super_class(), parent->get_type());
+}
+
+INSTANTIATE_TEST_SUITE_P(CodeAndStaticValues,
+                         VerticalMergingLiteralTest,
+                         ::testing::Values(Site::kConstClass,
+                                           Site::kClassFieldValue,
+                                           Site::kObjectFieldValue));

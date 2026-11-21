@@ -33,7 +33,8 @@
 namespace {
 
 void run_passes(const std::vector<Pass*>& passes,
-                std::vector<DexClass*> classes) {
+                std::vector<DexClass*> classes,
+                bool type_check) {
   std::vector<DexStore> stores;
   DexMetadata dm;
   dm.set_id("classes");
@@ -53,6 +54,9 @@ void run_passes(const std::vector<Pass*>& passes,
   };
   const method_splitting_test::ArtTypeCheckOfOutput art_check(methods());
   PassManager manager(passes);
+  if (!type_check) {
+    manager.disable_checker();
+  }
 
   Json::Value conf_obj = Json::nullValue;
   ConfigFiles dummy_config(conf_obj);
@@ -137,9 +141,10 @@ struct InstructionSequenceOutlinerTest : public RedexTest {
     return methods;
   }
 
-  void run() {
+  // `type_check` runs Redex's type checker on the input and the output.
+  void run(bool type_check = true) {
     std::vector<Pass*> passes = {new InstructionSequenceOutliner()};
-    run_passes(passes, m_classes);
+    run_passes(passes, m_classes, type_check);
   }
 
   ~InstructionSequenceOutlinerTest() {}
@@ -604,4 +609,70 @@ TEST_F(InstructionSequenceOutlinerTest, BitwiseOfCharsPassesThroughAsInt) {
   ASSERT_EQ(proto->get_args()->size(), 1u) << SHOW(proto);
   EXPECT_EQ(proto->get_args()->at(0), type::_int()) << SHOW(proto);
   EXPECT_EQ(proto->get_rtype(), type::_int()) << SHOW(proto);
+}
+
+// `new C()` leaves the object uninitialized until its constructor runs. ART
+// lets a comparison read it then, but rejects passing it to a method. The
+// sequence that starts at the comparison must not take the object as an
+// argument. Redex's own type checker rejects the comparison, so it does not run
+// here; the check of the output against ART's rules still does.
+TEST_F(InstructionSequenceOutlinerTest, ComparisonOfUninitializedObject) {
+  create();
+  std::vector<DexType*> no_interfaces;
+  DexType* holder = DexType::make_type("LUH;");
+  DexClass* holder_cls =
+      create_class(holder, type::java_lang_Object(), no_interfaces, ACC_PUBLIC);
+  m_classes.push_back(holder_cls);
+  for (const auto* field : {"LUH;.f1:I", "LUH;.f2:I"}) {
+    holder_cls->add_field(
+        DexField::make_field(field)->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  }
+  std::vector<DexMethod*> methods;
+  for (size_t i = 0; i < 4; i++) {
+    auto name = "m" + std::to_string(i);
+    auto* proto = DexProto::make_proto(
+        type::_void(), DexTypeList::make_type_list({type::_int()}));
+    auto* m =
+        DexMethod::make_method(holder, DexString::make_string(name), proto)
+            ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+    holder_cls->add_method(m);
+    std::ostringstream oss;
+    oss << "(\n(load-param v0)\n(new-instance \"LC;\")\n"
+        << "(move-result-pseudo-object v1)\n"
+        << "(invoke-static () \"LUH;.mark_" << name << ":()V\")\n"
+        << "(if-eqz v1 :skip)\n";
+    for (int j = 0; j < 7; j++) {
+      oss << "(sput v0 \"LUH;.f1:I\")\n";
+    }
+    oss << "(:skip)\n";
+    for (int j = 0; j < 7; j++) {
+      oss << "(sput v0 \"LUH;.f2:I\")\n";
+    }
+    oss << "(invoke-direct (v1) \"LC;.<init>:()V\")\n"
+        << "(invoke-static (v1) \"LUH;.end_" << name << ":(LC;)V\")\n"
+        << "(return-void)\n)";
+    m->set_code(assembler::ircode_from_string(oss.str()));
+    methods.push_back(m);
+  }
+
+  run(/* type_check */ false);
+
+  size_t outlined_calls = 0;
+  for (auto* m : methods) {
+    cfg::ScopedCFG cfg(m->get_code());
+    for (auto& mie : cfg::InstructionIterable(*cfg)) {
+      auto* insn = mie.insn;
+      if (insn->has_method() && insn->get_method()->get_name()->str().find(
+                                    "$outlined") != std::string::npos) {
+        outlined_calls++;
+        // The object is the only reference these methods hold.
+        for (const auto* t : *insn->get_method()->get_proto()->get_args()) {
+          EXPECT_TRUE(type::is_primitive(t)) << show(insn) << " in " << show(m);
+        }
+      }
+    }
+  }
+  // The stores are outlined without the object, so the fixture still presents
+  // outlinable code.
+  EXPECT_GT(outlined_calls, 0u);
 }

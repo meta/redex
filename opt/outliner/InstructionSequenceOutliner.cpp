@@ -633,6 +633,15 @@ static bool append_to_partial_candidate(
   for (size_t i = 0; i < insn->srcs_size(); i++) {
     auto src = insn->src(i);
     if (pcn->defined_regs.count(src) == 0u) {
+      // An argument must not be an uninitialized object: ART rejects passing
+      // one. A comparison may read one, unlike most instructions; the call of
+      // its constructor and a copy of it are refused above and below.
+      if (opcode::is_a_conditional_branch(opcode)) {
+        auto uninitialized = uninitialized_envs->at(insn).get(src);
+        if (!uninitialized.get_constant() || *uninitialized.get_constant()) {
+          return false;
+        }
+      }
       pc->in_regs.insert(src);
       if (insn->src_is_wide(i)) {
         pc->in_regs.insert(src + 1);

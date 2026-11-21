@@ -920,6 +920,122 @@ TEST_F(OutlinerTypeAnalysisTest, demand_accepts) {
   EXPECT_FALSE(unknown.accepts(IT::of(type::_boolean())));
 }
 
+// A parameter holds the passed values in every order ART may merge them.
+TEST_F(OutlinerTypeAnalysisTest, accepts_argument) {
+  auto constant = [](IROpcode op, int64_t literal) {
+    IRInstruction insn(op);
+    insn.set_dest(0);
+    insn.set_literal(literal);
+    return art::Value::constant(&insn);
+  };
+  auto join = [](std::initializer_list<art::Value> values) {
+    art::Value joined;
+    for (const auto& v : values) {
+      joined.join_with(v);
+    }
+    return joined;
+  };
+  const auto two = constant(OPCODE_CONST, 2);
+  const auto zero = constant(OPCODE_CONST, 0);
+  const auto wide_zero = constant(OPCODE_CONST_WIDE, 0);
+  const auto of = [](const DexType* t) { return art::Value::of_type(t); };
+
+  // Integral: a `boolean` or 2 is a `byte` in every order.
+  const auto boolean_or_two = join({of(type::_boolean()), two});
+  EXPECT_TRUE(art::accepts_argument(type::_byte(), boolean_or_two));
+  EXPECT_FALSE(art::accepts_argument(type::_char(), boolean_or_two));
+  EXPECT_FALSE(art::accepts_argument(type::_int(), of(type::_float())));
+  EXPECT_FALSE(art::accepts_argument(type::_int(), art::Value::unknown()));
+
+  // `float`, `long`, `double`: the type, or a constant of its width.
+  EXPECT_TRUE(
+      art::accepts_argument(type::_float(), join({of(type::_float()), two})));
+  EXPECT_FALSE(art::accepts_argument(type::_float(), wide_zero));
+  EXPECT_FALSE(art::accepts_argument(type::_float(), of(type::_int())));
+  EXPECT_TRUE(art::accepts_argument(type::_long(),
+                                    join({of(type::_long()), wide_zero})));
+  EXPECT_FALSE(art::accepts_argument(type::_long(), two));
+  EXPECT_FALSE(art::accepts_argument(type::_double(), of(type::_long())));
+  // A register that is 32-bit on one path and 64-bit on another has no type.
+  EXPECT_FALSE(art::accepts_argument(type::_long(), join({wide_zero, zero})));
+  EXPECT_FALSE(art::accepts_argument(
+      type::_double(), join({of(type::_double()), wide_zero, zero})));
+
+  ClassCreator i_creator(DexType::make_type("LAcceptI;"));
+  i_creator.set_access(ACC_INTERFACE | ACC_ABSTRACT);
+  i_creator.set_super(type::java_lang_Object());
+  auto* i_type = i_creator.create()->get_type();
+  ClassCreator a_creator(DexType::make_type("LAcceptA;"));
+  a_creator.set_super(type::java_lang_Object());
+  a_creator.add_interface(i_type);
+  auto* a_type = a_creator.create()->get_type();
+  ClassCreator b_creator(DexType::make_type("LAcceptB;"));
+  b_creator.set_super(type::java_lang_Object());
+  b_creator.add_interface(i_type);
+  auto* b_type = b_creator.create()->get_type();
+  auto* i_array = type::make_array_type(i_type);
+  auto* a_array = type::make_array_type(a_type);
+  auto* b_array = type::make_array_type(b_type);
+
+  // Any reference or zero is assigned to an interface; no primitive is.
+  EXPECT_TRUE(
+      art::accepts_argument(i_type, join({of(a_type), of(b_type), zero})));
+  EXPECT_FALSE(
+      art::accepts_argument(i_type, join({of(a_type), of(type::_int())})));
+  EXPECT_FALSE(
+      art::accepts_argument(type::java_lang_Object(), of(type::_float())));
+  // Arrays of classes merge monotonically: an unknown value is accepted.
+  EXPECT_TRUE(art::accepts_argument(a_array, art::Value::unknown()));
+
+  // An array of an interface holds only its own type and null.
+  EXPECT_TRUE(art::accepts_argument(i_array, join({of(i_array), zero})));
+  EXPECT_FALSE(art::accepts_argument(i_array, of(a_array)));
+  EXPECT_FALSE(
+      art::accepts_argument(i_array, join({of(a_array), of(b_array)})));
+  EXPECT_FALSE(art::accepts_argument(
+      i_array, of(type::make_array_type(type::java_lang_Object()))));
+  EXPECT_FALSE(art::accepts_argument(i_array, art::Value::unknown()));
+  EXPECT_TRUE(art::accepts_argument(
+      type::make_array_type(i_type, 2),
+      join({of(type::make_array_type(i_type, 2)), zero})));
+  EXPECT_FALSE(art::accepts_argument(type::make_array_type(i_type, 2),
+                                     of(type::make_array_type(a_type, 2))));
+  // An element class Redex cannot see, or never created, may be an interface.
+  auto* unseen_array = type::make_array_type(DexType::make_type("LUnseen;"));
+  EXPECT_FALSE(
+      art::accepts_argument(unseen_array, join({of(a_array), of(b_array)})));
+  auto* never_made_array = DexType::make_type("[LNeverMade;");
+  EXPECT_FALSE(art::accepts_argument(never_made_array, of(a_array)));
+  EXPECT_TRUE(art::accepts_argument(never_made_array, zero));
+  // Arrays of primitives and of `Object` merge monotonically.
+  EXPECT_TRUE(
+      art::accepts_argument(type::make_array_type(type::java_lang_Object()),
+                            join({of(a_array), of(b_array)})));
+  EXPECT_TRUE(art::accepts_argument(type::make_array_type(type::_int(), 2),
+                                    art::Value::unknown()));
+  EXPECT_FALSE(art::accepts_argument(nullptr, zero));
+}
+
+// `value_of_producers` keeps constants as constants, and a copy stands for the
+// definitions of what it copies.
+TEST_F(OutlinerTypeAnalysisTest, value_of_producers) {
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:()V" (
+        (const v0 65)
+        (move v1 v0)
+        (sput-short v0 "LFoo;.s:S")
+        (sput-char v1 "LFoo;.c:C")
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+  const auto* copy = find_insn(foo_method, OPCODE_MOVE);
+  auto value = ota.value_of_producers({copy}).integral();
+  ASSERT_TRUE(value.has_value());
+  EXPECT_TRUE(value->is_constant());
+  EXPECT_TRUE(value->held_by(type::_char()));
+}
+
 // Checks `get_result_type` against ART's merge. The definitions are every set
 // of up to four drawn from a parameter of each integral type and the oracle's
 // constants, with at least one parameter. The answer is the type that every

@@ -441,6 +441,16 @@ bit_width_t required_bit_width(uint16_t v) {
   return result;
 }
 
+std::vector<IRInstruction*> make_check_cast(const DexType* type,
+                                            reg_t src_dest) {
+  auto* check_cast = new IRInstruction(OPCODE_CHECK_CAST);
+  check_cast->set_type(type)->set_src(0, src_dest);
+  auto* move_result_pseudo =
+      new IRInstruction(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT);
+  move_result_pseudo->set_dest(src_dest);
+  return {check_cast, move_result_pseudo};
+}
+
 bool needs_range_conversion(const IRInstruction* insn) {
   auto op = insn->opcode();
   if (!opcode::has_range_form(op)) {

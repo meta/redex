@@ -476,6 +476,13 @@ class IRInstruction final {
 bit_width_t required_bit_width(uint16_t v);
 
 /*
+ * A `check-cast` of the object in `src_dest` to `type`, followed by the
+ * `move-result-pseudo-object` that puts the result back in `src_dest`.
+ */
+std::vector<IRInstruction*> make_check_cast(const DexType* type,
+                                            reg_t src_dest);
+
+/*
  * Whether instruction must be converted to /range form in order to encode it
  * as a DexInstruction
  */

@@ -81,12 +81,7 @@ std::optional<const DexType*> receiver_cast(const DexMethod* method,
 void insert_receiver_cast(DexMethod* method, const DexType* cast) {
   auto& cfg = method->get_code()->cfg();
   auto receiver = cfg.get_first_param_instruction()->dest();
-  cfg.insert_after_param_loads(
-      {(new IRInstruction(OPCODE_CHECK_CAST))
-           ->set_type(const_cast<DexType*>(cast))
-           ->set_src(0, receiver),
-       (new IRInstruction(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT))
-           ->set_dest(receiver)});
+  cfg.insert_after_param_loads(make_check_cast(cast, receiver));
 }
 
 // Whether code in `ref_checker`'s store may reference everything that

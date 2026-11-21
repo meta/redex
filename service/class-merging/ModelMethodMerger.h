@@ -76,9 +76,6 @@ class ModelMethodMerger {
     m_method_stats.print(model_name, num_mergeables);
   }
 
-  static std::vector<IRInstruction*> make_check_cast(DexType* type,
-                                                     reg_t src_dest);
-
   TypeToMethodMap get_method_dedup_map() { return m_method_dedup_map; }
   dispatch::DispatchMethod create_dispatch_method(
       const dispatch::Spec& spec, const std::vector<DexMethod*>& targets);

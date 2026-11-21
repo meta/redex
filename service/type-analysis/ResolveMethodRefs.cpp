@@ -91,23 +91,11 @@ void ResolveMethodRefs::analyze_method(
       TRACE(TYPE, 5, "Intf %s is resolved to: %s \n", SHOW(intf), SHOW(impl));
 
       // resolve the interface to its implementor.
-      // 1. add check_cast.
-      auto* check_cast = new IRInstruction(OPCODE_CHECK_CAST);
-      check_cast->set_src(0, insn->src(0));
-      check_cast->set_type(impl->get_class());
-
-      // 2. add move_result_pseudo_object
-      reg_t new_receiver;
-      new_receiver = check_cast->src(0); // code->allocate_temp();
-      auto* pseudo_move_result =
-          new IRInstruction(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT);
-      pseudo_move_result->set_dest(new_receiver);
-
       auto cfg_it = block->to_cfg_instruction_iterator(it);
-      mutation.insert_before(cfg_it, {check_cast, pseudo_move_result});
+      mutation.insert_before(cfg_it,
+                             make_check_cast(impl->get_class(), insn->src(0)));
 
-      // 3. rewrite invoke-interface to invoke-virtual
-      insn->set_src(0, new_receiver);
+      // rewrite invoke-interface to invoke-virtual
       insn->set_method(impl);
       insn->set_opcode(OPCODE_INVOKE_VIRTUAL);
 

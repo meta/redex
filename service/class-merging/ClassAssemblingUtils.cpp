@@ -10,7 +10,6 @@
 #include "Creators.h"
 #include "Debug.h"
 #include "DexStore.h"
-#include "ModelMethodMerger.h"
 #include "RefChecker.h"
 #include "Show.h"
 #include "Trace.h"
@@ -278,7 +277,7 @@ void patch_iget(cfg::ControlFlowGraph& cfg,
   case OPCODE_IGET_OBJECT: {
     auto move_insn_it = cfg.move_result_of(it);
     auto dest = move_insn_it->insn->dest();
-    auto cast = ModelMethodMerger::make_check_cast(original_field_type, dest);
+    auto cast = make_check_cast(original_field_type, dest);
     cfg.insert_after(move_insn_it, cast);
     if ((prev_sb != nullptr) && !disable_violation_fixes) {
       // Duplicate the last seen source block and place it after the iterator

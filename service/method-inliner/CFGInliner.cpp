@@ -106,15 +106,8 @@ void CFGInliner::inline_cfg(ControlFlowGraph* caller,
     if (needs_receiver_cast != nullptr) {
       always_assert(!needs_init_class);
       auto* first_load_param_insn = callee.get_first_param_instruction();
-      auto first_param_reg = first_load_param_insn->dest();
-      auto* check_cast_insn = (new IRInstruction(OPCODE_CHECK_CAST))
-                                  ->set_type(needs_receiver_cast)
-                                  ->set_src(0, first_param_reg);
-      auto* move_result_insn =
-          (new IRInstruction(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT))
-              ->set_dest(first_param_reg);
-      new_insns.push_back(check_cast_insn);
-      new_insns.push_back(move_result_insn);
+      new_insns =
+          make_check_cast(needs_receiver_cast, first_load_param_insn->dest());
     } else {
       always_assert(needs_init_class);
       auto* init_class_insn =

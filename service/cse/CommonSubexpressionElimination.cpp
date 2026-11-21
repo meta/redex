@@ -1926,15 +1926,9 @@ bool CommonSubexpressionElimination::patch(bool runtime_assertions) {
                         "not an abstract unboxing method: %s",
                         SHOW(unboxing_insn));
       const auto* impl = abs_it->first;
-      auto src_reg = unboxing_insn->src(0);
-      auto* check_cast_insn = (new IRInstruction(OPCODE_CHECK_CAST))
-                                  ->set_src(0, src_reg)
-                                  ->set_type(impl->get_class());
-      auto* pseudo_move_result_insn =
-          (new IRInstruction(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT))
-              ->set_dest(src_reg);
       // Add instructions
-      mutation.insert_before(it, {check_cast_insn, pseudo_move_result_insn});
+      mutation.insert_before(
+          it, make_check_cast(impl->get_class(), unboxing_insn->src(0)));
       // Replace the call method from abs_unboxing method to its impl.
       unboxing_insn->set_method(const_cast<DexMethodRef*>(impl));
     }

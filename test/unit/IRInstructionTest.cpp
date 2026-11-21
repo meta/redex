@@ -261,6 +261,18 @@ TEST_F(IRInstructionTest, SelectCheckCastHighDest) {
                  ->set_src(0, 200));
 }
 
+TEST_F(IRInstructionTest, MakeCheckCast) {
+  using namespace dex_asm;
+  auto insns = make_check_cast(type::java_lang_String(), 3);
+  ASSERT_EQ(insns.size(), 2);
+  EXPECT_EQ(*insns[0],
+            *dasm(OPCODE_CHECK_CAST, type::java_lang_String(), {3_v}));
+  EXPECT_EQ(*insns[1], *dasm(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT, {3_v}));
+  for (auto* insn : insns) {
+    delete insn;
+  }
+}
+
 TEST_F(IRInstructionTest, SelectMove) {
   using namespace dex_asm;
   using namespace instruction_lowering::impl;

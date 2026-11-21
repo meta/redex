@@ -143,6 +143,9 @@ class EnumUpcastDetector {
     case OPCODE_APUT_OBJECT:
       process_aput_object(insn, env);
       break;
+    case OPCODE_FILLED_NEW_ARRAY:
+      process_filled_new_array(insn, env);
+      break;
     case OPCODE_IPUT_OBJECT:
       process_isput_object(insn, env);
       reject(insn, insn->get_field()->get_class(),
@@ -238,6 +241,22 @@ class EnumUpcastDetector {
       return;
     }
     reject(insn, enum_cls, UnsafeType::kUsageUsedEnumEntries);
+  }
+
+  /**
+   * Process filled-new-array when we reach the fixpoint: like aput-object, it
+   * stores each source into an array, here of a known component type.
+   */
+  void process_filled_new_array(const IRInstruction* insn,
+                                const EnumTypeEnvironment* env) const {
+    const DexType* elem = type::make_array_component_type(insn->get_type());
+    if (elem == nullptr || type::is_primitive(elem)) {
+      return;
+    }
+    for (auto src : insn->srcs()) {
+      reject_if_inconsistent(insn, env->get(src), elem,
+                             UnsafeType::kUsageCastFilledNewArray);
+    }
   }
 
   /**

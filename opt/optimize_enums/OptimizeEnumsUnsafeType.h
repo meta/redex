@@ -37,6 +37,7 @@ enum class UnsafeType {
   kUsageCastCheckCast,
   kUsageCastISPutObject,
   kUsageCastAputObject,
+  kUsageCastFilledNewArray,
   kUsageMultiEnumTypes,
   kUsageUnsafeInvocationOnCandidateEnum,
   kUsageIFieldSetOutsideInit,
@@ -112,6 +113,9 @@ inline std::ostream& operator<<(std::ostream& os, const UnsafeType& u) {
     break;
   case UnsafeType::kUsageCastAputObject:
     os << "UsageCastAputObject";
+    break;
+  case UnsafeType::kUsageCastFilledNewArray:
+    os << "UsageCastFilledNewArray";
     break;
   case UnsafeType::kUsageMultiEnumTypes:
     os << "UsageMultiEnumTypes";

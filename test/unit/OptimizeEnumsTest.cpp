@@ -16,6 +16,7 @@
 #include "ControlFlow.h"
 #include "Creators.h"
 #include "DexCallSite.h"
+#include "EnumAnalyzeGeneratedMethods.h"
 #include "EnumClinitAnalysis.h"
 #include "EnumConfig.h"
 #include "EnumUpcastAnalysis.h"
@@ -1588,4 +1589,159 @@ TEST_F(OptimizeEnumsTest, inlinedNonReturningValuesLeavesNoUnreachableBlocks) {
   conf.parse_global_config();
   manager.run_passes(stores, conf);
   EXPECT_EQ(tab->get_super_class(), type::java_lang_Enum());
+}
+
+// `Arrays.asList(new Object[] {Bar.Y})`, with the array built by
+// filled-new-array: the enum escapes into an Object[], so Bar must not be boxed
+// as an Integer.
+TEST_F(OptimizeEnumsTest, enumStoredByFilledNewArrayIsRejected) {
+  auto store = create_enum_store();
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  uc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LUser;.list:()Ljava/util/List;"
+      (
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v0)
+        (filled-new-array (v0) "[Ljava/lang/Object;")
+        (move-result-object v1)
+        (invoke-static (v1) "Ljava/util/Arrays;.asList:([Ljava/lang/Object;)Ljava/util/List;")
+        (move-result-object v2)
+        (return-object v2)
+      )
+    )
+  )"));
+  store.add_classes({uc.create()});
+  DexStoresVector stores({std::move(store)});
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  auto* bar_type = DexType::get_type("LBar;");
+  optimize_enums::Config config(100);
+  config.candidate_enums.insert(bar_type);
+  std::set<optimize_enums::UnsafeType> bar_reasons;
+  std::mutex reasons_mutex;
+  optimize_enums::reject_unsafe_enums(
+      scope, &config, [&](const DexType* type, optimize_enums::UnsafeType u) {
+        if (type == bar_type) {
+          std::lock_guard<std::mutex> lock(reasons_mutex);
+          bar_reasons.insert(u);
+        }
+      });
+  EXPECT_EQ(bar_reasons,
+            std::set<optimize_enums::UnsafeType>{
+                optimize_enums::UnsafeType::kUsageCastFilledNewArray});
+}
+
+// `Bar[][] rows = {new Bar[] {Bar.Y}};` with both arrays built by
+// filled-new-array: the outer one stores a row, a `Bar[]`, so every value stays
+// a Bar, and Bar is boxed in both array types.
+TEST_F(OptimizeEnumsTest, rowStoredByFilledNewArrayLetsEnumBeBoxed) {
+  auto* make = run_pass_on_rows_maker(R"(
+    (method (public static) "LRows;.make:()[[LBar;"
+      (
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v0)
+        (filled-new-array (v0) "[LBar;")
+        (move-result-object v1)
+        (filled-new-array (v1) "[[LBar;")
+        (move-result-object v2)
+        (return-object v2)
+      )
+    )
+  )");
+  EXPECT_FALSE(is_enum(type_class(DexType::get_type("LBar;"))));
+  EXPECT_EQ(show(make->get_proto()->get_rtype()), "[[Ljava/lang/Integer;");
+  make->get_code()->build_cfg();
+  for (const auto& mie : cfg::InstructionIterable(make->get_code()->cfg())) {
+    if (mie.insn->opcode() == OPCODE_FILLED_NEW_ARRAY) {
+      EXPECT_EQ(type::make_array_element_type(mie.insn->get_type()),
+                type::java_lang_Integer());
+    }
+  }
+}
+
+namespace {
+
+// Run the analysis that deletes unused generated enum methods over the Bar
+// store, with `values` and `valueOf` added to Bar, plus `LUser;` with
+// `caller`, and return the names of the generated methods it keeps.
+std::set<std::string> generated_methods_kept(DexMethod* caller) {
+  auto store = create_enum_store();
+  auto* bar = type_class(DexType::get_type("LBar;"));
+  auto* values = assembler::method_from_string(R"(
+    (method (public static) "LBar;.values:()[LBar;"
+     (
+      (sget-object "LBar;.$VALUES:[LBar;")
+      (move-result-pseudo-object v0)
+      (return-object v0)
+     )
+    )
+  )");
+  auto* value_of = assembler::method_from_string(R"(
+    (method (public static) "LBar;.valueOf:(Ljava/lang/String;)LBar;"
+     (
+      (load-param-object v0)
+      (const-class "LBar;")
+      (move-result-pseudo-object v1)
+      (invoke-static (v1 v0) "Ljava/lang/Enum;.valueOf:(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;")
+      (move-result-object v1)
+      (check-cast v1 "LBar;")
+      (move-result-pseudo-object v1)
+      (return-object v1)
+     )
+    )
+  )");
+  bar->add_method(values);
+  bar->add_method(value_of);
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  uc.add_method(caller);
+  store.add_classes({uc.create()});
+  DexStoresVector stores({std::move(store)});
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  // The analysis looks these methods up.
+  for (const auto* ref : {"Ljava/lang/Enum;.compareTo:(Ljava/lang/Enum;)I",
+                          "Ljava/lang/Enum;.equals:(Ljava/lang/Object;)Z",
+                          "Ljava/lang/Enum;.hashCode:()I",
+                          "Ljava/lang/Enum;.name:()Ljava/lang/String;",
+                          "Ljava/lang/Enum;.ordinal:()I",
+                          "Ljava/lang/Enum;.toString:()Ljava/lang/String;"}) {
+    DexMethod::make_method(ref);
+  }
+  optimize_enums::EnumAnalyzeGeneratedMethods analyzer;
+  analyzer.consider_enum_type(bar->get_type(), value_of, values);
+  analyzer.transform_code(scope);
+  std::set<std::string> kept;
+  for (const auto* method : bar->get_dmethods()) {
+    if (method == values || method == value_of) {
+      kept.insert(method->get_name()->str_copy());
+    }
+  }
+  return kept;
+}
+
+} // namespace
+
+// `static Object[] all() { return new Object[] {Bar.Y}; }` with the array built
+// by filled-new-array: the enum escapes as an Object, and code that receives
+// it can call `values` reflectively through its class, so both are kept.
+TEST_F(OptimizeEnumsTest, enumStoredByFilledNewArrayKeepsGeneratedMethods) {
+  auto* caller = assembler::method_from_string(R"(
+    (method (public static) "LUser;.all:()[Ljava/lang/Object;"
+     (
+      (sget-object "LBar;.Y:LBar;")
+      (move-result-pseudo-object v0)
+      (filled-new-array (v0) "[Ljava/lang/Object;")
+      (move-result-object v1)
+      (return-object v1)
+     )
+    )
+  )");
+  EXPECT_EQ(generated_methods_kept(caller),
+            (std::set<std::string>{"valueOf", "values"}));
 }

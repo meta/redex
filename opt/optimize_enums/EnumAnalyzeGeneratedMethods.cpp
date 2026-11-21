@@ -91,7 +91,7 @@ void EnumAnalyzeGeneratedMethods::process_instruction(
   case OPCODE_FILLED_NEW_ARRAY: {
     auto* base_type = type::make_array_element_type(insn->get_type());
     always_assert(base_type);
-    for (size_t src_id = 1; src_id < insn->srcs_size(); src_id++) {
+    for (size_t src_id = 0; src_id < insn->srcs_size(); src_id++) {
       const EnumTypes elem_types = env->get(insn->src(src_id));
       reject_if_unsafe(base_type, elem_types, insn);
     }

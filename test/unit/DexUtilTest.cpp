@@ -6,6 +6,8 @@
  */
 
 #include "DexUtil.h"
+#include "Creators.h"
+#include "IRAssembler.h"
 #include "IRInstruction.h"
 #include "RedexTest.h"
 #include "TypeUtil.h"
@@ -166,4 +168,31 @@ TEST_F(DexUtilTest, create_abstract_method_error_block_emits_throw_sequence) {
   for (auto* insn : block) {
     delete insn;
   }
+}
+
+// An invoke-super calls the closest method above the class that makes the call,
+// so code that makes one cannot move to another class.
+TEST_F(DexUtilTest, invoke_super_prevents_relocation) {
+  ClassCreator base(DexType::make_type("LBase;"));
+  base.set_super(type::java_lang_Object());
+  base.add_method(assembler::method_from_string(R"(
+    (method (public) "LBase;.m:()V"
+     ((load-param-object v0) (return-void)))
+  )"));
+  base.create();
+  ClassCreator sub(DexType::make_type("LSub;"));
+  sub.set_super(DexType::make_type("LBase;"));
+  auto* f = assembler::method_from_string(R"(
+    (method (public) "LSub;.f:()V"
+     (
+      (load-param-object v0)
+      (invoke-super (v0) "LBase;.m:()V")
+      (return-void)
+     )
+    )
+  )");
+  sub.add_method(f);
+  sub.create();
+  f->get_code()->build_cfg();
+  EXPECT_FALSE(gather_invoked_methods_that_prevent_relocation(f));
 }

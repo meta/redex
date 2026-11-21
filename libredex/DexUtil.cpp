@@ -410,8 +410,10 @@ bool gather_invoked_methods_that_prevent_relocation(
       }
       if (meth != nullptr) {
         always_assert(meth->is_def());
+        // What an invoke-super calls depends on the class that makes the call.
         if ((meth->is_external() && !is_public(meth)) ||
-            (opcode == OPCODE_INVOKE_DIRECT && !method::is_init(meth))) {
+            (opcode == OPCODE_INVOKE_DIRECT && !method::is_init(meth)) ||
+            opcode == OPCODE_INVOKE_SUPER) {
           meth = nullptr;
         }
       }

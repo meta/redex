@@ -92,7 +92,8 @@ void relocate_field(DexField* field, DexType* to_type);
 /**
  * Checks if a method can be relocated, i.e. if it doesn't require any changes
  * to invoked direct methods (none of the invoked direct methods would need to
- * change into a public virtual / static method) or framework protected methods.
+ * change into a public virtual / static method) or framework protected methods,
+ * and makes no invoke-super call, whose target depends on the calling class.
  * Any problematic invoked methods are added to the optionally supplied set.
  */
 bool gather_invoked_methods_that_prevent_relocation(

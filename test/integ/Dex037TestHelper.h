@@ -17,6 +17,7 @@
 #include "DexClass.h"
 #include "DexLoader.h"
 #include "DexStore.h"
+#include "DexUtil.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
 #include "IRList.h"
@@ -45,6 +46,9 @@ class Dex037Test : public ::testing::Test {
                               37));
     EXPECT_TRUE(input_dex_version == 37);
     classes = root_store.get_dexen()[0];
+    // Apps always define java.lang.Object; a class chain without it is
+    // incomplete.
+    create_object_class();
   }
 
   void TearDown() override {

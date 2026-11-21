@@ -721,11 +721,6 @@ art::Value OutlinerTypeAnalysis::value_of_producers(
 
 art::Value OutlinerTypeAnalysis::value_at(const IRInstruction* anchor,
                                           reg_t reg) {
-  const auto& env = m_type_environments->at(anchor);
-  if (env.get_type(reg).element() == IRType::REFERENCE) {
-    auto dex_type = env.get_dex_type(reg);
-    return art::Value::of_type(dex_type ? *dex_type : nullptr);
-  }
   auto value = supply_at(anchor, reg);
   if (!value.is_constant()) {
     return value;
@@ -735,6 +730,18 @@ art::Value OutlinerTypeAnalysis::value_at(const IRInstruction* anchor,
   auto defs = known_defs_at(anchor, reg);
   redex_assert(defs.has_value());
   return value_of_defs(*defs, art::Value(), /* candidate */ {});
+}
+
+const DexType* OutlinerTypeAnalysis::array_type_at(const IRInstruction* insn,
+                                                   reg_t reg) {
+  // Reading an array from an array back into that array's own register is
+  // ill-typed code; its type is unknown rather than a recursion.
+  if (!m_array_reads_in_progress.insert(insn).second) {
+    return nullptr;
+  }
+  const auto* type = supply_at(insn, reg).exact();
+  m_array_reads_in_progress.erase(insn);
+  return type;
 }
 
 art::Demand OutlinerTypeAnalysis::demand_of_use(IRInstruction* use,
@@ -1075,10 +1082,9 @@ const DexType* OutlinerTypeAnalysis::get_result_type_helper(
   case OPCODE_AGET:
   case OPCODE_AGET_WIDE:
   case OPCODE_AGET_OBJECT: {
-    auto& env = m_type_environments->at(insn);
-    auto dex_type = env.get_dex_type(insn->src(0));
-    return (dex_type && type::is_array(*dex_type))
-               ? type::make_array_component_type(*dex_type)
+    const auto* array = array_type_at(insn, insn->src(0));
+    return (array != nullptr && type::is_array(array))
+               ? type::make_array_component_type(array)
                : nullptr;
   }
   case OPCODE_INVOKE_VIRTUAL:
@@ -1192,12 +1198,9 @@ const DexType* OutlinerTypeAnalysis::get_type_demand(IRInstruction* insn,
     return type::java_lang_Object();
 
   case OPCODE_ARRAY_LENGTH:
-  case OPCODE_FILL_ARRAY_DATA: {
+  case OPCODE_FILL_ARRAY_DATA:
     always_assert(src_index == 0);
-    auto& env = m_type_environments->at(insn);
-    auto dex_type = env.get_dex_type(insn->src(0));
-    return dex_type ? *dex_type : nullptr;
-  }
+    return array_type_at(insn, insn->src(0));
 
   case OPCODE_THROW:
     always_assert(src_index == 0);
@@ -1341,9 +1344,7 @@ const DexType* OutlinerTypeAnalysis::get_type_demand(IRInstruction* insn,
   case OPCODE_AGET_WIDE:
   case OPCODE_AGET_OBJECT:
     if (src_index == 0) {
-      auto& env = m_type_environments->at(insn);
-      auto dex_type = env.get_dex_type(insn->src(0));
-      return dex_type ? *dex_type : nullptr;
+      return array_type_at(insn, insn->src(0));
     }
     always_assert(src_index == 1);
     return type::_int();
@@ -1359,9 +1360,7 @@ const DexType* OutlinerTypeAnalysis::get_type_demand(IRInstruction* insn,
       if (insn->opcode() == OPCODE_APUT_OBJECT) {
         return DexType::make_type("[Ljava/lang/Object;");
       }
-      auto& env = m_type_environments->at(insn);
-      auto dex_type = env.get_dex_type(insn->src(1));
-      return dex_type ? *dex_type : nullptr;
+      return array_type_at(insn, insn->src(1));
     }
     if (src_index == 2) {
       return type::_int();
@@ -1370,11 +1369,10 @@ const DexType* OutlinerTypeAnalysis::get_type_demand(IRInstruction* insn,
     switch (insn->opcode()) {
     case OPCODE_APUT:
     case OPCODE_APUT_WIDE: {
-      auto& env = m_type_environments->at(insn);
-      auto dex_type = env.get_dex_type(insn->src(1));
-      return (dex_type && type::is_array(*dex_type))
+      const auto* array = array_type_at(insn, insn->src(1));
+      return (array != nullptr && type::is_array(array))
                  ? primitive_put_value_demand(
-                       type::make_array_component_type(*dex_type))
+                       type::make_array_component_type(array))
                  : nullptr;
     }
     case OPCODE_APUT_BOOLEAN:
@@ -1390,9 +1388,8 @@ const DexType* OutlinerTypeAnalysis::get_type_demand(IRInstruction* insn,
       // array into the array. Without a known array type, ART may still see an
       // array that Redex does not, for example after an `instance-of` test. So
       // only a proven null demands the instruction's type.
-      auto& env = m_type_environments->at(insn);
-      auto dex_type = env.get_dex_type(insn->src(1));
-      if (dex_type && type::is_array(*dex_type)) {
+      const auto* array = array_type_at(insn, insn->src(1));
+      if (array != nullptr && type::is_array(array)) {
         return type::_int();
       }
       if (!is_null_to_art(insn, insn->src(1))) {

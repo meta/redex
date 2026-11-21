@@ -1036,6 +1036,69 @@ TEST_F(OutlinerTypeAnalysisTest, declare_result_of_interface_arrays) {
   EXPECT_EQ(art::declare_result(join({of(a_type), of(b_type)})), i_type);
 }
 
+// Redex's type inference joins an `A[]` and a `B[]`, whose classes share only
+// the interface `I`, to `I[]`, but ART merges them to `Object[]`, which `I[]`
+// does not hold. So no query on such an array declares `I[]`: not the value of
+// the register, not what an `array-length` on it demands, and not what an
+// `aget-object` reads from an array of such arrays.
+TEST_F(OutlinerTypeAnalysisTest, queries_on_joined_interface_arrays) {
+  ClassCreator object_creator(type::java_lang_Object());
+  object_creator.create();
+  ClassCreator i_creator(DexType::make_type("LJoinI;"));
+  i_creator.set_access(ACC_INTERFACE | ACC_ABSTRACT);
+  i_creator.set_super(type::java_lang_Object());
+  auto* i_type = i_creator.create()->get_type();
+  for (const auto* name : {"LJoinA;", "LJoinB;"}) {
+    ClassCreator creator(DexType::make_type(name));
+    creator.set_super(type::java_lang_Object());
+    creator.add_interface(i_type);
+    creator.create();
+  }
+  auto* i_array = type::make_array_type(i_type);
+  auto* method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(I)V" (
+        (load-param v0)
+        (if-eqz v0 :a)
+        (invoke-static () "LFoo;.bs:()[LJoinB;")
+        (move-result-object v1)
+        (invoke-static () "LFoo;.bss:()[[LJoinB;")
+        (move-result-object v2)
+        (goto :join)
+        (:a)
+        (invoke-static () "LFoo;.as:()[LJoinA;")
+        (move-result-object v1)
+        (invoke-static () "LFoo;.ass:()[[LJoinA;")
+        (move-result-object v2)
+        (:join)
+        (invoke-static () "LFoo;.mark:()V")
+        (array-length v1)
+        (move-result-pseudo v3)
+        (const v4 0)
+        (aget-object v2 v4)
+        (move-result-pseudo-object v5)
+        (invoke-static (v5) "LFoo;.take:(Ljava/lang/Object;)V")
+        (return-void)
+      )))");
+  method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(method);
+  auto* mark = find_insn(method, [](IRInstruction* insn) {
+    return insn->opcode() == OPCODE_INVOKE_STATIC &&
+           insn->get_method()->get_name()->str() == "mark";
+  });
+  auto* take = find_insn(method, [](IRInstruction* insn) {
+    return insn->opcode() == OPCODE_INVOKE_STATIC &&
+           insn->get_method()->get_name()->str() == "take";
+  });
+  // The join itself, which none of the queries below may declare.
+  ASSERT_EQ(ota.supply_at(mark, 1).upper(), i_array);
+  EXPECT_EQ(art::declare_result(ota.value_at(mark, 1)), nullptr);
+  auto everywhere = [](IRInstruction*) { return true; };
+  EXPECT_EQ(
+      ota.demand_of_uses(ota.immediate_defs_at(mark, 1), everywhere).widest(),
+      nullptr);
+  EXPECT_EQ(art::declare_result(ota.value_at(take, 5)), nullptr);
+}
+
 // A parameter declared from the value the caller passes is never wider than an
 // integral value the caller holds, and is refused when no declared type
 // satisfies the uses.

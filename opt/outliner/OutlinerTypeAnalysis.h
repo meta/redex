@@ -266,10 +266,9 @@ class OutlinerTypeAnalysis {
       const Membership& candidate = {});
 
   // The value of `reg` where `anchor` reads it, typed for a declaration: its
-  // `supply_at`, except that a declared type is one type, not a set of values.
-  // So a reference takes the type that type inference gives the register, and
-  // a register only constants define takes a type from how the constants are
-  // used.
+  // `supply_at`, except that a register only constants define takes a type from
+  // how the constants are used, because a declared type is one type, not a set
+  // of constants.
   art::Value value_at(const IRInstruction* anchor, reg_t reg);
 
   // What reaches `reg` where `anchor` reads it, with constants kept as
@@ -323,6 +322,8 @@ class OutlinerTypeAnalysis {
   // Whether each `and`, `or` and `xor` analysed so far is boolean (true) or
   // int (false); nullopt when the type of an operand is unknown.
   UnorderedMap<const IRInstruction*, std::optional<bool>> m_bitwise_booleanness;
+  // The array reads whose `array_type_at` is being computed.
+  UnorderedSet<const IRInstruction*> m_array_reads_in_progress;
 
   art::Demand demand_of_use(IRInstruction* use, src_index_t src_index);
 
@@ -337,6 +338,13 @@ class OutlinerTypeAnalysis {
   const DexType* get_if_insn_type_demand(IRInstruction* insn);
 
   const DexType* get_type_demand(IRInstruction* insn, size_t src_index);
+
+  // The type of the array `reg` holds where `insn` reads it: a type that holds
+  // every array reaching it in every order ART may merge them
+  // (`art::Value::exact`), or nullptr. Type inference's join can be narrower:
+  // it joins an `A[]` and a `B[]`, whose classes share only the interface `I`,
+  // to `I[]`, which ART merges to `Object[]`.
+  const DexType* array_type_at(const IRInstruction* insn, reg_t reg);
 
   std::optional<UnorderedSet<const IRInstruction*>> get_defs(
       const UnorderedSet<const IRInstruction*>& insns);

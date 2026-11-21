@@ -7,12 +7,17 @@
 
 #include <gtest/gtest.h>
 
+#include "Creators.h"
 #include "DexCallSite.h"
 #include "DexClass.h"
+#include "DexFileTestHelper.h"
 #include "DexInstruction.h"
 #include "DexLoader.h"
+#include "IRAssembler.h"
 #include "RedexContext.h"
+#include "RedexTestUtils.h"
 #include "Show.h"
+#include "TypeUtil.h"
 
 TEST(Dex039Test, ReadDex039) {
   // const-method-handle.dex is sourced from https://fburl.com/prikp912
@@ -71,4 +76,38 @@ TEST(Dex039Test, ReadDex039) {
   EXPECT_EQ(idx->get_method_ids_size(), 23);
   EXPECT_EQ(idx->get_proto_ids_size(), 18);
   EXPECT_EQ(classes.size(), 2);
+}
+
+// `const-method-handle` and `const-method-type` are two code units long, and
+// the prototype that `const-method-type` loads need not be the prototype of
+// any method. Code that uses both reads back unchanged after it is written.
+TEST(Dex039Test, ReadWriteConstMethodHandleAndType) {
+  g_redex = new RedexContext();
+  // `(CSJ)Z` is the prototype of no method here.
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LConstants;.load:()V"
+     (
+      (const-method-type "(CSJ)Z")
+      (move-result-pseudo-object v0)
+      (const-method-handle invoke-instance "Ljava/lang/Object;.hashCode:()I")
+      (move-result-pseudo-object v1)
+      (return-void)
+     )
+    )
+  )");
+  ClassCreator creator(DexType::make_type("LConstants;"));
+  creator.set_super(type::java_lang_Object());
+  creator.add_method(method);
+  DexClasses classes{creator.create()};
+  const auto before = redex::show_instructions_by_method(classes);
+
+  auto tmpdir = redex::make_tmp_dir("dex039_test_%%%%%%%%");
+  auto output = write_dex_file(std::move(classes), tmpdir.path, 39);
+
+  delete g_redex;
+  g_redex = new RedexContext();
+  EXPECT_EQ(redex::show_instructions_by_method(load_dex_file(output, 39)),
+            before);
+  delete g_redex;
+  g_redex = nullptr;
 }

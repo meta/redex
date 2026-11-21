@@ -34,4 +34,7 @@ class Gatherable {
       std::vector<DexCallSite*>& /*lcallsite*/) const {}
   virtual void gather_methodhandles(
       std::vector<DexMethodHandle*>& /*lmethodhandle*/) const {}
+  // Protos referenced directly, not through a method, call site or method
+  // handle.
+  virtual void gather_protos(std::vector<DexProto*>& /*lproto*/) const {}
 };

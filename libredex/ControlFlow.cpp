@@ -1609,6 +1609,12 @@ void ControlFlowGraph::gather_callsites(
   }
 }
 
+void ControlFlowGraph::gather_protos(std::vector<DexProto*>& protos) const {
+  for (const auto& entry : m_blocks) {
+    entry.second->m_entries.gather_protos(protos);
+  }
+}
+
 void ControlFlowGraph::gather_methodhandles(
     std::vector<DexMethodHandle*>& methodhandles) const {
   for (const auto& entry : m_blocks) {

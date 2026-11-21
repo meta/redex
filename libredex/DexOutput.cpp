@@ -125,7 +125,7 @@ GatheredTypes::GatheredTypes(DexClasses* classes) : m_classes(classes) {
   build_method_map();
 
   gather_components(m_lstring, m_ltype, m_lfield, m_lmethod, m_lcallsite,
-                    m_lmethodhandle, *m_classes);
+                    m_lmethodhandle, m_lproto, *m_classes);
 }
 
 UnorderedSet<const DexString*> GatheredTypes::index_type_names() {
@@ -422,10 +422,11 @@ dexmethod_to_idx GatheredTypes::get_method_index(cmp_dmethod cmp) {
 dexproto_to_idx GatheredTypes::get_proto_index(cmp_dproto cmp) {
   // TODO: Profile and see whether a set first would be more efficient.
   std::vector<DexProto*> protos;
-  protos.reserve(m_lmethod.size() + m_lcallsite.size());
+  protos.reserve(m_lmethod.size() + m_lcallsite.size() + m_lproto.size());
   for (auto const& m : m_lmethod) {
     protos.push_back(m->get_proto());
   }
+  protos.insert(protos.end(), m_lproto.begin(), m_lproto.end());
   for (auto const& c : m_lcallsite) {
     protos.push_back(c->method_type());
     for (const auto& arg : c->args()) {

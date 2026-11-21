@@ -751,7 +751,7 @@ void DexOpcodeCallSite::gather_fields(std::vector<DexFieldRef*>& lfield) const {
   m_callsite->gather_fields(lfield);
 }
 
-size_t DexOpcodeMethodHandle::size() const { return 3; }
+size_t DexOpcodeMethodHandle::size() const { return 2; }
 
 void DexOpcodeMethodHandle::encode(DexOutputIdx* dodx, uint16_t*& insns) const {
   encode_opcode(insns);
@@ -783,7 +783,7 @@ void DexOpcodeData::encode(DexOutputIdx* /* unused */, uint16_t*& insns) const {
   insns += m_data_count;
 }
 
-size_t DexOpcodeProto::size() const { return 3; }
+size_t DexOpcodeProto::size() const { return 2; }
 
 void DexOpcodeProto::encode(DexOutputIdx* dodx, uint16_t*& insns) const {
   encode_opcode(insns);
@@ -795,6 +795,10 @@ void DexOpcodeProto::encode(DexOutputIdx* dodx, uint16_t*& insns) const {
 void DexOpcodeProto::gather_strings(
     std::vector<const DexString*>& lstring) const {
   m_proto->gather_strings(lstring);
+}
+
+void DexOpcodeProto::gather_protos(std::vector<DexProto*>& lproto) const {
+  lproto.push_back(m_proto);
 }
 
 void DexInstruction::encode(DexOutputIdx* /* unused */,

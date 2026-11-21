@@ -145,6 +145,7 @@ class IRCode {
   void gather_fields(std::vector<DexFieldRef*>& lfield) const;
   void gather_methods(std::vector<DexMethodRef*>& lmethod) const;
   void gather_callsites(std::vector<DexCallSite*>& lcallsite) const;
+  void gather_protos(std::vector<DexProto*>& lproto) const;
   void gather_methodhandles(std::vector<DexMethodHandle*>& lmethodhandle) const;
 
   void gather_init_classes(std::vector<const DexType*>& ltype) const;

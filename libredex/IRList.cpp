@@ -277,6 +277,26 @@ void MethodItemEntry::gather_methods(
   }
 }
 
+void MethodItemEntry::gather_protos(std::vector<DexProto*>& lproto) const {
+  switch (type) {
+  case MFLOW_TRY:
+  case MFLOW_CATCH:
+  case MFLOW_POSITION:
+  case MFLOW_FALLTHROUGH:
+  case MFLOW_TARGET:
+  case MFLOW_SOURCE_BLOCK:
+  case MFLOW_REMARK:
+  case MFLOW_DEBUG:
+    break;
+  case MFLOW_OPCODE:
+    insn->gather_protos(lproto);
+    break;
+  case MFLOW_DEX_OPCODE:
+    dex_insn->gather_protos(lproto);
+    break;
+  }
+}
+
 void MethodItemEntry::gather_callsites(
     std::vector<DexCallSite*>& lcallsite) const {
   switch (type) {
@@ -935,6 +955,12 @@ void IRList::gather_methods(std::vector<DexMethodRef*>& lmethod) const {
 void IRList::gather_callsites(std::vector<DexCallSite*>& lcallsite) const {
   for (const auto& mie : m_list) {
     mie.gather_callsites(lcallsite);
+  }
+}
+
+void IRList::gather_protos(std::vector<DexProto*>& lproto) const {
+  for (const auto& mie : m_list) {
+    mie.gather_protos(lproto);
   }
 }
 

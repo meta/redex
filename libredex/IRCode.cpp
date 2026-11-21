@@ -437,6 +437,8 @@ void translate_dex_to_ir(
                       static_cast<reg_t>(dex_insn->range_base() + i));
       }
     }
+    // Only the subclass of `DexInstruction` that holds a reference of a kind
+    // sets that kind, so these casts cannot fail.
     if (dex_insn->has_string()) {
       insn->set_string(
           dynamic_cast<const DexOpcodeString*>(dex_insn)->get_string());
@@ -455,6 +457,9 @@ void translate_dex_to_ir(
       insn->set_methodhandle(
           dynamic_cast<const DexOpcodeMethodHandle*>(dex_insn)
               ->get_methodhandle());
+    } else if (dex_insn->has_proto()) {
+      insn->set_proto(
+          dynamic_cast<const DexOpcodeProto*>(dex_insn)->get_proto());
     } else if (dex_opcode::has_literal(dex_op)) {
       insn->set_literal(dex_insn->get_literal());
     } else if (op == OPCODE_FILL_ARRAY_DATA) {
@@ -1329,6 +1334,14 @@ void IRCode::gather_methods(std::vector<DexMethodRef*>& lmethod) const {
     m_cfg->gather_methods(lmethod);
   } else {
     m_ir_list->gather_methods(lmethod);
+  }
+}
+
+void IRCode::gather_protos(std::vector<DexProto*>& lproto) const {
+  if (cfg_built()) {
+    m_cfg->gather_protos(lproto);
+  } else {
+    m_ir_list->gather_protos(lproto);
   }
 }
 

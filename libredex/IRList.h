@@ -32,6 +32,7 @@ class DexFieldRef;
 class DexInstruction;
 class DexMethodHandle;
 class DexMethodRef;
+class DexProto;
 struct DexPosition;
 class DexString;
 class DexType;
@@ -698,6 +699,7 @@ struct MethodItemEntry {
   void gather_methods(std::vector<DexMethodRef*>& lmethod) const;
   void gather_callsites(std::vector<DexCallSite*>& lcallsite) const;
   void gather_methodhandles(std::vector<DexMethodHandle*>& lmethodhandle) const;
+  void gather_protos(std::vector<DexProto*>& lproto) const;
 
   opcode::Branchingness branchingness() const;
 };
@@ -918,6 +920,7 @@ class IRList {
   void gather_methods(std::vector<DexMethodRef*>& lmethod) const;
   void gather_callsites(std::vector<DexCallSite*>& lcallsite) const;
   void gather_methodhandles(std::vector<DexMethodHandle*>& lmethodhandle) const;
+  void gather_protos(std::vector<DexProto*>& lproto) const;
 
   IRList::iterator erase(const IRList::iterator& it) {
     return m_list.erase(it);

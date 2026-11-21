@@ -222,6 +222,7 @@ class GatheredTypes {
   std::vector<DexMethodRef*> m_lmethod;
   std::vector<DexCallSite*> m_lcallsite;
   std::vector<DexMethodHandle*> m_lmethodhandle;
+  std::vector<DexProto*> m_lproto;
   DexClasses* m_classes;
   UnorderedMap<const DexString*, unsigned int> m_cls_load_strings;
   UnorderedMap<const DexString*, unsigned int> m_cls_strings;

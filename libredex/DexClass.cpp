@@ -2268,6 +2268,17 @@ void DexClass::gather_callsites(C& lcallsite) const {
 INSTANTIATE(DexClass::gather_callsites, DexCallSite*)
 
 template <typename C>
+void DexClass::gather_protos(C& lproto) const {
+  for (auto const& m : m_dmethods) {
+    m->gather_protos(lproto);
+  }
+  for (auto const& m : m_vmethods) {
+    m->gather_protos(lproto);
+  }
+}
+INSTANTIATE(DexClass::gather_protos, DexProto*)
+
+template <typename C>
 void DexClass::gather_methodhandles(C& lmethodhandle) const {
   for (auto const& m : m_dmethods) {
     m->gather_methodhandles(lmethodhandle);
@@ -2399,6 +2410,17 @@ void DexMethod::gather_callsites(C& lcallsite) const {
   }
 }
 INSTANTIATE(DexMethod::gather_callsites, DexCallSite*)
+
+template <typename C>
+void DexMethod::gather_protos(C& lproto) const {
+  // The method's own proto is handled with the method ref.
+  if (m_code) {
+    std::vector<DexProto*> proto_vec;
+    m_code->gather_protos(proto_vec);
+    c_append_all(lproto, proto_vec.begin(), proto_vec.end());
+  }
+}
+INSTANTIATE(DexMethod::gather_protos, DexProto*)
 
 template <typename C>
 void DexMethod::gather_methodhandles(C& lmethodhandle) const {
@@ -2600,6 +2622,7 @@ void gather_components(std::vector<const DexString*>& lstring,
                        std::vector<DexMethodRef*>& lmethod,
                        std::vector<DexCallSite*>& lcallsite,
                        std::vector<DexMethodHandle*>& lmethodhandle,
+                       std::vector<DexProto*>& lproto,
                        const DexClasses& classes,
                        bool exclude_loads) {
   // Gather references reachable from each class.
@@ -2609,9 +2632,10 @@ void gather_components(std::vector<const DexString*>& lstring,
   UnorderedSet<DexMethodRef*> methods;
   UnorderedSet<DexCallSite*> callsites;
   UnorderedSet<DexMethodHandle*> methodhandles;
+  UnorderedSet<DexProto*> protos;
   // Inside a lambda to ensure only visibility of the sets.
   [&classes, &exclude_loads, &strings, &types, &fields, &methods, &callsites,
-   &methodhandles]() {
+   &methodhandles, &protos]() {
     for (auto const& cls : classes) {
       cls->gather_strings(strings, exclude_loads);
       cls->gather_types(types);
@@ -2619,6 +2643,7 @@ void gather_components(std::vector<const DexString*>& lstring,
       cls->gather_methods(methods);
       cls->gather_callsites(callsites);
       cls->gather_methodhandles(methodhandles);
+      cls->gather_protos(protos);
     }
 
     // Gather types and strings needed for field and method refs.
@@ -2630,6 +2655,11 @@ void gather_components(std::vector<const DexString*>& lstring,
     for (auto* field : UnorderedIterable(fields)) {
       field->gather_types_shallow(types);
       field->gather_strings_shallow(strings);
+    }
+
+    for (auto* proto : UnorderedIterable(protos)) {
+      proto->gather_types(types);
+      proto->gather_strings(strings);
     }
 
     // Gather strings needed for each type.
@@ -2646,6 +2676,7 @@ void gather_components(std::vector<const DexString*>& lstring,
   insert_unordered_iterable(lmethod, lmethod.end(), methods);
   insert_unordered_iterable(lcallsite, lcallsite.end(), callsites);
   insert_unordered_iterable(lmethodhandle, lmethodhandle.end(), methodhandles);
+  insert_unordered_iterable(lproto, lproto.end(), protos);
 
   // This retains pre-set computation behavior.
   sort_unique(lstring);
@@ -2654,6 +2685,7 @@ void gather_components(std::vector<const DexString*>& lstring,
   sort_unique(lmethod);
   sort_unique(lcallsite);
   sort_unique(lmethodhandle);
+  sort_unique(lproto);
 }
 
 std::string DexField::self_show() const { return show(this); }

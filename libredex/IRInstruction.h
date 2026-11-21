@@ -416,6 +416,12 @@ class IRInstruction final {
 
   void gather_methodhandles(std::vector<DexMethodHandle*>& lmethodhandle) const;
 
+  void gather_protos(std::vector<DexProto*>& lproto) const {
+    if (has_proto()) {
+      lproto.push_back(m_proto);
+    }
+  }
+
   // Compute current instruction's hash.
   uint64_t hash() const;
 

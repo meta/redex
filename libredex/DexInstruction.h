@@ -354,6 +354,7 @@ class DexOpcodeProto : public DexInstruction {
   size_t size() const override;
   void encode(DexOutputIdx* dodx, uint16_t*& insns) const override;
   void gather_strings(std::vector<const DexString*>& lstring) const override;
+  void gather_protos(std::vector<DexProto*>& lproto) const override;
 
   DexOpcodeProto* clone() const override { return new DexOpcodeProto(*this); }
 

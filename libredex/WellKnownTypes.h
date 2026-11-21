@@ -98,7 +98,13 @@
            "Ljava/lang/Class;.forName:(Ljava/lang/String;)Ljava/"             \
            "lang/Class;")                                                     \
   FOR_EACH(java_lang_Class_isInstance,                                        \
-           "Ljava/lang/Class;.isInstance:(Ljava/lang/Object;)Z")
+           "Ljava/lang/Class;.isInstance:(Ljava/lang/Object;)Z")              \
+  FOR_EACH(java_lang_reflect_Array_newInstance,                               \
+           "Ljava/lang/reflect/Array;.newInstance:"                           \
+           "(Ljava/lang/Class;I)Ljava/lang/Object;")                          \
+  FOR_EACH(java_lang_reflect_Array_newInstance_dimensions,                    \
+           "Ljava/lang/reflect/Array;.newInstance:"                           \
+           "(Ljava/lang/Class;[I)Ljava/lang/Object;")
 
 #define KOTLIN_JVM_INTERNAL_TYPES                                              \
   FOR_EACH(kotlin_jvm_internal_Lambda, "Lkotlin/jvm/internal/Lambda;")         \

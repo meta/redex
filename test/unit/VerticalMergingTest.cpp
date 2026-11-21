@@ -10,11 +10,13 @@
 #include <gtest/gtest.h>
 
 #include "ConfigFiles.h"
+#include "ControlFlow.h"
 #include "Creators.h"
 #include "DexClass.h"
 #include "IRAssembler.h"
 #include "PassManager.h"
 #include "RedexTest.h"
+#include "ScopedCFG.h"
 #include "TypeUtil.h"
 #include "VerticalMerging.h"
 
@@ -479,4 +481,92 @@ TEST_F(VerticalMergingTest, mergesParentWhoseAnnotationNamesSubclass) {
   EXPECT_EQ(run_pass(create_user(kNewImpl)), 2);
   ASSERT_NE(impl->get_anno_set(), nullptr);
   EXPECT_EQ(impl->get_anno_set()->size(), 1);
+}
+
+namespace {
+
+// Java: `Base[][] a = new Base[2][3];`, as d8 compiles it, with `<extra>`
+// inserted after the class literal is loaded into v3.
+std::string allocate_multi_dimensional_array(const std::string& extra,
+                                             const std::string& component) {
+  return R"(
+    (
+      (const v0 2)
+      (const v1 3)
+      (filled-new-array (v0 v1) "[I")
+      (move-result-object v2)
+      (const-class "Lcom/redextest/Base;")
+      (move-result-pseudo-object v3)
+      )" +
+         extra + R"(
+      (invoke-static ()" +
+         component +
+         R"( v2) "Ljava/lang/reflect/Array;.newInstance:(Ljava/lang/Class;[I)Ljava/lang/Object;")
+      (move-result-object v4)
+      (check-cast v4 "[[Lcom/redextest/Base;")
+      (move-result-pseudo-object v5)
+      (new-instance "Lcom/redextest/Impl;")
+      (move-result-pseudo-object v6)
+      (invoke-direct (v6) "Lcom/redextest/Impl;.<init>:()V")
+      (return-object v5)
+    )
+  )";
+}
+
+const DexType* get_const_class_type(DexClass* user) {
+  cfg::ScopedCFG cfg(user->get_dmethods().front()->get_code());
+  for (const auto& mie : cfg::InstructionIterable(*cfg)) {
+    if (opcode::is_const_class(mie.insn->opcode())) {
+      return mie.insn->get_type();
+    }
+  }
+  return nullptr;
+}
+
+} // namespace
+
+// A class literal that only names the component type of `Array.newInstance`
+// allocates an array, like `new Base[2]`, so `Base` still merges and the array
+// becomes an `Impl[][]`.
+TEST_F(VerticalMergingTest, mergesAbstractComponentOfMultiDimensionalArray) {
+  auto* user = create_user(allocate_multi_dimensional_array("", "v3"));
+
+  EXPECT_EQ(run_pass(user), 2);
+  EXPECT_EQ(get_const_class_type(user), impl->get_type());
+}
+
+TEST_F(VerticalMergingTest, mergesAbstractComponentPassedThroughMove) {
+  auto* user = create_user(
+      allocate_multi_dimensional_array("(move-object v7 v3)", "v7"));
+
+  EXPECT_EQ(run_pass(user), 2);
+}
+
+// Java: `Base[] a = (Base[]) Array.newInstance(Base.class, 2);`.
+TEST_F(VerticalMergingTest, mergesAbstractComponentOfArrayNewInstance) {
+  auto* user = create_user(R"(
+    (
+      (const v0 2)
+      (const-class "Lcom/redextest/Base;")
+      (move-result-pseudo-object v1)
+      (invoke-static (v1 v0) "Ljava/lang/reflect/Array;.newInstance:(Ljava/lang/Class;I)Ljava/lang/Object;")
+      (move-result-object v2)
+      (new-instance "Lcom/redextest/Impl;")
+      (move-result-pseudo-object v3)
+      (invoke-direct (v3) "Lcom/redextest/Impl;.<init>:()V")
+      (return-object v2)
+    )
+  )");
+
+  EXPECT_EQ(run_pass(user), 2);
+}
+
+// The literal also reaches `map.put(Base.class, a)`, which observes its
+// identity.
+TEST_F(VerticalMergingTest, keepsAbstractComponentWithOtherUse) {
+  auto* user = create_user(allocate_multi_dimensional_array(
+      R"((invoke-static (v3) "Lcom/redextest/User;.observe:(Ljava/lang/Class;)V"))",
+      "v3"));
+
+  EXPECT_EQ(run_pass(user), 3);
 }

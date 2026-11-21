@@ -18,6 +18,9 @@
 #include "DexUtil.h"
 #include "EditableCfgAdapter.h"
 #include "IROpcode.h"
+#include "Lazy.h"
+#include "LiveRange.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "RClass.h"
 #include "Resolver.h"
@@ -397,6 +400,32 @@ size_t record_annotation(const Scope& scope,
 }
 
 /**
+ * d8 compiles `new T[n][m]` to `Array.newInstance(T.class, new int[] {n, m})`.
+ * When code passes a class literal only as the element type to
+ * `Array.newInstance`, the literal just picks the type of the arrays to
+ * allocate, as `new-array` does, and its identity is never observed. The same
+ * holds for a literal that nothing uses.
+ */
+bool is_array_component_type(IRInstruction* const_class,
+                             const live_range::DefUseChains& def_use_chains) {
+  auto it = def_use_chains.find(const_class);
+  if (it == def_use_chains.end()) {
+    return true;
+  }
+  return unordered_all_of(it->second, [](const live_range::Use& use) {
+    if (opcode::is_a_move(use.insn->opcode())) {
+      return true;
+    }
+    if (use.src_index != 0 || !use.insn->has_method()) {
+      return false;
+    }
+    const auto* callee = use.insn->get_method();
+    return callee == method::java_lang_reflect_Array_newInstance() ||
+           callee == method::java_lang_reflect_Array_newInstance_dimensions();
+  });
+}
+
+/**
  * 1. Analyze type usages.
  * 2. To simplify the method/field references updating, exclude the pure refs.
  * When ResolveRefsPass runs before the pass, the step should not drop many
@@ -407,7 +436,17 @@ size_t record_code_reference(const Scope& scope,
                              DontMergeStatus* dont_merge_status) {
   AtomicStatCounter<size_t> type_like_string_refs{0};
   walk::parallel::code(scope, [&](DexMethod* /*method*/, IRCode& code) {
-    for (const auto& mie : cfg::InstructionIterable(code.cfg())) {
+    auto& cfg = code.cfg();
+    // Built only for methods with a class literal, which most methods lack.
+    Lazy<live_range::DefUseChains> def_use_chains([&cfg] {
+      return live_range::MoveAwareChains(
+                 cfg, /* ignore_unreachable */ false,
+                 [](const IRInstruction* insn) {
+                   return opcode::is_const_class(insn->opcode());
+                 })
+          .get_def_use_chains();
+    });
+    for (const auto& mie : cfg::InstructionIterable(cfg)) {
       auto* insn = mie.insn;
       if (insn->has_type()) {
         const auto* type = type::get_element_type_if_array(insn->get_type());
@@ -420,7 +459,8 @@ size_t record_code_reference(const Scope& scope,
           // semantic error.
           record_dont_merge_state(type, kStrict, dont_merge_status);
           continue;
-        } else if (opcode::is_const_class(insn->opcode())) {
+        } else if (opcode::is_const_class(insn->opcode()) &&
+                   !is_array_component_type(insn, *def_use_chains)) {
           record_class_literal(type, dont_merge_status);
           TRACE(VMERGE, 9, "dont_merge %s as mergeable for class literal: %s",
                 SHOW(type), SHOW(insn));

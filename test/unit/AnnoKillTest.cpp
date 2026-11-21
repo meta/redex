@@ -5,12 +5,15 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <algorithm>
+
 #include <gtest/gtest.h>
 
 #include "AnnoKill.h"
 #include "Creators.h"
 #include "DexAnnotation.h"
 #include "DexClass.h"
+#include "IRAssembler.h"
 #include "RedexTest.h"
 #include "TypeUtil.h"
 
@@ -76,6 +79,51 @@ class AnnoKillTest : public RedexTest {
     }
     EXPECT_EQ(kill.get_stats().annotations_killed, 2u);
   }
+
+  // Whether the annotation class LAnno; survives AnnoKill when the only code
+  // that names it is `code`, a static method of another class.
+  static bool keeps_annotation_named_by(const std::string& code) {
+    Scope scope;
+    auto* annotation_type =
+        DexType::make_type("Ljava/lang/annotation/Annotation;");
+    ClassCreator annotation_interface(annotation_type);
+    annotation_interface.set_super(type::java_lang_Object());
+    annotation_interface.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+    annotation_interface.set_external();
+    annotation_interface.add_method(
+        DexMethod::make_method(
+            "Ljava/lang/annotation/Annotation;.annotationType:()Ljava/lang/"
+            "Class;")
+            ->make_concrete(ACC_PUBLIC | ACC_ABSTRACT, /* is_virtual */ true));
+    annotation_interface.create();
+
+    auto* anno_type = DexType::make_type("LAnno;");
+    ClassCreator annotation(anno_type);
+    annotation.set_super(type::java_lang_Object());
+    annotation.add_interface(annotation_type);
+    annotation.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT |
+                          ACC_ANNOTATION);
+    annotation.add_method(DexMethod::make_method("LAnno;.value:()I")
+                              ->make_concrete(ACC_PUBLIC | ACC_ABSTRACT,
+                                              /* is_virtual */ true));
+    scope.push_back(annotation.create());
+
+    ClassCreator user(DexType::make_type("LUser;"));
+    user.set_super(type::java_lang_Object());
+    user.add_method(DexMethod::make_method("LUser;.use:()V")
+                        ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                                        assembler::ircode_from_string(code),
+                                        /* is_virtual */ false));
+    scope.push_back(user.create());
+
+    AnnoKill kill(scope, /* only_force_kill */ false,
+                  /* kill_bad_signatures */ false, /* keep */ {}, /* kill */ {},
+                  /* force_kill */ {}, /* class_hierarchy_keep_annos */ {},
+                  /* annotated_keep_annos */ {});
+    kill.kill_annotations();
+    return std::find(scope.begin(), scope.end(), type_class(anno_type)) !=
+           scope.end();
+  }
 };
 
 TEST_F(AnnoKillTest, KeepsNativeCallingConventions) {
@@ -96,4 +144,20 @@ TEST_F(AnnoKillTest, KeepsNativeAnnotationsWithoutDefinitions) {
 
 TEST_F(AnnoKillTest, KeepsForcedNativeAnnotationsWithoutDefinitions) {
   check_native_annotations(true, true, false);
+}
+
+// A call on an annotation-typed receiver names the annotation class even when
+// the method is declared in `Annotation`.
+TEST_F(AnnoKillTest, KeepsAnnotationNamedByCallOfInheritedMethod) {
+  EXPECT_TRUE(keeps_annotation_named_by(R"((
+    (const v0 0)
+    (invoke-interface (v0) "LAnno;.annotationType:()Ljava/lang/Class;")
+    (return-void)
+  ))"));
+}
+
+TEST_F(AnnoKillTest, RemovesAnnotationNamedByNoCode) {
+  EXPECT_FALSE(keeps_annotation_named_by(R"((
+    (return-void)
+  ))"));
 }

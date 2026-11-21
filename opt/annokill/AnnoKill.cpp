@@ -280,13 +280,22 @@ AnnoKill::AnnoSet AnnoKill::get_referenced_annos() {
       concurrent_referenced_annos.insert(t);
     }
   };
+  // Marks `t` as referenced if it is an annotation type, and returns whether it
+  // is one.
+  auto add_if_anno = [&](const DexType* t) {
+    if (all_annos.count(t) == 0) {
+      return false;
+    }
+    add_concurrent_referenced_anno(t);
+    return true;
+  };
   // mark an annotation as "unremovable" if any opcode references the annotation
   // type
   walk::parallel::opcodes(
       m_scope,
       [](DexMethod*) { return true; },
-      [&add_concurrent_referenced_anno, &all_annos](DexMethod* meth,
-                                                    IRInstruction* insn) {
+      [&add_concurrent_referenced_anno, &add_if_anno,
+       &all_annos](DexMethod* meth, IRInstruction* insn) {
         // don't look at methods defined on the annotation itself
         auto* const meth_cls_type = meth->get_class();
         if (all_annos.count(meth_cls_type) > 0) {
@@ -311,6 +320,9 @@ AnnoKill::AnnoSet AnnoKill::get_referenced_annos() {
           }
         } else if (insn->has_field()) {
           auto* field = insn->get_field();
+          // The reference can name a subtype of the class that declares the
+          // field; both count.
+          bool referenced = add_if_anno(field->get_class());
           auto* fdef = resolve_field(field,
                                      opcode::is_an_sfield_op(insn->opcode())
                                          ? FieldSearch::Static
@@ -319,17 +331,8 @@ AnnoKill::AnnoSet AnnoKill::get_referenced_annos() {
             field = fdef;
           }
 
-          bool referenced = false;
-          auto* owner = field->get_class();
-          if (all_annos.count(owner) > 0) {
-            referenced = true;
-            add_concurrent_referenced_anno(owner);
-          }
-          auto* type = field->get_type();
-          if (all_annos.count(type) > 0) {
-            referenced = true;
-            add_concurrent_referenced_anno(type);
-          }
+          referenced |= add_if_anno(field->get_class());
+          referenced |= add_if_anno(field->get_type());
           if (referenced) {
             TRACE(ANNO,
                   3,
@@ -341,30 +344,20 @@ AnnoKill::AnnoSet AnnoKill::get_referenced_annos() {
           }
         } else if (insn->has_method()) {
           auto* method = insn->get_method();
+          // The reference can name a subtype of the class that declares the
+          // method; both count.
+          bool referenced = add_if_anno(method->get_class());
           DexMethod* methdef =
               resolve_method_deprecated(method, opcode_to_search(insn), meth);
           if (methdef != nullptr) {
             method = methdef;
           }
 
-          bool referenced = false;
-          auto* owner = method->get_class();
-          if (all_annos.count(owner) > 0) {
-            referenced = true;
-            add_concurrent_referenced_anno(owner);
-          }
+          referenced |= add_if_anno(method->get_class());
           auto* proto = method->get_proto();
-          auto* rtype = proto->get_rtype();
-          if (all_annos.count(rtype) > 0) {
-            referenced = true;
-            add_concurrent_referenced_anno(rtype);
-          }
-          auto* arg_list = proto->get_args();
-          for (const auto& arg : *arg_list) {
-            if (all_annos.count(arg) > 0) {
-              referenced = true;
-              add_concurrent_referenced_anno(arg);
-            }
+          referenced |= add_if_anno(proto->get_rtype());
+          for (const auto& arg : *proto->get_args()) {
+            referenced |= add_if_anno(arg);
           }
           if (referenced) {
             TRACE(ANNO,

@@ -25,16 +25,27 @@ const IRInstruction* get_first_load_param(const cfg::ControlFlowGraph& cfg) {
   return insn;
 }
 
-class Analyzer final : public BaseIRAnalyzer<UninitializedObjectEnvironment> {
+// A throwing instruction has no effect on the paths where it throws: a handler
+// sees the registers as they were before it. So every effect is applied on the
+// paths where the instruction does not throw (`analyze_no_throw`); a `<init>`
+// that throws leaves its object uninitialized in the handler, as ART's verifier
+// does.
+class Analyzer final
+    : public BaseEdgeAwareIRAnalyzer<UninitializedObjectEnvironment> {
  public:
   explicit Analyzer(DexMethod* method)
-      : BaseIRAnalyzer(method->get_code()->cfg()),
+      : BaseEdgeAwareIRAnalyzer(method->get_code()->cfg()),
         m_init_first_load_param(
             method::is_init(method)
                 ? get_first_load_param(method->get_code()->cfg())
                 : nullptr) {}
 
-  void analyze_instruction(
+ protected:
+  void analyze_instruction_normal(
+      const IRInstruction* /* insn */,
+      UninitializedObjectEnvironment* /* current_state */) const override {}
+
+  void analyze_no_throw(
       const IRInstruction* insn,
       UninitializedObjectEnvironment* current_state) const override {
     if (opcode::is_a_move(insn->opcode())) {
@@ -71,7 +82,7 @@ UninitializedObjectEnvironments get_uninitialized_object_environments(
     auto env = fp_iter.get_entry_state_at(block);
     for (const auto& mie : InstructionIterable(block)) {
       res.emplace(mie.insn, env);
-      fp_iter.analyze_instruction(mie.insn, &env);
+      fp_iter.analyze_instruction(mie.insn, &env, /* is_last */ false);
     }
   }
   return res;

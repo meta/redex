@@ -20,6 +20,7 @@
 #include "DexAnnotation.h"
 #include "DexCallSite.h"
 #include "DexInstruction.h"
+#include "DexLimits.h"
 #include "DexMethodHandle.h"
 #include "DexStructure.h"
 #include "DexUtil.h"
@@ -218,8 +219,12 @@ class TypedNonReturningMethodsTest : public RedexTest {
   }
 
   // Runs only the typing, for inputs that the PassManager's IR type checker
-  // does not support, such as method handles.
-  typed_nonreturning_methods::Stats run_typing_only() {
+  // does not support, such as method handles, or to pass `reserved_mrefs` or
+  // the method `profiles`.
+  typed_nonreturning_methods::Stats run_typing_only(
+      size_t reserved_mrefs = 0,
+      method_profiles::MethodProfiles* profiles = nullptr) {
+    method_profiles::MethodProfiles no_profiles;
     auto stores = make_stores();
     walk::code(build_class_scope(stores), [](DexMethod*, IRCode& code) {
       if (!code.cfg_built()) {
@@ -233,7 +238,17 @@ class TypedNonReturningMethodsTest : public RedexTest {
     return typed_nonreturning_methods::type_nonreturning_methods(
         stores, build_class_scope(stores),
         DexType::make_type(UNREACHABLE_EXCEPTION), profile,
-        baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX);
+        baseline_profiles::DEFAULT_ART_HUGE_METHOD_MAX, reserved_mrefs,
+        profiles == nullptr ? no_profiles : *profiles);
+  }
+
+  // The method references of the dex at `index`.
+  size_t count_method_refs(size_t index) const {
+    UnorderedSet<DexMethodRef*> refs;
+    for (const auto* cls : m_dexen.at(index)) {
+      cls->gather_methods(refs);
+    }
+    return refs.size();
   }
 
   // Runs `probe` (if any), UnreachableLoweringPass, then `after` (if any).
@@ -342,6 +357,31 @@ class TypedNonReturningMethodsTest : public RedexTest {
       auto caller = "LCaller;.caller" + std::to_string(i) + ":()V";
       EXPECT_EQ(count_invokes(caller, FAIL), 1) << caller;
       EXPECT_EQ(count_invokes(caller, CREATE_AND_THROW), 1) << caller;
+    }
+  }
+
+  // The body moved to a new method with the typed signature, `fail` became a
+  // stub that calls it, and every caller in `cls_name` calls the new method
+  // and throws its result.
+  static void expect_typed_with_stub(const DexMethod* fail,
+                                     size_t callers,
+                                     const std::string& code = FAIL_CODE,
+                                     const std::string& cls_name = "LCaller;") {
+    EXPECT_EQ(get_def(FAIL), fail);
+    auto* typed = get_def(TYPED_FAIL);
+    ASSERT_NE(typed, nullptr);
+    EXPECT_NE(typed, fail);
+    EXPECT_EQ(typed->get_access(), fail->get_access());
+    EXPECT_TRUE(code_is(TYPED_FAIL, code));
+    EXPECT_TRUE(code_is(FAIL, R"((
+      (load-param-object v0)
+      (invoke-static (v0) "LFailures;.fail:(Ljava/lang/String;)Lcom/redex/UnreachableException;")
+      (return-void)
+    ))"));
+    for (const auto& caller : caller_signatures(callers, cls_name)) {
+      EXPECT_EQ(count_invokes(caller, TYPED_FAIL), 1) << caller;
+      EXPECT_EQ(count_invokes(caller, FAIL), 0) << caller;
+      EXPECT_EQ(count_invokes(caller, CREATE_AND_THROW), 0) << caller;
     }
   }
 
@@ -977,31 +1017,72 @@ TEST_F(TypedNonReturningMethodsTest, split_off_typed_method_passes_all_args) {
 // References and signature collisions.
 
 TEST_F(TypedNonReturningMethodsTest, no_optimizations_caller) {
+  // The caller that must not change keeps calling the original signature, now
+  // a stub, and lowers its `unreachable` as before; every other reference,
+  // including one that ignores the result, moves to the typed method.
   auto* fail = add_failures_class()->get_dmethods().front();
   add_callers(20);
   auto* cls =
       add_class("LBlocked;", type::java_lang_Object(),
                 {{"LBlocked;.call:()V", ACC_PUBLIC | ACC_STATIC, CALLER_CODE}});
   cls->get_dmethods().front()->rstate.set_no_optimizations();
-  run_pass(/* enabled */ true);
-  expect_unchanged(fail, 20);
-}
-
-TEST_F(TypedNonReturningMethodsTest, reference_from_no_optimizations_clinit) {
-  auto* fail = add_failures_class()->get_dmethods().front();
-  add_callers(20);
-  auto* cls =
-      add_class("LBlocked;", type::java_lang_Object(),
-                {{"LBlocked;.<clinit>:()V", ACC_STATIC | ACC_CONSTRUCTOR,
-                  R"((
+  add_class("LIgnoring;", type::java_lang_Object(),
+            {{"LIgnoring;.ignore:()V", ACC_PUBLIC | ACC_STATIC, R"((
     (const-string "name")
     (move-result-pseudo-object v0)
     (invoke-static (v0) "LFailures;.fail:(Ljava/lang/String;)V")
     (return-void)
   ))"}});
+  run_pass(/* enabled */ true);
+  expect_typed_with_stub(fail, 20);
+  EXPECT_EQ(count_invokes("LBlocked;.call:()V", FAIL), 1);
+  EXPECT_EQ(count_invokes("LBlocked;.call:()V", CREATE_AND_THROW), 1);
+  EXPECT_EQ(count_invokes("LIgnoring;.ignore:()V", TYPED_FAIL), 1);
+  EXPECT_EQ(metric("typed_nonreturning_methods"), 1);
+  EXPECT_EQ(metric("typed_nonreturning_method_stubs"), 1);
+  EXPECT_EQ(metric("typed_nonreturning_method_call_sites"), 20);
+}
+
+TEST_F(TypedNonReturningMethodsTest, reference_from_no_optimizations_clinit) {
+  auto* fail = add_failures_class()->get_dmethods().front();
+  add_callers(20);
+  constexpr const char* CLINIT_CODE = R"((
+    (const-string "name")
+    (move-result-pseudo-object v0)
+    (invoke-static (v0) "LFailures;.fail:(Ljava/lang/String;)V")
+    (return-void)
+  ))";
+  auto* cls = add_class(
+      "LBlocked;", type::java_lang_Object(),
+      {{"LBlocked;.<clinit>:()V", ACC_STATIC | ACC_CONSTRUCTOR, CLINIT_CODE}});
   cls->get_clinit()->rstate.set_no_optimizations();
   run_pass(/* enabled */ true);
-  expect_unchanged(fail, 20);
+  expect_typed_with_stub(fail, 20);
+  EXPECT_TRUE(code_is("LBlocked;.<clinit>:()V", CLINIT_CODE));
+}
+
+TEST_F(TypedNonReturningMethodsTest, recursive_method_with_stub) {
+  // The recursive call moves with the body and calls the typed method.
+  const auto* code = R"((
+    (load-param-object v0)
+    (invoke-static (v0) "LFailures;.fail:(Ljava/lang/String;)V")
+    (unreachable v1)
+    (throw v1)
+  ))";
+  auto* fail = add_failures_class(code)->get_dmethods().front();
+  add_callers(20);
+  add_class("LBlocked;", type::java_lang_Object(),
+            {{"LBlocked;.call:()V", ACC_PUBLIC | ACC_STATIC, CALLER_CODE}})
+      ->get_dmethods()
+      .front()
+      ->rstate.set_no_optimizations();
+  run_pass(/* enabled */ true);
+  expect_typed_with_stub(fail, 20, R"((
+    (load-param-object v0)
+    (invoke-static (v0) "LFailures;.fail:(Ljava/lang/String;)Lcom/redex/UnreachableException;")
+    (move-result-object v1)
+    (throw v1)
+  ))");
 }
 
 TEST_F(TypedNonReturningMethodsTest, metadata_references) {
@@ -1118,19 +1199,41 @@ TEST_F(TypedNonReturningMethodsTest, metadata_references) {
       break;
     }
     }
+    // Every such reference keeps the original signature, as a stub.
     if (kind == Kind::ConstMethodHandle || kind == Kind::CallSiteArgument) {
       auto stats = run_typing_only();
-      EXPECT_EQ(stats.rejected_methods, 1);
-      EXPECT_EQ(stats.typed_methods, 0);
-      EXPECT_EQ(get_def(FAIL), fail);
-      EXPECT_EQ(DexMethod::get_method(TYPED_FAIL), nullptr);
-      EXPECT_TRUE(code_is(FAIL, FAIL_CODE));
-      EXPECT_TRUE(code_is("LCaller;.caller0:()V", CALLER_CODE));
+      EXPECT_EQ(stats.rejected_methods, 0);
+      EXPECT_EQ(stats.typed_methods, 1);
+      EXPECT_EQ(stats.stub_methods, 1);
+      expect_typed_with_stub(fail, 0);
+      EXPECT_EQ(count_invokes("LCaller;.caller0:()V", TYPED_FAIL), 1);
       continue;
     }
     run_pass(/* enabled */ true);
-    expect_unchanged(fail, 20);
+    expect_typed_with_stub(fail, 20);
+    EXPECT_EQ(metric("typed_nonreturning_method_stubs"), 1);
   }
+}
+
+TEST_F(TypedNonReturningMethodsTest, method_handle_keeps_original) {
+  auto* fail = add_failures_class()->get_dmethods().front();
+  add_callers(20);
+  auto* handle = new DexMethodHandle(METHOD_HANDLE_TYPE_INVOKE_STATIC, fail);
+  g_redex->publish_methodhandle(handle);
+  auto* holder = add_class("LHolder;", type::java_lang_Object(),
+                           {{"LHolder;.m:()V", ACC_PUBLIC | ACC_STATIC,
+                             R"(((const v0 0) (return-void)))"}});
+  auto* code = holder->get_dmethods().front()->get_code();
+  code->insert_before(code->begin(),
+                      (new IRInstruction(OPCODE_CONST_METHOD_HANDLE))
+                          ->set_methodhandle(handle));
+  code->insert_before(
+      std::next(code->begin()),
+      (new IRInstruction(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT))->set_dest(0));
+  run_typing_only();
+  expect_typed_with_stub(fail, 20);
+  EXPECT_EQ(handle->methodref(), fail);
+  EXPECT_EQ(show(handle->methodref()), FAIL);
 }
 
 TEST_F(TypedNonReturningMethodsTest, existing_method_with_new_signature) {
@@ -1303,6 +1406,171 @@ TEST_F(TypedNonReturningMethodsTest, dex_with_only_ignored_results) {
       expect_typed(fail, sites);
     }
   }
+}
+
+TEST_F(TypedNonReturningMethodsTest, stub_profitability_threshold) {
+  // In the single dex, the stub costs the proto (12 bytes), a second method
+  // reference (8 bytes) and its code and encoded_method (30 bytes): 50 bytes,
+  // which 9 sites pay for and 8 do not.
+  for (size_t sites : {8, 9}) {
+    SCOPED_TRACE(sites);
+    reset();
+    auto* fail = add_failures_class()->get_dmethods().front();
+    add_callers(sites);
+    add_class("LBlocked;", type::java_lang_Object(),
+              {{"LBlocked;.call:()V", ACC_PUBLIC | ACC_STATIC, CALLER_CODE}})
+        ->get_dmethods()
+        .front()
+        ->rstate.set_no_optimizations();
+    run_pass(/* enabled */ true);
+    if (sites == 8) {
+      expect_unchanged(fail, sites);
+      EXPECT_EQ(metric("typed_nonreturning_methods_unprofitable"), 1);
+    } else {
+      expect_typed_with_stub(fail, sites);
+    }
+  }
+}
+
+TEST_F(TypedNonReturningMethodsTest, stub_method_refs_per_dex) {
+  // The typed signature adds a proto to the defining dex and the callers'
+  // dex (24 bytes) and the stub 30 bytes. A second method reference goes into
+  // the defining dex, and into the callers' dex only if it also holds the
+  // reference that must not change (8 bytes each): 62 bytes with the blocked
+  // caller in a third dex, 70 with it beside the callers.
+  for (bool blocked_beside_callers : {false, true}) {
+    size_t threshold = blocked_beside_callers ? 12 : 11;
+    for (size_t sites : {threshold - 1, threshold}) {
+      SCOPED_TRACE(blocked_beside_callers);
+      SCOPED_TRACE(sites);
+      reset();
+      auto* fail = add_failures_class()->get_dmethods().front();
+      start_new_dex();
+      add_callers(sites);
+      if (!blocked_beside_callers) {
+        start_new_dex();
+      }
+      add_class("LBlocked;", type::java_lang_Object(),
+                {{"LBlocked;.call:()V", ACC_PUBLIC | ACC_STATIC, CALLER_CODE}})
+          ->get_dmethods()
+          .front()
+          ->rstate.set_no_optimizations();
+      run_pass(/* enabled */ true);
+      if (sites < threshold) {
+        expect_unchanged(fail, sites);
+        EXPECT_EQ(metric("typed_nonreturning_methods_unprofitable"), 1);
+      } else {
+        expect_typed_with_stub(fail, sites);
+      }
+    }
+  }
+}
+
+TEST_F(TypedNonReturningMethodsTest, stub_needs_method_ref_room) {
+  // The defining dex, which also holds the callers, needs room for the typed
+  // method's reference beside the references that stay reserved.
+  for (bool room : {false, true}) {
+    SCOPED_TRACE(room);
+    reset();
+    auto* fail = add_failures_class()->get_dmethods().front();
+    add_callers(20);
+    add_class("LBlocked;", type::java_lang_Object(),
+              {{"LBlocked;.call:()V", ACC_PUBLIC | ACC_STATIC, CALLER_CODE}})
+        ->get_dmethods()
+        .front()
+        ->rstate.set_no_optimizations();
+    size_t reserved = kMaxMethodRefs - count_method_refs(0) - (room ? 1 : 0);
+    auto stats = run_typing_only(reserved);
+    if (room) {
+      EXPECT_EQ(stats.stub_methods, 1);
+      expect_typed_with_stub(fail, 0);
+    } else {
+      EXPECT_EQ(stats.no_method_ref_room_methods, 1);
+      EXPECT_EQ(stats.typed_methods, 0);
+      EXPECT_EQ(get_def(FAIL), fail);
+      EXPECT_EQ(DexMethod::get_method(TYPED_FAIL), nullptr);
+      EXPECT_TRUE(code_is(FAIL, FAIL_CODE));
+    }
+  }
+}
+
+TEST_F(TypedNonReturningMethodsTest, method_ref_room_per_dex) {
+  // Only dexes that gain a method reference need room: the defining dex and a
+  // dex that holds both kinds of references, not a dex whose only reference
+  // must keep the original signature.
+  enum class Full { BothKinds, FixedOnly };
+  for (auto full : {Full::BothKinds, Full::FixedOnly}) {
+    SCOPED_TRACE(static_cast<int>(full));
+    reset();
+    auto* fail = add_failures_class()->get_dmethods().front();
+    start_new_dex();
+    add_callers(20);
+    if (full == Full::FixedOnly) {
+      start_new_dex();
+    }
+    // The blocked caller's class also references other methods, so its dex
+    // holds more references than the defining dex.
+    add_class("LBlocked;", type::java_lang_Object(),
+              {{"LBlocked;.call:()V", ACC_PUBLIC | ACC_STATIC, CALLER_CODE},
+               {"LBlocked;.other:()V", ACC_PUBLIC | ACC_STATIC,
+                R"(((invoke-static () "LElse;.x:()V") (return-void)))"}})
+        ->get_dmethods()
+        .front()
+        ->rstate.set_no_optimizations();
+    // Fill the dex that holds the blocked caller.
+    size_t full_dex = full == Full::BothKinds ? 1 : 2;
+    size_t reserved = kMaxMethodRefs - count_method_refs(full_dex);
+    ASSERT_LT(count_method_refs(0) + reserved, kMaxMethodRefs);
+    auto stats = run_typing_only(reserved);
+    if (full == Full::BothKinds) {
+      EXPECT_EQ(stats.no_method_ref_room_methods, 1);
+      EXPECT_EQ(DexMethod::get_method(TYPED_FAIL), nullptr);
+    } else {
+      EXPECT_EQ(stats.stub_methods, 1);
+      expect_typed_with_stub(fail, 20);
+    }
+  }
+}
+
+TEST_F(TypedNonReturningMethodsTest, method_ref_room_is_shared) {
+  // Two methods that both need a stub compete for the last free method
+  // reference of their dex; the first in order gets it.
+  constexpr const char* FAIL2 = "LFailures;.fail2:(Ljava/lang/String;)V";
+  add_class("LFailures;", type::java_lang_Object(),
+            {{FAIL, ACC_PUBLIC | ACC_STATIC, FAIL_CODE},
+             {FAIL2, ACC_PUBLIC | ACC_STATIC, FAIL_CODE}});
+  std::string fail2_caller_code = CALLER_CODE;
+  auto pos = fail2_caller_code.find("LFailures;.fail:");
+  fail2_caller_code.replace(pos, std::string("LFailures;.fail:").size(),
+                            "LFailures;.fail2:");
+  add_callers(20);
+  add_callers(20, fail2_caller_code, "LOtherCaller;");
+  add_class(
+      "LBlocked;", type::java_lang_Object(),
+      {{"LBlocked;.call:()V", ACC_PUBLIC | ACC_STATIC, CALLER_CODE},
+       {"LBlocked;.call2:()V", ACC_PUBLIC | ACC_STATIC, fail2_caller_code}});
+  for (auto* m : type_class(DexType::get_type("LBlocked;"))->get_dmethods()) {
+    m->rstate.set_no_optimizations();
+  }
+  auto stats = run_typing_only(kMaxMethodRefs - count_method_refs(0) - 1);
+  EXPECT_EQ(stats.stub_methods, 1);
+  EXPECT_EQ(stats.no_method_ref_room_methods, 1);
+  EXPECT_NE(get_def(TYPED_FAIL), nullptr);
+  EXPECT_EQ(
+      DexMethod::get_method("LFailures;.fail2:(Ljava/lang/String;)Lcom/redex/"
+                            "UnreachableException;"),
+      nullptr);
+}
+
+TEST_F(TypedNonReturningMethodsTest, in_place_typing_needs_no_method_ref_room) {
+  // Without references that must keep the original signature, no reference is
+  // added, so a full dex does not matter.
+  auto* fail = add_failures_class()->get_dmethods().front();
+  add_callers(20);
+  auto stats = run_typing_only(kMaxMethodRefs - count_method_refs(0));
+  EXPECT_EQ(stats.typed_methods, 1);
+  EXPECT_EQ(stats.stub_methods, 0);
+  EXPECT_EQ(get_def(TYPED_FAIL), fail);
 }
 
 // Compiled callers.

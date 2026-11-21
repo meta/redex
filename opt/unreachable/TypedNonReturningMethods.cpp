@@ -15,6 +15,7 @@
 #include "DeterministicContainers.h"
 #include "DexAccess.h"
 #include "DexDefs.h"
+#include "DexStructure.h"
 #include "DexUtil.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
@@ -36,6 +37,12 @@ namespace {
 
 // The 3-code-unit `invoke-static` of `UnreachableException.createAndThrow()`.
 constexpr size_t SAVED_BYTES_PER_CALL_SITE = 6;
+
+// What keeping the original method as a stub adds besides method references
+// and protos: the stub's code item, a header and the 4 code units of
+// `invoke-static` and `return-void`, and an encoded_method entry, whose
+// uleb128 index difference, access flags and code offset take about 6 bytes.
+constexpr size_t STUB_BYTES = sizeof(dex_code_item) + 4 * sizeof(uint16_t) + 6;
 
 // The CFG shape of an `unreachable` that is the value a following `throw`
 // throws, and nothing else.
@@ -114,15 +121,21 @@ DexMethod* get_static_void_callee(const IRInstruction* insn) {
   return callee;
 }
 
-// The protos of the methods that `dex` defines or references.
-UnorderedSet<const DexProto*> gather_dex_protos(const DexClasses& dex) {
-  std::vector<DexMethodRef*> methods;
+// The room a dex has for more method references, and the protos of the
+// methods that it defines or references.
+struct DexRefs {
+  MethodRefRoom method_ref_room;
+  UnorderedSet<const DexProto*> protos;
+};
+
+DexRefs gather_dex_refs(const DexClasses& dex, size_t reserved_mrefs) {
+  UnorderedSet<DexMethodRef*> methods;
   for (const auto* cls : dex) {
     cls->gather_methods(methods);
   }
-  UnorderedSet<const DexProto*> res;
-  for (const auto* m : methods) {
-    res.insert(m->get_proto());
+  DexRefs res{MethodRefRoom(methods.size(), reserved_mrefs), {}};
+  for (const auto* m : UnorderedIterable(methods)) {
+    res.protos.insert(m->get_proto());
   }
   return res;
 }
@@ -137,12 +150,14 @@ struct References {
   UnorderedSet<size_t> fixed_dexen;
 };
 
-// A non-returning method to type, with its new signature and the `unreachable`
+// A non-returning method to type, with its new signature, whether its original
+// signature stays for references that must not change, and the `unreachable`
 // instructions of its call sites, each of which becomes the result of the call
 // before it.
 struct Selection {
   DexMethod* method;
   DexProto* typed_proto;
+  bool keep_original;
   std::vector<IRInstruction*> unreachables;
 };
 
@@ -171,10 +186,12 @@ class Analysis {
            const Scope& scope,
            DexType* result_type,
            const baseline_profiles::BaselineProfile& baseline_profile,
-           uint32_t huge_method_max)
+           uint32_t huge_method_max,
+           size_t reserved_mrefs)
       : m_result_type(result_type),
         m_baseline_profile(baseline_profile),
         m_huge_method_max(huge_method_max),
+        m_reserved_mrefs(reserved_mrefs),
         m_scope(scope),
         m_xdexes(stores) {
     for (const auto& store : stores) {
@@ -208,12 +225,6 @@ class Analysis {
       m_typed_protos.emplace(method, typed);
     }
     check_references();
-    for (auto* method : candidates) {
-      auto it = m_references.find(method);
-      if (it != m_references.end() && !it->second.fixed_dexen.empty()) {
-        m_rejected.insert(method);
-      }
-    }
     stats->rejected_methods = m_rejected.size();
 
     std::vector<Selection> selected;
@@ -221,11 +232,21 @@ class Analysis {
       if (m_rejected.count(method) != 0u) {
         continue;
       }
-      if (!select_if_profitable(method)) {
+      // Every candidate has references: the call sites it was found at are
+      // instructions in methods without `no_optimizations`.
+      bool keep_original = !m_references.at(method).fixed_dexen.empty();
+      switch (select(method, keep_original)) {
+      case Outcome::Unprofitable:
         stats->unprofitable_methods++;
         continue;
+      case Outcome::NoMethodRefRoom:
+        stats->no_method_ref_room_methods++;
+        continue;
+      case Outcome::Selected:
+        break;
       }
       selected.push_back(Selection{method, m_typed_protos.at(method),
+                                   keep_original,
                                    std::move(m_sites.at(method))});
     }
     return selected;
@@ -340,41 +361,67 @@ class Analysis {
     }
   }
 
-  UnorderedSet<const DexProto*>& get_dex_protos(size_t dex) {
-    auto it = m_dex_protos.find(dex);
-    if (it == m_dex_protos.end()) {
-      it = m_dex_protos.emplace(dex, gather_dex_protos(*m_dexen.at(dex))).first;
+  DexRefs& get_dex_refs(size_t dex) {
+    auto it = m_dex_refs.find(dex);
+    if (it == m_dex_refs.end()) {
+      it =
+          m_dex_refs
+              .emplace(dex, gather_dex_refs(*m_dexen.at(dex), m_reserved_mrefs))
+              .first;
     }
     return it->second;
   }
 
-  // Selects `method` if its call sites save more than the proto entries its
-  // new signature adds to the dexes that reference it.
-  bool select_if_profitable(DexMethod* method) {
+  enum class Outcome { Selected, Unprofitable, NoMethodRefRoom };
+
+  // Selects `method` if its converted call sites save more than its typed
+  // signature adds: a proto in each dex that references the typed method and
+  // lacks it and, if `keep_original`, the stub and a second method reference
+  // in each dex that references both signatures, which must have room for it.
+  Outcome select(DexMethod* method, bool keep_original) {
     auto* typed = m_typed_protos.at(method);
-    auto typed_dexen = m_references.at(method).retargetable_dexen;
+    const auto& refs = m_references.at(method);
+    auto definition_dex = m_xdexes.get_dex_idx(method->get_class());
+    auto typed_dexen = refs.retargetable_dexen;
     // The definition is also in a dex.
-    typed_dexen.insert(m_xdexes.get_dex_idx(method->get_class()));
-    std::vector<size_t> adding_dexen;
+    typed_dexen.insert(definition_dex);
+    std::vector<size_t> adding_proto_dexen;
+    std::vector<size_t> adding_ref_dexen;
     for (auto dex : unordered_to_ordered(typed_dexen)) {
-      if (get_dex_protos(dex).count(typed) == 0u) {
-        adding_dexen.push_back(dex);
+      if (get_dex_refs(dex).protos.count(typed) == 0u) {
+        adding_proto_dexen.push_back(dex);
+      }
+      if (keep_original &&
+          (dex == definition_dex || refs.fixed_dexen.count(dex) != 0u)) {
+        adding_ref_dexen.push_back(dex);
       }
     }
-    size_t cost = adding_dexen.size() * sizeof(dex_proto_id);
+    size_t cost = adding_proto_dexen.size() * sizeof(dex_proto_id);
+    if (keep_original) {
+      cost += adding_ref_dexen.size() * sizeof(dex_method_id) + STUB_BYTES;
+    }
     size_t saving = m_sites.at(method).size() * SAVED_BYTES_PER_CALL_SITE;
     if (saving <= cost) {
-      return false;
+      return Outcome::Unprofitable;
     }
-    for (auto dex : adding_dexen) {
-      get_dex_protos(dex).insert(typed);
+    for (auto dex : adding_ref_dexen) {
+      if (!get_dex_refs(dex).method_ref_room.can_add()) {
+        return Outcome::NoMethodRefRoom;
+      }
     }
-    return true;
+    for (auto dex : adding_proto_dexen) {
+      get_dex_refs(dex).protos.insert(typed);
+    }
+    for (auto dex : adding_ref_dexen) {
+      get_dex_refs(dex).method_ref_room.add();
+    }
+    return Outcome::Selected;
   }
 
   DexType* m_result_type;
   const baseline_profiles::BaselineProfile& m_baseline_profile;
   uint32_t m_huge_method_max;
+  size_t m_reserved_mrefs;
   const Scope& m_scope;
   XDexRefs m_xdexes;
   std::vector<const DexClasses*> m_dexen;
@@ -382,7 +429,7 @@ class Analysis {
   UnorderedSet<const DexMethod*> m_rejected;
   UnorderedMap<const DexMethod*, DexProto*> m_typed_protos;
   UnorderedMap<const DexMethod*, References> m_references;
-  UnorderedMap<size_t, UnorderedSet<const DexProto*>> m_dex_protos;
+  UnorderedMap<size_t, DexRefs> m_dex_refs;
 };
 
 } // namespace
@@ -433,25 +480,52 @@ Stats type_nonreturning_methods(
     const Scope& scope,
     DexType* result_type,
     const baseline_profiles::BaselineProfile& baseline_profile,
-    uint32_t huge_method_max) {
+    uint32_t huge_method_max,
+    size_t reserved_mrefs,
+    method_profiles::MethodProfiles& method_profiles) {
   Stats stats;
   Analysis analysis(stores, scope, result_type, baseline_profile,
-                    huge_method_max);
+                    huge_method_max, reserved_mrefs);
   auto selected = analysis.run(&stats);
 
   // Nothing above changed the program; from here on, only the selected
-  // methods and their recorded call sites change.
-  for (auto& [method, typed, unreachables] : selected) {
-    method->change(DexMethodSpec(nullptr, nullptr, typed),
-                   /* rename_on_collision */ false);
+  // methods, their recorded call sites and the instructions that reference
+  // them change.
+  UnorderedMap<const DexMethodRef*, DexMethod*> typed_methods;
+  for (auto& [method, typed, keep_original, unreachables] : selected) {
+    if (keep_original) {
+      typed_methods.emplace(
+          method, split_off_typed_method(method, typed, method_profiles));
+      stats.stub_methods++;
+    } else {
+      method->change(DexMethodSpec(nullptr, nullptr, typed),
+                     /* rename_on_collision */ false);
+    }
     for (auto* unreachable : unreachables) {
       unreachable->set_opcode(OPCODE_MOVE_RESULT_OBJECT);
     }
     stats.typed_methods++;
     stats.typed_call_sites += unreachables.size();
-    TRACE(UNREACHABLE, 2, "typed %s, %zu call sites", SHOW(method),
-          unreachables.size());
+    TRACE(UNREACHABLE, 2, "typed %s, %zu call sites%s", SHOW(method),
+          unreachables.size(), keep_original ? ", original kept" : "");
   }
+  if (typed_methods.empty()) {
+    return stats;
+  }
+  walk::parallel::code(scope, [&](DexMethod* caller, IRCode& code) {
+    if (caller->rstate.no_optimizations()) {
+      return;
+    }
+    for (const auto& mie : cfg::InstructionIterable(code.cfg())) {
+      if (!mie.insn->has_method()) {
+        continue;
+      }
+      auto it = typed_methods.find(mie.insn->get_method());
+      if (it != typed_methods.end()) {
+        mie.insn->set_method(it->second);
+      }
+    }
+  });
   return stats;
 }
 

@@ -15,7 +15,7 @@
 #include "MethodProfiles.h"
 
 /*
- * Types non-returning static methods in place.
+ * Types non-returning static methods.
  *
  * A call to a method that cannot return normally is followed by an
  * `unreachable` / `throw` pair, which lowering would otherwise turn into a
@@ -49,12 +49,25 @@
  * A method qualifies if it is a static, non-native method with code returning
  * void that can be renamed and deleted, whose class is internal and neither
  * referenced by string nor serialized, and whose code has no return
- * instruction. All references to it must be instructions in methods without
- * `no_optimizations`; references from call sites, method handles, annotations
- * or static values reject it, as does a method or method reference with the
- * new signature on its class. It is selected only if the bytes its converted
- * call sites save outweigh the proto entries its new signature adds to the
- * dexes that reference it.
+ * instruction, and if its class has no method or method reference with the
+ * new signature. It is selected only if the bytes its converted call sites
+ * save outweigh the proto entries its new signature adds to the dexes that
+ * reference it.
+ *
+ * Instructions in methods without `no_optimizations` reference the typed
+ * method. Other references -- from annotations, static values, method handles
+ * and call sites, or instructions in `no_optimizations` methods -- must keep
+ * the original signature. If there are any, the body moves to a new method of
+ * the same class with the same name and access flags and the new signature,
+ * and the original becomes a stub that calls it:
+ *
+ *   LA;.fail:(I)V:
+ *     invoke-static {p0} LA;.fail:(I)Lcom/redex/UnreachableException;
+ *     return-void
+ *
+ * The stub's code and the second method reference, in the defining dex and in
+ * each dex that references both signatures, are part of the cost, and each of
+ * those dexes must have room for the reference.
  *
  * Method references are assumed to be resolved to their definitions, as
  * `ResolveRefsPass` leaves them (`NoResolvablePureRefs`): a reference such as
@@ -74,7 +87,12 @@ struct Stats {
   size_t candidate_methods{0};
   size_t rejected_methods{0};
   size_t unprofitable_methods{0};
+  // Profitable methods left alone because a dex has no room for the method
+  // reference that keeping the original signature adds.
+  size_t no_method_ref_room_methods{0};
   size_t typed_methods{0};
+  // Typed methods whose original signature stays as a stub.
+  size_t stub_methods{0};
   size_t typed_call_sites{0};
   // Matched call sites left alone because their caller is compiled and the
   // call is not covered by a handler.
@@ -84,17 +102,21 @@ struct Stats {
 // Types the qualifying methods referenced from `stores`, whose classes are
 // `scope`, with `result_type` as their return type and rewrites their
 // convertible call sites, where `baseline_profile` and `huge_method_max` tell
-// which callers dex2oat compiles. `result_type` must be a throwable class. Must
-// run after every pass that could change the matched call sites or cut off
-// control flow after a call. ArtProfileWriterPass.topoff_target_entries, an
-// option of that pass, can still pad the written profile with small methods,
-// where a converted site costs native code.
+// which callers dex2oat compiles. `result_type` must be a throwable class.
+// `reserved_mrefs` method references stay free in every dex, and a typed
+// method split off a stub gets the stub's `method_profiles` stats. Must run
+// after every pass that could change the matched call sites or cut off control
+// flow after a call. ArtProfileWriterPass.topoff_target_entries, an option of
+// that pass, can still pad the written profile with small methods, where a
+// converted site costs native code.
 Stats type_nonreturning_methods(
     const DexStoresVector& stores,
     const Scope& scope,
     DexType* result_type,
     const baseline_profiles::BaselineProfile& baseline_profile,
-    uint32_t huge_method_max);
+    uint32_t huge_method_max,
+    size_t reserved_mrefs,
+    method_profiles::MethodProfiles& method_profiles);
 
 // Moves the body of the static method `method` into a new method of its class
 // with the same name and access flags and the signature `typed_proto`, and

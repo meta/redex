@@ -14,6 +14,7 @@
 #include "Creators.h"
 #include "Debug.h"
 #include "DexUtil.h"
+#include "InterDexPassMetrics.h"
 #include "Lazy.h"
 #include "LiveRange.h"
 #include "Show.h"
@@ -43,7 +44,10 @@ void report(const typed_nonreturning_methods::Stats& stats, PassManager& mgr) {
                   stats.rejected_methods);
   mgr.incr_metric("typed_nonreturning_methods_unprofitable",
                   stats.unprofitable_methods);
+  mgr.incr_metric("typed_nonreturning_methods_without_method_ref_room",
+                  stats.no_method_ref_room_methods);
   mgr.incr_metric("typed_nonreturning_methods", stats.typed_methods);
+  mgr.incr_metric("typed_nonreturning_method_stubs", stats.stub_methods);
   mgr.incr_metric("typed_nonreturning_method_call_sites",
                   stats.typed_call_sites);
   mgr.incr_metric("typed_nonreturning_method_compiled_call_sites",
@@ -55,11 +59,13 @@ void report(const typed_nonreturning_methods::Stats& stats, PassManager& mgr) {
 void UnreachableLoweringPass::bind_config() {
   bind("typed_nonreturning_methods", false, m_typed_nonreturning_methods,
        "Where a static method that cannot return normally is called right "
-       "before an unreachable throw, change the method's return type in place "
-       "to com.redex.UnreachableException and throw the call's result, rather "
-       "than lowering the unreachable instruction to a second call. Only call "
-       "sites in callers that the baseline profile does not compile, or in "
-       "try regions, are converted, and instrumented builds are left alone.");
+       "before an unreachable throw, change the method's return type to "
+       "com.redex.UnreachableException and throw the call's result, rather "
+       "than lowering the unreachable instruction to a second call. If "
+       "references that must not change remain, the original signature stays "
+       "as a stub that calls the typed method. Only call sites in callers that "
+       "the baseline profile does not compile, or in try regions, are "
+       "converted, and instrumented builds are left alone.");
 }
 
 void UnreachableLoweringPass::eval_pass(DexStoresVector& stores,
@@ -155,7 +161,9 @@ void UnreachableLoweringPass::run_pass(DexStoresVector& stores,
     report(typed_nonreturning_methods::type_nonreturning_methods(
                stores, scope, m_create_and_throw_method->get_class(),
                baseline_profiles::get_default_baseline_profile(scope, conf),
-               baseline_profiles::get_huge_method_max(conf)),
+               baseline_profiles::get_huge_method_max(conf),
+               interdex::get_interdex_reserved_refs(mgr).mrefs,
+               conf.get_method_profiles()),
            mgr);
   }
 

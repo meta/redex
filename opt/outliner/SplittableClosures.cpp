@@ -271,11 +271,12 @@ void size_eviction(const UnorderedSet<cfg::Block*>& remaining_cfg_blocks,
   sc->evicted_size = sc->covered_code_units - duplicated_size;
 }
 
+// Measures one candidate: its sizes, its hot-split kind and the code it moves
+// out of the host. Returns nullopt for a candidate below a size floor.
 std::optional<ScoredClosure> score(
     const Config& config,
     const MethodClosures& mcs,
     bool host_compiled,
-    float max_overhead_ratio,
     cfg::Block* switch_block,
     bool is_large_packed_switch,
     const std::vector<const Closure*>& closures) {
@@ -373,14 +374,19 @@ std::optional<ScoredClosure> score(
   // `size_eviction` sizes from `covered_code_units`, which is this size.
   always_assert(sc.covered_code_units == reduced_components_code_size);
   size_eviction(remaining_cfg_blocks, &sc);
+  return std::optional<ScoredClosure>(std::move(sc));
+};
+
+// Whether a suffix candidate's estimated growth of the method, (split + what
+// remains) / original - 1, is within `max_overhead_ratio`.
+bool fits_overhead_ratio(const ScoredClosure& sc,
+                         const MethodClosures& mcs,
+                         float max_overhead_ratio) {
   auto overhead_ratio = static_cast<double>(sc.split_size + sc.remaining_size) /
                             static_cast<double>(mcs.original_size) -
                         1.0;
-  if (overhead_ratio > max_overhead_ratio) {
-    return std::nullopt;
-  }
-  return std::optional<ScoredClosure>(std::move(sc));
-};
+  return overhead_ratio <= max_overhead_ratio;
+}
 
 UnorderedSet<const ReducedBlock*> get_critical_components(
     const std::vector<std::pair<int32_t, const Closure*>>& keyed,
@@ -413,9 +419,9 @@ std::optional<ScoredClosure> select_prefix(
     bool is_large_packed_switch,
     std::vector<const Closure*> aggregated) {
   while (aggregated.size() > 1) {
-    auto opt_sc = score(config, mcs, host_compiled, max_overhead_ratio,
-                        switch_block, is_large_packed_switch, aggregated);
-    if (opt_sc) {
+    auto opt_sc = score(config, mcs, host_compiled, switch_block,
+                        is_large_packed_switch, aggregated);
+    if (opt_sc && fits_overhead_ratio(*opt_sc, mcs, max_overhead_ratio)) {
       return opt_sc;
     }
     aggregated.pop_back();
@@ -547,10 +553,9 @@ std::vector<ScoredClosure> get_scored_closures(const Config& config,
   UnorderedMap<cfg::Block*, std::vector<const Closure*>>
       remaining_switch_case_closures;
   for (const auto& c : mcs.closures) {
-    auto opt_sc = score(config, mcs, host_compiled, max_overhead_ratio,
-                        /* switch_block */ nullptr,
+    auto opt_sc = score(config, mcs, host_compiled, /* switch_block */ nullptr,
                         /* is_large_packed_switch */ false, {&c});
-    if (opt_sc) {
+    if (opt_sc && fits_overhead_ratio(*opt_sc, mcs, max_overhead_ratio)) {
       scored_closures.push_back(std::move(*opt_sc));
     }
     for (auto* src : UnorderedIterable(c.srcs)) {

@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 
+#include "ArtTypeCheck.h"
 #include "MethodClosures.h"
 #include "MethodProfiles.h"
 #include "MethodSplitter.h"
@@ -98,6 +99,7 @@ class MethodSplitterTest : public RedexTest {
     if (no_outlining) {
       m->rstate.set_no_outlining();
     }
+    const method_splitting_test::ArtTypeCheckOfOutput art_check({m});
     DexStoresVector stores;
     stores.emplace_back("test_store");
     DexClasses dex{cls};
@@ -123,6 +125,12 @@ class MethodSplitterTest : public RedexTest {
       method_splitting_impl::split_methods_in_stores(stores, env, config,
                                                      &stats);
     }
+    std::vector<DexMethod*> output{m};
+    for (const auto& [out, kind] : stats.added_methods) {
+      (void)kind;
+      output.push_back(out);
+    }
+    EXPECT_EQ(art_check.violations(output), "");
     // Every candidate is recorded once, at its final fate.
     const auto fates = stats.snapshot().suffix_fates;
     EXPECT_EQ(fates.recorded(), fates.candidates);
@@ -193,8 +201,15 @@ class MethodSplitterTest : public RedexTest {
     stores.front().get_dexen().push_back({cls});
     auto env = method_splitting_test::split_environment(
         stores, /* normal_primary_dex */ true);
+    const method_splitting_test::ArtTypeCheckOfOutput art_check({m});
     method_splitting_impl::Stats stats;
     method_splitting_impl::split_methods_in_stores(stores, env, config, &stats);
+    std::vector<DexMethod*> output{m};
+    for (const auto& [out, kind] : stats.added_methods) {
+      (void)kind;
+      output.push_back(out);
+    }
+    EXPECT_EQ(art_check.violations(output), "");
     const auto fates = stats.snapshot().suffix_fates;
     EXPECT_EQ(fates.recorded(), fates.candidates);
     return stats.added_methods.size();

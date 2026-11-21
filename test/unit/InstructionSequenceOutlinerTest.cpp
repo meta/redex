@@ -12,11 +12,13 @@
 #include <string>
 #include <utility>
 
+#include "ArtTypeCheck.h"
 #include "BigBlocks.h"
 #include "DeterministicContainers.h"
 #include "DexAsm.h"
 #include "DexClass.h"
 #include "DexStore.h"
+#include "DexUtil.h"
 #include "IRAssembler.h"
 #include "IRCode.h"
 #include "OutliningProfileGuidanceImpl.h"
@@ -41,12 +43,22 @@ void run_passes(const std::vector<Pass*>& passes,
   // secondary dex
   store.add_classes(std::move(classes));
   stores.emplace_back(std::move(store));
+  auto methods = [&stores] {
+    std::vector<DexMethod*> all;
+    for (auto* cls : build_class_scope(stores)) {
+      auto ms = cls->get_all_methods();
+      all.insert(all.end(), ms.begin(), ms.end());
+    }
+    return all;
+  };
+  const method_splitting_test::ArtTypeCheckOfOutput art_check(methods());
   PassManager manager(passes);
 
   Json::Value conf_obj = Json::nullValue;
   ConfigFiles dummy_config(conf_obj);
   dummy_config.parse_global_config();
   manager.run_passes(stores, dummy_config);
+  EXPECT_EQ(art_check.violations(methods()), "");
 }
 
 struct InstructionSequenceOutlinerTest : public RedexTest {

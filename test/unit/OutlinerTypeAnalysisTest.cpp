@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "ArtTypeCheck.h"
 #include "Creators.h"
 #include "Debug.h"
 #include "IRAssembler.h"
@@ -540,82 +541,6 @@ TEST_F(OutlinerTypeAnalysisTest, integral_type_join_covers_every_art_merge) {
 
 namespace art16 {
 
-// The integral register kinds of android-16.0.0_r1
-// `runtime/verifier/reg_type.h`, each group of constants in the enumerator
-// order the merge relies on.
-enum Kind : uint8_t {
-  kBoolean,
-  kByte,
-  kChar,
-  kShort,
-  kInteger,
-  kZero,
-  kBooleanConstant,
-  kPositiveByteConstant,
-  kPositiveShortConstant,
-  kCharConstant,
-  kByteConstant,
-  kShortConstant,
-  kIntegerConstant,
-  kNumKinds,
-};
-
-constexpr bool is_constant(uint8_t k) { return k >= kZero; }
-constexpr bool is_boolean_types(uint8_t k) {
-  return k == kBoolean || k == kZero || k == kBooleanConstant;
-}
-constexpr bool is_byte_types(uint8_t k) {
-  return k == kByte || k == kPositiveByteConstant || k == kByteConstant ||
-         is_boolean_types(k);
-}
-constexpr bool is_short_types(uint8_t k) {
-  return k == kShort || k == kPositiveShortConstant || k == kShortConstant ||
-         is_byte_types(k);
-}
-constexpr bool is_char_types(uint8_t k) {
-  return k == kChar || k == kCharConstant || k == kPositiveShortConstant ||
-         k == kPositiveByteConstant || is_boolean_types(k);
-}
-
-// `RegTypeMergeImpl::MergeKind` (`runtime/verifier/reg_type.cc`) on two
-// integral kinds.
-constexpr uint8_t merge(uint8_t a, uint8_t b) {
-  if (is_constant(a) && is_constant(b)) {
-    auto is_non_negative = [](uint8_t k) {
-      return k == kZero || k == kBooleanConstant ||
-             k == kPositiveByteConstant || k == kPositiveShortConstant ||
-             k == kCharConstant;
-    };
-    if (is_non_negative(a) == is_non_negative(b)) {
-      return a >= b ? a : b;
-    }
-    const uint8_t non_negative = is_non_negative(a) ? a : b;
-    const uint8_t can_be_negative = is_non_negative(a) ? b : a;
-    if (can_be_negative == kByteConstant &&
-        non_negative <= kPositiveByteConstant) {
-      return kByteConstant;
-    }
-    if (can_be_negative <= kShortConstant &&
-        non_negative <= kPositiveShortConstant) {
-      return kShortConstant;
-    }
-    return kIntegerConstant;
-  }
-  if (is_boolean_types(a) && is_boolean_types(b)) {
-    return kBoolean;
-  }
-  if (is_byte_types(a) && is_byte_types(b)) {
-    return kByte;
-  }
-  if (is_short_types(a) && is_short_types(b)) {
-    return kShort;
-  }
-  if (is_char_types(a) && is_char_types(b)) {
-    return kChar;
-  }
-  return kInteger;
-}
-
 outliner_impl::IntegralType to_integral_type(uint8_t k) {
   using IT = outliner_impl::IntegralType;
   switch (k) {
@@ -791,6 +716,62 @@ TEST_F(OutlinerTypeAnalysisTest,
   };
   each(0);
   EXPECT_EQ(multisets, 2379u);
+}
+
+// Before android-16, ART held a constant by its value (`art_oracle`), not by a
+// kind. Its merge reaches the kind android-16's does, for the integral types
+// and the boundary values of every constant kind, so `ArtTypeCheck.h`
+// models both with android-16's kinds.
+TEST_F(OutlinerTypeAnalysisTest, pre16_merge_reaches_the_same_kinds) {
+  using art_oracle::Reg;
+  auto kind = [](const Reg& r) -> uint8_t {
+    switch (r.kind) {
+    case Reg::Boolean:
+      return art16::kBoolean;
+    case Reg::Byte:
+      return art16::kByte;
+    case Reg::Short:
+      return art16::kShort;
+    case Reg::Char:
+      return art16::kChar;
+    case Reg::Integer:
+      return art16::kInteger;
+    case Reg::Constant:
+      return art16::constant_kind(r.value);
+    }
+    not_reached();
+  };
+  std::vector<Reg> leaves{
+      {Reg::Boolean}, {Reg::Byte}, {Reg::Short}, {Reg::Char}, {Reg::Integer}};
+  const int64_t boundaries[] = {std::numeric_limits<int32_t>::min(),
+                                -32769,
+                                -32768,
+                                -129,
+                                -128,
+                                -1,
+                                0,
+                                1,
+                                2,
+                                127,
+                                128,
+                                32767,
+                                32768,
+                                65535,
+                                65536,
+                                std::numeric_limits<int32_t>::max()};
+  for (int64_t v : boundaries) {
+    leaves.push_back({Reg::Constant, v});
+  }
+  for (const auto& a : leaves) {
+    EXPECT_EQ(a.boolean_types(), art16::is_boolean_types(kind(a)));
+    EXPECT_EQ(a.byte_types(), art16::is_byte_types(kind(a)));
+    EXPECT_EQ(a.short_types(), art16::is_short_types(kind(a)));
+    EXPECT_EQ(a.char_types(), art16::is_char_types(kind(a)));
+    for (const auto& b : leaves) {
+      EXPECT_EQ(kind(art_oracle::merge(a, b)), art16::merge(kind(a), kind(b)))
+          << a.kind << " " << a.value << ", " << b.kind << " " << b.value;
+    }
+  }
 }
 
 namespace {

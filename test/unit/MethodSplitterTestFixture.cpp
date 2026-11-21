@@ -14,6 +14,7 @@
 #include <sstream>
 #include <utility>
 
+#include "ArtTypeCheck.h"
 #include "ControlFlow.h"
 #include "Creators.h"
 #include "Debug.h"
@@ -200,6 +201,7 @@ SplitResult run_splitter(std::string_view sig,
   // check, which is the conservative default the harness wants.
   auto env = method_splitting_test::split_environment(
       stores, /* normal_primary_dex */ false);
+  const ArtTypeCheckOfOutput art_check({m});
   method_splitting_impl::split_methods_in_stores(stores, env, cfg, &stats,
                                                  /* name_infix */ "",
                                                  &hot_methods);
@@ -212,6 +214,15 @@ SplitResult run_splitter(std::string_view sig,
       res.suffix_splits.push_back(out);
     }
   }
+  std::vector<DexMethod*> output{m};
+  output.insert(output.end(), res.region_splits.begin(),
+                res.region_splits.end());
+  output.insert(output.end(), res.suffix_splits.begin(),
+                res.suffix_splits.end());
+  const auto rejected = art_check.violations(output);
+  always_assert_log(rejected.empty(),
+                    "ART rejects what the splitter emitted from %s:\n%s",
+                    std::string(code_sexpr).c_str(), rejected.c_str());
   res.stats = stats.snapshot();
   res.evaluations = evaluations.records();
   expectEveryCandidateHasOneFate(res.stats, res.evaluations,

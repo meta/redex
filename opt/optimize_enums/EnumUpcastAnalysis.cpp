@@ -251,7 +251,9 @@ class EnumUpcastDetector {
     EnumTypes elem_types = env->get(insn->src(0));
     UnorderedSet<const DexType*> acceptable_elem_types;
     for (const DexType* type : array_types.elements()) {
-      const DexType* elem = type::make_array_element_type(type);
+      // The stored value must have the array's component type, which for an
+      // array of arrays is itself an array type.
+      const DexType* elem = type::make_array_component_type(type);
       if ((elem != nullptr) && !type::is_primitive(elem)) {
         acceptable_elem_types.insert(elem); // An array of one type of objects.
       }

@@ -540,6 +540,61 @@ TEST_F(OptimizeEnumsTest, constantOfTwoDimensionalArrayIsFormattedByName) {
   EXPECT_EQ(name_helpers, 1u) << show(method->get_code()->cfg());
 }
 
+namespace {
+// Runs the pass on Bar and a class `LRows;` with `make`, which returns a
+// `Bar[][]`, and returns `make` after the pass.
+DexMethod* run_pass_on_rows_maker(const std::string& make) {
+  auto store = create_enum_store();
+  ClassCreator rc(DexType::make_type("LRows;"));
+  rc.set_super(type::java_lang_Object());
+  rc.set_access(ACC_PUBLIC);
+  rc.add_method(assembler::method_from_string(make));
+  auto* rows = rc.create();
+  store.add_classes({rows});
+  DexStoresVector stores({std::move(store)});
+  walk::code(build_class_scope(stores),
+             [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  optimize_enums::OptimizeEnumsPass pass;
+  PassManager manager({&pass});
+  ConfigFiles conf(Json::nullValue);
+  conf.parse_global_config();
+  manager.run_passes(stores, conf);
+  return only(rows->get_dmethods());
+}
+} // namespace
+
+// `Bar[][] rows = {new Bar[] {Bar.Y}};` stores a row, a `Bar[]`, into the
+// `Bar[][]`, so every value stays a Bar, and Bar is boxed in both array types.
+TEST_F(OptimizeEnumsTest, rowStoredIntoTwoDimensionalArrayLetsEnumBeBoxed) {
+  auto* make = run_pass_on_rows_maker(R"(
+    (method (public static) "LRows;.make:()[[LBar;"
+      (
+        (const v0 1)
+        (new-array v0 "[[LBar;")
+        (move-result-pseudo-object v1)
+        (new-array v0 "[LBar;")
+        (move-result-pseudo-object v2)
+        (const v3 0)
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v4)
+        (aput-object v4 v2 v3)
+        (aput-object v2 v1 v3)
+        (return-object v1)
+      )
+    )
+  )");
+  EXPECT_FALSE(is_enum(type_class(DexType::get_type("LBar;"))));
+  EXPECT_EQ(show(make->get_proto()->get_rtype()), "[[Ljava/lang/Integer;");
+  make->get_code()->build_cfg();
+  for (const auto& mie : cfg::InstructionIterable(make->get_code()->cfg())) {
+    if (mie.insn->opcode() == OPCODE_NEW_ARRAY) {
+      EXPECT_EQ(type::make_array_element_type(mie.insn->get_type()),
+                type::java_lang_Integer());
+    }
+  }
+}
+
 /* Run the usage analysis with `LUser;.x_of_y`, which reads `Bar.Y.x`, and
 return the reasons that keep Bar, or an empty set if Bar can be boxed. */
 std::set<optimize_enums::UnsafeType> reasons_with_user_method(

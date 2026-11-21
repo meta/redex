@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <utility>
+
 #include <gtest/gtest.h>
 
 #include "ConfigFiles.h"
@@ -39,6 +41,21 @@ DexClass* create_user(const std::string& code) {
   method->set_code(assembler::ircode_from_string(code));
   creator.add_method(method);
   return creator.create();
+}
+
+// `Parent` and its only subclass `Child`, which is abstract and has no methods.
+std::pair<DexClass*, DexClass*> create_parent_and_abstract_child() {
+  ClassCreator parent_creator(DexType::make_type("Lcom/redextest/Parent;"));
+  parent_creator.set_access(ACC_PUBLIC);
+  parent_creator.set_super(type::java_lang_Object());
+  add_init(parent_creator, "Lcom/redextest/Parent;",
+           "Ljava/lang/Object;.<init>:()V");
+  auto* parent = parent_creator.create();
+
+  ClassCreator child_creator(DexType::make_type("Lcom/redextest/Child;"));
+  child_creator.set_access(ACC_PUBLIC | ACC_ABSTRACT);
+  child_creator.set_super(parent->get_type());
+  return {parent, child_creator.create()};
 }
 
 size_t run_pass_on(const std::vector<DexClass*>& classes) {
@@ -174,18 +191,7 @@ TEST_F(VerticalMergingTest, mergesAbstractClassUsedInCast) {
 // `Child` is abstract, has no methods and is never instantiated, so it could
 // merge into `Parent`, but `Child.class` would then be `Parent.class`.
 TEST_F(VerticalMergingTest, keepsAbstractSubclassWithClassLiteral) {
-  ClassCreator parent_creator(DexType::make_type("Lcom/redextest/Parent;"));
-  parent_creator.set_access(ACC_PUBLIC);
-  parent_creator.set_super(type::java_lang_Object());
-  add_init(parent_creator, "Lcom/redextest/Parent;",
-           "Ljava/lang/Object;.<init>:()V");
-  auto* parent = parent_creator.create();
-
-  ClassCreator child_creator(DexType::make_type("Lcom/redextest/Child;"));
-  child_creator.set_access(ACC_PUBLIC | ACC_ABSTRACT);
-  child_creator.set_super(parent->get_type());
-  auto* child = child_creator.create();
-
+  auto [parent, child] = create_parent_and_abstract_child();
   auto* user = create_user(R"(
     (
       (new-instance "Lcom/redextest/Parent;")
@@ -199,4 +205,96 @@ TEST_F(VerticalMergingTest, keepsAbstractSubclassWithClassLiteral) {
 
   EXPECT_EQ(run_pass_on({parent, child, user}), 3);
   EXPECT_EQ(child->get_super_class(), parent->get_type());
+}
+
+constexpr const char* kSynchronizedOnImplCallsS = R"(
+  (
+    (const-class "Lcom/redextest/Impl;")
+    (move-result-pseudo-object v0)
+    (monitor-enter v0)
+    (invoke-static () "Lcom/redextest/Base;.s:()V")
+    (monitor-exit v0)
+    (new-instance "Lcom/redextest/Impl;")
+    (move-result-pseudo-object v1)
+    (invoke-direct (v1) "Lcom/redextest/Impl;.<init>:()V")
+    (return-object v1)
+  )
+)";
+
+// Java: `abstract class Base { static synchronized native void s(); }` and
+// `synchronized (Impl.class) { Base.s(); }`. The runtime binds `s` to `Base`
+// by name and locks `Base.class` around it; moving `s` to `Impl` would break
+// the binding and make both locks `Impl.class`.
+TEST_F(VerticalMergingTest, keepsClassWithStaticSynchronizedNativeMethod) {
+  auto* s =
+      DexMethod::make_method("Lcom/redextest/Base;.s:()V")
+          ->make_concrete(
+              ACC_PUBLIC | ACC_STATIC | ACC_SYNCHRONIZED | ACC_NATIVE, false);
+  base->add_method(s);
+
+  EXPECT_EQ(run_pass(create_user(kSynchronizedOnImplCallsS)), 3);
+  EXPECT_EQ(s->get_class(), base->get_type());
+}
+
+// Java: `abstract class Base { native int n(); }`.
+TEST_F(VerticalMergingTest, keepsClassWithNativeMethod) {
+  auto* n = DexMethod::make_method("Lcom/redextest/Base;.n:()I")
+                ->make_concrete(ACC_PUBLIC | ACC_NATIVE, true);
+  base->add_method(n);
+
+  EXPECT_EQ(run_pass(create_user(kNewImpl)), 3);
+  EXPECT_EQ(n->get_class(), base->get_type());
+}
+
+// The merger keeps its methods and its name, so its native methods stay bound.
+TEST_F(VerticalMergingTest, mergesIntoClassWithNativeMethod) {
+  auto* n = DexMethod::make_method("Lcom/redextest/Impl;.n:()I")
+                ->make_concrete(ACC_PUBLIC | ACC_NATIVE, true);
+  impl->add_method(n);
+
+  EXPECT_EQ(run_pass(create_user(kNewImpl)), 2);
+  EXPECT_EQ(n->get_class(), impl->get_type());
+}
+
+// d8 compiles `static synchronized void s() {}` to a method that locks
+// `Base.class` with `const-class` and `monitor-enter`, and keeps only
+// `ACC_DECLARED_SYNCHRONIZED`, which has no effect at run time. The class
+// literal keeps `Base` from being merged away.
+TEST_F(VerticalMergingTest, keepsClassWithStaticSynchronizedMethod) {
+  auto* s = DexMethod::make_method("Lcom/redextest/Base;.s:()V")
+                ->make_concrete(
+                    ACC_PUBLIC | ACC_STATIC | ACC_DECLARED_SYNCHRONIZED, false);
+  s->set_code(assembler::ircode_from_string(R"(
+    (
+      (const-class "Lcom/redextest/Base;")
+      (move-result-pseudo-object v0)
+      (monitor-enter v0)
+      (monitor-exit v0)
+      (return-void)
+    )
+  )"));
+  base->add_method(s);
+
+  EXPECT_EQ(run_pass(create_user(kSynchronizedOnImplCallsS)), 3);
+  EXPECT_EQ(s->get_class(), base->get_type());
+}
+
+// Java: `abstract class Child extends Parent { static native void m(); }`.
+// `Child` has no code, so it could merge into `Parent`, which would move `m`.
+TEST_F(VerticalMergingTest, keepsAbstractSubclassWithNativeMethod) {
+  auto [parent, child] = create_parent_and_abstract_child();
+  auto* m = DexMethod::make_method("Lcom/redextest/Child;.m:()V")
+                ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_NATIVE, false);
+  child->add_method(m);
+  auto* user = create_user(R"(
+    (
+      (new-instance "Lcom/redextest/Parent;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "Lcom/redextest/Parent;.<init>:()V")
+      (return-object v0)
+    )
+  )");
+
+  EXPECT_EQ(run_pass_on({parent, child, user}), 3);
+  EXPECT_EQ(m->get_class(), child->get_type());
 }

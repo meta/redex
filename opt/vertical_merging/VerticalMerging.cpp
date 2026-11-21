@@ -473,10 +473,19 @@ size_t record_code_reference(const Scope& scope,
  * When a method is native or not renamable, we can not change its signature.
  * Record a type as don't merge as a mergeable if it's used in a such method's
  * signature.
+ *
+ * A native method is also bound to its declaring class: the runtime links it by
+ * the class's name, and a `static synchronized` native method locks the class's
+ * `Class` object. Merging moves the mergeable's methods into the merger, so the
+ * declaring class of a native method must not be the mergeable.
  */
 void record_method_signature(const Scope& scope,
                              DontMergeStatus* dont_merge_status) {
   walk::parallel::methods(scope, [&](DexMethod* method) {
+    if (is_native(method)) {
+      record_dont_merge_state(method->get_class(), kConditional,
+                              dont_merge_status);
+    }
     if (is_native(method) || !can_rename(method)) {
       DexProto* proto = method->get_proto();
       record_dont_merge_state(proto->get_rtype(), kConditional,

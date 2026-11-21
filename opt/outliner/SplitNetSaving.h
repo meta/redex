@@ -21,6 +21,8 @@
 
 namespace method_splitting_impl {
 
+class RegionPlan;
+
 // The code units an instruction of `op` takes in the dex, at the widest form
 // of an opcode with a literal, as `Block::estimate_code_units` counts it. The
 // net cost model sizes every single instruction it adds by this, or a `const`
@@ -78,7 +80,13 @@ struct NetSavingInput {
   struct Suffix {
     bool returns_value;
   };
-  std::variant<Suffix> split;
+  // A region: the call block invokes the split and jumps back to the
+  // continuation, where the host resumes. `plan` says how the host's switch is
+  // edited.
+  struct Region {
+    const RegionPlan& plan;
+  };
+  std::variant<Suffix, Region> split;
   // The switch whose cases the split takes, for a split with several entries.
   struct Dispatch {
     const SwitchPartition& partition;
@@ -97,6 +105,8 @@ struct NetSavingInput {
   // copies while the host keeps it.
   size_t evicted;
   size_t duplicated;
+  // The return sites the split adds to the dex.
+  size_t return_sites;
   // The arguments the launchpad passes, and the registers they take in the
   // invoke.
   size_t passed_args;

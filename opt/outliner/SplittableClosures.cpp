@@ -684,6 +684,7 @@ NetSavingInput net_saving_input(const ScoredClosure& sc,
                      ? sc.evicted_size
                      : sc.evicted_size - sc.evicted_hot_size,
       .duplicated = sc.duplicated_dex_code_units,
+      .return_sites = 0,
       .passed_args = passed_args,
       .passed_arg_registers = passed_arg_registers,
       .recreated_defs = recreated_defs,

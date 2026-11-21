@@ -19,10 +19,12 @@
 #include "IRCode.h"
 #include "InstructionLowering.h"
 #include "RedexTest.h"
+#include "RegionPlan.h"
 #include "SplitNetSaving.h"
 #include "SwitchFixture.h"
 
 namespace msi = method_splitting_impl;
+using method_splitting_test::region_closure;
 using method_splitting_test::SwitchFixture;
 
 class SplitNetSavingTest : public RedexTest {};
@@ -36,6 +38,21 @@ msi::NetSavingInput suffix_input() {
       .dispatch = std::nullopt,
       .evicted = 100,
       .duplicated = 5,
+      .return_sites = 0,
+      .passed_args = 2,
+      .passed_arg_registers = 2,
+      .recreated_defs = 0,
+  };
+}
+
+msi::NetSavingInput region_input(const msi::RegionPlan& plan,
+                                 size_t return_sites) {
+  return msi::NetSavingInput{
+      .split = msi::NetSavingInput::Region{.plan = plan},
+      .dispatch = std::nullopt,
+      .evicted = 100,
+      .duplicated = 0,
+      .return_sites = return_sites,
       .passed_args = 2,
       .passed_arg_registers = 2,
       .recreated_defs = 0,
@@ -256,4 +273,16 @@ TEST_F(SplitNetSavingTest, SuffixGroupCopiesTheSwitchAndShedsItsKeys) {
   // host.
   expect_terms(split_net_saving(in, config, true), 100 + 2, 5,
                5 + metadata() + load_params(2) + 5 + 2 - 2);
+}
+
+TEST_F(SplitNetSavingTest, RegionRejoinLaunchpadVoid) {
+  SwitchFixture f;
+  msi::Config config;
+  auto m = region_closure(f.case0);
+  auto plan = msi::RegionPlan::make({&m});
+  // The call block is `invoke; goto`. The invoke (3) is compiled into the host
+  // and counts against the saving; the goto (1) costs dex only. The dex also
+  // pays the metadata, the load-params and the body's one return.
+  expect_terms(split_net_saving(region_input(plan, 1), config, true), 100, 3,
+               3 + 1 + metadata() + load_params(2) + 1);
 }

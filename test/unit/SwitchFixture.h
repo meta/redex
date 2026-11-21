@@ -77,4 +77,14 @@ struct SwitchFixture {
   static cfg::Block* rejoin_of(cfg::Block* b) { return b->goes_to(); }
 };
 
+// The closure of a region candidate of the single block `head`.
+inline method_splitting_impl::Closure region_closure(cfg::Block* head) {
+  return method_splitting_impl::Closure{
+      .reduced_block = nullptr,
+      .reduced_components = {},
+      .srcs = {},
+      .target = head,
+  };
+}
+
 } // namespace method_splitting_test

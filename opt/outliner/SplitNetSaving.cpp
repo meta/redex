@@ -12,6 +12,7 @@
 
 #include "Debug.h"
 #include "IRInstruction.h"
+#include "RegionPlan.h"
 
 namespace method_splitting_impl {
 
@@ -104,10 +105,18 @@ size_t host_dispatch_after(const SwitchPartition& partition,
 ClosureNetTerms split_net_saving(const NetSavingInput& input,
                                  const Config& config,
                                  bool host_compiled) {
-  // A suffix taking several cases deletes them from the host's switch, as it
-  // takes the switch's edges into them.
-  const auto edit =
-      input.dispatch ? HostSwitchEdit::DeleteGrouped : HostSwitchEdit::None;
+  const auto* region = std::get_if<NetSavingInput::Region>(&input.split);
+  // A region split takes one block's predecessors, not cases of a switch.
+  always_assert(region == nullptr || !input.dispatch);
+  // The edit the host's switch gets. A region's plan decides it. A suffix
+  // taking several cases deletes them, because it takes the switch's edges
+  // into them.
+  HostSwitchEdit edit = HostSwitchEdit::None;
+  if (region != nullptr) {
+    edit = region->plan.host_switch_edit();
+  } else if (input.dispatch) {
+    edit = HostSwitchEdit::DeleteGrouped;
+  }
   // Code the launchpad adds to the host. It costs dex, and re-enters the
   // compiled code of a compiled host.
   size_t hot = 0;
@@ -118,16 +127,21 @@ ClosureNetTerms split_net_saving(const NetSavingInput& input,
   const size_t move_result = opcode_code_units(OPCODE_MOVE_RESULT);
   size_t dex_only = config.net_cu_method_metadata +
                     config.net_cu_load_param * input.passed_args +
-                    input.recreated_defs + input.duplicated;
+                    input.recreated_defs + return_units * input.return_sites +
+                    input.duplicated;
   const size_t spill =
       input.passed_arg_registers > kMaxNonRangeInvokeRegisters
           ? input.passed_arg_registers * config.net_cu_range_spill_per_reg
           : 0;
   hot += opcode_code_units(OPCODE_INVOKE_STATIC) + spill;
-  hot +=
-      return_units +
-      (std::get<NetSavingInput::Suffix>(input.split).returns_value ? move_result
-                                                                   : 0);
+  if (region == nullptr) {
+    hot += return_units +
+           (std::get<NetSavingInput::Suffix>(input.split).returns_value
+                ? move_result
+                : 0);
+  } else {
+    dex_only += opcode_code_units(OPCODE_GOTO);
+  }
   // A split taking several cases of a switch starts with a copy of it over
   // the cases it takes. The host's switch sheds what the edit removes. It can
   // also grow, which counts as a negative shed: when the edit leaves the

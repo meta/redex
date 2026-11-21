@@ -181,6 +181,7 @@ check_PROGRAMS = \
     reduce_sparse_switches_test \
     reflection_analysis_test \
     reg_alloc_test \
+    region_plan_test \
     registers_test \
     remark_test \
     remove_builders_test \
@@ -596,6 +597,8 @@ reflection_analysis_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 reg_alloc_test_SOURCES = RegAllocTest.cpp OpcodeList.cpp
 reg_alloc_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
+
+region_plan_test_SOURCES = RegionPlanTest.cpp
 
 registers_test_SOURCES = RegistersTest.cpp OpcodeList.cpp
 

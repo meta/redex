@@ -306,7 +306,39 @@ enum class Site {
   kConstClass, // `const-class` in code
   kClassFieldValue, // `static final Class<?> TAG = X.class;`
   kObjectFieldValue, // `static final Object TAG = X.class;`
+  kClassAnnotation, // `@Anno(X.class) class User`
+  kMethodAnnotation, // `@Anno(X.class) void m(Object o)`
+  kParameterAnnotation, // `void m(@Anno(X.class) Object o)`
+  kFieldAnnotation, // `@Anno(X.class) Object f;`
+  kAnnotationArray, // `@Anno({X.class})`
+  kNestedAnnotation, // `@Outer(@Anno(X.class))`
 };
+
+std::unique_ptr<DexAnnotationSet> annotation_naming(DexType* type,
+                                                    bool in_array = false,
+                                                    bool nested = false) {
+  std::unique_ptr<DexEncodedValue> element =
+      std::make_unique<DexEncodedValueType>(type);
+  if (in_array) {
+    auto* values = new DexEncodedValueArray::Storage();
+    values->push_back(std::move(element));
+    element = std::make_unique<DexEncodedValueArray>(values);
+  }
+  auto anno = std::make_unique<DexAnnotation>(
+      DexType::make_type("Lcom/redextest/Anno;"), DAV_RUNTIME);
+  if (nested) {
+    EncodedAnnotations elements;
+    elements.emplace_back(DexString::make_string("value"), std::move(element));
+    anno->add_element("value", std::make_unique<DexEncodedValueAnnotation>(
+                                   DexType::make_type("Lcom/redextest/Inner;"),
+                                   std::move(elements)));
+  } else {
+    anno->add_element("value", std::move(element));
+  }
+  auto anno_set = std::make_unique<DexAnnotationSet>();
+  anno_set->add_annotation(std::move(anno));
+  return anno_set;
+}
 
 // Adds a class literal naming `type` to `user`, at `site`.
 void add_class_literal(DexClass* user, Site site, DexType* type) {
@@ -318,6 +350,23 @@ void add_class_literal(DexClass* user, Site site, DexType* type) {
                             std::make_unique<DexEncodedValueType>(type));
     user->add_field(field);
   };
+  // Annotations go on members before `make_concrete`, which rejects them.
+  auto add_annotated_method =
+      [&](std::unique_ptr<DexAnnotationSet> annos,
+          std::unique_ptr<DexAnnotationSet> param_annos) {
+        auto* method = dynamic_cast<DexMethod*>(DexMethod::make_method(
+            "Lcom/redextest/User;.m:(Ljava/lang/Object;)V"));
+        if (annos != nullptr) {
+          ASSERT_TRUE(method->attach_annotation_set(std::move(annos)));
+        }
+        if (param_annos != nullptr) {
+          method->attach_param_annotation_set(0, std::move(param_annos));
+        }
+        method->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+        method->set_code(assembler::ircode_from_string(
+            "((load-param-object v0) (return-void))"));
+        user->add_method(method);
+      };
   switch (site) {
   case Site::kConstClass: {
     auto* method = DexMethod::make_method(
@@ -334,6 +383,32 @@ void add_class_literal(DexClass* user, Site site, DexType* type) {
     break;
   case Site::kObjectFieldValue:
     add_field(type::java_lang_Object());
+    break;
+  case Site::kClassAnnotation:
+    ASSERT_TRUE(user->attach_annotation_set(annotation_naming(type)));
+    break;
+  case Site::kMethodAnnotation:
+    add_annotated_method(annotation_naming(type), nullptr);
+    break;
+  case Site::kParameterAnnotation:
+    add_annotated_method(nullptr, annotation_naming(type));
+    break;
+  case Site::kFieldAnnotation: {
+    auto* field = dynamic_cast<DexField*>(
+        DexField::make_field(user->get_type(), DexString::make_string("f"),
+                             type::java_lang_Object()));
+    ASSERT_TRUE(field->attach_annotation_set(annotation_naming(type)));
+    field->make_concrete(ACC_PUBLIC);
+    user->add_field(field);
+    break;
+  }
+  case Site::kAnnotationArray:
+    ASSERT_TRUE(user->attach_annotation_set(
+        annotation_naming(type, /* in_array */ true)));
+    break;
+  case Site::kNestedAnnotation:
+    ASSERT_TRUE(user->attach_annotation_set(
+        annotation_naming(type, /* in_array */ false, /* nested */ true)));
     break;
   }
 }
@@ -386,3 +461,22 @@ INSTANTIATE_TEST_SUITE_P(CodeAndStaticValues,
                          ::testing::Values(Site::kConstClass,
                                            Site::kClassFieldValue,
                                            Site::kObjectFieldValue));
+
+INSTANTIATE_TEST_SUITE_P(Annotations,
+                         VerticalMergingLiteralTest,
+                         ::testing::Values(Site::kClassAnnotation,
+                                           Site::kMethodAnnotation,
+                                           Site::kParameterAnnotation,
+                                           Site::kFieldAnnotation,
+                                           Site::kAnnotationArray,
+                                           Site::kNestedAnnotation));
+
+// Java: `@Anno(Impl.class) abstract class Base {}`. `Base` merges into `Impl`,
+// which then carries the annotation naming itself.
+TEST_F(VerticalMergingTest, mergesParentWhoseAnnotationNamesSubclass) {
+  ASSERT_TRUE(base->attach_annotation_set(annotation_naming(impl->get_type())));
+
+  EXPECT_EQ(run_pass(create_user(kNewImpl)), 2);
+  ASSERT_NE(impl->get_anno_set(), nullptr);
+  EXPECT_EQ(impl->get_anno_set()->size(), 1);
+}

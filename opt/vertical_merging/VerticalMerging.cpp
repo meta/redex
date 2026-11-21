@@ -92,10 +92,10 @@ void record_dont_merge_state(const DexType* type,
  * A class literal is a class's identity, which code can compare, key a map on
  * or lock, so the class it names, even an abstract one, must not be merged
  * away. It may still be the merger, which keeps its name. The literal is the
- * same value whether it is a `const-class` in code or the constant value of a
+ * same value whether it is a `const-class` in code, the constant value of a
  * static field (which `FinalInlinePassV2` makes from a `const-class` in
- * `<clinit>`). The pass does not rewrite types in static values, so this rule
- * also keeps those values correct.
+ * `<clinit>`), or an annotation element. The pass does not rewrite types in
+ * static values or annotations, so this rule also keeps those values correct.
  */
 void record_class_literal(const DexType* type,
                           DontMergeStatus* dont_merge_status) {
@@ -380,13 +380,9 @@ size_t record_annotation(const Scope& scope,
                          bool record_type_like_string_refs,
                          DontMergeStatus* dont_merge_status) {
   AtomicStatCounter<size_t> type_like_string_refs{0};
-  // Remove class if it is the type of an annotation.
-  // TODO(suree404): Merge the classes even though it appears in annotation?
   walk::parallel::annotations(scope, [&](DexAnnotation* anno) {
-    std::vector<const DexType*> types_in_anno;
-    anno->gather_types(types_in_anno);
-    for (const auto& type : types_in_anno) {
-      record_dont_merge_state(type, kStrict, dont_merge_status);
+    for (const auto& elem : anno->anno_elems()) {
+      record_class_literals(*elem.encoded_value, dont_merge_status);
     }
     if (anno->type() == type::dalvik_annotation_Signature() ||
         anno->type()->str() == "Lkotlin/Metadata;") {

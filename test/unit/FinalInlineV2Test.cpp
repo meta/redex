@@ -254,6 +254,160 @@ TEST_F(FinalInlineTest, fieldConditionallySet) {
   EXPECT_EQ(field_baz->get_static_value()->value(), 0);
 }
 
+// A <clinit> call whose target is unknown may run code that reads a field
+// before the <clinit> writes it, so the field keeps its <clinit>. The missing
+// LibListener may declare onEvent(), so the target is unknown:
+//   interface Known { default void onEvent() {} }
+//   interface Listener extends LibListener, Known {}
+//   class Impl implements Listener { void onEvent() { Bar.seen = Foo.y; } }
+//   class Foo { static int y; static { new Impl().onEvent(); y = 5; } }
+TEST_F(FinalInlineTest, unknownCalleeReadsFieldMissingSuperinterface) {
+  ClassCreator listener_cc(DexType::make_type("LListener;"));
+  listener_cc.set_super(type::java_lang_Object());
+  listener_cc.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  listener_cc.add_interface(DexType::make_type("LLibListener;"));
+  listener_cc.add_interface(DexType::make_type("LKnown;"));
+  ClassCreator known_cc(DexType::make_type("LKnown;"));
+  known_cc.set_super(type::java_lang_Object());
+  known_cc.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  known_cc.add_method(assembler::method_from_string(R"(
+    (method (public) "LKnown;.onEvent:()V"
+     (
+      (load-param-object v0)
+      (return-void)
+     )
+    )
+  )"));
+  ClassCreator impl_cc(DexType::make_type("LImpl;"));
+  impl_cc.set_super(type::java_lang_Object());
+  impl_cc.add_interface(DexType::make_type("LListener;"));
+  impl_cc.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LImpl;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (return-void)
+     )
+    )
+  )"));
+  impl_cc.add_method(assembler::method_from_string(R"(
+    (method (public) "LImpl;.onEvent:()V"
+     (
+      (load-param-object v0)
+      (sget "LFoo;.y:I")
+      (move-result-pseudo v1)
+      (sput v1 "LBar;.seen:I")
+      (return-void)
+     )
+    )
+  )"));
+  ClassCreator bar_cc(DexType::make_type("LBar;"));
+  bar_cc.set_super(type::java_lang_Object());
+  create_field_with_zero_value("LBar;.seen:I", &bar_cc);
+  auto* field_y = create_field_with_zero_value("LFoo;.y:I", m_cc.get());
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public static constructor) "LFoo;.<clinit>:()V"
+     (
+      (new-instance "LImpl;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "LImpl;.<init>:()V")
+      (invoke-interface (v0) "LListener;.onEvent:()V")
+      (const v1 5)
+      (sput v1 "LFoo;.y:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* cls = m_cc->create();
+
+  auto original = assembler::to_s_expr(cls->get_clinit()->get_code());
+  run({known_cc.create(), listener_cc.create(), impl_cc.create(),
+       bar_cc.create(), cls},
+      /* xstores */ nullptr);
+  ASSERT_NE(cls->get_clinit(), nullptr);
+  EXPECT_EQ(assembler::to_s_expr(cls->get_clinit()->get_code()), original);
+  EXPECT_EQ(field_y->get_static_value()->value(), 0);
+}
+
+// As above, through a missing superclass that may declare m():
+//   interface Known { default void m() {} }
+//   class D extends LibBase implements Known {}
+//   class Impl extends D { void m() { Bar.seen = Foo.y; } }
+//   class Foo { static int y; static { D d = new Impl(); d.m(); y = 5; } }
+TEST_F(FinalInlineTest, unknownCalleeReadsFieldMissingSuperclass) {
+  ClassCreator known_cc(DexType::make_type("LKnown;"));
+  known_cc.set_super(type::java_lang_Object());
+  known_cc.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  known_cc.add_method(assembler::method_from_string(R"(
+    (method (public) "LKnown;.m:()V"
+     (
+      (load-param-object v0)
+      (return-void)
+     )
+    )
+  )"));
+  ClassCreator d_cc(DexType::make_type("LD;"));
+  d_cc.set_super(DexType::make_type("LLibBase;"));
+  d_cc.add_interface(DexType::make_type("LKnown;"));
+  d_cc.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LD;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "LLibBase;.<init>:()V")
+      (return-void)
+     )
+    )
+  )"));
+  ClassCreator impl_cc(DexType::make_type("LImpl;"));
+  impl_cc.set_super(DexType::make_type("LD;"));
+  impl_cc.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LImpl;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "LD;.<init>:()V")
+      (return-void)
+     )
+    )
+  )"));
+  impl_cc.add_method(assembler::method_from_string(R"(
+    (method (public) "LImpl;.m:()V"
+     (
+      (load-param-object v0)
+      (sget "LFoo;.y:I")
+      (move-result-pseudo v1)
+      (sput v1 "LBar;.seen:I")
+      (return-void)
+     )
+    )
+  )"));
+  ClassCreator bar_cc(DexType::make_type("LBar;"));
+  bar_cc.set_super(type::java_lang_Object());
+  create_field_with_zero_value("LBar;.seen:I", &bar_cc);
+  auto* field_y = create_field_with_zero_value("LFoo;.y:I", m_cc.get());
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public static constructor) "LFoo;.<clinit>:()V"
+     (
+      (new-instance "LImpl;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "LImpl;.<init>:()V")
+      (invoke-virtual (v0) "LD;.m:()V")
+      (const v1 5)
+      (sput v1 "LFoo;.y:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* cls = m_cc->create();
+
+  auto original = assembler::to_s_expr(cls->get_clinit()->get_code());
+  run({known_cc.create(), d_cc.create(), impl_cc.create(), bar_cc.create(),
+       cls},
+      /* xstores */ nullptr);
+  ASSERT_NE(cls->get_clinit(), nullptr);
+  EXPECT_EQ(assembler::to_s_expr(cls->get_clinit()->get_code()), original);
+  EXPECT_EQ(field_y->get_static_value()->value(), 0);
+}
+
 TEST_F(FinalInlineTest, dominatedSget) {
   auto* field_bar = create_field_with_zero_value("LFoo;.bar:I", m_cc.get());
   auto* field_baz = create_field_with_zero_value("LFoo;.baz:I", m_cc.get());

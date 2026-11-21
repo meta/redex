@@ -257,13 +257,17 @@ StaticFieldReadAnalysis::Result StaticFieldReadAnalysis::analyze(
   cfg_adapter::iterate_with_iterator(code, [&](const IRList::iterator& it) {
     auto* insn = it->insn;
     if (opcode::is_an_invoke(insn->opcode())) {
-      auto* callee_method_def = resolve_method_deprecated(
-          insn->get_method(), opcode_to_search(insn), method);
-      if ((callee_method_def == nullptr) || callee_method_def->is_external() ||
-          !callee_method_def->is_concrete() ||
-          (m_allowed_opaque_callees.count(callee_method_def) != 0u)) {
+      auto* callee_ref = insn->get_method();
+      auto* callee_method_def =
+          resolve_method_deprecated(callee_ref, opcode_to_search(insn), method);
+      if (is_external_call(callee_ref, callee_method_def) ||
+          (callee_method_def != nullptr &&
+           (!callee_method_def->is_concrete() ||
+            (m_allowed_opaque_callees.count(callee_method_def) != 0u)))) {
         return cfg_adapter::LOOP_CONTINUE;
       }
+      // A call whose target is unknown has no callees in the graph, so the
+      // analysis gives up on it.
       const auto& callees = resolve_callees_in_graph(m_graph, insn);
       if (callees.empty()) {
         TRACE(FINALINLINE, 2, "%s has opaque callees %s", SHOW(method),

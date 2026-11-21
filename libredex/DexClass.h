@@ -593,6 +593,9 @@ class DexProto {
 
   static DexProto* make_proto(const DexType* rtype, const DexTypeList* args);
 
+  // The proto of a descriptor such as "(I[Ljava/lang/String;)V".
+  static DexProto* make_proto(std::string_view descriptor);
+
   // Return an existing DexProto or nullptr if one does not exist.
   static DexProto* get_proto(const DexType* rtype, const DexTypeList* args);
 

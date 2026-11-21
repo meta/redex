@@ -75,7 +75,15 @@ struct MethodDescriptorTokens {
   }
 };
 
+struct ProtoDescriptorTokens {
+  std::vector<std::string_view> args;
+  std::string_view rtype;
+};
+
 FieldDescriptorTokens parse_field(std::string_view);
+
+// Parses a prototype such as "(I[Ljava/lang/String;)V".
+ProtoDescriptorTokens parse_proto(std::string_view);
 
 // When `kCheckFormat` = true, syntactical issues in the string
 // will lead to asserts, i.e., throws.

@@ -1154,17 +1154,31 @@ DexMethodRef* DexMethod::get_method(std::string_view full_descriptor) {
 template DexMethodRef* DexMethod::get_method<false>(std::string_view);
 template DexMethodRef* DexMethod::get_method<true>(std::string_view);
 
+namespace {
+
+DexProto* make_proto_from_tokens(const std::vector<std::string_view>& arg_strs,
+                                 std::string_view rtype_str) {
+  DexTypeList::ContainerType args;
+  for (auto arg_str : arg_strs) {
+    args.push_back(DexType::make_type(arg_str));
+  }
+  return DexProto::make_proto(DexType::make_type(rtype_str),
+                              DexTypeList::make_type_list(std::move(args)));
+}
+
+} // namespace
+
+DexProto* DexProto::make_proto(std::string_view descriptor) {
+  auto pdt = dex_member_refs::parse_proto(descriptor);
+  return make_proto_from_tokens(pdt.args, pdt.rtype);
+}
+
 DexMethodRef* DexMethod::make_method(std::string_view full_descriptor) {
   auto mdt = dex_member_refs::parse_method(full_descriptor);
   auto* cls = DexType::make_type(mdt.cls);
   const auto* name = DexString::make_string(mdt.name);
-  DexTypeList::ContainerType args;
-  for (auto& arg_str : mdt.args) {
-    args.push_back(DexType::make_type(arg_str));
-  }
-  auto* dtl = DexTypeList::make_type_list(std::move(args));
-  auto* rtype = DexType::make_type(mdt.rtype);
-  return DexMethod::make_method(cls, name, DexProto::make_proto(rtype, dtl));
+  return DexMethod::make_method(cls, name,
+                                make_proto_from_tokens(mdt.args, mdt.rtype));
 }
 
 DexMethodRef* DexMethod::make_method(

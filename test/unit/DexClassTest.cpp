@@ -11,6 +11,7 @@
 #include "RedexContext.h"
 #include "RedexTest.h"
 #include "SimpleClassHierarchy.h"
+#include "TypeUtil.h"
 
 class DexClassTest : public RedexTest {};
 
@@ -236,4 +237,21 @@ Methods:
 // A class name in a method descriptor must end with `;`.
 TEST_F(DexClassTest, makeMethodRejectsUnterminatedClassName) {
   EXPECT_THROW(DexMethod::make_method("LFoo;.bar:(Lfoo)V"), RedexException);
+}
+
+TEST_F(DexClassTest, makeProtoFromDescriptor) {
+  auto* string_array = DexType::make_type("[Ljava/lang/String;");
+  EXPECT_EQ(DexProto::make_proto("(I[Ljava/lang/String;)V"),
+            DexProto::make_proto(
+                type::_void(),
+                DexTypeList::make_type_list({type::_int(), string_array})));
+  EXPECT_EQ(
+      DexProto::make_proto("()J"),
+      DexProto::make_proto(type::_long(), DexTypeList::make_type_list({})));
+  EXPECT_EQ(DexMethod::make_method("LFoo;.bar:(IJ)Z")->get_proto(),
+            DexProto::make_proto("(IJ)Z"));
+
+  EXPECT_THROW(DexProto::make_proto("I)V"), RedexException);
+  EXPECT_THROW(DexProto::make_proto("(I)"), RedexException);
+  EXPECT_THROW(DexProto::make_proto("(Lfoo)V"), RedexException);
 }

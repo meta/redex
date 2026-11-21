@@ -74,22 +74,30 @@ std::vector<std::string_view> split_args(std::string_view args) {
 
 } // namespace
 
+ProtoDescriptorTokens parse_proto(std::string_view s) {
+  always_assert_log(!s.empty() && s[0] == '(', "No argument list found");
+  auto args_end = expect(s, ')', 1);
+  auto rtype_start = args_end + 1;
+  always_assert_log(rtype_start < s.size(), "No return type found");
+
+  ProtoDescriptorTokens pdt;
+  pdt.args = split_args(s.substr(1, args_end - 1));
+  pdt.rtype = s.substr(rtype_start);
+  return pdt;
+}
+
 template <bool kCheckFormat>
 MethodDescriptorTokens parse_method(std::string_view s) {
   auto cls_end = expect(s, '.');
   auto name_start = cls_end + 1;
   auto name_end = expect(s, ":(", name_start);
-  auto args_start = name_end + 2;
-  auto args_end = expect(s, ')', args_start);
-  auto rtype_start = args_end + 1;
-  always_assert_log(rtype_start < s.size(), "No return type found");
+  auto pdt = parse_proto(s.substr(name_end + 1));
 
   MethodDescriptorTokens mdt;
   mdt.cls = s.substr(0, cls_end);
   mdt.name = s.substr(name_start, name_end - name_start);
-  auto args_str = s.substr(args_start, args_end - args_start);
-  mdt.args = split_args(args_str);
-  mdt.rtype = s.substr(rtype_start);
+  mdt.args = std::move(pdt.args);
+  mdt.rtype = pdt.rtype;
   if (kCheckFormat) {
     // Macros are ugly, but it will print nicer since asserts are macros, too.
 #define context_assert(e, local_ctx) \

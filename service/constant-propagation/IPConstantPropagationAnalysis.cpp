@@ -92,10 +92,6 @@ void FixpointIterator::analyze_node(call_graph::NodeId const& node,
     }
     outgoing_insns.emplace(edge->invoke_insn());
   }
-  WholeProgramStateAccessorRecord record;
-  if (ipa->wps_accessor) {
-    ipa->wps_accessor->start_recording(&record);
-  }
   UnorderedMap<const IRInstruction*, ArgumentDomain> result;
   for (auto* block : cfg.blocks()) {
     auto state = intra_cp.get_entry_state_at(block);
@@ -114,14 +110,11 @@ void FixpointIterator::analyze_node(call_graph::NodeId const& node,
       intra_cp.analyze_instruction(insn, &state, insn == last_insn->insn);
     }
   }
-  if (ipa->wps_accessor) {
-    ipa->wps_accessor->stop_recording();
-  }
   for (auto& [insn, out_args] : UnorderedIterable(result)) {
     current_state->set(insn, out_args);
   }
   method_cache.push_front(std::make_shared<MethodCacheEntry>((MethodCacheEntry){
-      std::move(args), std::move(record), std::move(result)}));
+      std::move(args), ipa->take_wps_accessor_record(), std::move(result)}));
   ++m_stats.method_cache_misses;
 }
 
@@ -155,7 +148,18 @@ IntraproceduralAnalysis::IntraproceduralAnalysis(
               std::move(insn_analyzer),
               make_wps_aware_no_throw_analyzer(null_check_methods,
                                                this->wps_accessor.get())) {
+  if (this->wps_accessor) {
+    this->wps_accessor->start_recording();
+  }
   fp_iter.run(env);
+}
+
+WholeProgramStateAccessorRecord
+IntraproceduralAnalysis::take_wps_accessor_record() {
+  if (wps_accessor == nullptr) {
+    return {};
+  }
+  return wps_accessor->stop_recording();
 }
 
 const ArgumentDomain& FixpointIterator::get_entry_args(

@@ -3594,3 +3594,70 @@ TEST_F(InterproceduralConstantPropagationTest, rConstArgumentPropagation) {
   m2->get_code()->clear_cfg();
   EXPECT_CODE_EQ(m2->get_code(), expected_code2.get());
 }
+
+// `check` returns normally only when its argument is 5, so after the call
+// `caller` passes 5 to `use`. The call sits in a try block, so that refinement
+// is read only on the call's no-throw edge; a cached result of `caller` from a
+// run that did not know the summary of `check` must not be reused once it does.
+TEST_F(InterproceduralConstantPropagationTest,
+       cachedResultIsRedoneWhenASummaryReadOnAnEdgeChanges) {
+  ClassCreator creator(DexType::make_type("LFoo;"));
+  creator.set_super(type::java_lang_Object());
+  creator.add_method(assembler::method_from_string(R"(
+    (method (public static) "LFoo;.check:(I)V"
+     (
+      (load-param v0)
+      (const v1 5)
+      (if-eq v0 v1 :ok)
+      (const v2 0)
+      (throw v2)
+      (:ok)
+      (return-void)
+     )
+    )
+  )"));
+  creator.add_method(assembler::method_from_string(R"(
+    (method (public static) "LFoo;.use:(I)V"
+     (
+      (load-param v0)
+      (return-void)
+     )
+    )
+  )"));
+  auto* caller = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.caller:(I)V"
+     (
+      (load-param v0)
+      (.try_start a)
+      (invoke-static (v0) "LFoo;.check:(I)V")
+      (.try_end a)
+      (invoke-static (v0) "LFoo;.use:(I)V")
+      (return-void)
+      (.catch (a))
+      (return-void)
+     )
+    )
+  )");
+  caller->rstate.set_root();
+  creator.add_method(caller);
+  Scope scope{creator.create()};
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  auto fp_iter = InterproceduralConstantPropagationPass().analyze(
+      scope, &m_immut_analyzer_state, &m_api_level_analyzer_state,
+      &m_string_analyzer_state, &m_package_name_state, m_null_check_methods);
+  auto graph = method_override_graph::build_graph(scope);
+  fp_iter->set_whole_program_state(std::make_unique<WholeProgramState>(
+      scope, *fp_iter,
+      method_override_graph::get_non_true_virtuals(*graph, scope),
+      UnorderedSet<const DexType*>(), UnorderedSet<const DexField*>(),
+      /* call_graph */ nullptr));
+  fp_iter->run(Domain{{CURRENT_PARTITION_LABEL, ArgumentDomain()}});
+
+  const auto* use = DexMethod::get_method("LFoo;.use:(I)V")->as_def();
+  const auto& cg = fp_iter->get_call_graph();
+  EXPECT_EQ(fp_iter->get_entry_state_at(cg.node(use))
+                .get(CURRENT_PARTITION_LABEL)
+                .get(0),
+            SignedConstantDomain(5));
+}

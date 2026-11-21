@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include <sparta/HashedAbstractPartition.h>
 #include <sparta/PatriciaTreeMapAbstractEnvironment.h>
 
@@ -244,7 +246,7 @@ class WholeProgramStateAccessor {
 
   ConstantValue get_field_value(const DexField* field) const {
     auto val = m_wps.get_field_value(field);
-    if (m_record != nullptr) {
+    if (m_record) {
       m_record->field_dependencies.emplace(field, val);
     }
     return val;
@@ -265,7 +267,7 @@ class WholeProgramStateAccessor {
     ConstantValue ret = ConstantValue::bottom();
     for (const DexMethod* callee : UnorderedIterable(callees)) {
       const auto& val = m_wps.get_method_partition().get(callee);
-      if (m_record != nullptr) {
+      if (m_record) {
         m_record->method_dependencies.emplace(callee, val);
       }
       ret.join_with(val);
@@ -278,7 +280,7 @@ class WholeProgramStateAccessor {
 
   ConstantValue get_return_value(const DexMethod* method) const {
     auto val = m_wps.get_return_value(method);
-    if (m_record != nullptr) {
+    if (m_record) {
       m_record->method_dependencies.emplace(method, val);
     }
     return val;
@@ -286,7 +288,7 @@ class WholeProgramStateAccessor {
 
   MethodParamEnv get_method_param_env(const DexMethod* method) const {
     auto val = m_wps.get_method_param_env(method);
-    if (m_record != nullptr) {
+    if (m_record) {
       m_record->method_param_env_dependencies.emplace(method, val);
     }
     return val;
@@ -309,7 +311,7 @@ class WholeProgramStateAccessor {
     MethodParamEnv ret = MethodParamEnv::bottom();
     for (const DexMethod* callee : UnorderedIterable(callees)) {
       const auto& val = m_wps.get_method_param_partition().get(callee);
-      if (m_record != nullptr) {
+      if (m_record) {
         m_record->method_param_env_dependencies.emplace(callee, val);
       }
       ret.join_with(val);
@@ -317,15 +319,20 @@ class WholeProgramStateAccessor {
     return ret;
   }
 
-  void start_recording(WholeProgramStateAccessorRecord* record) {
-    m_record = record;
-  }
+  // Starts recording every whole-program value that the getters above return.
+  void start_recording() { m_record.emplace(); }
 
-  void stop_recording() { m_record = nullptr; }
+  // Stops recording and returns the values read since start_recording().
+  WholeProgramStateAccessorRecord stop_recording() {
+    redex_assert(m_record);
+    auto record = std::move(*m_record);
+    m_record.reset();
+    return record;
+  }
 
  private:
   const WholeProgramState& m_wps;
-  WholeProgramStateAccessorRecord* m_record{nullptr};
+  mutable std::optional<WholeProgramStateAccessorRecord> m_record;
 };
 
 /*

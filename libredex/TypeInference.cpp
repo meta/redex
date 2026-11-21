@@ -286,6 +286,13 @@ void set_byte(TypeEnvironment* state, reg_t reg) {
   set_integral(state, reg);
 }
 
+// No move-result can read a result after this.
+void clear_result(TypeEnvironment* state) {
+  set_type(state, RESULT_REGISTER, TypeDomain::top());
+  set_type(state, RESULT_REGISTER, IntTypeDomain::top());
+  state->reset_dex_type(RESULT_REGISTER);
+}
+
 // This is used for the operand of a comparison operation with zero. The
 // complexity here is that this operation may be performed on either an
 // integer or a reference.
@@ -1294,6 +1301,7 @@ void TypeInference::analyze_instruction(const IRInstruction* insn,
     }
     DexType* return_type = dex_method->get_proto()->get_rtype();
     if (type::is_void(return_type)) {
+      clear_result(current_state);
       break;
     }
     if (type::is_object(return_type)) {
@@ -1542,9 +1550,7 @@ void TypeInference::analyze_instruction(const IRInstruction* insn,
 
   // If the opcode does not set the RESULT_REGISTER, clear it.
   if (!insn->has_move_result_any()) {
-    set_type(current_state, RESULT_REGISTER, TypeDomain::top());
-    set_type(current_state, RESULT_REGISTER, IntTypeDomain::top());
-    current_state->reset_dex_type(RESULT_REGISTER);
+    clear_result(current_state);
   }
 }
 

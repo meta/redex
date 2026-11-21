@@ -432,6 +432,23 @@ TEST_F(IRTypeCheckerTest, move_result) {
                            "ADD_INT v5, v5, v5$"));
 }
 
+// A void call leaves no result, even right after a call that does.
+TEST_F(IRTypeCheckerTest, move_result_after_void_invoke) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar:()I"
+     (
+      (invoke-static () "LFoo;.getInt:()I")
+      (invoke-static () "LFoo;.run:()V")
+      (move-result v0)
+      (return v0)
+     )
+    )
+  )");
+  IRTypeChecker checker(method);
+  checker.run();
+  EXPECT_TRUE(checker.fail());
+}
+
 TEST_F(IRTypeCheckerTest, move_result_at_start) {
   using namespace dex_asm;
   // Construct a new method because we don't want any load-param opcodes in

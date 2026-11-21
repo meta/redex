@@ -543,6 +543,31 @@ bool accepts_argument(const DexType* parameter, const Value& passed) {
          });
 }
 
+std::optional<const DexType*> declare_parameter_preferring_supply(
+    const Demand& uses, const std::function<Value()>& supply) {
+  if (uses.is_none()) {
+    const auto value = supply();
+    if (const auto integral = value.integral()) {
+      return integral->is_constant() ? type::_int() : integral->type();
+    }
+    if (const auto* t = value.upper(); accepts_argument(t, value)) {
+      return t;
+    }
+    return std::nullopt;
+  }
+  // `widest()` is also nullptr when the type a use needs is unknown.
+  const auto* widest = uses.widest();
+  if (widest == nullptr) {
+    return std::nullopt;
+  }
+  const auto value = supply();
+  if (!accepts_argument(widest, value)) {
+    return std::nullopt;
+  }
+  const auto integral = value.integral();
+  return integral && !integral->is_constant() ? integral->type() : widest;
+}
+
 const DexType* declare_result(const Value& returned) {
   return returned.exact();
 }

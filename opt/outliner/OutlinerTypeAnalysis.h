@@ -209,6 +209,31 @@ const DexType* declare_parameter(const Demand& uses,
 [[nodiscard]] bool accepts_argument(const DexType* parameter,
                                     const Value& passed);
 
+// The type to declare for a value passed into outlined code, or nullopt to
+// refuse the value; never nullptr. For an integral value it is never wider than
+// the type the caller holds, so a value the outlined code passes on keeps the
+// integral type ART gave it in the caller. `declare_parameter`, by contrast,
+// may widen a `char` to the `int` its uses accept.
+//
+//  - No use needs a type (the value is only passed on): the type of the value.
+//    A value defined only by constants has no single type, and `int` holds any
+//    of them. A value whose type cannot be told (an unknown contribution, or
+//    several without a common type), or that the type does not hold
+//    (`accepts_argument`), is refused.
+//  - The uses have a widest type: refuse a value it does not hold
+//    (`accepts_argument`). Otherwise declare the type of an integral value that
+//    is not only constants, and else that widest type. The type of the value is
+//    the least type above every order in which ART may merge its definitions,
+//    because outlined code need not keep the order ART verified the caller
+//    with.
+//  - The uses have no widest type, or the type a use needs is unknown: refuse.
+//    No declared type satisfies the uses.
+//
+// `supply` gives the value that reaches the register at the call, as the caller
+// holds it; it is called only when the uses do not refuse the value.
+std::optional<const DexType*> declare_parameter_preferring_supply(
+    const Demand& uses, const std::function<Value()>& supply);
+
 // The type of a value outlined code gives back. The caller's code after the
 // call was verified against the one type ART gave the register, so only a
 // type that every merge order ends at may be declared.

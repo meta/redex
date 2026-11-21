@@ -997,6 +997,59 @@ TEST_F(OutlinerTypeAnalysisTest, accepts_argument) {
   EXPECT_FALSE(art::accepts_argument(nullptr, zero));
 }
 
+// A parameter declared from the value the caller passes is never wider than an
+// integral value the caller holds, and is refused when no declared type
+// satisfies the uses.
+TEST_F(OutlinerTypeAnalysisTest, declare_parameter_preferring_supply) {
+  auto use = [](const DexType* t) { return art::Demand::of_use(t); };
+  auto supply = [](const art::Value& v) { return [v]() { return v; }; };
+  const auto char_value = art::Value::of_type(type::_char());
+  IRInstruction constant(OPCODE_CONST);
+  constant.set_dest(0);
+  constant.set_literal(65);
+  const auto constant_value = art::Value::constant(&constant);
+  auto declare = [](const art::Demand& uses,
+                    const std::function<art::Value()>& value) {
+    return art::declare_parameter_preferring_supply(uses, value);
+  };
+
+  // Passed through: the value's own type, and `int` for constants alone.
+  EXPECT_EQ(declare(art::Demand(), supply(char_value)), type::_char());
+  EXPECT_EQ(declare(art::Demand(), supply(constant_value)), type::_int());
+  // An `int` use accepts the `char`, which stays `char`; a constant takes the
+  // widest type its uses accept.
+  EXPECT_EQ(declare(use(type::_int()), supply(char_value)), type::_char());
+  EXPECT_EQ(declare(use(type::_char()), supply(constant_value)), type::_char());
+  // A `byte` use does not accept a `char`.
+  EXPECT_EQ(declare(use(type::_byte()), supply(char_value)), std::nullopt);
+  // `byte` and `char` uses have no widest type; an unknown use refuses too.
+  auto no_meet = use(type::_byte());
+  no_meet.meet_with(use(type::_char()));
+  EXPECT_EQ(declare(no_meet, supply(constant_value)), std::nullopt);
+  EXPECT_EQ(declare(art::Demand::unknown(), supply(char_value)), std::nullopt);
+  // A value whose type cannot be told is refused, whether or not a use requires
+  // a type. A known value that is not integral is declared as it is when no use
+  // requires a type, and refused by an integral use.
+  EXPECT_EQ(declare(art::Demand(), supply(art::Value::unknown())),
+            std::nullopt);
+  EXPECT_EQ(declare(use(type::_int()), supply(art::Value::unknown())),
+            std::nullopt);
+  EXPECT_EQ(declare(art::Demand(),
+                    supply(art::Value::of_type(type::java_lang_String()))),
+            type::java_lang_String());
+  EXPECT_EQ(
+      declare(use(type::_int()), supply(art::Value::of_type(type::_float()))),
+      std::nullopt);
+  // A widest type of any other kind is declared when it holds the value.
+  EXPECT_EQ(declare(use(type::java_lang_Object()),
+                    supply(art::Value::of_type(type::java_lang_String()))),
+            type::java_lang_Object());
+  EXPECT_EQ(declare(use(type::_float()), supply(constant_value)),
+            type::_float());
+  EXPECT_EQ(declare(use(type::java_lang_Object()), supply(char_value)),
+            std::nullopt);
+}
+
 // `value_of_producers` keeps constants as constants, and a copy stands for the
 // definitions of what it copies.
 TEST_F(OutlinerTypeAnalysisTest, value_of_producers) {

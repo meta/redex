@@ -2299,3 +2299,108 @@ TEST_F(OutlinerTypeAnalysisTest, demand_of_uses_reads_only_its_seeds) {
   EXPECT_EQ(ota.demand_of_uses(own_defs, after).widest(),
             DexType::get_type("LA;"));
 }
+
+// `supply_at` keeps the constants that reach an integral register as
+// constants, and gives an integral value only to an integral register.
+TEST_F(OutlinerTypeAnalysisTest, supply_at) {
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(CLjava/lang/Object;)V" (
+        (load-param v0)
+        (load-param-object v1)
+        (const v2 1)
+        (int-to-float v3 v2)
+        (const v5 1065353216)
+        (sput-char v0 "LFoo;.c:C")
+        (sput v2 "LFoo;.i:I")
+        (sput v3 "LFoo;.f:F")
+        (sput v5 "LFoo;.g:F")
+        (sput-object v1 "LFoo;.o:Ljava/lang/Object;")
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+  const auto* anchor = find_insn(foo_method, OPCODE_SPUT_CHAR);
+
+  {
+    // A char parameter is a char value.
+    auto supply = ota.supply_at(anchor, 0);
+    EXPECT_EQ(supply.upper(), type::_char());
+    auto value = supply.integral();
+    ASSERT_TRUE(value.has_value());
+    EXPECT_FALSE(value->is_constant());
+    EXPECT_EQ(value->type(), type::_char());
+  }
+
+  {
+    // A register that only a constant defines has a constant value, though
+    // `value_at` types it as `boolean` (a type that holds 1).
+    EXPECT_EQ(ota.value_at(anchor, 2).upper(), type::_boolean());
+    auto value = ota.supply_at(anchor, 2).integral();
+    ASSERT_TRUE(value.has_value());
+    EXPECT_TRUE(value->is_constant());
+  }
+
+  {
+    // A float has no integral value.
+    auto supply = ota.supply_at(anchor, 3);
+    EXPECT_EQ(supply.upper(), type::_float());
+    EXPECT_FALSE(supply.integral().has_value());
+  }
+
+  {
+    // Nor does a reference.
+    auto supply = ota.supply_at(anchor, 1);
+    EXPECT_EQ(supply.upper(), type::java_lang_Object());
+    EXPECT_FALSE(supply.integral().has_value());
+  }
+
+  {
+    // A literal used as a float is a float.
+    auto supply = ota.supply_at(anchor, 5);
+    EXPECT_EQ(supply.upper(), type::_float());
+    EXPECT_FALSE(supply.integral().has_value());
+  }
+}
+
+// Type inference joins `[LSupplyA;` and `[LSupplyB;` to the array of the
+// interface both classes implement, but ART merges them to `Object[]`. So
+// `supply_at` keeps both arrays, and an array of the interface does not hold
+// them, while `value_at` still gives one type to declare.
+TEST_F(OutlinerTypeAnalysisTest, supply_at_keeps_each_reference) {
+  ClassCreator object_creator(type::java_lang_Object());
+  object_creator.create();
+  ClassCreator i_creator(DexType::make_type("LSupplyI;"));
+  i_creator.set_access(ACC_INTERFACE | ACC_ABSTRACT);
+  i_creator.set_super(type::java_lang_Object());
+  auto* i_type = i_creator.create()->get_type();
+  for (const auto* name : {"LSupplyA;", "LSupplyB;"}) {
+    ClassCreator creator(DexType::make_type(name));
+    creator.set_super(type::java_lang_Object());
+    creator.add_interface(i_type);
+    creator.create();
+  }
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(I)V" (
+        (load-param v0)
+        (if-eqz v0 :b)
+        (invoke-static () "LFoo;.as:()[LSupplyA;")
+        (move-result-object v1)
+        (goto :join)
+        (:b)
+        (invoke-static () "LFoo;.bs:()[LSupplyB;")
+        (move-result-object v1)
+        (:join)
+        (invoke-static (v1) "LFoo;.take:([Ljava/lang/Object;)V")
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+  const auto* take = find_insn(foo_method, [](IRInstruction* insn) {
+    return insn->opcode() == OPCODE_INVOKE_STATIC && insn->srcs_size() == 1;
+  });
+  const auto supply = ota.supply_at(take, 1);
+  EXPECT_FALSE(art::accepts_argument(type::make_array_type(i_type), supply));
+  EXPECT_TRUE(art::accepts_argument(
+      type::make_array_type(type::java_lang_Object()), supply));
+  EXPECT_EQ(ota.value_at(take, 1).upper(), type::make_array_type(i_type));
+}

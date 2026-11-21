@@ -610,6 +610,60 @@ art::Value OutlinerTypeAnalysis::value_of_assignments(
   return value_of_defs(*defs, incoming ? *incoming : art::Value(), candidate);
 }
 
+art::Value OutlinerTypeAnalysis::supply_at(const IRInstruction* anchor,
+                                           reg_t reg) {
+  const auto& env = m_type_environments->at(anchor);
+  switch (env.get_type(reg).element()) {
+  case IRType::BOTTOM:
+  case IRType::ZERO:
+  case IRType::CONST:
+  case IRType::CONST1:
+  case IRType::SCALAR:
+  case IRType::SCALAR1:
+  case IRType::INT: {
+    // Type inference tells neither constants nor `boolean`, `byte`, `short`,
+    // `char` and `int` apart; go back to the definitions.
+    auto defs = known_defs_at(anchor, reg);
+    if (!defs) {
+      return art::Value::unknown();
+    }
+    auto value = value_of_producers(*defs);
+    if (value.is_constant()) {
+      const auto typed = value_of_defs(*defs, art::Value(), /* candidate */ {});
+      const auto* type = typed.upper();
+      if (type == nullptr || !type::is_integral(type)) {
+        return typed;
+      }
+    }
+    return value;
+  }
+  case IRType::REFERENCE: {
+    // Type inference joins the references, and its join of arrays whose
+    // elements share an interface (`[LA;` and `[LB;` give `[LI;`) is narrower
+    // than ART's merge (`[Ljava/lang/Object;`), so keep each producer's value.
+    if (auto defs = known_defs_at(anchor, reg)) {
+      return value_of_producers(*defs);
+    }
+    auto dex_type = env.get_dex_type(reg);
+    return art::Value::of_type(dex_type ? *dex_type : nullptr);
+  }
+  case IRType::FLOAT:
+    return art::Value::of_type(type::_float());
+  case IRType::LONG1:
+    return art::Value::of_type(type::_long());
+  case IRType::DOUBLE1:
+    return art::Value::of_type(type::_double());
+  case IRType::CONST2:
+  case IRType::DOUBLE2:
+  case IRType::LONG2:
+  case IRType::SCALAR2:
+  case IRType::TOP:
+  default:
+    // shouldn't happen for any input, but we don't need to fight that here
+    return art::Value::unknown();
+  }
+}
+
 art::Value OutlinerTypeAnalysis::value_of_producers(
     const UnorderedSet<const IRInstruction*>& defs) {
   art::Value value;
@@ -637,43 +691,19 @@ art::Value OutlinerTypeAnalysis::value_of_producers(
 art::Value OutlinerTypeAnalysis::value_at(const IRInstruction* anchor,
                                           reg_t reg) {
   const auto& env = m_type_environments->at(anchor);
-  switch (env.get_type(reg).element()) {
-  case IRType::BOTTOM:
-  case IRType::ZERO:
-  case IRType::CONST:
-  case IRType::CONST1:
-  case IRType::SCALAR:
-  case IRType::SCALAR1:
-  case IRType::INT: {
-    // Type inference tells neither constants nor `boolean`, `byte`, `short`,
-    // `char` and `int` apart; go back to the definitions.
-    auto defs = m_reaching_defs_environments->at(anchor).get(reg);
-    if (defs.is_bottom() || defs.is_top()) {
-      return art::Value::unknown();
-    }
-    return value_of_defs(UnorderedSet<const IRInstruction*>(
-                             defs.elements().begin(), defs.elements().end()),
-                         art::Value(), /* candidate */ {});
-  }
-  case IRType::REFERENCE: {
+  if (env.get_type(reg).element() == IRType::REFERENCE) {
     auto dex_type = env.get_dex_type(reg);
     return art::Value::of_type(dex_type ? *dex_type : nullptr);
   }
-  case IRType::FLOAT:
-    return art::Value::of_type(type::_float());
-  case IRType::LONG1:
-    return art::Value::of_type(type::_long());
-  case IRType::DOUBLE1:
-    return art::Value::of_type(type::_double());
-  case IRType::CONST2:
-  case IRType::DOUBLE2:
-  case IRType::LONG2:
-  case IRType::SCALAR2:
-  case IRType::TOP:
-  default:
-    // shouldn't happen for any input, but we don't need to fight that here
-    return art::Value::unknown();
+  auto value = supply_at(anchor, reg);
+  if (!value.is_constant()) {
+    return value;
   }
+  // `supply_at` keeps constants only for a register whose definitions it
+  // knows.
+  auto defs = known_defs_at(anchor, reg);
+  redex_assert(defs.has_value());
+  return value_of_defs(*defs, art::Value(), /* candidate */ {});
 }
 
 art::Demand OutlinerTypeAnalysis::demand_of_use(IRInstruction* use,
@@ -1416,6 +1446,16 @@ const DexType* OutlinerTypeAnalysis::get_type_demand(IRInstruction* insn,
         "get_type_demand\n",
         SHOW(insn));
   }
+}
+
+std::optional<UnorderedSet<const IRInstruction*>>
+OutlinerTypeAnalysis::known_defs_at(const IRInstruction* anchor, reg_t reg) {
+  auto defs = m_reaching_defs_environments->at(anchor).get(reg);
+  if (defs.is_bottom() || defs.is_top()) {
+    return std::nullopt;
+  }
+  return UnorderedSet<const IRInstruction*>(defs.elements().begin(),
+                                            defs.elements().end());
 }
 
 std::optional<UnorderedSet<const IRInstruction*>>

@@ -236,8 +236,24 @@ class OutlinerTypeAnalysis {
       const std::optional<art::Value>& incoming,
       const Membership& candidate = {});
 
-  // The value of `reg` where `anchor` reads it.
+  // The value of `reg` where `anchor` reads it, typed for a declaration: its
+  // `supply_at`, except that a declared type is one type, not a set of values.
+  // So a reference takes the type that type inference gives the register, and
+  // a register only constants define takes a type from how the constants are
+  // used.
   art::Value value_at(const IRInstruction* anchor, reg_t reg);
+
+  // What reaches `reg` where `anchor` reads it, with constants kept as
+  // constants: the join of its definitions as ART types them
+  // (`value_of_producers`). A reference keeps the value of each producer too,
+  // where its producers are known: ART merges arrays whose elements share an
+  // interface to `Object[]`, wider than type inference's join of them, and
+  // `art::accepts_argument` must see each value. Floating-point and wide
+  // values take the type that type inference gives the register. A register
+  // that only constants define keeps those constants where their uses take
+  // them as integral values; a literal used as a float, a wide value or null
+  // takes that type, and a literal whose uses have no common type is unknown.
+  art::Value supply_at(const IRInstruction* anchor, reg_t reg);
 
   // What reaches a register that `defs` define, with constants kept as
   // constants: the join of the value of each producer as ART types it. A move
@@ -295,6 +311,11 @@ class OutlinerTypeAnalysis {
 
   std::optional<UnorderedSet<const IRInstruction*>> get_defs(
       const UnorderedSet<const IRInstruction*>& insns);
+
+  // The definitions of `reg` that reach `anchor`; nullopt when they are not
+  // known (bottom or top).
+  std::optional<UnorderedSet<const IRInstruction*>> known_defs_at(
+      const IRInstruction* anchor, reg_t reg);
 
   const DexType* get_const_insns_type_demand(
       const Membership& candidate,

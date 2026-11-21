@@ -100,12 +100,12 @@
 #include "OutliningProfileGuidanceImpl.h"
 #include "PartialCandidates.h"
 #include "PassManager.h"
-#include "ReachingInitializeds.h"
 #include "RedexContext.h"
 #include "RefChecker.h"
 #include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
+#include "UninitializedObjects.h"
 #include "Walkers.h"
 
 using namespace outliner;
@@ -369,10 +369,10 @@ class CandidateInstructionCoresBuilder {
 // Normalization of partial candidate sequence to candidate sequence
 ////////////////////////////////////////////////////////////////////////////////
 
-using LazyReachingInitializedsEnvironments =
-    Lazy<reaching_initializeds::ReachingInitializedsEnvironments>;
-using OptionalReachingInitializedsEnvironments =
-    std::optional<reaching_initializeds::ReachingInitializedsEnvironments>;
+using LazyUninitializedObjectEnvironments =
+    Lazy<uninitialized_objects::UninitializedObjectEnvironments>;
+using OptionalUninitializedObjectEnvironments =
+    std::optional<uninitialized_objects::UninitializedObjectEnvironments>;
 
 static std::vector<cfg::Edge*> get_ordered_goto_and_branch_succs(
     cfg::Block* block) {
@@ -606,7 +606,7 @@ static bool can_outline_opcode(IROpcode opcode, bool outline_control_flow) {
 // indicates whether attempt was successful. If not, then the partial
 // candidate sequence should be abandoned.
 static bool append_to_partial_candidate(
-    LazyReachingInitializedsEnvironments& reaching_initialized_new_instances,
+    LazyUninitializedObjectEnvironments& uninitialized_envs,
     IRInstruction* insn,
     PartialCandidate* pc,
     PartialCandidateNode* pcn,
@@ -638,9 +638,8 @@ static bool append_to_partial_candidate(
       if (it != pcn->defined_regs.end()) {
         defined_reg = it->second;
       } else {
-        auto initialized =
-            reaching_initialized_new_instances->at(insn).get(insn->src(0));
-        if (!initialized.get_constant() || !*initialized.get_constant()) {
+        auto uninitialized = uninitialized_envs->at(insn).get(insn->src(0));
+        if (!uninitialized.get_constant() || *uninitialized.get_constant()) {
           return false;
         }
       }
@@ -667,11 +666,11 @@ static bool append_to_partial_candidate(
   return true;
 }
 
-static bool can_outline_insn(const RefChecker& ref_checker,
-                             const OptionalReachingInitializedsEnvironments&
-                                 reaching_initialized_init_first_param,
-                             IRInstruction* insn,
-                             bool outline_control_flow) {
+static bool can_outline_insn(
+    const RefChecker& ref_checker,
+    const OptionalUninitializedObjectEnvironments& uninitialized_receiver_envs,
+    IRInstruction* insn,
+    bool outline_control_flow) {
   if (!can_outline_opcode(insn->opcode(), outline_control_flow)) {
     return false;
   }
@@ -722,14 +721,14 @@ static bool can_outline_insn(const RefChecker& ref_checker,
       }
     }
   }
-  if (reaching_initialized_init_first_param) {
+  if (uninitialized_receiver_envs) {
     // In a constructor, we cannot outline instructions that access the first
     // parameter before the base constructor was called on it.
-    const auto& env = reaching_initialized_init_first_param->at(insn);
+    const auto& env = uninitialized_receiver_envs->at(insn);
     for (size_t i = 0; i < insn->srcs_size(); i++) {
       auto reg = insn->src(i);
-      const auto& initialized = env.get(reg);
-      if (!initialized.get_constant() || !*initialized.get_constant()) {
+      const auto& uninitialized = env.get(reg);
+      if (!uninitialized.get_constant() || *uninitialized.get_constant()) {
         return false;
       }
     }
@@ -816,9 +815,8 @@ using ExploredCallback =
 // particular point in a big block.
 // Result indicates whether the big block was successfully explored to the end.
 static bool explore_candidates_from(
-    LazyReachingInitializedsEnvironments& reaching_initialized_new_instances,
-    const OptionalReachingInitializedsEnvironments&
-        reaching_initialized_init_first_param,
+    LazyUninitializedObjectEnvironments& uninitialized_envs,
+    const OptionalUninitializedObjectEnvironments& uninitialized_receiver_envs,
     const Config& config,
     const RefChecker& ref_checker,
     const CandidateInstructionCoresSet& recurring_cores,
@@ -836,8 +834,8 @@ static bool explore_candidates_from(
       return false;
     }
     auto* insn = it->insn;
-    if (!can_outline_insn(ref_checker, reaching_initialized_init_first_param,
-                          insn, config.outline_control_flow)) {
+    if (!can_outline_insn(ref_checker, uninitialized_receiver_envs, insn,
+                          config.outline_control_flow)) {
       return false;
     }
     cores_builder.push_back(insn);
@@ -845,8 +843,8 @@ static bool explore_candidates_from(
         (recurring_cores.count(cores_builder.get_value()) == 0u)) {
       return false;
     }
-    if (!append_to_partial_candidate(reaching_initialized_new_instances, insn,
-                                     pc, pcn, config)) {
+    if (!append_to_partial_candidate(uninitialized_envs, insn, pc, pcn,
+                                     config)) {
       return false;
     }
     if (opcode::is_a_conditional_branch(insn->opcode()) ||
@@ -880,11 +878,10 @@ static bool explore_candidates_from(
           always_assert(
               is_uniquely_reached_via_pred(succ_big_block->get_first_block()));
           auto succ_ii = big_blocks::InstructionIterable(*succ_big_block);
-          if (!explore_candidates_from(reaching_initialized_new_instances,
-                                       reaching_initialized_init_first_param,
-                                       config, ref_checker, recurring_cores, pc,
-                                       succ_pcn.get(), succ_ii.begin(),
-                                       succ_ii.end())) {
+          if (!explore_candidates_from(
+                  uninitialized_envs, uninitialized_receiver_envs, config,
+                  ref_checker, recurring_cores, pc, succ_pcn.get(),
+                  succ_ii.begin(), succ_ii.end())) {
             return false;
           }
         }
@@ -987,17 +984,14 @@ static MethodCandidates find_method_candidates(
         }
         return res;
       });
-  LazyReachingInitializedsEnvironments reaching_initialized_new_instances(
-      [&cfg]() {
-        return reaching_initializeds::get_reaching_initializeds(
-            cfg, reaching_initializeds::Mode::NewInstances);
-      });
-  OptionalReachingInitializedsEnvironments
-      reaching_initialized_init_first_param;
+  LazyUninitializedObjectEnvironments uninitialized_envs([method]() {
+    return uninitialized_objects::get_uninitialized_object_environments(method);
+  });
+  OptionalUninitializedObjectEnvironments uninitialized_receiver_envs;
   if (method::is_init(method)) {
-    reaching_initialized_init_first_param =
-        reaching_initializeds::get_reaching_initializeds(
-            cfg, reaching_initializeds::Mode::FirstLoadParam);
+    uninitialized_receiver_envs =
+        uninitialized_objects::get_uninitialized_object_environments(
+            method, uninitialized_objects::TrackedObjects::ConstructorReceiver);
   }
   OutlinerTypeAnalysis type_analysis(method);
   auto big_blocks = big_blocks::get_big_blocks(cfg);
@@ -1199,10 +1193,9 @@ static MethodCandidates find_method_candidates(
         continue;
       }
       PartialCandidate pc;
-      explore_candidates_from(reaching_initialized_new_instances,
-                              reaching_initialized_init_first_param, config,
-                              ref_checker, recurring_cores, &pc, &pc.root, it,
-                              end, &explored_callback);
+      explore_candidates_from(uninitialized_envs, uninitialized_receiver_envs,
+                              config, ref_checker, recurring_cores, &pc,
+                              &pc.root, it, end, &explored_callback);
     }
   }
 
@@ -1243,12 +1236,12 @@ static void get_recurring_cores(const Config& config,
         always_assert(code.cfg_built());
         code.cfg().calculate_exit_block();
         auto& cfg = code.cfg();
-        OptionalReachingInitializedsEnvironments
-            reaching_initialized_init_first_param;
+        OptionalUninitializedObjectEnvironments uninitialized_receiver_envs;
         if (method::is_init(method)) {
-          reaching_initialized_init_first_param =
-              reaching_initializeds::get_reaching_initializeds(
-                  cfg, reaching_initializeds::Mode::FirstLoadParam);
+          uninitialized_receiver_envs =
+              uninitialized_objects::get_uninitialized_object_environments(
+                  method,
+                  uninitialized_objects::TrackedObjects::ConstructorReceiver);
         }
         for (auto& big_block : big_blocks::get_big_blocks(cfg)) {
           if (outlineability.can_outline_from_big_block(method, big_block) !=
@@ -1258,9 +1251,8 @@ static void get_recurring_cores(const Config& config,
           CandidateInstructionCoresBuilder cores_builder;
           for (auto& mie : big_blocks::InstructionIterable(big_block)) {
             auto* insn = mie.insn;
-            if (!can_outline_insn(ref_checker,
-                                  reaching_initialized_init_first_param, insn,
-                                  config.outline_control_flow)) {
+            if (!can_outline_insn(ref_checker, uninitialized_receiver_envs,
+                                  insn, config.outline_control_flow)) {
               cores_builder.clear();
               continue;
             }

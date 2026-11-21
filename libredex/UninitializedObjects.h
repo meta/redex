@@ -25,11 +25,20 @@ using UninitializedObjectEnvironment =
 using UninitializedObjectEnvironments =
     UnorderedMap<const IRInstruction*, UninitializedObjectEnvironment>;
 
+// The objects whose initialization the analysis tracks. Untracked objects count
+// as initialized.
+enum class TrackedObjects {
+  // Every object created by a `new-instance`, and a constructor's receiver.
+  All,
+  // Only a constructor's receiver.
+  ConstructorReceiver,
+};
+
 // For each instruction, and each incoming register, determine if it may contain
 // an uninitialized object, i.e. one that was created or passed in via the
 // receiver argument of a constructor, and no invoke-direct to a constructor
 // happened yet.
 UninitializedObjectEnvironments get_uninitialized_object_environments(
-    DexMethod* method);
+    DexMethod* method, TrackedObjects tracked = TrackedObjects::All);
 
 } // namespace uninitialized_objects

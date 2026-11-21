@@ -22,8 +22,12 @@ namespace {
 // Whether `reg` may hold an uninitialized object just before the first
 // instruction of `m` with opcode `op`: true, false, or nullopt when the
 // analysis cannot tell.
-std::optional<bool> uninitialized_before(DexMethod* m, IROpcode op, reg_t reg) {
-  auto envs = get_uninitialized_object_environments(m);
+std::optional<bool> uninitialized_before(
+    DexMethod* m,
+    IROpcode op,
+    reg_t reg,
+    TrackedObjects tracked = TrackedObjects::All) {
+  auto envs = get_uninitialized_object_environments(m, tracked);
   for (const auto& mie : cfg::InstructionIterable(m->get_code()->cfg())) {
     if (mie.insn->opcode() == op) {
       auto uninitialized = envs.at(mie.insn).get(reg).get_constant();
@@ -196,4 +200,28 @@ TEST_F(UninitializedObjectsTest, AllocationInALoopIsAnotherObjectEachTime) {
   )");
   EXPECT_EQ(uninitialized_before(m, OPCODE_RETURN_VOID, 1), false);
   EXPECT_NE(uninitialized_before(m, OPCODE_RETURN_VOID, 2), false);
+}
+
+// Tracking only a constructor's receiver counts the object of a `new-instance`
+// as initialized.
+TEST_F(UninitializedObjectsTest, ConstructorReceiverOnlyTracksTheReceiver) {
+  auto* m = make(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+      (
+        (load-param-object v0)
+        (new-instance "Ljava/lang/Object;")
+        (move-result-pseudo-object v1)
+        (invoke-direct (v1) "Ljava/lang/Object;.<init>:()V")
+        (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+        (return-void)
+      )
+    )
+  )");
+  EXPECT_EQ(uninitialized_before(m, OPCODE_INVOKE_DIRECT, 1), true);
+  EXPECT_EQ(uninitialized_before(m, OPCODE_INVOKE_DIRECT, 1,
+                                 TrackedObjects::ConstructorReceiver),
+            false);
+  EXPECT_EQ(uninitialized_before(m, OPCODE_INVOKE_DIRECT, 0,
+                                 TrackedObjects::ConstructorReceiver),
+            true);
 }

@@ -85,12 +85,13 @@ class State final
 // does.
 class Analyzer final : public BaseEdgeAwareIRAnalyzer<State> {
  public:
-  explicit Analyzer(DexMethod* method)
+  Analyzer(DexMethod* method, TrackedObjects tracked)
       : BaseEdgeAwareIRAnalyzer(method->get_code()->cfg()),
         m_init_first_load_param(
             method::is_init(method)
                 ? get_first_load_param(method->get_code()->cfg())
-                : nullptr) {}
+                : nullptr),
+        m_track_new_instances(tracked == TrackedObjects::All) {}
 
  protected:
   void analyze_instruction_normal(const IRInstruction* /* insn */,
@@ -108,7 +109,8 @@ class Analyzer final : public BaseEdgeAwareIRAnalyzer<State> {
                          AllocationDomain(insn));
     } else if (insn->has_dest()) {
       current_state->set(insn->dest(), initialized, AllocationDomain::top());
-    } else if (opcode::is_new_instance(insn->opcode())) {
+    } else if (m_track_new_instances &&
+               opcode::is_new_instance(insn->opcode())) {
       // No register is bound to an object from an earlier run of this
       // `new-instance`, as in a loop: a register stays bound after a merge
       // only if every incoming path binds it (otherwise it is Top), and the
@@ -133,14 +135,15 @@ class Analyzer final : public BaseEdgeAwareIRAnalyzer<State> {
 
  private:
   const IRInstruction* m_init_first_load_param;
+  const bool m_track_new_instances;
 };
 } // namespace
 
 namespace uninitialized_objects {
 
 UninitializedObjectEnvironments get_uninitialized_object_environments(
-    DexMethod* method) {
-  Analyzer fp_iter(method);
+    DexMethod* method, TrackedObjects tracked) {
+  Analyzer fp_iter(method, tracked);
   fp_iter.run({});
   UninitializedObjectEnvironments res;
   for (cfg::Block* block : method->get_code()->cfg().blocks()) {

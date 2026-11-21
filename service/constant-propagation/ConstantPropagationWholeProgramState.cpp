@@ -82,17 +82,50 @@ void analyze_clinits(const Scope& scope,
   });
 }
 
-bool analyze_gets_helper(const WholeProgramStateAccessor* whole_program_state,
-                         const IRInstruction* insn,
-                         ConstantEnvironment* env) {
+// Returns the whole-program value of the field that `insn` reads, or Top.
+ConstantValue get_read_field_value(
+    const WholeProgramStateAccessor* whole_program_state,
+    const IRInstruction* insn) {
   if (whole_program_state == nullptr) {
-    return false;
+    return ConstantValue::top();
   }
   auto* field = resolve_field(insn->get_field());
   if (field == nullptr) {
-    return false;
+    return ConstantValue::top();
   }
-  auto value = whole_program_state->get_field_value(field);
+  return whole_program_state->get_field_value(field);
+}
+
+// Returns the whole-program value that the method `insn` calls returns, or
+// Top.
+ConstantValue get_invoke_return_value(
+    const WholeProgramStateAccessor* whole_program_state,
+    const IRInstruction* insn) {
+  if (whole_program_state == nullptr) {
+    return ConstantValue::top();
+  }
+  if (whole_program_state->has_call_graph()) {
+    if (whole_program_state->invoke_is_dynamic(insn)) {
+      return ConstantValue::top();
+    }
+    return whole_program_state->get_return_value_from_cg(insn);
+  }
+  auto op = insn->opcode();
+  if (op != OPCODE_INVOKE_DIRECT && op != OPCODE_INVOKE_STATIC &&
+      op != OPCODE_INVOKE_VIRTUAL) {
+    return ConstantValue::top();
+  }
+  auto* method =
+      resolve_method_deprecated(insn->get_method(), opcode_to_search(insn));
+  if (method == nullptr) {
+    return ConstantValue::top();
+  }
+  return whole_program_state->get_return_value(method);
+}
+
+// Binds the result register to `value`, the whole-program value of the
+// instruction just analyzed. Binds nothing for Top.
+bool bind_result(const ConstantValue& value, ConstantEnvironment* env) {
   if (value.is_top()) {
     return false;
   }
@@ -438,50 +471,21 @@ bool WholeProgramAwareAnalyzer::analyze_sget(
     const WholeProgramStateAccessor* whole_program_state,
     const IRInstruction* insn,
     ConstantEnvironment* env) {
-  return analyze_gets_helper(whole_program_state, insn, env);
+  return bind_result(get_read_field_value(whole_program_state, insn), env);
 }
 
 bool WholeProgramAwareAnalyzer::analyze_iget(
     const WholeProgramStateAccessor* whole_program_state,
     const IRInstruction* insn,
     ConstantEnvironment* env) {
-  return analyze_gets_helper(whole_program_state, insn, env);
+  return bind_result(get_read_field_value(whole_program_state, insn), env);
 }
 
 bool WholeProgramAwareAnalyzer::analyze_invoke(
     const WholeProgramStateAccessor* whole_program_state,
     const IRInstruction* insn,
     ConstantEnvironment* env) {
-  if (whole_program_state == nullptr) {
-    return false;
-  }
-  if (whole_program_state->has_call_graph()) {
-    if (whole_program_state->invoke_is_dynamic(insn)) {
-      return false;
-    }
-    auto value = whole_program_state->get_return_value_from_cg(insn);
-    if (value.is_top()) {
-      return false;
-    }
-    env->set(RESULT_REGISTER, value);
-    return true;
-  }
-  auto op = insn->opcode();
-  if (op != OPCODE_INVOKE_DIRECT && op != OPCODE_INVOKE_STATIC &&
-      op != OPCODE_INVOKE_VIRTUAL) {
-    return false;
-  }
-  auto* method =
-      resolve_method_deprecated(insn->get_method(), opcode_to_search(insn));
-  if (method == nullptr) {
-    return false;
-  }
-  auto value = whole_program_state->get_return_value(method);
-  if (value.is_top()) {
-    return false;
-  }
-  env->set(RESULT_REGISTER, value);
-  return true;
+  return bind_result(get_invoke_return_value(whole_program_state, insn), env);
 }
 
 namespace {

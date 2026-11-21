@@ -382,90 +382,89 @@ size_t record_code_reference(const Scope& scope,
                              bool record_type_like_string_refs,
                              DontMergeStatus* dont_merge_status) {
   AtomicStatCounter<size_t> type_like_string_refs{0};
-  walk::parallel::opcodes(
-      scope,
-      [dont_merge_status, &type_like_string_refs, record_type_like_string_refs](
-          DexMethod* /*method*/, IRInstruction* insn) {
-        if (insn->has_type()) {
-          const auto* type = type::get_element_type_if_array(insn->get_type());
-          if (type == nullptr) {
-            return;
-          }
-          if (opcode::is_instance_of(insn->opcode())) {
-            // We don't want to merge class if either merger or
-            // mergeable was ever accessed in instance_of to prevent
-            // semantic error.
-            record_dont_merge_state(type, kStrict, dont_merge_status);
-            return;
-          } else {
-            DexClass* cls = type_class(type);
-            // A class literal is the type's identity, which code can compare
-            // or key a map on, so unlike other type references it keeps even
-            // an abstract type from being merged away.
-            if ((cls != nullptr) &&
-                (!is_abstract(cls) || opcode::is_const_class(insn->opcode()))) {
-              // Keep the referenced type from being the mergeable.
-              record_dont_merge_state(type, kConditional, dont_merge_status);
-              TRACE(VMERGE, 9, "dont_merge %s as mergeable for type usage: %s",
-                    SHOW(type), SHOW(insn));
-            }
-          }
-        } else if (opcode::is_const_string(insn->opcode())) {
-          auto* type = java_names::get_element_type_from_external_name(
-              insn->get_string()->str());
-          if (type != nullptr) {
-            type_like_string_refs++;
-            if (record_type_like_string_refs) {
-              record_dont_merge_state(type, kStrict, dont_merge_status);
-              TRACE(VMERGE, 9,
-                    "dont_merge %s for type-like string reference: %s",
-                    SHOW(type), SHOW(insn));
-            }
-          }
-        } else if (insn->has_field()) {
-          DexField* field = resolve_field(insn->get_field());
-          if (field != nullptr) {
-            bool resolve_differently =
-                field->get_class() != insn->get_field()->get_class();
-            if (resolve_differently) {
-              // If a field reference need to be resolved, don't merge as
-              // renaming it might cause problems.
-              // If a field that can't be renamed is being referenced. Don't
-              // merge it as we need the field and this field can't be renamed
-              // if having collision.
-              // TODO(suree404): can improve.
-              record_dont_merge_state(field->get_class(), kStrict,
-                                      dont_merge_status);
-              record_dont_merge_state(insn->get_field()->get_class(), kStrict,
-                                      dont_merge_status);
-            }
-          } else {
-            record_dont_merge_state(insn->get_field()->get_class(),
-                                    kConditional, dont_merge_status);
-          }
-        } else if (insn->has_method()) {
-          auto* callee_ref = insn->get_method();
-          if (opcode::is_invoke_super(insn->opcode())) {
-            // The only allowed pure ref is in invoke-super.
-            return;
-          }
-          if (!is_internal_def(callee_ref)) {
-            record_dont_merge_state(callee_ref->get_class(), kStrict,
-                                    dont_merge_status);
-            TRACE(VMERGE, 9, "dont_merge %s for pure ref %s",
-                  SHOW(callee_ref->get_class()), SHOW(callee_ref));
-            DexMethod* callee =
-                resolve_method_deprecated(callee_ref, MethodSearch::Any);
-            if (callee != nullptr) {
-              record_dont_merge_state(callee->get_class(), kStrict,
-                                      dont_merge_status);
-              TRACE(VMERGE, 9,
-                    "dont_merge %s for it may be invoked as a pure ref %s",
-                    SHOW(callee->get_class()), SHOW(callee_ref));
-            }
+  walk::parallel::code(scope, [&](DexMethod* /*method*/, IRCode& code) {
+    for (const auto& mie : cfg::InstructionIterable(code.cfg())) {
+      auto* insn = mie.insn;
+      if (insn->has_type()) {
+        const auto* type = type::get_element_type_if_array(insn->get_type());
+        if (type == nullptr) {
+          continue;
+        }
+        if (opcode::is_instance_of(insn->opcode())) {
+          // We don't want to merge class if either merger or
+          // mergeable was ever accessed in instance_of to prevent
+          // semantic error.
+          record_dont_merge_state(type, kStrict, dont_merge_status);
+          continue;
+        } else {
+          DexClass* cls = type_class(type);
+          // A class literal is the type's identity, which code can compare
+          // or key a map on, so unlike other type references it keeps even
+          // an abstract type from being merged away.
+          if ((cls != nullptr) &&
+              (!is_abstract(cls) || opcode::is_const_class(insn->opcode()))) {
+            // Keep the referenced type from being the mergeable.
+            record_dont_merge_state(type, kConditional, dont_merge_status);
+            TRACE(VMERGE, 9, "dont_merge %s as mergeable for type usage: %s",
+                  SHOW(type), SHOW(insn));
           }
         }
-      });
+      } else if (opcode::is_const_string(insn->opcode())) {
+        auto* type = java_names::get_element_type_from_external_name(
+            insn->get_string()->str());
+        if (type != nullptr) {
+          type_like_string_refs++;
+          if (record_type_like_string_refs) {
+            record_dont_merge_state(type, kStrict, dont_merge_status);
+            TRACE(VMERGE, 9, "dont_merge %s for type-like string reference: %s",
+                  SHOW(type), SHOW(insn));
+          }
+        }
+      } else if (insn->has_field()) {
+        DexField* field = resolve_field(insn->get_field());
+        if (field != nullptr) {
+          bool resolve_differently =
+              field->get_class() != insn->get_field()->get_class();
+          if (resolve_differently) {
+            // If a field reference need to be resolved, don't merge as
+            // renaming it might cause problems.
+            // If a field that can't be renamed is being referenced. Don't
+            // merge it as we need the field and this field can't be renamed
+            // if having collision.
+            // TODO(suree404): can improve.
+            record_dont_merge_state(field->get_class(), kStrict,
+                                    dont_merge_status);
+            record_dont_merge_state(insn->get_field()->get_class(), kStrict,
+                                    dont_merge_status);
+          }
+        } else {
+          record_dont_merge_state(insn->get_field()->get_class(), kConditional,
+                                  dont_merge_status);
+        }
+      } else if (insn->has_method()) {
+        auto* callee_ref = insn->get_method();
+        if (opcode::is_invoke_super(insn->opcode())) {
+          // The only allowed pure ref is in invoke-super.
+          continue;
+        }
+        if (!is_internal_def(callee_ref)) {
+          record_dont_merge_state(callee_ref->get_class(), kStrict,
+                                  dont_merge_status);
+          TRACE(VMERGE, 9, "dont_merge %s for pure ref %s",
+                SHOW(callee_ref->get_class()), SHOW(callee_ref));
+          DexMethod* callee =
+              resolve_method_deprecated(callee_ref, MethodSearch::Any);
+          if (callee != nullptr) {
+            record_dont_merge_state(callee->get_class(), kStrict,
+                                    dont_merge_status);
+            TRACE(VMERGE, 9,
+                  "dont_merge %s for it may be invoked as a pure ref %s",
+                  SHOW(callee->get_class()), SHOW(callee_ref));
+          }
+        }
+      }
+    }
+  });
   return type_like_string_refs.load();
 }
 

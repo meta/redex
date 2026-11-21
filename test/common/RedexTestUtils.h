@@ -11,6 +11,11 @@
 #include <boost/filesystem/path.hpp>
 
 #include <fstream>
+#include <map>
+#include <string>
+#include <vector>
+
+class DexClass;
 
 namespace redex {
 
@@ -60,4 +65,10 @@ inline void copy_file(const std::string& from, const std::string& to) {
 }
 
 bool are_files_equal(const std::string&, const std::string&);
+
+// Prints the instructions of every method with code, keyed by the method, so
+// that code read into different RedexContexts can be compared. The code must
+// not have its CFG built.
+std::map<std::string, std::vector<std::string>> show_instructions_by_method(
+    const std::vector<DexClass*>& classes);
 } // namespace redex

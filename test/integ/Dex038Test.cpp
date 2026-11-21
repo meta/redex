@@ -7,24 +7,22 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <functional>
+
 #include <boost/filesystem.hpp>
 
 #include "DexCallSite.h"
 #include "DexClass.h"
+#include "DexFileTestHelper.h"
+#include "DexIdx.h"
 #include "DexLoader.h"
-#include "DexOutput.h"
-#include "DexPosition.h"
-#include "DexStore.h"
-#include "InstructionLowering.h"
-#include "PassManager.h"
+#include "DexMethodHandle.h"
 #include "RedexContext.h"
-#include "RedexOptions.h"
 #include "RedexTestUtils.h"
 // NOLINTNEXTLINE(facebook-unused-include-check)
 #include "SanitizersConfig.h"
 #include "Show.h"
-
-using namespace std::literals::string_literals;
 
 using CallSitePredicate = const std::function<bool(DexCallSite*)>&;
 int ensureCallSite(DexIdx* idx, CallSitePredicate predicate) {
@@ -55,8 +53,8 @@ static const char* VOID_RETURN_OBJECT_PROTO = "()Ljava/lang/Object;";
 static const char* VOID_RETURN_STRING_PROTO = "()Ljava/lang/String;";
 
 void testReadDex(const char* dexfile) {
-  auto dl = DexLoader::create(
-      DexLocation::make_location("", dexfile), 38, DexLoader::Parallel::kYes);
+  auto dl = DexLoader::create(DexLocation::make_location("", dexfile), 38,
+                              DexLoader::Parallel::kYes);
   auto* idx = dl.get_idx();
 
   EXPECT_EQ(idx->get_callsite_ids_size(), 7);
@@ -325,58 +323,10 @@ TEST(Dex038Test, ReadWriteDex038) {
   const char* dexfile = std::getenv("dexfile");
   EXPECT_NE(nullptr, dexfile);
 
-  DexMetadata dm;
-  dm.set_id("classes");
-  DexStore root_store(dm);
-  int input_dex_version = 0;
-  root_store.add_classes(
-      load_classes_from_dex(DexLocation::make_location("dex", dexfile),
-                            /*stats=*/nullptr,
-                            &input_dex_version,
-                            true,
-                            true,
-                            38));
-  EXPECT_EQ(input_dex_version, 38);
-  DexClasses& classes = root_store.get_dexen().back();
-  std::vector<DexStore> stores;
-  stores.emplace_back(std::move(root_store));
+  auto classes = load_dex_file(dexfile, 38);
 
-  //  DexClasses classes = load_classes_from_dex(dexfile, true, 38);
-  std::cout << "Loaded classes: " << classes.size() << "\n";
-
-  std::unique_ptr<PositionMapper> pos_mapper(PositionMapper::make(""));
-  UnorderedMap<DexMethod*, uint64_t> method_to_id;
-  UnorderedMap<DexCode*, std::vector<DebugLineItem>> code_debug_lines;
-
-  Json::Value conf_obj = Json::nullValue;
   auto tmpdir = redex::make_tmp_dir("dex038_test_%%%%%%%%");
-  ConfigFiles dummy_cfg(conf_obj, tmpdir.path);
-
-  std::string metafiles = tmpdir.path + "/meta";
-  int status = mkdir(metafiles.c_str(), 0755);
-  if (status != 0) {
-    EXPECT_EQ(EEXIST, errno);
-  }
-
-  instruction_lowering::normalize_cfg(stores);
-  instruction_lowering::run(stores);
-
-  std::string output_dex = tmpdir.path + "/output.dex";
-  auto gtypes = std::make_shared<GatheredTypes>(&classes);
-
-  write_classes_to_dex(output_dex,
-                       &classes,
-                       std::move(gtypes),
-                       0,
-                       nullptr,
-                       0,
-                       dummy_cfg,
-                       pos_mapper.get(),
-                       DebugInfoKind::NoCustomSymbolication,
-                       &method_to_id,
-                       &code_debug_lines,
-                       nullptr,
-                       "dex\n038\0"s);
+  auto output_dex = write_dex_file(std::move(classes), tmpdir.path, 38);
 
   delete g_redex;
   g_redex = new RedexContext();

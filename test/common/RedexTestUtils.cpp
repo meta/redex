@@ -8,6 +8,9 @@
 #include "RedexTestUtils.h"
 
 #include "Debug.h"
+#include "DexClass.h"
+#include "IRCode.h"
+#include "Show.h"
 
 #include <iostream>
 
@@ -27,5 +30,24 @@ bool are_files_equal(const std::string& p1, const std::string& p2) {
   return std::equal(std::istreambuf_iterator<char>(f1.rdbuf()),
                     std::istreambuf_iterator<char>(),
                     std::istreambuf_iterator<char>(f2.rdbuf()));
+}
+
+std::map<std::string, std::vector<std::string>> show_instructions_by_method(
+    const std::vector<DexClass*>& classes) {
+  std::map<std::string, std::vector<std::string>> result;
+  for (const auto* cls : classes) {
+    for (const auto* method : cls->get_all_methods()) {
+      const auto* code = method->get_code();
+      if (code == nullptr) {
+        continue;
+      }
+      always_assert(!code->cfg_built());
+      auto& instructions = result[show(method)];
+      for (const auto& mie : InstructionIterable(code)) {
+        instructions.push_back(show(mie.insn));
+      }
+    }
+  }
+  return result;
 }
 } // namespace redex

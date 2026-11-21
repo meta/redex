@@ -162,6 +162,30 @@ inline INT_TYPE art_float_to_integral(FLOAT_TYPE f) {
   }
 }
 
+// Java defines integer division and remainder for every nonzero divisor; C++
+// does not define the minimum value divided by -1 (x86 traps). Java wraps that
+// quotient to the minimum value and its remainder is 0. Dividing by -1 is
+// negation, which wraps in unsigned arithmetic.
+template <typename Int>
+Int java_div(Int dividend, Int divisor) {
+  static_assert(std::is_signed_v<Int>);
+  redex_assert(divisor != 0);
+  if (divisor == -1) {
+    return static_cast<Int>(-static_cast<std::make_unsigned_t<Int>>(dividend));
+  }
+  return dividend / divisor;
+}
+
+template <typename Int>
+Int java_rem(Int dividend, Int divisor) {
+  static_assert(std::is_signed_v<Int>);
+  redex_assert(divisor != 0);
+  if (divisor == -1) {
+    return 0;
+  }
+  return dividend % divisor;
+}
+
 } // namespace
 
 namespace constant_propagation {
@@ -756,14 +780,14 @@ bool PrimitiveAnalyzer::analyze_binop_lit(
     }
     case OPCODE_DIV_INT_LIT: {
       if (lit != 0) {
-        result = (*cst) / lit;
+        result = java_div<int64_t>(*cst, lit);
       }
       use_result_reg = true;
       break;
     }
     case OPCODE_REM_INT_LIT: {
       if (lit != 0) {
-        result = (*cst) % lit;
+        result = java_rem<int64_t>(*cst, lit);
       }
       use_result_reg = true;
       break;
@@ -894,7 +918,7 @@ bool PrimitiveAnalyzer::analyze_binop(const IRInstruction* insn,
     case OPCODE_DIV_INT:
     case OPCODE_DIV_LONG: {
       if ((*cst_right) != 0) {
-        result = (*cst_left) / (*cst_right);
+        result = java_div(*cst_left, *cst_right);
       }
       use_result_reg = true;
       break;
@@ -902,7 +926,7 @@ bool PrimitiveAnalyzer::analyze_binop(const IRInstruction* insn,
     case OPCODE_REM_INT:
     case OPCODE_REM_LONG: {
       if ((*cst_right) != 0) {
-        result = (*cst_left) % (*cst_right);
+        result = java_rem(*cst_left, *cst_right);
       }
       use_result_reg = true;
       break;

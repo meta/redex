@@ -2575,6 +2575,81 @@ TEST_F(ConstantPropagationTest, FoldDivIntLit) {
   EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
+TEST_F(ConstantPropagationTest, FoldDivLongMinValueByMinusOne) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const-wide v0 -9223372036854775808)
+      (const-wide v2 -1)
+      (div-long v0 v2)
+      (move-result-pseudo-wide v4)
+      (return-wide v4)
+    )
+  )");
+  do_const_prop(code.get());
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const-wide v0 -9223372036854775808)
+      (const-wide v2 -1)
+      (const-wide v4 -9223372036854775808)
+      (return-wide v4)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantPropagationTest, FoldRemLongMinValueByMinusOne) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const-wide v0 -9223372036854775808)
+      (const-wide v2 -1)
+      (rem-long v0 v2)
+      (move-result-pseudo-wide v4)
+      (return-wide v4)
+    )
+  )");
+  do_const_prop(code.get());
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const-wide v0 -9223372036854775808)
+      (const-wide v2 -1)
+      (const-wide v4 0)
+      (return-wide v4)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantPropagationTest, FoldDivRemIntMinValueByMinusOne) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v0 -2147483648)
+      (const v1 -1)
+      (div-int v0 v1)
+      (move-result-pseudo v2)
+      (rem-int v0 v1)
+      (move-result-pseudo v3)
+      (div-int/lit v0 -1)
+      (move-result-pseudo v4)
+      (rem-int/lit v0 -1)
+      (move-result-pseudo v5)
+      (return-void)
+    )
+  )");
+  do_const_prop(code.get());
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const v0 -2147483648)
+      (const v1 -1)
+      (const v2 -2147483648)
+      (const v3 0)
+      (const v4 -2147483648)
+      (const v5 0)
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
 TEST_F(ConstantPropagationTest, NeAtBoundaryOfNez) {
   auto code = assembler::ircode_from_string(R"(
     (

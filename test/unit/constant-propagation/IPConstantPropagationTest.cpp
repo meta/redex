@@ -1654,20 +1654,21 @@ TEST_F(InterproceduralConstantPropagationTest, unreachableInvoke) {
       *method_override_graph::build_graph(scope), scope));
   walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
   NullCheckMethods null_check_methods;
-  FixpointIterator fp_iter(std::move(cg),
-                           [&null_check_methods](const DexMethod* method,
-                                                 const WholeProgramState&,
-                                                 const ArgumentDomain& args) {
-                             const auto& code = *method->get_code();
-                             auto env = env_with_params(is_static(method),
-                                                        &code, args);
-                             return std::make_unique<IntraproceduralAnalysis>(
-                                 &null_check_methods,
-                                 /* wps accessor */ nullptr,
-                                 code.cfg(),
-                                 ConstantPrimitiveAnalyzer(),
-                                 std::move(env));
-                           });
+  FixpointIterator fp_iter(
+      std::move(cg),
+      [&null_check_methods](const DexMethod* method,
+                            const WholeProgramState&,
+                            const ArgumentDomain& args) {
+        const auto& code = *method->get_code();
+        auto env = env_with_params(is_static(method), &code, args);
+        return std::make_unique<IntraproceduralAnalysis>(
+            /* wps accessor */ nullptr,
+            code.cfg(),
+            ConstantPrimitiveAnalyzer(),
+            intraprocedural::make_default_no_throw_analyzer(
+                &null_check_methods),
+            std::move(env));
+      });
 
   fp_iter.run(Domain{{CURRENT_PARTITION_LABEL, ArgumentDomain()}});
 

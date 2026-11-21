@@ -118,13 +118,15 @@ class AnalyzerGenerator {
     auto wps_accessor = std::make_unique<WholeProgramStateAccessor>(wps);
     auto* wps_accessor_ptr = wps_accessor.get();
     return std::make_unique<IntraproceduralAnalysis>(
-        &m_null_check_methods, std::move(wps_accessor), code.cfg(),
+        std::move(wps_accessor), code.cfg(),
         CombinedAnalyzer(
             ClinitFieldAnalyzerState(class_under_init, &m_clinit_only_fields),
             m_immut_analyzer_state, wps_accessor_ptr,
             m_enum_field_analyzer_state, m_boxed_boolean_analyzer_state,
             m_string_analyzer_state, nullptr, *m_api_level_analyzer_state,
             m_package_name_state, m_immut_analyzer_state, nullptr, nullptr),
+        make_wps_aware_no_throw_analyzer(&m_null_check_methods,
+                                         wps_accessor_ptr),
         std::move(env));
   }
 };

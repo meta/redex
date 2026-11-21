@@ -138,16 +138,13 @@ FixpointIterator::get_intraprocedural_analysis(const DexMethod* method) const {
 }
 
 IntraproceduralAnalysis::IntraproceduralAnalysis(
-    const NullCheckMethods* null_check_methods,
     std::unique_ptr<WholeProgramStateAccessor> wps_accessor,
     const cfg::ControlFlowGraph& cfg,
     InstructionAnalyzer<ConstantEnvironment> insn_analyzer,
+    InstructionAnalyzer<ConstantEnvironment> no_throw_analyzer,
     const ConstantEnvironment& env)
     : wps_accessor(std::move(wps_accessor)),
-      fp_iter(cfg,
-              std::move(insn_analyzer),
-              make_wps_aware_no_throw_analyzer(null_check_methods,
-                                               this->wps_accessor.get())) {
+      fp_iter(cfg, std::move(insn_analyzer), std::move(no_throw_analyzer)) {
   if (this->wps_accessor) {
     this->wps_accessor->start_recording();
   }

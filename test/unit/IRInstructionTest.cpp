@@ -457,3 +457,53 @@ TEST_F(IRInstructionTest, CopyInstructionWithData) {
   delete insn;
   delete copy;
 }
+
+TEST_F(IRInstructionTest, ArrayOpcodeForType) {
+  const std::vector<std::tuple<const DexType*, IROpcode, IROpcode, IROpcode>>
+      cases = {
+          {type::_boolean(), OPCODE_AGET_BOOLEAN, OPCODE_APUT_BOOLEAN,
+           IOPCODE_MOVE_RESULT_PSEUDO},
+          {type::_byte(), OPCODE_AGET_BYTE, OPCODE_APUT_BYTE,
+           IOPCODE_MOVE_RESULT_PSEUDO},
+          {type::_char(), OPCODE_AGET_CHAR, OPCODE_APUT_CHAR,
+           IOPCODE_MOVE_RESULT_PSEUDO},
+          {type::_short(), OPCODE_AGET_SHORT, OPCODE_APUT_SHORT,
+           IOPCODE_MOVE_RESULT_PSEUDO},
+          {type::_int(), OPCODE_AGET, OPCODE_APUT, IOPCODE_MOVE_RESULT_PSEUDO},
+          {type::_float(), OPCODE_AGET, OPCODE_APUT,
+           IOPCODE_MOVE_RESULT_PSEUDO},
+          {type::_long(), OPCODE_AGET_WIDE, OPCODE_APUT_WIDE,
+           IOPCODE_MOVE_RESULT_PSEUDO_WIDE},
+          {type::_double(), OPCODE_AGET_WIDE, OPCODE_APUT_WIDE,
+           IOPCODE_MOVE_RESULT_PSEUDO_WIDE},
+          {type::java_lang_Object(), OPCODE_AGET_OBJECT, OPCODE_APUT_OBJECT,
+           IOPCODE_MOVE_RESULT_PSEUDO_OBJECT},
+          {type::make_array_type(type::_int()), OPCODE_AGET_OBJECT,
+           OPCODE_APUT_OBJECT, IOPCODE_MOVE_RESULT_PSEUDO_OBJECT},
+      };
+  for (const auto& [component, aget, aput, move_result] : cases) {
+    EXPECT_EQ(opcode::aget_opcode_for_type(component), aget) << SHOW(component);
+    EXPECT_EQ(opcode::aput_opcode_for_type(component), aput) << SHOW(component);
+    EXPECT_EQ(opcode::move_result_pseudo_for(aget), move_result)
+        << SHOW(component);
+  }
+}
+
+TEST_F(IRInstructionTest, MoveResultPseudoFor) {
+  const std::vector<std::pair<IROpcode, IROpcode>> cases = {
+      {OPCODE_IGET, IOPCODE_MOVE_RESULT_PSEUDO},
+      {OPCODE_IGET_WIDE, IOPCODE_MOVE_RESULT_PSEUDO_WIDE},
+      {OPCODE_IGET_OBJECT, IOPCODE_MOVE_RESULT_PSEUDO_OBJECT},
+      {OPCODE_SGET, IOPCODE_MOVE_RESULT_PSEUDO},
+      {OPCODE_SGET_WIDE, IOPCODE_MOVE_RESULT_PSEUDO_WIDE},
+      {OPCODE_SGET_OBJECT, IOPCODE_MOVE_RESULT_PSEUDO_OBJECT},
+      {OPCODE_CHECK_CAST, IOPCODE_MOVE_RESULT_PSEUDO_OBJECT},
+  };
+  for (const auto& [op, move_result] : cases) {
+    EXPECT_EQ(opcode::move_result_pseudo_for(op), move_result) << SHOW(op);
+  }
+  EXPECT_EQ(opcode::move_result_pseudo_for_iget(OPCODE_IGET_WIDE),
+            IOPCODE_MOVE_RESULT_PSEUDO_WIDE);
+  EXPECT_EQ(opcode::move_result_pseudo_for_sget(OPCODE_SGET_OBJECT),
+            IOPCODE_MOVE_RESULT_PSEUDO_OBJECT);
+}

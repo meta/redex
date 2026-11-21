@@ -225,6 +225,13 @@ IROpcode iget_opcode_for_field(const DexField* field);
 
 IROpcode sget_opcode_for_field(const DexField* field);
 
+// The aget and aput opcodes for an array whose elements have type `component`.
+IROpcode aget_opcode_for_type(const DexType* component);
+IROpcode aput_opcode_for_type(const DexType* component);
+
+// The move-result-pseudo that takes the value of `op`, an opcode that has one.
+IROpcode move_result_pseudo_for(IROpcode op);
+
 enum Branchingness : uint8_t {
   BRANCH_NONE,
   BRANCH_RETURN,

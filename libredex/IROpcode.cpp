@@ -1102,37 +1102,13 @@ IROpcode iget_to_move(IROpcode op) {
 }
 
 IROpcode move_result_pseudo_for_iget(IROpcode op) {
-  switch (op) {
-  case OPCODE_IGET_BOOLEAN:
-  case OPCODE_IGET_BYTE:
-  case OPCODE_IGET_SHORT:
-  case OPCODE_IGET_CHAR:
-  case OPCODE_IGET:
-    return IOPCODE_MOVE_RESULT_PSEUDO;
-  case OPCODE_IGET_OBJECT:
-    return IOPCODE_MOVE_RESULT_PSEUDO_OBJECT;
-  case OPCODE_IGET_WIDE:
-    return IOPCODE_MOVE_RESULT_PSEUDO_WIDE;
-  default:
-    not_reached_log("Unexpected opcode %s", SHOW(op));
-  }
+  always_assert_log(opcode::is_an_iget(op), "Unexpected opcode %s", SHOW(op));
+  return move_result_pseudo_for(op);
 }
 
 IROpcode move_result_pseudo_for_sget(IROpcode op) {
-  switch (op) {
-  case OPCODE_SGET_BOOLEAN:
-  case OPCODE_SGET_BYTE:
-  case OPCODE_SGET_SHORT:
-  case OPCODE_SGET_CHAR:
-  case OPCODE_SGET:
-    return IOPCODE_MOVE_RESULT_PSEUDO;
-  case OPCODE_SGET_OBJECT:
-    return IOPCODE_MOVE_RESULT_PSEUDO_OBJECT;
-  case OPCODE_SGET_WIDE:
-    return IOPCODE_MOVE_RESULT_PSEUDO_WIDE;
-  default:
-    not_reached_log("Unexpected opcode %s", SHOW(op));
-  }
+  always_assert_log(opcode::is_an_sget(op), "Unexpected opcode %s", SHOW(op));
+  return move_result_pseudo_for(op);
 }
 
 IROpcode move_result_for_invoke(const DexMethodRef* method) {
@@ -1275,6 +1251,66 @@ IROpcode sget_opcode_for_field(const DexField* field) {
     break;
   }
   not_reached();
+}
+
+IROpcode aget_opcode_for_type(const DexType* component) {
+  switch (type::to_datatype(component)) {
+  case DataType::Array:
+  case DataType::Object:
+    return OPCODE_AGET_OBJECT;
+  case DataType::Boolean:
+    return OPCODE_AGET_BOOLEAN;
+  case DataType::Byte:
+    return OPCODE_AGET_BYTE;
+  case DataType::Char:
+    return OPCODE_AGET_CHAR;
+  case DataType::Short:
+    return OPCODE_AGET_SHORT;
+  case DataType::Int:
+  case DataType::Float:
+    return OPCODE_AGET;
+  case DataType::Long:
+  case DataType::Double:
+    return OPCODE_AGET_WIDE;
+  case DataType::Void:
+    break;
+  }
+  // Callers pass the component type of an array, which is never void.
+  not_reached_log("No array of %s", SHOW(component));
+}
+
+IROpcode aput_opcode_for_type(const DexType* component) {
+  switch (type::to_datatype(component)) {
+  case DataType::Array:
+  case DataType::Object:
+    return OPCODE_APUT_OBJECT;
+  case DataType::Boolean:
+    return OPCODE_APUT_BOOLEAN;
+  case DataType::Byte:
+    return OPCODE_APUT_BYTE;
+  case DataType::Char:
+    return OPCODE_APUT_CHAR;
+  case DataType::Short:
+    return OPCODE_APUT_SHORT;
+  case DataType::Int:
+  case DataType::Float:
+    return OPCODE_APUT;
+  case DataType::Long:
+  case DataType::Double:
+    return OPCODE_APUT_WIDE;
+  case DataType::Void:
+    break;
+  }
+  // Callers pass the component type of an array, which is never void.
+  not_reached_log("No array of %s", SHOW(component));
+}
+
+IROpcode move_result_pseudo_for(IROpcode op) {
+  always_assert_log(opcode_impl::has_move_result_pseudo(op),
+                    "%s has no move-result-pseudo", SHOW(op));
+  return opcode_impl::dest_is_wide(op)     ? IOPCODE_MOVE_RESULT_PSEUDO_WIDE
+         : opcode_impl::dest_is_object(op) ? IOPCODE_MOVE_RESULT_PSEUDO_OBJECT
+                                           : IOPCODE_MOVE_RESULT_PSEUDO;
 }
 
 IROpcode invert_conditional_branch(IROpcode op) {

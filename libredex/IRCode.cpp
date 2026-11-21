@@ -409,18 +409,11 @@ void translate_dex_to_ir(
     } else if (opcode::may_throw(op)) {
       if (op == OPCODE_CHECK_CAST) {
         move_result_pseudo =
-            std::make_unique<IRInstruction>(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT);
+            std::make_unique<IRInstruction>(opcode::move_result_pseudo_for(op));
         move_result_pseudo->set_dest(dex_insn->src(0));
       } else if (dex_insn->has_dest()) {
-        IROpcode move_op;
-        if (opcode_impl::dest_is_wide(op)) {
-          move_op = IOPCODE_MOVE_RESULT_PSEUDO_WIDE;
-        } else if (opcode_impl::dest_is_object(op)) {
-          move_op = IOPCODE_MOVE_RESULT_PSEUDO_OBJECT;
-        } else {
-          move_op = IOPCODE_MOVE_RESULT_PSEUDO;
-        }
-        move_result_pseudo = std::make_unique<IRInstruction>(move_op);
+        move_result_pseudo =
+            std::make_unique<IRInstruction>(opcode::move_result_pseudo_for(op));
         move_result_pseudo->set_dest(dex_insn->dest());
       }
     }

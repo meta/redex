@@ -61,10 +61,21 @@ std::string nonMergeableRejoin();
 //
 // Names are exactly `<field_prefix>_<i>`, with nothing else in the name, so
 // `countFieldRefs` with that prefix counts this chain and no other.
-std::string sputChain(size_t n_instrs, std::string_view field_prefix = "f");
+std::string sputChain(size_t n_instrs,
+                      std::string_view field_prefix = "f",
+                      std::string_view reg = "v0");
 
 // A `sput` to a static int field is 2 code units.
 inline constexpr size_t kSputCodeUnits = 2;
+
+// A `sputChain` of approximately `code_units` code units, rounded UP to whole
+// sputs. Rounding down could leave a body one code unit short of a floor; it
+// would be rejected, and that test failure looks just like a missing feature.
+// Contains no branches, so it serves as a cold body and, inside a hot
+// `.src_block`, as hot filler that cannot add a new candidate head.
+std::string sizedChain(size_t code_units,
+                       std::string_view field_prefix = "c",
+                       std::string_view reg = "v0");
 
 // Build a hot-cold-hot CFG template: hot prefix -> if-eqz -> (cold body
 // | hot rejoin) -> return-void. The cold body is exactly `cold_body`
@@ -158,14 +169,23 @@ size_t countFieldRefsIn(const SplitResult& res,
                         std::string_view marker,
                         Where where);
 
+// Empty when `m` type-checks; the checker's complaint otherwise. Simplified
+// first: a split is a re-rooted deep copy whose unreachable leftovers never
+// reach the dex. The checker uses PassManager's constructor rule
+// (`relaxed_init_check`): from API 21 on, ART lets a superclass's `<init>`
+// initialize a `new-instance`.
+std::string typeCheckFailure(DexMethod* m);
+
 // Construct a class with a single method `bar` from the given IR
 // S-expression and signature, run `split_methods_in_stores` on it,
-// and return the result by value.
+// and return the result by value. `before_split`, when set, gets the method
+// before the splitter does.
 SplitResult runSplitter(
     std::string_view sig,
     std::string_view code_sexpr,
     const method_splitting_impl::Config& cfg = splitterTestConfig(),
-    std::string_view class_prefix = "LFoo");
+    std::string_view class_prefix = "LFoo",
+    const std::function<void(DexMethod*)>& before_split = {});
 
 // The fates of a run's candidates, for failure messages.
 std::string describeSelection(const SplitResult& res);

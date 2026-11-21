@@ -24,6 +24,7 @@
 #include "IRAssembler.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
+#include "IRTypeChecker.h"
 #include "MethodSplitter.h"
 #include "MethodSplittingTestUtil.h"
 #include "Show.h"
@@ -64,12 +65,22 @@ std::string nonMergeableRejoin() {
   return "(add-int v0 v0 v0)";
 }
 
-std::string sputChain(size_t n_instrs, std::string_view field_prefix) {
+std::string sputChain(size_t n_instrs,
+                      std::string_view field_prefix,
+                      std::string_view reg) {
   std::ostringstream oss;
   for (size_t i = 0; i < n_instrs; ++i) {
-    oss << "(sput v0 \"LFoo;." << field_prefix << "_" << i << ":I\")\n";
+    oss << "(sput " << reg << " \"LFoo;." << field_prefix << "_" << i
+        << ":I\")\n";
   }
   return oss.str();
+}
+
+std::string sizedChain(size_t code_units,
+                       std::string_view field_prefix,
+                       std::string_view reg) {
+  size_t n = (code_units + kSputCodeUnits - 1) / kSputCodeUnits;
+  return sputChain(n, field_prefix, reg);
 }
 
 std::string hotColdHotCfg(std::string_view cold_body, std::string_view sig) {
@@ -179,9 +190,13 @@ SplitResult run_splitter(std::string_view sig,
                          std::string_view code_sexpr,
                          const method_splitting_impl::Config& cfg,
                          std::string_view class_prefix,
+                         const std::function<void(DexMethod*)>& before_split,
                          bool host_compiled) {
   cfg.validate();
   auto [cls, m] = make_test_class(sig, code_sexpr, class_prefix);
+  if (before_split) {
+    before_split(m);
+  }
   DexStoresVector stores;
   stores.emplace_back("test_store");
   stores.front().get_dexen().push_back({cls});
@@ -235,8 +250,9 @@ SplitResult run_splitter(std::string_view sig,
 SplitResult runSplitter(std::string_view sig,
                         std::string_view code_sexpr,
                         const method_splitting_impl::Config& cfg,
-                        std::string_view class_prefix) {
-  return run_splitter(sig, code_sexpr, cfg, class_prefix,
+                        std::string_view class_prefix,
+                        const std::function<void(DexMethod*)>& before_split) {
+  return run_splitter(sig, code_sexpr, cfg, class_prefix, before_split,
                       /*host_compiled=*/true);
 }
 
@@ -244,7 +260,8 @@ SplitResult runSplitterOnUncompiledHost(
     std::string_view sig,
     std::string_view code_sexpr,
     const method_splitting_impl::Config& cfg) {
-  return run_splitter(sig, code_sexpr, cfg, "LFoo", /*host_compiled=*/false);
+  return run_splitter(sig, code_sexpr, cfg, "LFoo", {},
+                      /*host_compiled=*/false);
 }
 
 std::string describeSelection(const SplitResult& res) {
@@ -318,6 +335,14 @@ void expectEveryCandidateHasOneFate(
                         (size_t)e.heads.front());
     }
   }
+}
+
+std::string typeCheckFailure(DexMethod* m) {
+  m->get_code()->cfg().simplify();
+  IRTypeChecker checker(m);
+  checker.relaxed_init_check();
+  checker.run();
+  return checker.good() ? std::string() : checker.what();
 }
 
 std::vector<std::string> reachableFieldNames(DexMethod* m) {

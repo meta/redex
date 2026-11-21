@@ -53,6 +53,12 @@ class RefChecker {
 
   bool check_type(const DexType* type) const;
 
+  // Whether code in the package `package` (like "Lcom/foo/") may name `type`:
+  // check_type() allows it, and its element type is primitive or a defined
+  // class that is public, or package-private in `package`.
+  bool check_type_from_package(const DexType* type,
+                               std::string_view package) const;
+
   bool check_method(const DexMethod* method) const;
 
   // Checks the return and argument types of `proto`.

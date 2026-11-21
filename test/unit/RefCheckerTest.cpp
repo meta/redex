@@ -34,3 +34,35 @@ TEST_F(RefCheckerTest, typeWhoseHierarchyEndsInDefinedObject) {
   EXPECT_TRUE(checker.check_type(foo->get_type()));
   EXPECT_TRUE(checker.check_type(DexType::make_type("[LFoo;")));
 }
+
+// Code in a package may name a public class, or a package-private class of
+// the same package, and arrays of either.
+TEST_F(RefCheckerTest, typeFromPackage) {
+  ClassCreator object_creator(type::java_lang_Object());
+  object_creator.set_access(ACC_PUBLIC);
+  auto* object = object_creator.create();
+  std::vector<DexClass*> classes{object};
+  for (const auto& [name, access] :
+       std::vector<std::pair<const char*, DexAccessFlags>>{
+           {"Lcom/a/Public;", ACC_PUBLIC}, {"Lcom/a/Hidden;", ACC_FINAL}}) {
+    ClassCreator creator(DexType::make_type(name));
+    creator.set_super(type::java_lang_Object());
+    creator.set_access(access);
+    classes.push_back(creator.create());
+  }
+  DexStore store("classes");
+  store.add_classes(classes);
+  DexStoresVector stores({store});
+  XStoreRefs xstores(stores, /* normal_primary_dex */ false);
+  RefChecker checker(&xstores, 0, /* min_sdk_api */ nullptr);
+
+  EXPECT_TRUE(checker.check_type_from_package(
+      DexType::get_type("Lcom/a/Public;"), "Lcom/b/"));
+  EXPECT_TRUE(checker.check_type_from_package(
+      DexType::make_type("[Lcom/a/Hidden;"), "Lcom/a/"));
+  EXPECT_FALSE(checker.check_type_from_package(
+      DexType::get_type("Lcom/a/Hidden;"), "Lcom/b/"));
+  EXPECT_TRUE(checker.check_type_from_package(type::_int(), "Lcom/b/"));
+  EXPECT_FALSE(checker.check_type_from_package(
+      DexType::make_type("Lcom/a/Unknown;"), "Lcom/a/"));
+}

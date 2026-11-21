@@ -164,6 +164,24 @@ bool RefChecker::check_code_refs(const CodeRefs& code_refs) const {
   return true;
 }
 
+bool RefChecker::check_type_from_package(const DexType* type,
+                                         std::string_view package) const {
+  if (!check_type(type)) {
+    return false;
+  }
+  const auto* element_type = type::get_element_type_if_array(type);
+  if (type::is_primitive(element_type)) {
+    return true;
+  }
+  const auto* cls = type_class(element_type);
+  if (cls == nullptr) {
+    return false;
+  }
+  const auto access = get_visibility(cls);
+  return access == ACC_PUBLIC ||
+         (access == 0 && type::get_package_name(element_type) == package);
+}
+
 bool RefChecker::check_type_internal(const DexType* type) const {
   type = type::make_element_type_if_array(type);
   if (type::is_primitive(type)) {

@@ -45,26 +45,6 @@ std::string_view get_merger_package_name(const DexType* root_type) {
   return pkg_name;
 }
 
-bool can_preserve_field_type(const DexType* field_type,
-                             const DexType* parent,
-                             const RefChecker& ref_checker) {
-  if (!ref_checker.check_type(field_type)) {
-    return false;
-  }
-  const auto* element_type = type::get_element_type_if_array(field_type);
-  if (type::is_primitive(element_type)) {
-    return true;
-  }
-  const auto* cls = type_class(element_type);
-  if (cls == nullptr) {
-    return false;
-  }
-  const auto access = get_visibility(cls);
-  return access == ACC_PUBLIC ||
-         (access == 0 && type::get_package_name(element_type) ==
-                             get_merger_package_name(parent));
-}
-
 } // namespace
 
 namespace class_merging {
@@ -169,7 +149,8 @@ std::vector<DexField*> create_merger_fields(
     if (type != nullptr &&
         (type::is_primitive(type) || type == type::java_lang_Object() ||
          type == type::java_lang_String() ||
-         !can_preserve_field_type(type, parent, ref_checker))) {
+         !ref_checker.check_type_from_package(
+             type, get_merger_package_name(parent)))) {
       type = nullptr;
     }
   }

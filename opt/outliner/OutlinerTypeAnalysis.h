@@ -131,8 +131,10 @@ class Value {
   // contribute. No type holds a one-register value beside a wide pair, such
   // as a `const 0` beside a `long`.
   const DexType* upper() const;
-  // `upper()` when every order in which ART may merge the contributions ends
-  // at that type, else nullptr (`IntegralType::exact_type`).
+  // `upper()` when ART's merge of the contributions surely fits it: for an
+  // integral value, a type every merge order ends at
+  // (`IntegralType::exact_type`); for any other, a type that holds every
+  // contribution in every merge order (`accepts_argument`). Else nullptr.
   const DexType* exact() const;
 
  private:
@@ -234,9 +236,11 @@ const DexType* declare_parameter(const Demand& uses,
 std::optional<const DexType*> declare_parameter_preferring_supply(
     const Demand& uses, const std::function<Value()>& supply);
 
-// The type of a value outlined code gives back. The caller's code after the
-// call was verified against the one type ART gave the register, so only a
-// type that every merge order ends at may be declared.
+// The type of a value outlined code gives back (`Value::exact`). The caller's
+// code after the call was verified against the one type ART gave the
+// register, and the outlined method's own `return` must hold every value.
+// `returned` lists each value as its own contribution, or a type that already
+// holds them in every merge order.
 const DexType* declare_result(const Value& returned);
 
 } // namespace art

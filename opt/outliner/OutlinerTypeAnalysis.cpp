@@ -408,7 +408,13 @@ const DexType* Value::upper() const {
 
 const DexType* Value::exact() const {
   const auto* t = upper();
-  return t != nullptr && m_integral ? integral()->exact_type() : t;
+  if (t != nullptr && m_integral) {
+    return integral()->exact_type();
+  }
+  // Redex joins `A[]` and `B[]`, whose classes share only the interface `I`, to
+  // `I[]`, but ART merges them to `Object[]`, which `I[]` does not hold. So a
+  // type is exact only when it holds every value in every merge order.
+  return t != nullptr && accepts_argument(t, *this) ? t : nullptr;
 }
 
 Demand Demand::unknown() {

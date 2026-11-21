@@ -997,6 +997,45 @@ TEST_F(OutlinerTypeAnalysisTest, accepts_argument) {
   EXPECT_FALSE(art::accepts_argument(nullptr, zero));
 }
 
+// A declared result must hold what ART merges the returned values to. Redex
+// joins an `A[]` and a `B[]` whose classes share only the interface `I` to
+// `I[]`, but ART merges them to `Object[]`, which `I[]` does not hold.
+TEST_F(OutlinerTypeAnalysisTest, declare_result_of_interface_arrays) {
+  const auto of = [](const DexType* t) { return art::Value::of_type(t); };
+  auto join = [](std::initializer_list<art::Value> values) {
+    art::Value joined;
+    for (const auto& v : values) {
+      joined.join_with(v);
+    }
+    return joined;
+  };
+  ClassCreator object_creator(type::java_lang_Object());
+  object_creator.create();
+  ClassCreator i_creator(DexType::make_type("LResultI;"));
+  i_creator.set_access(ACC_INTERFACE | ACC_ABSTRACT);
+  i_creator.set_super(type::java_lang_Object());
+  auto* i_type = i_creator.create()->get_type();
+  ClassCreator a_creator(DexType::make_type("LResultA;"));
+  a_creator.set_super(type::java_lang_Object());
+  a_creator.add_interface(i_type);
+  auto* a_type = a_creator.create()->get_type();
+  ClassCreator b_creator(DexType::make_type("LResultB;"));
+  b_creator.set_super(type::java_lang_Object());
+  b_creator.add_interface(i_type);
+  auto* b_type = b_creator.create()->get_type();
+  auto* i_array = type::make_array_type(i_type);
+  auto* a_array = type::make_array_type(a_type);
+  auto* b_array = type::make_array_type(b_type);
+
+  const auto both = join({of(a_array), of(b_array)});
+  ASSERT_EQ(both.upper(), i_array);
+  EXPECT_EQ(art::declare_result(both), nullptr);
+  EXPECT_EQ(art::declare_result(of(i_array)), i_array);
+  EXPECT_EQ(art::declare_result(join({of(a_array), of(a_array)})), a_array);
+  // ART assigns any reference to an interface, so `I` itself is exact.
+  EXPECT_EQ(art::declare_result(join({of(a_type), of(b_type)})), i_type);
+}
+
 // A parameter declared from the value the caller passes is never wider than an
 // integral value the caller holds, and is refused when no declared type
 // satisfies the uses.

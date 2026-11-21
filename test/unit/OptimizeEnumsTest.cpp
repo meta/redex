@@ -1664,12 +1664,8 @@ TEST_F(OptimizeEnumsTest, rowStoredByFilledNewArrayLetsEnumBeBoxed) {
 
 namespace {
 
-// Run the analysis that deletes unused generated enum methods over the Bar
-// store, with `values` and `valueOf` added to Bar, plus `LUser;` with
-// `caller`, and return the names of the generated methods it keeps.
-std::set<std::string> generated_methods_kept(DexMethod* caller) {
-  auto store = create_enum_store();
-  auto* bar = type_class(DexType::get_type("LBar;"));
+// Adds the generated `values` and `valueOf` to `bar` and returns them.
+std::pair<DexMethod*, DexMethod*> add_generated_methods(DexClass* bar) {
   auto* values = assembler::method_from_string(R"(
     (method (public static) "LBar;.values:()[LBar;"
      (
@@ -1695,6 +1691,16 @@ std::set<std::string> generated_methods_kept(DexMethod* caller) {
   )");
   bar->add_method(values);
   bar->add_method(value_of);
+  return {values, value_of};
+}
+
+// Run the analysis that deletes unused generated enum methods over the Bar
+// store, with `values` and `valueOf` added to Bar, plus `LUser;` with
+// `caller`, and return the names of the generated methods it keeps.
+std::set<std::string> generated_methods_kept(DexMethod* caller) {
+  auto store = create_enum_store();
+  auto* bar = type_class(DexType::get_type("LBar;"));
+  auto [values, value_of] = add_generated_methods(bar);
   ClassCreator uc(DexType::make_type("LUser;"));
   uc.set_super(type::java_lang_Object());
   uc.set_access(ACC_PUBLIC);
@@ -1704,15 +1710,6 @@ std::set<std::string> generated_methods_kept(DexMethod* caller) {
   auto scope = build_class_scope(stores);
   walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
 
-  // The analysis looks these methods up.
-  for (const auto* ref : {"Ljava/lang/Enum;.compareTo:(Ljava/lang/Enum;)I",
-                          "Ljava/lang/Enum;.equals:(Ljava/lang/Object;)Z",
-                          "Ljava/lang/Enum;.hashCode:()I",
-                          "Ljava/lang/Enum;.name:()Ljava/lang/String;",
-                          "Ljava/lang/Enum;.ordinal:()I",
-                          "Ljava/lang/Enum;.toString:()Ljava/lang/String;"}) {
-    DexMethod::make_method(ref);
-  }
   optimize_enums::EnumAnalyzeGeneratedMethods analyzer;
   analyzer.consider_enum_type(bar->get_type(), value_of, values);
   analyzer.transform_code(scope);
@@ -1744,4 +1741,52 @@ TEST_F(OptimizeEnumsTest, enumStoredByFilledNewArrayKeepsGeneratedMethods) {
   )");
   EXPECT_EQ(generated_methods_kept(caller),
             (std::set<std::string>{"valueOf", "values"}));
+}
+
+// `static int ordinal(Bar bar) { return bar.ordinal(); }` makes an allowed
+// call, so the pass deletes Bar's `values` and `valueOf` with boxing disabled.
+// The input defines only some of the allowlisted `java.lang.Enum` methods, as
+// an input loaded without the SDK does, and the pass runs in two contexts in a
+// row.
+TEST_F(OptimizeEnumsTest, allowedCallWithoutSdkLetsGeneratedMethodsGo) {
+  for (int run = 0; run < 2; ++run) {
+    if (run > 0) {
+      delete g_redex;
+      g_redex = new RedexContext();
+    }
+    auto store = create_enum_store();
+    auto* bar = type_class(DexType::get_type("LBar;"));
+    auto [values, value_of] = add_generated_methods(bar);
+    ClassCreator uc(DexType::make_type("LUser;"));
+    uc.set_super(type::java_lang_Object());
+    uc.set_access(ACC_PUBLIC);
+    uc.add_method(assembler::method_from_string(R"(
+      (method (public static) "LUser;.ordinal:(LBar;)I"
+       (
+        (load-param-object v0)
+        (invoke-virtual (v0) "LBar;.ordinal:()I")
+        (move-result v1)
+        (return v1)
+       )
+      )
+    )"));
+    store.add_classes({uc.create()});
+    DexStoresVector stores({std::move(store)});
+    walk::code(build_class_scope(stores),
+               [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+    Json::Value json_conf;
+    json_conf["OptimizeEnumsPass"]["max_enum_size"] = 0;
+    ConfigFiles conf(json_conf);
+    conf.parse_global_config();
+    optimize_enums::OptimizeEnumsPass pass;
+    PassManager manager({&pass}, conf, RedexOptions{});
+    manager.run_passes(stores, conf);
+
+    const auto& dmethods = bar->get_dmethods();
+    EXPECT_EQ(std::find(dmethods.begin(), dmethods.end(), values),
+              dmethods.end());
+    EXPECT_EQ(std::find(dmethods.begin(), dmethods.end(), value_of),
+              dmethods.end());
+  }
 }

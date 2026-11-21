@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <array>
+
 #include "DexClass.h"
 #include "EnumUpcastAnalysis.h"
 #include "Walkers.h"
@@ -33,8 +35,7 @@ namespace optimize_enums {
  */
 class EnumAnalyzeGeneratedMethods {
  public:
-  EnumAnalyzeGeneratedMethods()
-      : m_config(/*max_enum_size*/ std::numeric_limits<uint32_t>::max()) {}
+  EnumAnalyzeGeneratedMethods();
 
   /**
    * Adds the enum class and its generated methods to be considered for
@@ -65,6 +66,11 @@ class EnumAnalyzeGeneratedMethods {
 
  private:
   Config m_config;
+  // Method refs belong to one `RedexContext`, so each analysis makes its own.
+  // They are made, not looked up, because the input need not reference them.
+  const std::array<const DexMethodRef*, 7> m_allowlisted_methods;
+  const DexMethodRef* m_get_declaring_class_method;
+  const DexMethodRef* m_get_class_method;
   ConcurrentSet<const DexMethod*> m_candidate_methods;
   ConcurrentSet<const DexType*> m_candidate_types;
 

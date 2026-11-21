@@ -10,11 +10,41 @@
 #include <array>
 
 #include "Debug.h"
+#include "MethodUtil.h"
 #include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
 
 using namespace optimize_enums;
+
+namespace {
+
+/**
+ * A list of common enum methods that may upcast arguments, but cannot lead to a
+ * call to `Enum.valueOf()` or `Enum.values()` directly or reflectively because
+ * they are safe and final.
+ */
+std::array<const DexMethodRef*, 7> make_allowlisted_methods() {
+  return {
+      method::java_lang_Enum_ctor(),
+      DexMethod::make_method("Ljava/lang/Enum;.compareTo:(Ljava/lang/Enum;)I"),
+      method::java_lang_Enum_equals(),
+      DexMethod::make_method("Ljava/lang/Enum;.hashCode:()I"),
+      method::java_lang_Enum_name(),
+      method::java_lang_Enum_ordinal(),
+      DexMethod::make_method("Ljava/lang/Enum;.toString:()Ljava/lang/String;"),
+  };
+}
+
+} // namespace
+
+EnumAnalyzeGeneratedMethods::EnumAnalyzeGeneratedMethods()
+    : m_config(/*max_enum_size*/ std::numeric_limits<uint32_t>::max()),
+      m_allowlisted_methods(make_allowlisted_methods()),
+      m_get_declaring_class_method(DexMethod::make_method(
+          "Ljava/lang/Enum;.getDeclaringClass:()Ljava/lang/Class;")),
+      m_get_class_method(DexMethod::make_method(
+          "Ljava/lang/Object;.getClass:()Ljava/lang/Class;")) {}
 
 size_t EnumAnalyzeGeneratedMethods::transform_code(const Scope& scope) {
 
@@ -132,25 +162,10 @@ void EnumAnalyzeGeneratedMethods::process_invocation(
   auto* callee_class = callee_ref->get_class();
   auto* proto = callee_ref->get_proto();
 
-  /**
-   * A list of common enum methods that may upcast arguments, but cannot lead
-   * to a call to `Enum.valueOf()` or `Enum.values()` directly or reflectively
-   * because they are safe and final.
-   */
-  static const std::array allowlisted_methods{
-      DexMethod::get_method("Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V"),
-      DexMethod::get_method("Ljava/lang/Enum;.compareTo:(Ljava/lang/Enum;)I"),
-      DexMethod::get_method("Ljava/lang/Enum;.equals:(Ljava/lang/Object;)Z"),
-      DexMethod::get_method("Ljava/lang/Enum;.hashCode:()I"),
-      DexMethod::get_method("Ljava/lang/Enum;.name:()Ljava/lang/String;"),
-      DexMethod::get_method("Ljava/lang/Enum;.ordinal:()I"),
-      DexMethod::get_method("Ljava/lang/Enum;.toString:()Ljava/lang/String;"),
-  };
-
   if ((m_candidate_types.count(callee_class) != 0u) ||
       type::java_lang_Enum() == callee_class ||
       type::java_lang_Object() == callee_class) {
-    for (const auto* allowlisted_method : allowlisted_methods) {
+    for (const auto* allowlisted_method : m_allowlisted_methods) {
       if (method::signatures_match(callee_ref, allowlisted_method)) {
         TRACE(ENUM, 9, "Skipping allowed invocation %s", SHOW(insn));
         return;
@@ -179,12 +194,8 @@ void EnumAnalyzeGeneratedMethods::process_invocation(
 
   switch (insn->opcode()) {
   case OPCODE_INVOKE_VIRTUAL: {
-    const DexMethodRef* get_declaring_class_method = DexMethod::get_method(
-        "Ljava/lang/Enum;.getDeclaringClass:()Ljava/lang/Class;");
-    const DexMethodRef* get_class_method = DexMethod::get_method(
-        "Ljava/lang/Object;.getClass:()Ljava/lang/Class;");
-    if (method::signatures_match(callee_ref, get_declaring_class_method) ||
-        method::signatures_match(callee_ref, get_class_method)) {
+    if (method::signatures_match(callee_ref, m_get_declaring_class_method) ||
+        method::signatures_match(callee_ref, m_get_class_method)) {
       const EnumTypes possible_types = env->get(insn->src(0));
       for (const DexType* type : possible_types.elements()) {
         if (m_candidate_types.count(type) != 0u) {

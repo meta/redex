@@ -3661,3 +3661,74 @@ TEST_F(InterproceduralConstantPropagationTest,
                 .get(0),
             SignedConstantDomain(5));
 }
+
+// `check`, which `LSub;` overrides, returns normally only when its argument is
+// 5, so after the call `caller` passes 5 to `use`. With the multiple-callee
+// call graph, IPCP reads what both overrides guarantee about their arguments
+// from the whole-program state, although neither is a known method. The
+// cached result of `caller` from the bootstrap, which knew nothing about
+// `check`, must not be reused once the guarantee is known.
+TEST_F(InterproceduralConstantPropagationTest,
+       cachedResultIsRedoneWhenASummaryReadThroughTheCallGraphChanges) {
+  const char* const check_body = R"(
+     (
+      (load-param-object v0)
+      (load-param v1)
+      (const v2 5)
+      (if-eq v1 v2 :ok)
+      (const v3 0)
+      (throw v3)
+      (:ok)
+      (return-void)
+     )
+  )";
+  ClassCreator base_creator(DexType::make_type("LBase;"));
+  base_creator.set_super(type::java_lang_Object());
+  base_creator.add_method(assembler::method_from_string(
+      std::string(R"((method (public) "LBase;.check:(I)V")") + check_body +
+      ")"));
+  base_creator.add_method(assembler::method_from_string(R"(
+    (method (public static) "LBase;.use:(I)V"
+     (
+      (load-param v0)
+      (return-void)
+     )
+    )
+  )"));
+  auto* caller = assembler::method_from_string(R"(
+    (method (public static) "LBase;.caller:(LBase;I)V"
+     (
+      (load-param-object v0)
+      (load-param v1)
+      (invoke-virtual (v0 v1) "LBase;.check:(I)V")
+      (invoke-static (v1) "LBase;.use:(I)V")
+      (return-void)
+     )
+    )
+  )");
+  caller->rstate.set_root();
+  base_creator.add_method(caller);
+  auto* base_cls = base_creator.create();
+
+  ClassCreator sub_creator(DexType::make_type("LSub;"));
+  sub_creator.set_super(base_cls->get_type());
+  sub_creator.add_method(assembler::method_from_string(
+      std::string(R"((method (public) "LSub;.check:(I)V")") + check_body +
+      ")"));
+  Scope scope{base_cls, sub_creator.create()};
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  InterproceduralConstantPropagationPass::Config config;
+  config.max_heap_analysis_iterations = 1;
+  config.use_multiple_callee_callgraph = true;
+  auto fp_iter = InterproceduralConstantPropagationPass(config).analyze(
+      scope, &m_immut_analyzer_state, &m_api_level_analyzer_state,
+      &m_string_analyzer_state, &m_package_name_state, m_null_check_methods);
+
+  const auto* use = DexMethod::get_method("LBase;.use:(I)V")->as_def();
+  const auto& cg = fp_iter->get_call_graph();
+  EXPECT_EQ(fp_iter->get_entry_state_at(cg.node(use))
+                .get(CURRENT_PARTITION_LABEL)
+                .get(0),
+            SignedConstantDomain(5));
+}

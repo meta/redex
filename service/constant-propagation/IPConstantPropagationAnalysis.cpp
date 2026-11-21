@@ -185,10 +185,19 @@ bool FixpointIterator::method_cache_entry_matches(
   if (!mce.args.equals(args)) {
     return false;
   }
+  // Each value is compared the way WholeProgramStateAccessor read it: with a
+  // call graph, a callee's return value and parameter summary come straight
+  // from the partitions, also for methods that are not known.
   if (m_wps->has_call_graph()) {
     for (auto&& [method, val] :
          UnorderedIterable(mce.wps_accessor_record.method_dependencies)) {
       if (!m_wps->get_method_partition().get(method).equals(val)) {
+        return false;
+      }
+    }
+    for (auto&& [method, val] : UnorderedIterable(
+             mce.wps_accessor_record.method_param_env_dependencies)) {
+      if (!m_wps->get_method_param_partition().get(method).equals(val)) {
         return false;
       }
     }
@@ -199,16 +208,16 @@ bool FixpointIterator::method_cache_entry_matches(
         return false;
       }
     }
+    for (auto&& [method, val] : UnorderedIterable(
+             mce.wps_accessor_record.method_param_env_dependencies)) {
+      if (!m_wps->get_method_param_env(method).equals(val)) {
+        return false;
+      }
+    }
   }
   for (auto&& [field, val] :
        UnorderedIterable(mce.wps_accessor_record.field_dependencies)) {
     if (!m_wps->get_field_value(field).equals(val)) {
-      return false;
-    }
-  }
-  for (auto&& [method, val] : UnorderedIterable(
-           mce.wps_accessor_record.method_param_env_dependencies)) {
-    if (!m_wps->get_method_param_env(method).equals(val)) {
       return false;
     }
   }

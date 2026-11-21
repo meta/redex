@@ -33,6 +33,7 @@
 #include "PassManager.h"
 #include "RedexOptions.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "RegisterAllocation.h"
 #include "Resolver.h"
 #include "Show.h"
@@ -1005,21 +1006,15 @@ TEST_F(TypedNonReturningMethodsTest, metadata_references) {
       break;
     }
     case Kind::CallSiteArgument: {
-      auto* bootstrap = DexMethod::make_method(
-          "LBoot;.bootstrap:(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/"
-          "String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/"
-          "MethodHandle;)Ljava/lang/invoke/CallSite;");
-      auto* boot_handle =
-          new DexMethodHandle(METHOD_HANDLE_TYPE_INVOKE_STATIC, bootstrap);
-      g_redex->publish_methodhandle(boot_handle);
       std::vector<std::unique_ptr<DexEncodedValue>> args;
       args.push_back(
           std::make_unique<DexEncodedValueMethodHandle>(make_handle()));
-      auto* callsite = new DexCallSite(
-          boot_handle, DexString::make_string("run"),
-          DexProto::make_proto(type::_void(), DexTypeList::make_type_list({})),
-          std::move(args));
-      g_redex->publish_callsite(callsite);
+      auto* callsite = redex::make_callsite("run", "()V", std::move(args));
+      // The bootstrap method receives the handle as its last argument.
+      EXPECT_EQ(show(callsite->method_handle()->methodref()->get_proto()),
+                "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;"
+                "Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;)"
+                "Ljava/lang/invoke/CallSite;");
       auto* code = m->get_code();
       auto it = code->begin();
       ++it;

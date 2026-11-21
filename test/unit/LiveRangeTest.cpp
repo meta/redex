@@ -11,11 +11,10 @@
 #include "CheckCast.h"
 #include "ControlFlow.h"
 #include "Creators.h"
-#include "DexCallSite.h"
-#include "DexMethodHandle.h"
 #include "IRAssembler.h"
 #include "LiveRange.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "ScopedCFG.h"
 #include "TypeUtil.h"
 
@@ -420,18 +419,7 @@ TEST_F(LiveRangeTest, TypeDemandOfInvokes) {
   // arguments must be.
   EXPECT_EQ(get_type_demand(nullptr, {invoke_polymorphic, 1}), nullptr);
 
-  auto* call_site = new DexCallSite(
-      new DexMethodHandle(
-          METHOD_HANDLE_TYPE_INVOKE_STATIC,
-          DexMethod::make_method(
-              "LBootstrap;.bootstrap:(Ljava/lang/invoke/MethodHandles$Lookup;"
-              "Ljava/lang/String;Ljava/lang/invoke/MethodType;)"
-              "Ljava/lang/invoke/CallSite;")),
-      DexString::make_string("run"),
-      DexProto::make_proto(
-          type::_void(),
-          DexTypeList::make_type_list({DexType::make_type("LArg;")})),
-      {});
+  auto* call_site = redex::make_callsite("run", "(LArg;)V");
   IRInstruction invoke_custom(OPCODE_INVOKE_CUSTOM);
   invoke_custom.set_callsite(call_site)->set_srcs_size(1)->set_src(0, 0);
   EXPECT_EQ(get_type_demand(nullptr, {&invoke_custom, 0}),

@@ -1162,11 +1162,7 @@ TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsCallSite) {
     if (mie.insn->has_method() &&
         mie.insn->get_method()->str() == "placeholder") {
       mie.insn->set_opcode(OPCODE_INVOKE_CUSTOM)
-          ->set_callsite(new DexCallSite(
-              nullptr, DexString::make_string("run"),
-              DexProto::make_proto(type::_void(),
-                                   DexTypeList::make_type_list({})),
-              {}));
+          ->set_callsite(redex::make_callsite("run", "()V"));
     }
   }
   auto attributes =

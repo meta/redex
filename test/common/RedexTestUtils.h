@@ -12,10 +12,18 @@
 
 #include <fstream>
 #include <map>
+#include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "DexAnnotation.h"
+#include "DexDefs.h"
+
+class DexCallSite;
 class DexClass;
+class DexMethodHandle;
+class IRCode;
 
 namespace redex {
 
@@ -71,4 +79,28 @@ bool are_files_equal(const std::string&, const std::string&);
 // not have its CFG built.
 std::map<std::string, std::vector<std::string>> show_instructions_by_method(
     const std::vector<DexClass*>& classes);
+
+// A method handle of kind `type` for the method or field `ref`, published to
+// `g_redex`.
+DexMethodHandle* make_method_handle(MethodHandleType type,
+                                    std::string_view ref);
+
+// A call site named `method_name` with method type `method_type`, linked by
+// the static method `LBoot;.bootstrap` with `args` as its further bootstrap
+// arguments, published to `g_redex`. The bootstrap method takes one parameter
+// of the matching type for each of `args`.
+DexCallSite* make_callsite(
+    std::string_view method_name,
+    std::string_view method_type,
+    std::vector<std::unique_ptr<DexEncodedValue>> args = {});
+
+// S-expressions cannot express call sites, so tests write an `invoke-static`
+// in its place. This turns every `invoke-static` in `code` into an
+// `invoke-custom` of one new call site, made by `make_callsite` with the given
+// arguments, and returns that call site.
+DexCallSite* make_invoke_custom(
+    IRCode* code,
+    std::string_view method_name,
+    std::string_view method_type,
+    std::vector<std::unique_ptr<DexEncodedValue>> args = {});
 } // namespace redex

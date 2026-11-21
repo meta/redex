@@ -472,7 +472,7 @@ kotlin_lambda_dedup_pass_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 literals_test_SOURCES = LiteralsTest.cpp
 
-live_range_test_SOURCES = LiveRangeTest.cpp
+live_range_test_SOURCES = LiveRangeTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 live_range_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 local_dce_test_SOURCES = LocalDceTest.cpp ScopeHelper.cpp
@@ -546,7 +546,7 @@ object_inliner_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 object_propagation_test_SOURCES = constant-propagation/ObjectPropagationTest.cpp
 object_propagation_test_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/sparta/test
 
-optimize_enums_test_SOURCES = OptimizeEnumsTest.cpp
+optimize_enums_test_SOURCES = OptimizeEnumsTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 optimize_enums_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 outliner_type_analysis_test_SOURCES = OutlinerTypeAnalysisTest.cpp
@@ -720,7 +720,7 @@ type_system_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 type_util_test_SOURCES = TypeUtilTest.cpp
 
-typed_nonreturning_methods_test_SOURCES = TypedNonReturningMethodsTest.cpp
+typed_nonreturning_methods_test_SOURCES = TypedNonReturningMethodsTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 uninitialized_objects_test_SOURCES = UninitializedObjectsTest.cpp
 

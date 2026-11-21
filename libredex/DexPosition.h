@@ -154,6 +154,16 @@ inline bool same_position_and_provenance(const DexPosition& a,
   }
   return pa == nullptr && pb == nullptr;
 }
+
+// The first position in `pos`'s parent chain that has a file, or null if none
+// has. This mimics what generate_debug_instructions(DexClass.cpp) does
+// eventually: ignoring positions that don't have a file.
+inline DexPosition* skip_fileless(DexPosition* pos) {
+  for (; (pos != nullptr) && (pos->file == nullptr); pos = pos->parent) {
+  }
+  return pos;
+}
+
 // Identity of an interned position. Keep these two adjacent: they are a pair,
 // and a hash that stops agreeing with its equality is the bug this replaced.
 // A parent is interned before its child, so a whole inlining chain is

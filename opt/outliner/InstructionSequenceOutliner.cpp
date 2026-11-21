@@ -1729,14 +1729,6 @@ class MethodNameGenerator {
   }
 };
 
-// This mimics what generate_debug_instructions(DexClass.cpp) does eventually:
-// ignoring positions that don't have a file.
-static DexPosition* skip_fileless(DexPosition* pos) {
-  for (; (pos != nullptr) && (pos->file == nullptr); pos = pos->parent) {
-  }
-  return pos;
-}
-
 using CallSitePatternIds = UnorderedMap<IRInstruction*, uint32_t>;
 
 class OutlinedMethodCreator {

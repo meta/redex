@@ -265,3 +265,23 @@ Kotlin
   EXPECT_EQ(positions[2]->line, 22);
   EXPECT_EQ(positions[2]->parent, positions[1]);
 }
+
+// `skip_fileless` returns the first position in the parent chain that has a
+// file, and null when none has.
+TEST_F(DexPositionTest, skipFilelessFindsTheFirstAncestorWithAFile) {
+  const auto* method = DexString::make_string("LFoo;.bar:()V");
+  const auto* file = DexString::make_string("Foo.java");
+  DexPosition outer(method, file, 10);
+  DexPosition middle(method, file, 20);
+  middle.file = nullptr;
+  middle.parent = &outer;
+  DexPosition inner(method, file, 30);
+  inner.file = nullptr;
+  inner.parent = &middle;
+
+  EXPECT_EQ(skip_fileless(&inner), &outer);
+  EXPECT_EQ(skip_fileless(&outer), &outer);
+  EXPECT_EQ(skip_fileless(nullptr), nullptr);
+  outer.file = nullptr;
+  EXPECT_EQ(skip_fileless(&inner), nullptr);
+}

@@ -2037,3 +2037,105 @@ TEST_F(OutlinerTypeAnalysisTest,
                               /* as_result */ true),
             nullptr);
 }
+
+namespace {
+
+// `Object <- LA <- {LB, LC}`, as real classes: combining the types the uses
+// require compares them with `type::check_cast`, which answers false for a type
+// with no `DexClass`.
+DexMethod* create_with_a_b_c(const std::string& method) {
+  ClassCreator object_creator(type::java_lang_Object());
+  object_creator.create();
+  ClassCreator a_creator(DexType::make_type("LA;"));
+  a_creator.set_super(type::java_lang_Object());
+  auto* a_type = a_creator.create()->get_type();
+  ClassCreator b_creator(DexType::make_type("LB;"));
+  b_creator.set_super(a_type);
+  b_creator.create();
+  ClassCreator c_creator(DexType::make_type("LC;"));
+  c_creator.set_super(a_type);
+  c_creator.create();
+
+  auto* foo_method = assembler::method_from_string(method);
+  foo_method->get_code()->build_cfg();
+  ClassCreator foo_creator(DexType::make_type("LFoo;"));
+  foo_creator.set_super(type::java_lang_Object());
+  foo_creator.add_method(foo_method);
+  foo_creator.create();
+  return foo_method;
+}
+
+} // namespace
+
+// The caller chooses which uses type a register. A value passed into a region
+// must satisfy the region's own uses; a value the region returns must satisfy
+// only the uses after it. Here the region is the block holding `useB`, and
+// `v0` is read as an `LB;` inside it and as an `LA;` after it. The same
+// definitions therefore give `LB;` or `LA;`, depending on the scope passed in.
+TEST_F(OutlinerTypeAnalysisTest, demand_of_uses_reads_the_scope_it_is_given) {
+  auto* foo_method = create_with_a_b_c(R"(
+      (method (public static) "LFoo;.twoSided:(LA;Z)V" (
+        (load-param-object v0)
+        (load-param v1)
+        (if-eqz v1 :out)
+        (invoke-static (v0) "LFoo;.useB:(LB;)V")
+        (:out)
+        (invoke-static (v0) "LFoo;.useA:(LA;)V")
+        (return-void)
+      )))");
+  auto& cfg = foo_method->get_code()->cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+  auto* anchor = find_invoke_of(foo_method, "useB");
+  auto* region = block_of(cfg, anchor);
+  auto seeds = ota.immediate_defs_at(anchor, anchor->src(0));
+
+  auto inside = [&](IRInstruction* insn) {
+    return block_of(cfg, insn) == region;
+  };
+  auto after = [&](IRInstruction* insn) { return !inside(insn); };
+  EXPECT_EQ(ota.demand_of_uses(seeds, inside).widest(),
+            DexType::get_type("LB;"));
+  EXPECT_EQ(ota.demand_of_uses(seeds, after).widest(),
+            DexType::get_type("LA;"));
+}
+
+// A value a region returns is constrained only by the uses its own definitions
+// reach. `v0` is written on both arms of a diamond: the region writes an `LB;`,
+// and the path that skips the region writes an `LC;` and reads it as an `LC;`.
+// Starting from every definition that reaches the join would let that read
+// require an `LC;` of the region's value, which is never an `LC;`.
+TEST_F(OutlinerTypeAnalysisTest, demand_of_uses_reads_only_its_seeds) {
+  auto* foo_method = create_with_a_b_c(R"(
+      (method (public static) "LFoo;.siblings:(Z)V" (
+        (load-param v1)
+        (if-eqz v1 :bypass)
+        (invoke-static () "LFoo;.makeB:()LB;")
+        (move-result-object v0)
+        (goto :join)
+        (:bypass)
+        (invoke-static () "LFoo;.makeC:()LC;")
+        (move-result-object v0)
+        (invoke-static (v0) "LFoo;.useC:(LC;)V")
+        (:join)
+        (invoke-static (v0) "LFoo;.useA:(LA;)V")
+        (return-void)
+      )))");
+  auto& cfg = foo_method->get_code()->cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+  auto* anchor = find_invoke_of(foo_method, "useA");
+  auto* region = block_of(cfg, find_invoke_of(foo_method, "makeB"));
+  auto after = [&](IRInstruction* insn) {
+    return block_of(cfg, insn) != region;
+  };
+
+  auto every_def = ota.immediate_defs_at(anchor, anchor->src(0));
+  EXPECT_EQ(ota.demand_of_uses(every_def, after).widest(),
+            DexType::get_type("LC;"));
+
+  auto own_defs = every_def;
+  own_defs.filter(
+      [&](IRInstruction* def) { return block_of(cfg, def) == region; });
+  ASSERT_EQ(own_defs.size(), 1u);
+  EXPECT_EQ(ota.demand_of_uses(own_defs, after).widest(),
+            DexType::get_type("LA;"));
+}

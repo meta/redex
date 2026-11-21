@@ -1032,6 +1032,13 @@ class ControlFlowGraph {
   // by default, start at the entry block
   boost::sub_range<IRList> get_param_instructions() const;
 
+  // The first load-param instruction of get_param_instructions(), which loads
+  // `this` in an instance method, or null if the range holds no instruction.
+  // The range may begin with an MFLOW_FALLTHROUGH entry, which is not an
+  // instruction: IRList::remove_opcode leaves one in linear code, and building
+  // the CFG keeps it.
+  [[nodiscard]] IRInstruction* get_first_param_instruction() const;
+
   void gather_catch_types(std::vector<const DexType*>& types) const;
   void gather_strings(std::vector<const DexString*>& strings) const;
   void gather_types(std::vector<const DexType*>& types) const;

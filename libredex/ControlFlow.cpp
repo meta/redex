@@ -1545,6 +1545,13 @@ boost::sub_range<IRList> ControlFlowGraph::get_param_instructions() const {
   return block->m_entries.get_param_instructions();
 }
 
+IRInstruction* ControlFlowGraph::get_first_param_instruction() const {
+  auto range = get_param_instructions();
+  auto params = ir_list::InstructionIterable(range);
+  auto it = params.begin();
+  return it == params.end() ? nullptr : it->insn;
+}
+
 void ControlFlowGraph::gather_catch_types(
     std::vector<const DexType*>& types) const {
   UnorderedSet<DexType*> seen;

@@ -2677,6 +2677,50 @@ TEST_F(ControlFlowTest, get_param_instructions_empty) {
   EXPECT_TRUE(cfg.get_param_instructions().empty());
 }
 
+TEST_F(ControlFlowTest, get_first_param_instruction) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (load-param v1)
+      (return-void)
+    )
+  )");
+  auto* first_param = code->begin()->insn;
+
+  code->build_cfg();
+  EXPECT_EQ(code->cfg().get_first_param_instruction(), first_param);
+}
+
+// Removing an instruction from linear code leaves an MFLOW_FALLTHROUGH entry
+// in its place, which building the CFG keeps at the start of the parameters.
+TEST_F(ControlFlowTest, get_first_param_instruction_after_fallthrough) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param v0)
+      (load-param-object v1)
+      (return-void)
+    )
+  )");
+  auto* second_param = std::next(code->begin())->insn;
+  code->remove_opcode(code->begin());
+
+  code->build_cfg();
+  auto& cfg = code->cfg();
+  EXPECT_EQ(cfg.get_param_instructions().begin()->type, MFLOW_FALLTHROUGH);
+  EXPECT_EQ(cfg.get_first_param_instruction(), second_param);
+}
+
+TEST_F(ControlFlowTest, get_first_param_instruction_without_params) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (return-void)
+    )
+  )");
+
+  code->build_cfg();
+  EXPECT_EQ(code->cfg().get_first_param_instruction(), nullptr);
+}
+
 TEST_F(ControlFlowTest, no_crash_on_remove_insn) {
   auto code = assembler::ircode_from_string(R"(
     (

@@ -24,6 +24,20 @@ DexMethodHandle::DexMethodHandle(MethodHandleType type, DexFieldRef* fieldref) {
   m_fieldref = fieldref;
 }
 
+DexMethodHandle* DexMethodHandle::make_method_handle(MethodHandleType type,
+                                                     DexMethodRef* methodref) {
+  auto* method_handle = new DexMethodHandle(type, methodref);
+  g_redex->publish_methodhandle(method_handle);
+  return method_handle;
+}
+
+DexMethodHandle* DexMethodHandle::make_method_handle(MethodHandleType type,
+                                                     DexFieldRef* fieldref) {
+  auto* method_handle = new DexMethodHandle(type, fieldref);
+  g_redex->publish_methodhandle(method_handle);
+  return method_handle;
+}
+
 DexMethodRef* DexMethodHandle::methodref() const {
   always_assert_log(isInvokeType(m_type),
                     "MethodHandleType %d invalid to use with methodref",

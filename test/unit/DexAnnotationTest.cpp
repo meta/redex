@@ -80,16 +80,15 @@ TEST_F(DexAnnotationTest, EscapeStrings) {
 // Method handles and call sites print what they refer to, not where they are in
 // memory, so equal ones print alike in any RedexContext.
 TEST_F(DexAnnotationTest, ShowMethodHandleAndCallSiteByContent) {
-  auto* bootstrap = new DexMethodHandle(
+  auto* bootstrap = DexMethodHandle::make_method_handle(
       METHOD_HANDLE_TYPE_INVOKE_STATIC,
       DexMethod::make_method(
           "LBoot;.bootstrap:(Ljava/lang/invoke/MethodHandles$Lookup;"
           "Ljava/lang/String;Ljava/lang/invoke/MethodType;)"
           "Ljava/lang/invoke/CallSite;"));
-  auto* target = new DexMethodHandle(METHOD_HANDLE_TYPE_INVOKE_STATIC,
-                                     DexMethod::make_method("LFoo;.run:()V"));
-  g_redex->publish_methodhandle(bootstrap);
-  g_redex->publish_methodhandle(target);
+  auto* target = DexMethodHandle::make_method_handle(
+      METHOD_HANDLE_TYPE_INVOKE_STATIC,
+      DexMethod::make_method("LFoo;.run:()V"));
   std::vector<std::unique_ptr<DexEncodedValue>> args;
   args.emplace_back(new DexEncodedValueMethodHandle(target));
   args.emplace_back(new DexEncodedValueMethodType(DexProto::make_proto("()V")));
@@ -106,9 +105,8 @@ TEST_F(DexAnnotationTest, ShowMethodHandleAndCallSiteByContent) {
                 show(target) + ", ()V]");
 
   // A handle to a field prints the field.
-  auto* field_handle = new DexMethodHandle(METHOD_HANDLE_TYPE_STATIC_GET,
-                                           DexField::make_field("LFoo;.bar:I"));
-  g_redex->publish_methodhandle(field_handle);
+  auto* field_handle = DexMethodHandle::make_method_handle(
+      METHOD_HANDLE_TYPE_STATIC_GET, DexField::make_field("LFoo;.bar:I"));
   DexOpcodeMethodHandle const_handle(DOPCODE_CONST_METHOD_HANDLE, field_handle);
   EXPECT_EQ(show(&const_handle), "const-method-handle LFoo;.bar:I v0");
 }

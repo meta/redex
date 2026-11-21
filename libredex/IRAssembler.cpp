@@ -7,6 +7,8 @@
 
 #include "IRAssembler.h"
 
+#include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstdint>
 #include <cstdio>
@@ -19,6 +21,7 @@
 #include "DeterministicContainers.h"
 #include "DexClass.h"
 #include "DexInstruction.h"
+#include "DexMethodHandle.h"
 #include "DexPosition.h"
 #include "IRCode.h"
 #include "Show.h"
@@ -43,6 +46,40 @@ UnorderedMap<std::string, IROpcode> string_to_opcode_table = {
 #include "IROpcodes.def"
 };
 // clang-format on
+
+// A method handle is written as its kind, spelled as smali spells it, and the
+// field or method it refers to:
+// (const-method-handle invoke-instance "Ljava/lang/Object;.hashCode:()I")
+constexpr auto method_handle_type_names =
+    std::to_array<std::pair<MethodHandleType, std::string_view>>({
+        {METHOD_HANDLE_TYPE_STATIC_PUT, "static-put"},
+        {METHOD_HANDLE_TYPE_STATIC_GET, "static-get"},
+        {METHOD_HANDLE_TYPE_INSTANCE_PUT, "instance-put"},
+        {METHOD_HANDLE_TYPE_INSTANCE_GET, "instance-get"},
+        {METHOD_HANDLE_TYPE_INVOKE_STATIC, "invoke-static"},
+        {METHOD_HANDLE_TYPE_INVOKE_INSTANCE, "invoke-instance"},
+        {METHOD_HANDLE_TYPE_INVOKE_CONSTRUCTOR, "invoke-constructor"},
+        {METHOD_HANDLE_TYPE_INVOKE_DIRECT, "invoke-direct"},
+        {METHOD_HANDLE_TYPE_INVOKE_INTERFACE, "invoke-interface"},
+    });
+
+std::string_view method_handle_type_name(MethodHandleType type) {
+  const auto* const it = std::find_if(
+      method_handle_type_names.begin(), method_handle_type_names.end(),
+      [type](const auto& entry) { return entry.first == type; });
+  always_assert_log(it != method_handle_type_names.end(),
+                    "unknown method handle type %d", static_cast<int>(type));
+  return it->second;
+}
+
+MethodHandleType method_handle_type_from_name(std::string_view name) {
+  const auto* const it = std::find_if(
+      method_handle_type_names.begin(), method_handle_type_names.end(),
+      [name](const auto& entry) { return entry.second == name; });
+  always_assert_log(it != method_handle_type_names.end(),
+                    "unknown method handle type %s", std::string(name).c_str());
+  return it->first;
+}
 
 using LabelDefs = UnorderedMap<std::string, MethodItemEntry*>;
 using LabelRefs = UnorderedMap<const IRInstruction*, std::vector<std::string>>;
@@ -119,9 +156,16 @@ s_expr to_s_expr(const IRInstruction* insn, const LabelRefs& label_refs) {
   case opcode::Ref::CallSite:
     s_exprs.emplace_back(show(insn->get_callsite()));
     break;
-  case opcode::Ref::MethodHandle:
-    s_exprs.emplace_back(show(insn->get_methodhandle()));
+  case opcode::Ref::MethodHandle: {
+    const auto* handle = insn->get_methodhandle();
+    s_exprs.emplace_back(std::string(method_handle_type_name(handle->type())));
+    if (DexMethodHandle::isInvokeType(handle->type())) {
+      s_exprs.emplace_back(show(handle->methodref()));
+    } else {
+      s_exprs.emplace_back(show(handle->fieldref()));
+    }
     break;
+  }
   case opcode::Ref::Proto:
     s_exprs.emplace_back(show(insn->get_proto()));
     break;
@@ -317,10 +361,26 @@ std::unique_ptr<IRInstruction> instruction_from_s_expr(
     not_reached_log("callsites currently unsupported in s-exprs");
   }
   case opcode::Ref::MethodHandle: {
-    not_reached_log("methodhandles currently unsupported in s-exprs");
+    std::string type_str;
+    std::string ref_str;
+    s_patn({s_patn(&type_str), s_patn(&ref_str)}, tail)
+        .must_match(
+            tail,
+            "Expecting method handle type and reference for " + opcode_str);
+    auto type = method_handle_type_from_name(type_str);
+    insn->set_methodhandle(DexMethodHandle::isInvokeType(type)
+                               ? DexMethodHandle::make_method_handle(
+                                     type, DexMethod::make_method(ref_str))
+                               : DexMethodHandle::make_method_handle(
+                                     type, DexField::make_field(ref_str)));
+    break;
   }
   case opcode::Ref::Proto: {
-    not_reached_log("proto currently unsupported in s-exprs");
+    std::string proto_str;
+    s_patn({s_patn(&proto_str)}, tail)
+        .must_match(tail, "Expecting prototype for " + opcode_str);
+    insn->set_proto(DexProto::make_proto(proto_str));
+    break;
   }
   }
 

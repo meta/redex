@@ -114,18 +114,13 @@ DexMethodHandle* DexIdx::get_methodhandleidx_fromdex(uint32_t mhidx) {
       INVALID_DEX,
       "Invalid MethodHandle type");
   MethodHandleType method_handle_type = (MethodHandleType)type_uint16;
-  DexMethodHandle* methodhandle;
+  auto id = m_methodhandle_ids[mhidx].field_or_method_id;
   if (DexMethodHandle::isInvokeType(method_handle_type)) {
-    DexMethodRef* methodref =
-        get_methodidx(m_methodhandle_ids[mhidx].field_or_method_id);
-    methodhandle = new DexMethodHandle(method_handle_type, methodref);
-  } else {
-    DexFieldRef* fieldref =
-        get_fieldidx(m_methodhandle_ids[mhidx].field_or_method_id);
-    methodhandle = new DexMethodHandle(method_handle_type, fieldref);
+    return DexMethodHandle::make_method_handle(method_handle_type,
+                                               get_methodidx(id));
   }
-  g_redex->publish_methodhandle(methodhandle);
-  return methodhandle;
+  return DexMethodHandle::make_method_handle(method_handle_type,
+                                             get_fieldidx(id));
 }
 
 std::string_view DexIdx::get_string_data(uint32_t stridx,

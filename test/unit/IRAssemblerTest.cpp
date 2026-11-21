@@ -18,6 +18,7 @@
 #include "DexClass.h"
 #include "DexDebugInstruction.h"
 #include "DexInstruction.h"
+#include "DexMethodHandle.h"
 #include "DexPosition.h"
 #include "IRCode.h"
 #include "IRList.h"
@@ -100,6 +101,55 @@ TEST_F(IRAssemblerTest, disassembleCode) {
             "(move-result-pseudo-object v0) "
             "(return-void))");
   EXPECT_EQ(s, assembler::to_string(assembler::ircode_from_string(s).get()));
+}
+
+TEST_F(IRAssemblerTest, methodConstantsRoundTrip) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+     (const-method-type "(CSJ)Z")
+     (move-result-pseudo-object v0)
+     (const-method-handle invoke-instance "Ljava/lang/Object;.hashCode:()I")
+     (move-result-pseudo-object v1)
+     (const-method-handle static-get "LFoo;.bar:I")
+     (move-result-pseudo-object v2)
+     (return-void)
+    )
+)");
+  auto it = InstructionIterable(code.get()).begin();
+  EXPECT_EQ(it->insn->get_proto(), DexProto::make_proto("(CSJ)Z"));
+  ++it;
+  ++it;
+  const auto* handle = it->insn->get_methodhandle();
+  EXPECT_EQ(handle->type(), METHOD_HANDLE_TYPE_INVOKE_INSTANCE);
+  EXPECT_EQ(handle->methodref(),
+            DexMethod::get_method("Ljava/lang/Object;.hashCode:()I"));
+  ++it;
+  ++it;
+  handle = it->insn->get_methodhandle();
+  EXPECT_EQ(handle->type(), METHOD_HANDLE_TYPE_STATIC_GET);
+  EXPECT_EQ(handle->fieldref(), DexField::get_field("LFoo;.bar:I"));
+
+  auto s = assembler::to_string(code.get());
+  EXPECT_EQ(s,
+            "((const-method-type \"(CSJ)Z\") "
+            "(move-result-pseudo-object v0) "
+            "(const-method-handle invoke-instance "
+            "\"Ljava/lang/Object;.hashCode:()I\") "
+            "(move-result-pseudo-object v1) "
+            "(const-method-handle static-get \"LFoo;.bar:I\") "
+            "(move-result-pseudo-object v2) "
+            "(return-void))");
+  EXPECT_EQ(s, assembler::to_string(assembler::ircode_from_string(s).get()));
+}
+
+TEST_F(IRAssemblerTest, unknownMethodHandleKindIsRejected) {
+  EXPECT_THROW(assembler::ircode_from_string(R"(
+    (
+      (const-method-handle invoke-everything "LFoo;.bar:()V")
+      (move-result-pseudo-object v0)
+    )
+  )"),
+               RedexException);
 }
 
 TEST_F(IRAssemblerTest, empty) {

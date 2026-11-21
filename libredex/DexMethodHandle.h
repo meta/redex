@@ -31,6 +31,12 @@ class DexMethodHandle {
 
   static bool isInvokeType(MethodHandleType type);
 
+  // A new handle of `type` to `methodref` or `fieldref`, owned by `g_redex`.
+  static DexMethodHandle* make_method_handle(MethodHandleType type,
+                                             DexMethodRef* methodref);
+  static DexMethodHandle* make_method_handle(MethodHandleType type,
+                                             DexFieldRef* fieldref);
+
  private:
   MethodHandleType m_type;
   union {

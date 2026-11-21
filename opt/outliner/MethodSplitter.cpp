@@ -194,18 +194,7 @@ ConcurrentSet<DexMethod*> split_splittable_closures(
 
     std::sort(ranked_splittable_closures.begin(),
               ranked_splittable_closures.end(), [](auto* c, auto* d) {
-                if (c->rank != d->rank) {
-                  return c->rank > d->rank;
-                }
-                auto* c_method = c->method_closures->method;
-                auto* d_method = d->method_closures->method;
-                if (c_method != d_method) {
-                  return compare_dexmethods(c_method, d_method);
-                }
-                if (c->is_switch() != d->is_switch()) {
-                  return c->is_switch() < d->is_switch();
-                }
-                return c->id() > d->id();
+                return precedes<CandidateOrder::Emission>(*c, *d);
               });
     UnorderedSet<DexMethod*> affected_methods;
     auto record = [stats](const SplittableClosure& sc, CandidateFate fate,

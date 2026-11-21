@@ -1792,7 +1792,7 @@ std::optional<method_splitting_impl::SplittableClosure> make_test_closure(
       .closures = std::move(closures),
       .grouped_heads = std::move(head_ids),
       .args = {{0, type::_int(), nullptr}},
-      .rank = 0,
+      .rank = {},
       .added_code_size = 0,
       .hot_split_kind = method_splitting_impl::HotSplitKind::HotCold,
       .net_terms = std::nullopt};
@@ -2496,6 +2496,91 @@ TEST_F(MethodSplitterTest, RemainingFloorOfASwitchGroupAtItsBoundary) {
   EXPECT_EQ(split_count("(I)V", switchGroupCode(), config), 1u);
   config.min_hot_split_size = kGroupRemaining + 1;
   EXPECT_EQ(split_count("(I)V", switchGroupCode(), config), 0u);
+}
+
+// The order of two ranks: the larger key goes first.
+TEST_F(MethodSplitterTest, SelectionRankOrder) {
+  const auto rank = [](double key) {
+    return method_splitting_impl::SelectionRank{.key = key, .suffix_nodes = 0};
+  };
+  const auto before = [](const method_splitting_impl::SelectionRank& a,
+                         const method_splitting_impl::SelectionRank& b) {
+    return std::is_lt(method_splitting_impl::compare_rank(a, b)) &&
+           std::is_gt(method_splitting_impl::compare_rank(b, a));
+  };
+  EXPECT_TRUE(before(rank(7), rank(5)));
+  EXPECT_TRUE(
+      std::is_eq(method_splitting_impl::compare_rank(rank(5), rank(5))));
+}
+
+// The orders of one method's candidates in selection and of one dex's
+// candidates in emission. Selection takes the candidate that takes more nodes
+// first, then a single entry before a switch group, then the lower id. Emission
+// goes by rank, then by method, then a single entry before a switch group, then
+// the higher id. Split names are numbered in emission order.
+TEST_F(MethodSplitterTest, CandidateOrders) {
+  std::vector<DexMethod*> hosts;
+  std::vector<std::shared_ptr<method_splitting_impl::MethodClosures>> mcss;
+  for (int i = 0; i < 2; ++i) {
+    auto [cls, method] = create("(I)V", switchGroupCode());
+    method->get_code()->build_cfg();
+    method_splitting_impl::normalize_cfg_for_splitting(method);
+    auto rcfg = method_splitting_impl::reduce_cfg(method);
+    auto mcs = method_splitting_impl::discover_closures(method, rcfg);
+    ASSERT_NE(mcs, nullptr);
+    hosts.push_back(method);
+    mcss.push_back(std::move(mcs));
+  }
+  if (compare_dexmethods(hosts[1], hosts[0])) {
+    std::swap(hosts[0], hosts[1]);
+    std::swap(mcss[0], mcss[1]);
+  }
+  // A candidate of `hosts[host]` taking the blocks of the source blocks
+  // `heads`, as a group of the switch's cases when `group`.
+  const auto candidate = [&](size_t host, const std::vector<uint32_t>& heads,
+                             bool group, double key, size_t suffix_nodes) {
+    std::vector<cfg::Block*> blocks;
+    blocks.reserve(heads.size());
+    for (auto id : heads) {
+      blocks.push_back(profile_block(hosts[host], id));
+    }
+    auto sc = make_test_closure(
+        mcss[host], blocks, group ? profile_block(hosts[host], 0) : nullptr);
+    sc.value().rank.key = key;
+    sc.value().rank.suffix_nodes = suffix_nodes;
+    return std::move(sc.value());
+  };
+  const auto case_a = candidate(0, {2}, false, 1, 1);
+  const auto case_b = candidate(0, {3}, false, 1, 1);
+  const auto group = candidate(0, {2, 3}, true, 1, 2);
+  const auto other_host = candidate(1, {2}, false, 1, 1);
+  const auto higher_rank = candidate(1, {3}, false, 2, 1);
+  ASSERT_NE(case_a.id(), case_b.id());
+  const auto* lower_id = case_a.id() < case_b.id() ? &case_a : &case_b;
+  const auto* higher_id = lower_id == &case_a ? &case_b : &case_a;
+  using Candidates =
+      std::vector<const method_splitting_impl::SplittableClosure*>;
+
+  Candidates selection{&case_a, &case_b, &group};
+  std::sort(selection.begin(), selection.end(), [](auto* c, auto* d) {
+    return method_splitting_impl::precedes<
+        method_splitting_impl::CandidateOrder::Selection>(*c, *d);
+  });
+  EXPECT_EQ(selection, (Candidates{&group, lower_id, higher_id}));
+  // A single entry and a switch group that hold equally many nodes.
+  const auto group_covering_one = candidate(0, {2, 3}, true, 1, 1);
+  EXPECT_TRUE(method_splitting_impl::precedes<
+              method_splitting_impl::CandidateOrder::Selection>(
+      *higher_id, group_covering_one));
+
+  Candidates emission{&case_a, &case_b, &group, &other_host, &higher_rank};
+  std::sort(emission.begin(), emission.end(), [](auto* c, auto* d) {
+    return method_splitting_impl::precedes<
+        method_splitting_impl::CandidateOrder::Emission>(*c, *d);
+  });
+  EXPECT_EQ(
+      emission,
+      (Candidates{&higher_rank, higher_id, lower_id, &group, &other_host}));
 }
 
 // The cases of a top-level switch, selected and split the way a

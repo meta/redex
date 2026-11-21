@@ -94,6 +94,8 @@ struct ScoredClosure {
   // The partition of `switch_block`'s edges by `grouped_heads`; set for a
   // candidate taking several cases of a switch.
   std::optional<SwitchPartition> dispatch{std::nullopt};
+  // Set once phase 1 has evaluated the candidate.
+  SelectionRank rank{};
 
   int is_switch() const { return switch_block != nullptr ? 1 : 0; }
 
@@ -940,18 +942,23 @@ std::vector<SplittableClosure> to_splittable_closures(
     return fate.has_value();
   });
 
-  // We sort closures in a way that allows us to quickly prune contained
-  // closures if we found a viable containing closure.
-  std::sort(
-      scored_closures.begin(), scored_closures.end(), [](auto& a, auto& b) {
-        if (a.reduced_components.size() != b.reduced_components.size()) {
-          return a.reduced_components.size() > b.reduced_components.size();
-        }
-        if (a.is_switch() != b.is_switch()) {
-          return a.is_switch() < b.is_switch();
-        }
-        return a.id() < b.id();
-      });
+  // Phase 2: order the candidates by `CandidateOrder::Selection`, then keep, in
+  // that order, each candidate none of whose entries is among a kept
+  // candidate's blocks. Selection follows its containment rule rather than the
+  // size keys, so this is not the order their dex emits them in
+  // (`CandidateOrder::Emission`).
+  for (auto& sc : scored_closures) {
+    sc.rank = SelectionRank{
+        .key = static_cast<double>(sc.split_size) *
+               static_cast<double>(mcs->original_size) /
+               static_cast<double>(sc.split_size + sc.remaining_size),
+        .suffix_nodes = sc.reduced_components.size(),
+    };
+  }
+  std::sort(scored_closures.begin(), scored_closures.end(),
+            [](const ScoredClosure& a, const ScoredClosure& b) {
+              return precedes<CandidateOrder::Selection>(a, b);
+            });
   UnorderedSet<const ReducedBlock*> covered;
   // Greedy: the predicate reads this set and then inserts into it, so which
   // candidates survive depends on the order the sort above left them in. That
@@ -1009,9 +1016,6 @@ std::vector<SplittableClosure> to_splittable_closures(
       oss << ::show(method->get_code()->cfg());
       TRACE(MS, 2, "%s", oss.str().c_str());
     }
-    auto rank = static_cast<double>(sc.split_size) *
-                static_cast<double>(mcs->original_size) /
-                static_cast<double>(sc.split_size + sc.remaining_size);
     auto added_code_size =
         sc.split_size + sc.remaining_size - mcs->original_size;
     splittable_closures.push_back((SplittableClosure){
@@ -1020,7 +1024,7 @@ std::vector<SplittableClosure> to_splittable_closures(
         .closures = std::move(sc.closures),
         .grouped_heads = std::move(sc.grouped_heads),
         .args = std::move(sc.args),
-        .rank = rank,
+        .rank = sc.rank,
         .added_code_size = added_code_size,
         .hot_split_kind = sc.hot_split_kind,
         .is_large_packed_switch = sc.is_large_packed_switch,
@@ -1536,6 +1540,15 @@ RareSuffixSelection::RareSuffixSelection(
             });
       },
       methods);
+}
+
+std::weak_ordering compare_rank(const SelectionRank& a,
+                                const SelectionRank& b) {
+  if (a.key != b.key) {
+    return a.key > b.key ? std::weak_ordering::less
+                         : std::weak_ordering::greater;
+  }
+  return std::weak_ordering::equivalent;
 }
 
 } // namespace method_splitting_impl

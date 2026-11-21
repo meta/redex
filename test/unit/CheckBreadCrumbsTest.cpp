@@ -14,7 +14,10 @@
 #include "DexClass.h"
 #include "DexUtil.h"
 #include "IRAssembler.h"
+#include "PassManager.h"
+#include "RedexException.h"
 #include "RedexTest.h"
+#include "Walkers.h"
 
 // Create the following hierarchy
 //
@@ -207,6 +210,40 @@ std::vector<DexClass*> create_classes() {
 class CheckBreadcrumbsTest : public RedexTest {
  public:
   ConfigFiles conf = ConfigFiles(Json::nullValue);
+
+  // Runs the pass on `root_classes`, in the root store, and `module_classes`,
+  // in a module store that the root store may not refer to, and returns the
+  // report it fails with: of dangling references if there are any, and
+  // otherwise of illegal cross-store references.
+  static std::string failure_report(
+      const std::vector<DexClass*>& root_classes,
+      const std::vector<DexClass*>& module_classes) {
+    DexMetadata dm_root;
+    dm_root.set_id("classes");
+    DexStore store_root(dm_root);
+    store_root.add_classes(root_classes);
+    DexMetadata dm_module;
+    dm_module.set_id("Module");
+    DexStore store_module(dm_module);
+    store_module.add_classes(module_classes);
+    std::vector<DexStore> stores;
+    stores.emplace_back(std::move(store_root));
+    stores.emplace_back(std::move(store_module));
+
+    Json::Value json(Json::objectValue);
+    json["CheckBreadcrumbsPass"]["fail"] = true;
+    json["CheckBreadcrumbsPass"]["fail_if_illegal_refs"] = true;
+    ConfigFiles config(json);
+    config.parse_global_config();
+    CheckBreadcrumbsPass pass;
+    PassManager manager({&pass}, config);
+    try {
+      manager.run_passes(stores, config);
+    } catch (const RedexException& e) {
+      return e.what();
+    }
+    return "";
+  }
 };
 
 //========== Test Cases ==========
@@ -348,5 +385,61 @@ TEST_F(CheckBreadcrumbsTest, CrossStoreValidityTest) {
             true);
   EXPECT_EQ(bc_standard.is_illegal_cross_store(type_s_A_B, type_s_A_B_C).second,
             type_s_A_B_C);
+}
+
+// An illegal reference through a type operand names the store of that type.
+TEST_F(CheckBreadcrumbsTest, IllegalTypeRefNamesStoreOfType) {
+  std::vector<DexMethod*> no_methods;
+  std::vector<DexField*> no_fields;
+  auto* other = create_class(DexType::make_type("LOther;"),
+                             type::java_lang_Object(), no_methods, no_fields);
+  std::vector<DexMethod*> user_methods{assembler::method_from_string(R"(
+    (method (public static) "LUser;.use:()V"
+      (
+        (const-class "LOther;")
+        (move-result-pseudo-object v0)
+        (return-void)
+      )
+    )
+  )")};
+  auto* user = create_class(DexType::make_type("LUser;"),
+                            type::java_lang_Object(), user_methods, no_fields);
+
+  auto report = failure_report({user}, {other});
+  EXPECT_NE(report.find("CONST_CLASS LOther; (Module1)  By  LOther; (Module1)"),
+            std::string::npos)
+      << report;
+}
+
+// An illegal reference to the type of a field names the store of that type.
+TEST_F(CheckBreadcrumbsTest, IllegalFieldTypeRefNamesStoreOfType) {
+  std::vector<DexMethod*> no_methods;
+  std::vector<DexField*> no_fields;
+  auto* other_t = DexType::make_type("LOther;");
+  auto* other =
+      create_class(other_t, type::java_lang_Object(), no_methods, no_fields);
+  auto* holder_t = DexType::make_type("LHolder;");
+  std::vector<DexField*> holder_fields{
+      make_field_def(holder_t, "f", other_t, ACC_PUBLIC | ACC_STATIC)};
+  auto* holder = create_class(holder_t, type::java_lang_Object(), no_methods,
+                              holder_fields);
+  std::vector<DexMethod*> user_methods{assembler::method_from_string(R"(
+    (method (public static) "LUser;.use:()V"
+      (
+        (sget-object "LHolder;.f:LOther;")
+        (move-result-pseudo-object v0)
+        (return-void)
+      )
+    )
+  )")};
+  auto* user = create_class(DexType::make_type("LUser;"),
+                            type::java_lang_Object(), user_methods, no_fields);
+
+  auto report = failure_report({user, holder}, {other});
+  EXPECT_NE(report.find("Illegal field type refs in method  (classes)\n"
+                        "\tSGET_OBJECT LHolder;.f:LOther; (Module1)  By  "
+                        "LOther; (Module1)\n"),
+            std::string::npos)
+      << report;
 }
 } // namespace

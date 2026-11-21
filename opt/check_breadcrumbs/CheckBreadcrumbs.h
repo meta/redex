@@ -70,20 +70,29 @@ around at the end of a run.
   bool enforce_allowed_violations_file;
 };
 
+// An instruction that refers to `type` from a store that may not refer to
+// `illegal_type`, which is `type` or, when type hierarchies are verified, a
+// type in its hierarchy. Not in the anonymous namespace below: members of
+// `Breadcrumbs` hold it, so it needs external linkage like `Breadcrumbs`.
+struct IllegalInstructionRef {
+  const IRInstruction* insn;
+  const DexType* type;
+  const DexType* illegal_type;
+};
+
 namespace {
 
 using FieldsAndType = std::vector<std::pair<const DexField*, const DexType*>>;
 using Fields = std::vector<const DexField*>;
 using Methods = std::vector<const DexMethod*>;
 using Instructions = std::vector<const IRInstruction*>;
-using InstructionsAndType =
-    std::vector<std::pair<const IRInstruction*, const DexType*>>;
+using IllegalInstructionRefs = std::vector<IllegalInstructionRef>;
 using Types = std::vector<const DexType*>;
 using TypesAndTypes = std::vector<std::pair<const DexType*, const DexType*>>;
 using MethodInsns =
     std::map<const DexMethod*, Instructions, dexmethods_comparator>;
 using MethodInsnsType =
-    std::map<const DexMethod*, InstructionsAndType, dexmethods_comparator>;
+    std::map<const DexMethod*, IllegalInstructionRefs, dexmethods_comparator>;
 
 } // namespace
 

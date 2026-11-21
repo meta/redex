@@ -94,17 +94,6 @@ using Instructions = std::vector<const IRInstruction*>;
 using MethodInsns =
     std::map<const DexMethod*, Instructions, dexmethods_comparator>;
 
-const DexType* get_type_from_insn(const IRInstruction* insn) {
-  auto op = insn->opcode();
-  if (opcode::is_an_invoke(op)) {
-    return insn->get_method()->get_class();
-  }
-  if (opcode::is_an_ifield_op(op) || opcode::is_an_sfield_op(op)) {
-    return insn->get_field()->get_class();
-  }
-  return insn->get_type();
-}
-
 std::string get_store_name(const XStoreRefs& xstores, size_t idx) {
   auto base_name = xstores.get_store(idx)->get_name();
   if (idx > 0) {
@@ -209,38 +198,31 @@ void print_allowed_violations_per_class(
       }
       auto type_insns = illegal_type.find(method);
       if (type_insns != illegal_type.end()) {
-        for (const auto& insn : type_insns->second) {
+        for (const auto& ref : type_insns->second) {
           method_detail << "      Instruction type "
-                        << show_deobfuscated(insn.first) << " ("
-                        << get_store_name(xstores, insn.first->get_type())
-                        << ")\n";
+                        << show_deobfuscated(ref.insn) << " ("
+                        << get_store_name(xstores, ref.type) << ")\n";
         }
       }
       auto field_type_insns = illegal_field_type.find(method);
       if (field_type_insns != illegal_field_type.end()) {
-        for (const auto& insn : field_type_insns->second) {
-          method_detail
-              << "      Field type " << show_deobfuscated(insn.first) << " ("
-              << get_store_name(xstores, insn.first->get_field()->get_type())
-              << ")\n";
+        for (const auto& ref : field_type_insns->second) {
+          method_detail << "      Field type " << show_deobfuscated(ref.insn)
+                        << " (" << get_store_name(xstores, ref.type) << ")\n";
         }
       }
       auto field_cls_insns = illegal_field_cls.find(method);
       if (field_cls_insns != illegal_field_cls.end()) {
-        for (const auto& insn : field_cls_insns->second) {
-          method_detail
-              << "      Field class " << show_deobfuscated(insn.first) << " ("
-              << get_store_name(xstores, insn.first->get_field()->get_class())
-              << ")\n";
+        for (const auto& ref : field_cls_insns->second) {
+          method_detail << "      Field class " << show_deobfuscated(ref.insn)
+                        << " (" << get_store_name(xstores, ref.type) << ")\n";
         }
       }
       auto method_calls = illegal_method_call.find(method);
       if (method_calls != illegal_method_call.end()) {
-        for (const auto& insn : method_calls->second) {
-          method_detail
-              << "      Callee class " << show_deobfuscated(insn.first) << " ("
-              << get_store_name(xstores, insn.first->get_method()->get_class())
-              << ")\n";
+        for (const auto& ref : method_calls->second) {
+          method_detail << "      Callee class " << show_deobfuscated(ref.insn)
+                        << " (" << get_store_name(xstores, ref.type) << ")\n";
         }
       }
       auto detail_str = method_detail.str();
@@ -457,11 +439,11 @@ size_t Breadcrumbs::process_illegal_elements(
        << method->get_deobfuscated_name_or_empty() << " ("
        << get_store_name(xstores, method->get_class()) << ")\n";
     num_illegal_cross_store_refs += insns.size();
-    for (const auto& insn : insns) {
-      ss << "\t" << show_deobfuscated(insn.first) << " ("
-         << get_store_name(xstores, get_type_from_insn(insn.first)) << ")  By  "
-         << show_deobfuscated(insn.second) << " ("
-         << get_store_name(xstores, insn.second) << ")\n";
+    for (const auto& ref : insns) {
+      ss << "\t" << show_deobfuscated(ref.insn) << " ("
+         << get_store_name(xstores, ref.type) << ")  By  "
+         << show_deobfuscated(ref.illegal_type) << " ("
+         << get_store_name(xstores, ref.illegal_type) << ")\n";
     }
   }
 
@@ -844,7 +826,7 @@ void Breadcrumbs::check_type_opcode(const DexMethod* method,
     auto* const cls = method->get_class();
     auto pair = is_illegal_cross_store(cls, insn->get_type());
     if (pair.first) {
-      m_illegal_type[method].emplace_back(insn, pair.second);
+      m_illegal_type[method].push_back({insn, insn->get_type(), pair.second});
     }
   }
 }
@@ -868,11 +850,13 @@ void Breadcrumbs::check_field_opcode(const DexMethod* method,
     auto* cls = method->get_class();
     auto pair = is_illegal_cross_store(cls, field->get_type());
     if (pair.first) {
-      m_illegal_field_type[method].emplace_back(insn, pair.second);
+      m_illegal_field_type[method].push_back(
+          {insn, field->get_type(), pair.second});
     }
     pair = is_illegal_cross_store(cls, field->get_class());
     if (pair.first) {
-      m_illegal_field_cls[method].emplace_back(insn, pair.second);
+      m_illegal_field_cls[method].push_back(
+          {insn, field->get_class(), pair.second});
     }
   }
 
@@ -907,7 +891,8 @@ void Breadcrumbs::check_method_opcode(const DexMethod* method,
   }
   auto pair = is_illegal_cross_store(method->get_class(), meth->get_class());
   if (pair.first) {
-    m_illegal_method_call[method].emplace_back(insn, pair.second);
+    m_illegal_method_call[method].push_back(
+        {insn, meth->get_class(), pair.second});
   }
 
   DexMethod* res_meth =

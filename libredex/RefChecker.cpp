@@ -203,6 +203,11 @@ bool RefChecker::check_type_internal(const DexType* type) const {
       }
     }
     type = cls->get_super_class();
+    if (type == nullptr) {
+      // The input defines the root of the hierarchy, which must be
+      // `java.lang.Object`.
+      return cls->get_type() == type::java_lang_Object();
+    }
   }
 }
 

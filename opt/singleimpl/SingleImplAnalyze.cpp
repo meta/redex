@@ -595,11 +595,13 @@ void SingleImplAnalysis::escape_interface(const DexType* intf,
   if (sit == single_impls.end()) {
     return;
   }
-  if ((sit->second.escape & reason) != 0u) {
-    return;
+  {
+    std::lock_guard<std::mutex> lock(sit->second.mutex);
+    if ((sit->second.escape & reason) != 0u) {
+      return;
+    }
+    sit->second.escape |= reason;
   }
-  std::lock_guard<std::mutex> lock(sit->second.mutex);
-  sit->second.escape |= reason;
   TRACE(INTF, 5, "(ESC) Escape %s => 0x%X", SHOW(intf), reason);
   auto* const intf_cls = type_class(intf);
   if (intf_cls != nullptr) {

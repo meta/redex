@@ -92,27 +92,25 @@ TEST_F(MethodSplitterTestFixtureTest,
   EXPECT_TRUE(saw_cold);
 }
 
-// `regionTestConfig()` deliberately departs from the production defaults so
-// that tiny hand-written fixtures are splittable at all. Those departures are
-// what every region test silently depends on, so they are pinned here: if one
-// drifts back toward production, this fails in one obvious place instead of
-// turning a dozen unrelated fixtures un-splittable for no visible reason.
+// Every region test relies on `regionTestConfig()` lowering the production
+// size floors, so that a fixture a few dozen code units long is split at all.
+// The same small cold chain moves out under it, and stays in the host under
+// the production defaults with only region splitting turned on.
 TEST_F(MethodSplitterTestFixtureTest,
        FixtureSmoke_RegionTestConfigLowersProductionFloors) {
-  auto cfg = mt::regionTestConfig();
-  method_splitting_impl::Config prod;
+  const auto code = mt::hotColdHotCfg(mt::sputChain(20, "c"));
 
-  EXPECT_TRUE(cfg.enable_region_splitting)
-      << "region tests need the feature on; it is off by default";
+  auto lowered = mt::runSplitter("(I)V", code, mt::regionTestConfig());
+  EXPECT_EQ(mt::countFieldRefsIn(lowered, "c", mt::Where::AllSplits), 20u)
+      << mt::describeSelection(lowered);
+  EXPECT_EQ(mt::countFieldRefs(lowered.main_method, "c"), 0u);
 
-  // Fixtures are a few dozen code units, far below the production floors.
-  EXPECT_LT(cfg.min_hot_cold_split_size, prod.min_hot_cold_split_size);
-  EXPECT_LT(cfg.min_hot_split_size, prod.min_hot_split_size);
-  EXPECT_LE(cfg.min_hot_cold_split_size, 4u);
-  EXPECT_LE(cfg.min_hot_split_size, 4u);
-
-  // Block splitting must not fire and reshape a fixture's CFG under the test.
-  EXPECT_GT(cfg.split_block_size, prod.split_block_size);
+  method_splitting_impl::Config production;
+  production.enable_region_splitting = true;
+  auto unlowered = mt::runSplitter("(I)V", code, production);
+  EXPECT_TRUE(unlowered.region_splits.empty());
+  EXPECT_TRUE(unlowered.suffix_splits.empty());
+  EXPECT_EQ(mt::countFieldRefs(unlowered.main_method, "c"), 20u);
 }
 
 TEST_F(MethodSplitterTestFixtureTest,

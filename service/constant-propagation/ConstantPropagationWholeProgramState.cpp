@@ -82,7 +82,8 @@ void analyze_clinits(const Scope& scope,
   });
 }
 
-// Returns the whole-program value of the field that `insn` reads, or Top.
+// Returns the whole-program value of the field that `insn` reads (Bottom if it
+// never holds a value), or Top.
 ConstantValue get_read_field_value(
     const WholeProgramStateAccessor* whole_program_state,
     const IRInstruction* insn) {
@@ -96,8 +97,8 @@ ConstantValue get_read_field_value(
   return whole_program_state->get_field_value(field);
 }
 
-// Returns the whole-program value that the method `insn` calls returns, or
-// Top.
+// Returns the whole-program value that the method `insn` calls returns (Bottom
+// if it never returns), or Top.
 ConstantValue get_invoke_return_value(
     const WholeProgramStateAccessor* whole_program_state,
     const IRInstruction* insn) {
@@ -124,9 +125,11 @@ ConstantValue get_invoke_return_value(
 }
 
 // Binds the result register to `value`, the whole-program value of the
-// instruction just analyzed. Binds nothing for Top.
+// instruction just analyzed. Binds nothing for Top, nor for Bottom: binding
+// Bottom makes the whole state Bottom, and with it the state on the
+// instruction's exception edges, which the instruction can still take.
 bool bind_result(const ConstantValue& value, ConstantEnvironment* env) {
-  if (value.is_top()) {
+  if (value.is_top() || value.is_bottom()) {
     return false;
   }
   env->set(RESULT_REGISTER, value);

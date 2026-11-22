@@ -660,3 +660,67 @@ TEST_F(FinalInlineTest, rConstInstanceFieldInlining) {
   )");
   EXPECT_CODE_EQ(reader->get_code(), expected.get());
 }
+
+// `LFoo;.<clinit>` calls a method on null, so it never completes normally and
+// `X` never holds a value. `LBar;.<clinit>` sets `y` to 1, or reads `X` in a
+// try block whose handler sets `y` to 2. The read throws, so `y` can be 2, and
+// reads of it must not fold to 1.
+TEST_F(FinalInlineTest,
+       handlerOfReadOfFieldThatNeverHoldsAValueStaysReachable) {
+  create_field_with_zero_value("LFoo;.X:I", m_cc.get(),
+                               ACC_PUBLIC | ACC_STATIC | ACC_FINAL);
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public static constructor) "LFoo;.<clinit>:()V"
+      (
+        (const v0 0)
+        (invoke-virtual (v0) "Ljava/lang/Object;.hashCode:()I")
+        (return-void)
+      )
+    )
+  )"));
+  auto* foo = m_cc->create();
+
+  ClassCreator bar_creator(DexType::make_type("LBar;"));
+  bar_creator.set_super(type::java_lang_Object());
+  create_field_with_zero_value("LBar;.y:I", &bar_creator,
+                               ACC_PUBLIC | ACC_STATIC | ACC_FINAL);
+  bar_creator.add_method(assembler::method_from_string(R"(
+    (method (public static constructor) "LBar;.<clinit>:()V"
+      (
+        (sget "LUnknown;.field:I")
+        (move-result-pseudo v0)
+        (if-eqz v0 :read)
+        (const v1 1)
+        (sput v1 "LBar;.y:I")
+        (return-void)
+        (:read)
+        (.try_start a)
+        (sget "LFoo;.X:I")
+        (move-result-pseudo v0)
+        (.try_end a)
+        (sput v0 "LBar;.y:I")
+        (return-void)
+        (.catch (a))
+        (const v1 2)
+        (sput v1 "LBar;.y:I")
+        (return-void)
+      )
+    )
+  )"));
+  auto* read = assembler::method_from_string(R"(
+    (method (public static) "LBar;.read:()I"
+      (
+        (sget "LBar;.y:I")
+        (move-result-pseudo v0)
+        (return v0)
+      )
+    )
+  )");
+  bar_creator.add_method(read);
+  auto* bar = bar_creator.create();
+  const auto original_read = assembler::to_s_expr(read->get_code());
+
+  run({foo, bar}, /* xstores */ nullptr);
+
+  EXPECT_EQ(assembler::to_s_expr(read->get_code()), original_read);
+}

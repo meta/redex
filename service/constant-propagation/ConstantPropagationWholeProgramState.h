@@ -110,7 +110,12 @@ class WholeProgramState {
   /*
    * Returns our best approximation of the field value.
    *
-   * It will never return Bottom.
+   * Bottom means that the field holds no value once initialized. For an
+   * instance field, no reachable code writes it, and every constructor writes
+   * it before any read, so no read of it completes normally. A static field's
+   * value, Bottom included, describes it only after its class initializer
+   * completes; code that the initializer runs can read it earlier (see
+   * analyze_clinits).
    */
   ConstantValue get_field_value(const DexField* field) const {
     if (m_known_fields.count(field) == 0u) {

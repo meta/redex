@@ -3733,3 +3733,279 @@ TEST_F(InterproceduralConstantPropagationTest,
                 .get(0),
             SignedConstantDomain(5));
 }
+
+namespace {
+
+// Creates the class `type` with the instance field `field:I`, which its
+// constructor `(I)V` sets to its argument, plus the root methods `roots` and
+// the non-root methods `others`.
+DexClass* create_class_with_int_field(
+    const std::string& type,
+    const std::string& field,
+    const std::vector<std::string>& roots,
+    const std::vector<std::string>& others = {}) {
+  ClassCreator creator(DexType::make_type(type));
+  creator.set_super(type::java_lang_Object());
+  creator.add_field(DexField::make_field(type + "." + field + ":I")
+                        ->make_concrete(ACC_PUBLIC));
+  creator.add_method(assembler::method_from_string(R"(
+    (method (public constructor) ")" + type + R"(.<init>:(I)V"
+     (
+      (load-param-object v0)
+      (load-param v1)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (iput v1 v0 ")" + type + "." + field + R"(:I")
+      (return-void)
+     )
+    )
+  )"));
+  for (const auto& method : roots) {
+    auto* m = assembler::method_from_string(method);
+    m->rstate.set_root();
+    creator.add_method(m);
+  }
+  for (const auto& method : others) {
+    creator.add_method(assembler::method_from_string(method));
+  }
+  return creator.create();
+}
+
+// `make` creates every Foo with f = 7, so `read` folds to 7 unless reachable
+// code writes another value to `f`.
+const char* const kMakeWithConst = R"(
+    (method (public static) "LFoo;.make:()LFoo;"
+     (
+      (new-instance "LFoo;")
+      (move-result-pseudo-object v0)
+      (const v1 7)
+      (invoke-direct (v0 v1) "LFoo;.<init>:(I)V")
+      (return-object v0)
+     )
+    )
+)";
+
+const char* const kRead = R"(
+    (method (public static) "LFoo;.read:(LFoo;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.f:I")
+      (move-result-pseudo v1)
+      (return v1)
+     )
+    )
+)";
+
+void run_ipcp(const Scope& scope,
+              ConfigFiles& conf,
+              const InterproceduralConstantPropagationPass::Config& config) {
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+  InterproceduralConstantPropagationPass(config).run(make_simple_stores(scope),
+                                                     conf);
+}
+
+// With no heap-analysis iterations, every whole-program value is Top, and no
+// field or method is ever Bottom.
+InterproceduralConstantPropagationPass::Config config_with_heap_analysis() {
+  InterproceduralConstantPropagationPass::Config config;
+  config.max_heap_analysis_iterations = 3;
+  return config;
+}
+
+bool contains_const(const std::string& method, int64_t value) {
+  auto& cfg = DexMethod::get_method(method)->as_def()->get_code()->cfg();
+  for (const auto& mie : cfg::InstructionIterable(cfg)) {
+    if (mie.insn->opcode() == OPCODE_CONST &&
+        mie.insn->get_literal() == value) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Wraps `insns`, which can throw, in a try block whose handler, for
+// `exception`, writes 99 to `LFoo;.f:I` (the object in `foo_reg`); without
+// `in_try`, the write follows `insns` directly.
+std::string set_f_after(const std::string& insns,
+                        const std::string& exception,
+                        const std::string& foo_reg,
+                        bool in_try) {
+  const std::string set_f =
+      "(const v9 99)\n(iput v9 " + foo_reg + " \"LFoo;.f:I\")\n(return-void)\n";
+  if (!in_try) {
+    return insns + set_f;
+  }
+  return "(.try_start a)\n" + insns + "(.try_end a)\n(return-void)\n" +
+         "(.catch (a) \"" + exception + "\")\n" + set_f;
+}
+
+// `fail` never returns. Returns whether `LFoo;.read` folds to 7 after a method
+// calls `fail` and then writes 99 to `f`, in a handler when `in_try`.
+bool read_folds_after_call_of_fail(ConfigFiles& conf, bool in_try) {
+  const char* const fail = R"(
+    (method (public static) "LFoo;.fail:()I"
+     (
+      (new-instance "Ljava/lang/RuntimeException;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "Ljava/lang/RuntimeException;.<init>:()V")
+      (throw v0)
+     )
+    )
+  )";
+  const std::string call_and_set =
+      R"((method (public static) "LFoo;.callAndSet:(LFoo;)V" (
+      (load-param-object v0)
+      )" +
+      set_f_after("(invoke-static () \"LFoo;.fail:()I\")\n(move-result v1)\n",
+                  "Ljava/lang/RuntimeException;", "v0", in_try) +
+      "))";
+  run_ipcp({create_class_with_int_field(
+               "LFoo;", "f", {kMakeWithConst, kRead, call_and_set}, {fail})},
+           conf, config_with_heap_analysis());
+  return contains_const("LFoo;.read:(LFoo;)I", 7);
+}
+
+// Bar's only constructor calls `fail`, which never returns, before it assigns
+// `g`. Since every constructor assigns `g` before any read, IPCP does not start
+// it at 0, and that one write is unreachable. So no Bar is ever constructed,
+// `g` never holds a value, and a read of it can only throw a
+// `NullPointerException`. Returns whether `LFoo;.read` folds to 7 after a
+// method reads `g` and then writes 99 to `f`, in a handler when `in_try`.
+bool read_folds_after_read_of_field_without_value(ConfigFiles& conf,
+                                                  bool in_try) {
+  const char* const fail = R"(
+    (method (public static) "LBar;.fail:()V"
+     (
+      (new-instance "Ljava/lang/RuntimeException;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "Ljava/lang/RuntimeException;.<init>:()V")
+      (throw v0)
+     )
+    )
+  )";
+  const char* const make_bar = R"(
+    (method (public static) "LBar;.make:()LBar;"
+     (
+      (new-instance "LBar;")
+      (move-result-pseudo-object v0)
+      (const v1 5)
+      (invoke-direct (v0 v1) "LBar;.<init>:(I)V")
+      (return-object v0)
+     )
+    )
+  )";
+  const std::string read_and_set =
+      R"((method (public static) "LBar;.readAndSet:(LBar;LFoo;)V" (
+      (load-param-object v0)
+      (load-param-object v1)
+      )" +
+      set_f_after("(iget v0 \"LBar;.g:I\")\n(move-result-pseudo v2)\n",
+                  "Ljava/lang/NullPointerException;", "v1", in_try) +
+      "))";
+  ClassCreator bar(DexType::make_type("LBar;"));
+  bar.set_super(type::java_lang_Object());
+  bar.add_field(DexField::make_field("LBar;.g:I")->make_concrete(ACC_PUBLIC));
+  bar.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LBar;.<init>:(I)V"
+     (
+      (load-param-object v0)
+      (load-param v1)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (invoke-static () "LBar;.fail:()V")
+      (iput v1 v0 "LBar;.g:I")
+      (return-void)
+     )
+    )
+  )"));
+  bar.add_method(assembler::method_from_string(fail));
+  for (const std::string& root : {std::string(make_bar), read_and_set}) {
+    auto* m = assembler::method_from_string(root);
+    m->rstate.set_root();
+    bar.add_method(m);
+  }
+  run_ipcp({bar.create(),
+            create_class_with_int_field("LFoo;", "f", {kMakeWithConst, kRead})},
+           conf, config_with_heap_analysis());
+  return contains_const("LFoo;.read:(LFoo;)I", 7);
+}
+
+} // namespace
+
+// The exception of `fail` reaches the handler, so `f` is not always 7.
+TEST_F(InterproceduralConstantPropagationTest,
+       callOfMethodThatNeverReturnsKeepsItsHandler) {
+  EXPECT_FALSE(read_folds_after_call_of_fail(conf, /* in_try */ true));
+}
+
+// The NullPointerException of the read reaches the handler, so `f` is not
+// always 7.
+TEST_F(InterproceduralConstantPropagationTest,
+       readOfInstanceFieldThatNeverHoldsAValueKeepsItsHandler) {
+  EXPECT_FALSE(
+      read_folds_after_read_of_field_without_value(conf, /* in_try */ true));
+}
+
+// `LFoo;.<clinit>` sets `x` to 1, calls `LHelper;.copy`, and then calls a
+// method on null, so it never completes normally and `x` holds no value after
+// it. `copy` runs while the initializer is still running: its read of `x`
+// completes, so it copies 1 to `LBar;.z`, and reads of `z` must not fold to its
+// initial value, 0.
+TEST_F(InterproceduralConstantPropagationTest,
+       staticFieldReadWhileItsFailingClassInitializerRunsCompletes) {
+  ClassCreator bar_creator(DexType::make_type("LBar;"));
+  bar_creator.set_super(type::java_lang_Object());
+  bar_creator.add_field(DexField::make_field("LBar;.z:I")
+                            ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  auto* read = assembler::method_from_string(R"(
+    (method (public static) "LBar;.read:()I"
+      (
+        (sget "LBar;.z:I")
+        (move-result-pseudo v0)
+        (return v0)
+      )
+    )
+  )");
+  read->rstate.set_root();
+  bar_creator.add_method(read);
+
+  ClassCreator helper_creator(DexType::make_type("LHelper;"));
+  helper_creator.set_super(type::java_lang_Object());
+  helper_creator.add_method(assembler::method_from_string(R"(
+    (method (public static) "LHelper;.copy:()V"
+      (
+        (sget "LFoo;.x:I")
+        (move-result-pseudo v0)
+        (sput v0 "LBar;.z:I")
+        (return-void)
+      )
+    )
+  )"));
+
+  ClassCreator foo_creator(DexType::make_type("LFoo;"));
+  foo_creator.set_super(type::java_lang_Object());
+  foo_creator.add_field(DexField::make_field("LFoo;.x:I")
+                            ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  foo_creator.add_method(assembler::method_from_string(R"(
+    (method (public static constructor) "LFoo;.<clinit>:()V"
+      (
+        (const v0 1)
+        (sput v0 "LFoo;.x:I")
+        (invoke-static () "LHelper;.copy:()V")
+        (const v1 0)
+        (invoke-virtual (v1) "Ljava/lang/Object;.hashCode:()I")
+        (return-void)
+      )
+    )
+  )"));
+  Scope scope{bar_creator.create(), helper_creator.create(),
+              foo_creator.create()};
+  const auto original_read = assembler::to_s_expr(read->get_code());
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+  PassImpl::Config config;
+  config.max_heap_analysis_iterations = 3;
+  config.use_multiple_callee_callgraph = true;
+
+  PassImpl(config).run(make_simple_stores(scope), conf);
+
+  read->get_code()->clear_cfg();
+  EXPECT_EQ(assembler::to_s_expr(read->get_code()), original_read);
+}

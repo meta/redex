@@ -4897,3 +4897,435 @@ TEST_F(InterproceduralConstantPropagationTest,
   EXPECT_EQ(search.values, full.values);
   EXPECT_TRUE(states_match(search, full, scope));
 }
+
+namespace {
+
+const char* const kCopyPreservingField = R"(
+    (method (public static) "LFoo;.copy:(LFoo;)LFoo;"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.f:I")
+      (move-result-pseudo v1)
+      (new-instance "LFoo;")
+      (move-result-pseudo-object v2)
+      (invoke-direct (v2 v1) "LFoo;.<init>:(I)V")
+      (return-object v2)
+     )
+    )
+)";
+
+// IPCP's configuration with the field search allowed `rounds` rounds.
+InterproceduralConstantPropagationPass::Config config_with_field_search(
+    size_t rounds, size_t widening_delay = 2) {
+  auto config = config_with_heap_analysis();
+  config.field_search_max_rounds = rounds;
+  config.field_search_widening_delay = widening_delay;
+  return config;
+}
+
+// Runs IPCP with `config` over `scope`, and returns whether `LFoo;.read` then
+// returns the constant 7.
+bool read_folds(const Scope& scope,
+                ConfigFiles& conf,
+                const InterproceduralConstantPropagationPass::Config& config) {
+  run_ipcp(scope, conf, config);
+  return contains_const("LFoo;.read:(LFoo;)I", 7);
+}
+
+bool read_folds_with_copy(
+    ConfigFiles& conf,
+    const InterproceduralConstantPropagationPass::Config& config) {
+  return read_folds(
+      {create_class_with_int_field(
+          "LFoo;", "f", {kMakeWithConst, kRead, kCopyPreservingField})},
+      conf, config);
+}
+
+} // namespace
+
+// The field is 7 in every instance: `copy` passes the field of an existing
+// instance back to the constructor. Descending from Top cannot show this,
+// because the value written depends on the value read.
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldPreservedByCopyStaysUnknownWithoutFieldSearch) {
+  EXPECT_FALSE(read_folds_with_copy(conf, config_with_field_search(0)));
+}
+
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchProvesFieldPreservedByCopy) {
+  EXPECT_TRUE(read_folds_with_copy(conf, config_with_field_search(4)));
+}
+
+// Two rounds are exactly enough: the first adds the 7 that the constructor
+// call writes, and the second finds that `copy` writes back only 7.
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchProvesFieldPreservedByCopyInTwoRounds) {
+  EXPECT_TRUE(read_folds_with_copy(conf, config_with_field_search(2)));
+}
+
+// Without the refinement after the search, the field values the search proves
+// are what the transformation uses.
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchProvesFieldPreservedByCopyWithoutRefinement) {
+  auto config = config_with_field_search(4);
+  config.max_heap_analysis_iterations = 0;
+  EXPECT_TRUE(read_folds_with_copy(conf, config));
+}
+
+// Apps run IPCP with the multiple-callee call graph, which the whole-program
+// state then also uses. The search proves the field there too, and a search
+// cut short by the limit is discarded there too.
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchWorksWithTheMultipleCalleeCallGraph) {
+  auto config = config_with_field_search(4);
+  config.use_multiple_callee_callgraph = true;
+  EXPECT_TRUE(read_folds_with_copy(conf, config));
+}
+
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchCutShortIsDiscardedWithTheMultipleCalleeCallGraph) {
+  auto config = config_with_field_search(1);
+  config.use_multiple_callee_callgraph = true;
+  EXPECT_FALSE(read_folds_with_copy(conf, config));
+}
+
+// The value comes from a static field set by its class initializer, like a
+// Kotlin companion object's `val` used as a constructor default.
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchProvesFieldFromAStaticPreservedByCopy) {
+  ClassCreator bar(DexType::make_type("LBar;"));
+  bar.set_super(type::java_lang_Object());
+  bar.add_field(DexField::make_field("LBar;.s:I")
+                    ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL));
+  bar.add_method(assembler::method_from_string(R"(
+    (method (public static constructor) "LBar;.<clinit>:()V"
+     (
+      (const v0 7)
+      (sput v0 "LBar;.s:I")
+      (return-void)
+     )
+    )
+  )"));
+  const char* make_from_static = R"(
+    (method (public static) "LFoo;.make:()LFoo;"
+     (
+      (sget "LBar;.s:I")
+      (move-result-pseudo v1)
+      (new-instance "LFoo;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0 v1) "LFoo;.<init>:(I)V")
+      (return-object v0)
+     )
+    )
+  )";
+  EXPECT_TRUE(read_folds(
+      {bar.create(),
+       create_class_with_int_field(
+           "LFoo;", "f", {make_from_static, kRead, kCopyPreservingField})},
+      conf, config_with_field_search(4)));
+}
+
+// `f` goes from Bottom to 7 and stays there. Getting a first value is not
+// growth, so even with no widening delay `f` is not widened.
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchDoesNotCountFirstValueAsGrowth) {
+  EXPECT_TRUE(read_folds_with_copy(conf, config_with_field_search(4, 0)));
+}
+
+// The Kotlin `copy$default` shape: each parameter is either the caller's
+// argument or, when its mask bit is set, the field of the source instance.
+// Every caller sets the bit for `f`, so `f` keeps its value.
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchProvesFieldPreservedByMaskedCopy) {
+  const char* const masked_copy = R"(
+    (method (public static) "LFoo;.copy:(LFoo;II)LFoo;"
+     (
+      (load-param-object v0)
+      (load-param v1)
+      (load-param v2)
+      (and-int/lit v3 v2 1)
+      (if-eqz v3 :use_arg)
+      (iget v0 "LFoo;.f:I")
+      (move-result-pseudo v1)
+      (:use_arg)
+      (new-instance "LFoo;")
+      (move-result-pseudo-object v4)
+      (invoke-direct (v4 v1) "LFoo;.<init>:(I)V")
+      (return-object v4)
+     )
+    )
+  )";
+  const char* const update = R"(
+    (method (public static) "LFoo;.update:(LFoo;)LFoo;"
+     (
+      (load-param-object v0)
+      (const v1 0)
+      (const v2 3)
+      (invoke-static (v0 v1 v2) "LFoo;.copy:(LFoo;II)LFoo;")
+      (move-result-object v0)
+      (const v2 1)
+      (invoke-static (v0 v1 v2) "LFoo;.copy:(LFoo;II)LFoo;")
+      (move-result-object v0)
+      (return-object v0)
+     )
+    )
+  )";
+  EXPECT_TRUE(read_folds(
+      {create_class_with_int_field(
+          "LFoo;", "f", {kMakeWithConst, kRead, update}, {masked_copy})},
+      conf, config_with_field_search(4)));
+}
+
+namespace {
+
+// `f` is 7 or 8, but it reaches 8 only in the second round: `make8` reads it
+// from `Bar.g`, which has no value until the first round records `Bar`'s
+// constructor. One growth is within the widening delay, so `f` keeps the range
+// [7, 8] and `positive` folds its branch; with no delay, `f` is widened to Top
+// instead.
+Scope make_field_growing_once() {
+  const char* const make8 = R"(
+    (method (public static) "LFoo;.make8:()LFoo;"
+     (
+      (new-instance "LBar;")
+      (move-result-pseudo-object v2)
+      (const v1 8)
+      (invoke-direct (v2 v1) "LBar;.<init>:(I)V")
+      (iget v2 "LBar;.g:I")
+      (move-result-pseudo v1)
+      (new-instance "LFoo;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0 v1) "LFoo;.<init>:(I)V")
+      (return-object v0)
+     )
+    )
+  )";
+  const char* const positive = R"(
+    (method (public static) "LFoo;.positive:(LFoo;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.f:I")
+      (move-result-pseudo v1)
+      (if-lez v1 :not_positive)
+      (const v2 1)
+      (return v2)
+      (:not_positive)
+      (const v2 0)
+      (return v2)
+     )
+    )
+  )";
+  return {create_class_with_int_field("LBar;", "g", {}),
+          create_class_with_int_field(
+              "LFoo;", "f",
+              {kMakeWithConst, make8, positive, kCopyPreservingField})};
+}
+
+} // namespace
+
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchKeepsFieldThatGrowsWithinTheDelay) {
+  run_ipcp(make_field_growing_once(), conf, config_with_field_search(8, 1));
+  EXPECT_FALSE(contains_const("LFoo;.positive:(LFoo;)I", 0));
+}
+
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchWidensFieldThatGrowsBeyondTheDelay) {
+  run_ipcp(make_field_growing_once(), conf, config_with_field_search(8, 0));
+  EXPECT_TRUE(contains_const("LFoo;.positive:(LFoo;)I", 0));
+}
+
+namespace {
+
+// `Baz.h` doubles in every round: `make` writes 1 and `inc` writes the field
+// shifted left by one, and the analysis keeps the known bits of each value,
+// so `h` keeps growing for many rounds. `Foo.f` is preserved by a copy, so it
+// is proven once the search converges.
+Scope make_field_growing_every_round() {
+  const char* const make_baz = R"(
+    (method (public static) "LBaz;.make:()LBaz;"
+     (
+      (new-instance "LBaz;")
+      (move-result-pseudo-object v0)
+      (const v1 1)
+      (invoke-direct (v0 v1) "LBaz;.<init>:(I)V")
+      (return-object v0)
+     )
+    )
+  )";
+  const char* const inc = R"(
+    (method (public static) "LBaz;.inc:(LBaz;)LBaz;"
+     (
+      (load-param-object v0)
+      (iget v0 "LBaz;.h:I")
+      (move-result-pseudo v1)
+      (shl-int/lit v1 v1 1)
+      (new-instance "LBaz;")
+      (move-result-pseudo-object v2)
+      (invoke-direct (v2 v1) "LBaz;.<init>:(I)V")
+      (return-object v2)
+     )
+    )
+  )";
+  return {create_class_with_int_field("LBaz;", "h", {make_baz, inc}),
+          create_class_with_int_field(
+              "LFoo;", "f", {kMakeWithConst, kRead, kCopyPreservingField})};
+}
+
+} // namespace
+
+// Widening `Baz.h` lets the search converge within the limit.
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchWidensFieldThatKeepsGrowing) {
+  EXPECT_TRUE(read_folds(make_field_growing_every_round(), conf,
+                         config_with_field_search(10)));
+}
+
+// Without widening within the limit, `Baz.h` keeps the search from
+// converging, so it is discarded and `Foo.f` stays unknown as well.
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchDiscardsSearchThatKeepsGrowing) {
+  EXPECT_FALSE(read_folds(make_field_growing_every_round(), conf,
+                          config_with_field_search(10, 10)));
+}
+
+// `Bar` is only ever constructed from another `Bar`, so the search proves
+// that `Bar.g` never holds a value: no Bar can exist. Reading `g` therefore
+// always throws, here into a handler that writes 99 to `Foo.f`, so `f` is not
+// always 7.
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchKeepsHandlerOfReadOfFieldWithoutValue) {
+  const char* const copy_ctor = R"(
+    (method (public constructor) "LBar;.<init>:(LBar;)V"
+     (
+      (load-param-object v0)
+      (load-param-object v1)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (iget v1 "LBar;.g:I")
+      (move-result-pseudo v2)
+      (iput v2 v0 "LBar;.g:I")
+      (return-void)
+     )
+    )
+  )";
+  const char* const copy = R"(
+    (method (public static) "LBar;.copy:(LBar;)LBar;"
+     (
+      (load-param-object v0)
+      (new-instance "LBar;")
+      (move-result-pseudo-object v1)
+      (invoke-direct (v1 v0) "LBar;.<init>:(LBar;)V")
+      (return-object v1)
+     )
+    )
+  )";
+  const char* const read_g_or_set_f = R"(
+    (method (public static) "LBar;.readGOrSetF:(LBar;LFoo;)V"
+     (
+      (load-param-object v0)
+      (load-param-object v1)
+      (.try_start a)
+      (iget v0 "LBar;.g:I")
+      (move-result-pseudo v2)
+      (.try_end a)
+      (return-void)
+      (.catch (a) "Ljava/lang/NullPointerException;")
+      (const v3 99)
+      (iput v3 v1 "LFoo;.f:I")
+      (return-void)
+     )
+    )
+  )";
+  ClassCreator bar(DexType::make_type("LBar;"));
+  bar.set_super(type::java_lang_Object());
+  bar.add_field(DexField::make_field("LBar;.g:I")->make_concrete(ACC_PUBLIC));
+  bar.add_method(assembler::method_from_string(copy_ctor));
+  for (const auto* root : {copy, read_g_or_set_f}) {
+    auto* m = assembler::method_from_string(root);
+    m->rstate.set_root();
+    bar.add_method(m);
+  }
+  run_ipcp({bar.create(),
+            create_class_with_int_field("LFoo;", "f", {kMakeWithConst, kRead})},
+           conf, config_with_field_search(4));
+  EXPECT_FALSE(contains_const("LFoo;.read:(LFoo;)I", 7));
+}
+
+// One round only reaches the field's first written value; the round that
+// would show the copy preserves it does not run, so the search is discarded
+// and the field stays unknown.
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchDiscardsSearchCutShortByTheLimit) {
+  EXPECT_FALSE(read_folds_with_copy(conf, config_with_field_search(1)));
+}
+
+namespace {
+
+// Runs IPCP with the search, but without the refinement after it, over the
+// recursion of create_flagged_recursion(), and returns whether `isNegative`
+// still returns 1 somewhere, that is, whether its branch on `Cyc.r` stayed.
+bool is_negative_keeps_branch(ConfigFiles& conf, size_t max_growing_sweeps) {
+  auto scope = create_flagged_recursion();
+  auto* is_negative = assembler::method_from_string(R"(
+    (method (public static) "LCyc;.isNegative:(LCyc;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LCyc;.r:I")
+      (move-result-pseudo v1)
+      (if-gez v1 :not_negative)
+      (const v2 1)
+      (return v2)
+      (:not_negative)
+      (const v2 0)
+      (return v2)
+     )
+    )
+  )");
+  is_negative->rstate.set_root();
+  type_class(DexType::get_type("LCyc;"))->add_method(is_negative);
+  auto config = config_with_field_search(10);
+  config.max_heap_analysis_iterations = 0;
+  config.field_search_max_growing_sweeps = max_growing_sweeps;
+  run_ipcp(scope, conf, config);
+  return contains_const("LCyc;.isNegative:(LCyc;)I", 1);
+}
+
+} // namespace
+
+// `Cyc.r` is 0 or 5, so `isNegative` always returns 0.
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchProvesFieldWrittenAlongARecursion) {
+  EXPECT_FALSE(is_negative_keeps_branch(conf, /* max_growing_sweeps */ 20));
+}
+
+// Allowed no growing sweep, the search's incremental reruns set the argument
+// of `a` to Top as soon as the recursive call grows it, so `Cyc.r` is unknown
+// and the branch stays.
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchPassesTheGrowingSweepsLimitToTheReruns) {
+  EXPECT_TRUE(is_negative_keeps_branch(conf, /* max_growing_sweeps */ 0));
+}
+
+// `Bar.g` is 9 once `callSet` ran, so its read must not fold to 0. Without the
+// refinement after the search, the search's result is what the read sees.
+TEST_F(InterproceduralConstantPropagationTest,
+       fieldSearchSeesWriteBehindACutOffRead) {
+  auto config = config_with_heap_analysis();
+  config.max_heap_analysis_iterations = 0;
+  config.field_search_max_rounds = 4;
+  auto scope = create_write_behind_immutable_read();
+  auto* read_g = assembler::method_from_string(R"(
+    (method (public static) "LBar;.readG:(LBar;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LBar;.g:I")
+      (move-result-pseudo v1)
+      (return v1)
+     )
+    )
+  )");
+  read_g->rstate.set_root();
+  type_class(DexType::get_type("LBar;"))->add_method(read_g);
+  run_ipcp(scope, conf, config);
+  EXPECT_FALSE(contains_const("LBar;.readG:(LBar;)I", 0));
+}

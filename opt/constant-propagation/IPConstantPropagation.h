@@ -28,9 +28,19 @@ class PassImpl : public Pass {
     bool use_multiple_callee_callgraph{false};
     bool create_runtime_asserts{false};
     // The maximum number of times we will try to refine the WholeProgramState.
-    // Setting this to zero means that all field values and return values will
-    // be treated as Top.
+    // Setting this to zero skips the refinement: return values are treated as
+    // Top, and so are field values unless the search below proves them.
     uint64_t max_heap_analysis_iterations{0};
+    // The maximum number of rounds of search_field_values(), which runs
+    // before the refinement above. Setting this to zero disables it.
+    uint64_t field_search_max_rounds{0};
+    // How many times a field's value may grow during that search before the
+    // field is treated as unknown. Getting a first value does not count.
+    uint64_t field_search_widening_delay{2};
+    // Bounds the search's incremental reruns: once recursive calls have grown
+    // a method's arguments in this many passes over the call graph, the
+    // arguments are treated as unknown.
+    uint64_t field_search_max_growing_sweeps{20};
     uint32_t big_override_threshold{5};
     UnorderedSet<const DexType*> field_blocklist;
     bool compute_definitely_assigned_ifields{true};
@@ -113,6 +123,24 @@ program resolves to (JLS 3.10.5):
     bind("max_heap_analysis_iterations",
          UINT64_C(0),
          m_config.max_heap_analysis_iterations);
+    bind("field_search_max_rounds",
+         UINT64_C(0),
+         m_config.field_search_max_rounds,
+         "Maximum number of rounds of the search for instance field values "
+         "that runs before the heap analysis iterations; zero disables it.");
+    bind("field_search_widening_delay",
+         UINT64_C(2),
+         m_config.field_search_widening_delay,
+         "How many times a field's value may grow during the search for "
+         "instance field values before the field is treated as unknown. "
+         "Getting a first value does not count.");
+    bind("field_search_max_growing_sweeps",
+         UINT64_C(20),
+         m_config.field_search_max_growing_sweeps,
+         "Bounds the incremental reruns of the search for instance field "
+         "values: once recursive calls have grown a method's arguments in "
+         "this many passes over the call graph, the arguments are treated as "
+         "unknown.");
     bind("field_blocklist",
          {},
          m_config.field_blocklist,
@@ -177,6 +205,11 @@ program resolves to (JLS 3.10.5):
                                             const NullCheckMethods&);
 
  private:
+  [[nodiscard]] bool search_field_values(
+      const Scope& scope,
+      std::unique_ptr<WholeProgramState> start,
+      FixpointIterator* fp_iter);
+
   void compute_analysis_stats(const WholeProgramState&,
                               const UnorderedSet<const DexField*>&);
 
@@ -205,6 +238,9 @@ program resolves to (JLS 3.10.5):
     size_t callgraph_callsites{0};
 
     size_t heap_analysis_iterations{0};
+    size_t field_search_rounds{0};
+    size_t field_search_converged{0};
+    size_t field_search_widened{0};
     FixpointIterator::Stats fp_iter;
   } m_stats;
   Transform::Stats m_transform_stats;

@@ -192,6 +192,10 @@ void FixpointIterator::start_recording_field_writes(const Scope& scope) {
       unordered_to_ordered(methods_without_node, compare_dexmethods);
 }
 
+void FixpointIterator::stop_recording_field_writes() {
+  m_record_field_writes = false;
+}
+
 ConstantFieldPartition
 FixpointIterator::collect_writes_of_methods_without_node() const {
   const auto& methods = m_methods_without_node;

@@ -138,6 +138,9 @@ class FixpointIterator : public sparta::ParallelMonotonicFixpointIterator<
    */
   void start_recording_field_writes(const Scope& scope);
 
+  // Stops recording; the cached results keep the writes they have.
+  void stop_recording_field_writes();
+
   /*
    * Returns what the methods write to instance fields under their current
    * entry arguments and the current whole-program state, analyzing the methods

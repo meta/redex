@@ -140,11 +140,20 @@ class AnalyzerGenerator {
  * the result of that "bootstrap" run to build an approximation of the field
  * and method return values, which is represented by a WholeProgramState. We
  * re-run propagation using that WholeProgramState until we reach a fixpoint or
- * a configurable limit.
+ * a configurable limit. These rounds only narrow, so a value the bootstrap
+ * leaves unknown stays unknown; Venet and Brat [1, Sect. 2] describe the same
+ * persistence of bootstrap imprecision. With field_search_max_rounds set,
+ * search_field_values() runs first: it computes instance field values from
+ * below, as an ascending fixpoint with widening [2]. When it converges, the
+ * refinement starts from that state; otherwise analyze() discards it and runs
+ * the bootstrap.
  *
- * [1]: Venet, Arnaud. Precise and Efficient Static Array Bound Checking for
- *      Large Embedded C Programs.
+ * [1]: Venet, Arnaud and Brat, Guillaume. Precise and Efficient Static Array
+ *      Bound Checking for Large Embedded C Programs. PLDI 2004.
  *      https://ntrs.nasa.gov/search.jsp?R=20040081118
+ * [2]: Cousot, Patrick and Cousot, Radhia. Abstract interpretation: a unified
+ *      lattice model for static analysis of programs by construction or
+ *      approximation of fixpoints. POPL 1977.
  */
 std::unique_ptr<FixpointIterator> PassImpl::analyze(
     const Scope& scope,
@@ -176,9 +185,6 @@ std::unique_ptr<FixpointIterator> PassImpl::analyze(
                         string_analyzer_state, package_name_state,
                         null_check_methods),
       cg_for_wps);
-  // Run the bootstrap. All field value and method return values are
-  // represented by Top.
-  fp_iter->run(Domain{{CURRENT_PARTITION_LABEL, ArgumentDomain()}});
   auto non_true_virtuals =
       mog::get_non_true_virtuals(*method_override_graph, scope);
   UnorderedSet<const DexField*> definitely_assigned_ifields;
@@ -188,6 +194,20 @@ std::unique_ptr<FixpointIterator> PassImpl::analyze(
             scope, m_config.analyze_ancestor_constructors);
   }
   m_stats.definitely_assigned_ifields = definitely_assigned_ifields.size();
+  if (m_config.field_search_max_rounds == 0 ||
+      !search_field_values(scope,
+                           WholeProgramState::make_field_search_start(
+                               scope, *fp_iter, non_true_virtuals,
+                               m_config.field_blocklist,
+                               definitely_assigned_ifields, cg_for_wps),
+                           fp_iter.get())) {
+    // Run the bootstrap. All field value and method return values are
+    // represented by Top.
+    auto top = std::make_unique<WholeProgramState>(cg_for_wps);
+    top->set_to_top();
+    fp_iter->set_whole_program_state(std::move(top));
+    fp_iter->run(Domain{{CURRENT_PARTITION_LABEL, ArgumentDomain()}});
+  }
   for (size_t i = 0; i < m_config.max_heap_analysis_iterations; ++i) {
     // Build an approximation of all the field values and method return values.
     auto wps = std::make_unique<WholeProgramState>(
@@ -206,6 +226,42 @@ std::unique_ptr<FixpointIterator> PassImpl::analyze(
   compute_analysis_stats(fp_iter->get_whole_program_state(),
                          definitely_assigned_ifields);
   return fp_iter;
+}
+
+/*
+ * The refinement in analyze() starts from Top, so a field whose writes copy the
+ * field itself (a copy constructor, a data class `copy`) stays Top there: each
+ * run reads Top and writes it back. This search goes the other way. It assumes
+ * that each instance field holds only its initial value (no value for a field
+ * that every constructor assigns, zero otherwise) and that method results are
+ * unknown. Each round adds what the analysis writes to each field. When a round
+ * writes nothing new, the assumed values hold in every execution, and the
+ * refinement starts from them. A field that keeps growing is widened to Top so
+ * that the search ends. Returns whether the search converged within the limit;
+ * if not, its state is unproven, and analyze() discards it.
+ */
+bool PassImpl::search_field_values(const Scope& scope,
+                                   std::unique_ptr<WholeProgramState> start,
+                                   FixpointIterator* fp_iter) {
+  // Needs no guard for exceptions: Redex catches none from a pass, so a throw
+  // here ends the run and no analysis uses fp_iter afterwards.
+  fp_iter->start_recording_field_writes(scope);
+  fp_iter->set_whole_program_state(std::move(start));
+  fp_iter->run(Domain{{CURRENT_PARTITION_LABEL, ArgumentDomain()}});
+  auto writes = fp_iter->collect_field_writes();
+  for (size_t round = 1;; ++round) {
+    auto growth = fp_iter->grow_field_values(
+        writes, m_config.field_search_widening_delay);
+    m_stats.field_search_widened += growth.widened;
+    if (growth.grown == 0 || round == m_config.field_search_max_rounds) {
+      m_stats.field_search_rounds = round;
+      m_stats.field_search_converged = growth.grown == 0 ? 1 : 0;
+      fp_iter->stop_recording_field_writes();
+      return growth.grown == 0;
+    }
+    writes =
+        fp_iter->rerun_incrementally(m_config.field_search_max_growing_sweeps);
+  }
 }
 
 void PassImpl::compute_analysis_stats(
@@ -405,6 +461,9 @@ void PassImpl::run_pass(DexStoresVector& stores,
   mgr.incr_metric("callgraph_nodes", m_stats.callgraph_nodes);
   mgr.incr_metric("callgraph_callsites", m_stats.callgraph_callsites);
   mgr.incr_metric("heap_analysis_iterations", m_stats.heap_analysis_iterations);
+  mgr.incr_metric("field_search_rounds", m_stats.field_search_rounds);
+  mgr.incr_metric("field_search_converged", m_stats.field_search_converged);
+  mgr.incr_metric("field_search_widened", m_stats.field_search_widened);
   mgr.incr_metric("fp_iter.method_cache_hits",
                   m_stats.fp_iter.method_cache_hits);
   mgr.incr_metric("fp_iter.method_cache_misses",
@@ -414,6 +473,12 @@ void PassImpl::run_pass(DexStoresVector& stores,
                  m_config.max_heap_analysis_iterations);
   mgr.set_metric("config.analyze_ancestor_constructors",
                  m_config.analyze_ancestor_constructors);
+  mgr.set_metric("config.field_search_max_rounds",
+                 m_config.field_search_max_rounds);
+  mgr.set_metric("config.field_search_widening_delay",
+                 m_config.field_search_widening_delay);
+  mgr.set_metric("config.field_search_max_growing_sweeps",
+                 m_config.field_search_max_growing_sweeps);
   mgr.incr_metric("stringbuilder_appends_merged", m_appends_merged);
   mgr.incr_metric("stringbuilder_constant_tostrings_replaced",
                   m_stringbuilder_constant_tostrings_replaced);

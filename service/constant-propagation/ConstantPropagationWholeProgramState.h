@@ -8,6 +8,7 @@
 #pragma once
 
 #include <optional>
+#include <utility>
 
 #include <sparta/HashedAbstractPartition.h>
 #include <sparta/PatriciaTreeMapAbstractEnvironment.h>
@@ -97,6 +98,52 @@ class WholeProgramState {
 
   void set_to_top() {
     m_field_partition.set_to_top();
+    set_methods_to_top();
+  }
+
+  /*
+   * The start of a search for instance field values, built by analyzing only
+   * class initializers. It assumes that no method writes an instance field, so
+   * each tracked instance field holds what a read sees before any write: 0, or
+   * Bottom when the field is always assigned before it is read. A static field
+   * holds what its class initializer leaves in it, or Top when another method
+   * writes it. Method results are Top. The class initializers are analyzed
+   * under the whole-program state of `fp_iter`, which must assume nothing.
+   */
+  static std::unique_ptr<WholeProgramState> make_field_search_start(
+      const Scope& scope,
+      const interprocedural::FixpointIterator& fp_iter,
+      const InsertOnlyConcurrentSet<DexMethod*>& non_true_virtuals,
+      const UnorderedSet<const DexType*>& field_blocklist,
+      const UnorderedSet<const DexField*>& definitely_assigned_ifields,
+      std::shared_ptr<const call_graph::Graph> call_graph);
+
+  struct FieldGrowth {
+    // Tracked instance fields whose value grew.
+    size_t grown{0};
+    // Of those, the fields bound to Top because they grew more than the
+    // allowed number of times.
+    size_t widened{0};
+  };
+
+  /*
+   * Joins `writes`, values written to fields, into the values of the tracked
+   * instance fields among them. A field that has grown more than
+   * `widening_delay` times since make_field_search_start() is bound to Top, so
+   * that a field that keeps growing (a counter, say) cannot keep a search from
+   * converging. Getting a first value is not growth.
+   */
+  FieldGrowth grow_field_values(const ConstantFieldPartition& writes,
+                                size_t widening_delay);
+
+  /*
+   * If `insn` writes a field, returns the field and the value written; `env`
+   * is the environment at `insn`.
+   */
+  static std::optional<std::pair<const DexField*, ConstantValue>>
+  get_field_write(const IRInstruction* insn, const ConstantEnvironment& env);
+
+  void set_methods_to_top() {
     m_method_partition.set_to_top();
     m_method_param_partition.set_to_top();
   }
@@ -172,6 +219,11 @@ class WholeProgramState {
   }
 
  private:
+  void add_known_fields_and_methods(
+      const Scope& scope,
+      const InsertOnlyConcurrentSet<DexMethod*>& non_true_virtuals,
+      const UnorderedSet<const DexType*>& field_blocklist);
+
   void collect(
       const Scope& scope,
       const interprocedural::FixpointIterator& fp_iter,
@@ -230,6 +282,9 @@ class WholeProgramState {
   ConstantFieldPartition m_field_partition;
   ConstantMethodPartition m_method_partition;
   MethodParamPartition m_method_param_partition;
+
+  // How often each field grew since make_field_search_start().
+  UnorderedMap<const DexField*, size_t> m_field_growths;
 };
 
 struct WholeProgramStateAccessorRecord {

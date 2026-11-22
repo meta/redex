@@ -189,7 +189,39 @@ WholeProgramState::WholeProgramState(
     const UnorderedSet<const DexField*>& definitely_assigned_ifields,
     std::shared_ptr<const call_graph::Graph> call_graph)
     : m_call_graph(std::move(call_graph)), m_field_blocklist(field_blocklist) {
+  add_known_fields_and_methods(scope, non_true_virtuals, field_blocklist);
+  analyze_clinits(scope, fp_iter, &m_field_partition);
+  collect(scope, fp_iter, definitely_assigned_ifields);
+}
 
+std::unique_ptr<WholeProgramState> WholeProgramState::make_field_search_start(
+    const Scope& scope,
+    const interprocedural::FixpointIterator& fp_iter,
+    const InsertOnlyConcurrentSet<DexMethod*>& non_true_virtuals,
+    const UnorderedSet<const DexType*>& field_blocklist,
+    const UnorderedSet<const DexField*>& definitely_assigned_ifields,
+    std::shared_ptr<const call_graph::Graph> call_graph) {
+  auto wps = std::make_unique<WholeProgramState>(std::move(call_graph));
+  wps->m_field_blocklist = field_blocklist;
+  wps->add_known_fields_and_methods(scope, non_true_virtuals, field_blocklist);
+  analyze_clinits(scope, fp_iter, &wps->m_field_partition);
+  // `collect` would join in the values that other methods write to a static
+  // field; without analyzing those methods, the field is unknown.
+  const auto written_outside_clinit =
+      get_static_fields_written_outside_clinit(scope);
+  for (const auto* field : UnorderedIterable(written_outside_clinit)) {
+    wps->m_field_partition.set(field, ConstantValue::top());
+  }
+  initialize_ifields(scope, &wps->m_field_partition,
+                     definitely_assigned_ifields);
+  wps->set_methods_to_top();
+  return wps;
+}
+
+void WholeProgramState::add_known_fields_and_methods(
+    const Scope& scope,
+    const InsertOnlyConcurrentSet<DexMethod*>& non_true_virtuals,
+    const UnorderedSet<const DexType*>& field_blocklist) {
   walk::fields(scope, [&](DexField* field) {
     // We exclude those marked by keep rules: keep-marked fields may be
     // written to by non-Dex bytecode.
@@ -214,8 +246,6 @@ WholeProgramState::WholeProgramState(
       m_known_methods.emplace(method);
     }
   });
-  analyze_clinits(scope, fp_iter, &m_field_partition);
-  collect(scope, fp_iter, definitely_assigned_ifields);
 }
 
 /*
@@ -328,27 +358,23 @@ void WholeProgramState::collect_field_values(
     const ConstantEnvironment& env,
     const DexType* clinit_cls,
     ConcurrentMap<const DexField*, ConstantValue>* fields_value_tmp) {
-  if (!opcode::is_an_sput(insn->opcode()) &&
-      !opcode::is_an_iput(insn->opcode())) {
+  auto write = get_field_write(insn, env);
+  if (!write || m_known_fields.count(write->first) == 0u) {
     return;
   }
-  auto* field = resolve_field(insn->get_field());
-  if (field != nullptr && (m_known_fields.count(field) != 0u)) {
-    if (opcode::is_an_sput(insn->opcode()) &&
-        field->get_class() == clinit_cls) {
-      return;
-    }
-    auto value = env.get(insn->src(0));
-    fields_value_tmp->update(
-        field,
-        [&value](const DexField*, ConstantValue& current_value, bool exists) {
-          if (exists) {
-            current_value.join_with(value);
-          } else {
-            current_value = std::move(value);
-          }
-        });
+  auto& [field, value] = *write;
+  if (opcode::is_an_sput(insn->opcode()) && field->get_class() == clinit_cls) {
+    return;
   }
+  fields_value_tmp->update(
+      field,
+      [&value](const DexField*, ConstantValue& current_value, bool exists) {
+        if (exists) {
+          current_value.join_with(value);
+        } else {
+          current_value = std::move(value);
+        }
+      });
 }
 
 /*
@@ -430,6 +456,47 @@ void WholeProgramState::collect_param_exit_values(
           current.join_with(exit_env);
         }
       });
+}
+
+WholeProgramState::FieldGrowth WholeProgramState::grow_field_values(
+    const ConstantFieldPartition& writes, size_t widening_delay) {
+  // Never Top: the writes are built from per-field updates of empty
+  // partitions and joins of those, so only their values can be Top.
+  always_assert_log(!writes.is_top(), "field writes must be per-field");
+  FieldGrowth growth;
+  for (const auto& [field, value] : writes.bindings()) {
+    if (m_known_fields.count(field) == 0u || is_static(field)) {
+      continue;
+    }
+    const auto& before = m_field_partition.get(field);
+    auto after = before.join(value);
+    if (after.equals(before)) {
+      continue;
+    }
+    ++growth.grown;
+    if (!before.is_bottom() && ++m_field_growths[field] > widening_delay) {
+      m_field_partition.set(field, ConstantValue::top());
+      ++growth.widened;
+      continue;
+    }
+    m_field_partition.set(field, std::move(after));
+  }
+  return growth;
+}
+
+std::optional<std::pair<const DexField*, ConstantValue>>
+WholeProgramState::get_field_write(const IRInstruction* insn,
+                                   const ConstantEnvironment& env) {
+  if (!opcode::is_an_sput(insn->opcode()) &&
+      !opcode::is_an_iput(insn->opcode())) {
+    return std::nullopt;
+  }
+  auto* field = resolve_field(insn->get_field());
+  if (field == nullptr) {
+    return std::nullopt;
+  }
+  // Every iput and sput has its value in src(0).
+  return std::make_pair(field, env.get(insn->src(0)));
 }
 
 void WholeProgramState::collect_static_finals(const DexClass* cls,

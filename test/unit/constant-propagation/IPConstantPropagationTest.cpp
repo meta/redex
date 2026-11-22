@@ -3936,12 +3936,25 @@ TEST_F(InterproceduralConstantPropagationTest,
   EXPECT_FALSE(read_folds_after_call_of_fail(conf, /* in_try */ true));
 }
 
+// The write after the call never runs, so `f` is always 7.
+TEST_F(InterproceduralConstantPropagationTest,
+       callOfMethodThatNeverReturnsCutsOffWhatFollows) {
+  EXPECT_TRUE(read_folds_after_call_of_fail(conf, /* in_try */ false));
+}
+
 // The NullPointerException of the read reaches the handler, so `f` is not
 // always 7.
 TEST_F(InterproceduralConstantPropagationTest,
        readOfInstanceFieldThatNeverHoldsAValueKeepsItsHandler) {
   EXPECT_FALSE(
       read_folds_after_read_of_field_without_value(conf, /* in_try */ true));
+}
+
+// The write after the read never runs, so `f` is always 7.
+TEST_F(InterproceduralConstantPropagationTest,
+       readOfInstanceFieldThatNeverHoldsAValueCutsOffWhatFollows) {
+  EXPECT_TRUE(
+      read_folds_after_read_of_field_without_value(conf, /* in_try */ false));
 }
 
 // `LFoo;.<clinit>` sets `x` to 1, calls `LHelper;.copy`, and then calls a

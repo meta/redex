@@ -376,6 +376,11 @@ class WholeProgramAwareAnalyzer final
  * the callee's normal exits, so it describes the argument only when the call
  * returns normally -- e.g. a callee that dereferences a parameter throws on
  * null, so a normal return proves that argument was non-null.
+ *
+ * It also makes the no-throw edge unreachable after an instance field read or
+ * a call whose whole-program value is Bottom: such an instruction cannot
+ * complete normally, but its exception edges stay reachable. Static field
+ * reads keep their no-throw edge (see get_field_value).
  */
 InstructionAnalyzer<ConstantEnvironment> make_wps_aware_no_throw_analyzer(
     const NullCheckMethods* null_check_methods,

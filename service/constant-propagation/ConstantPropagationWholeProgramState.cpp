@@ -128,6 +128,8 @@ ConstantValue get_invoke_return_value(
 // instruction just analyzed. Binds nothing for Top, nor for Bottom: binding
 // Bottom makes the whole state Bottom, and with it the state on the
 // instruction's exception edges, which the instruction can still take.
+// WpsAwareNoThrowAnalyzer instead cuts off only the normal edge, for the
+// instructions whose Bottom means that they cannot complete normally.
 bool bind_result(const ConstantValue& value, ConstantEnvironment* env) {
   if (value.is_top() || value.is_bottom()) {
     return false;
@@ -493,18 +495,30 @@ bool WholeProgramAwareAnalyzer::analyze_invoke(
 
 namespace {
 
-// Refines an invoke's source registers from the IPCP per-(method, param)
-// exit-value summary on the no-throw edge. Composed before
-// DefaultNoThrowAnalyzer so the hardcoded null-check facts still apply
-// afterward.
+// Refines the no-throw edge from the whole-program state. A read of an
+// instance field that never holds a value, or a call of a method that never
+// returns, cannot complete normally, so the edge is cut off. Static field
+// reads are not cut off (see get_field_value). Otherwise, an invoke's source
+// registers are refined from the IPCP per-(method, param) exit-value summary.
+// Composed before DefaultNoThrowAnalyzer so the hardcoded null-check facts
+// still apply afterward.
 class WpsAwareNoThrowAnalyzer final
     : public InstructionAnalyzerBase<WpsAwareNoThrowAnalyzer,
                                      ConstantEnvironment,
                                      const WholeProgramStateAccessor*> {
  public:
+  static bool analyze_iget(const WholeProgramStateAccessor* wps_accessor,
+                           const IRInstruction* insn,
+                           ConstantEnvironment* env) {
+    return cut_off_if_bottom(get_read_field_value(wps_accessor, insn), env);
+  }
+
   static bool analyze_invoke(const WholeProgramStateAccessor* wps_accessor,
                              const IRInstruction* insn,
                              ConstantEnvironment* env) {
+    if (cut_off_if_bottom(get_invoke_return_value(wps_accessor, insn), env)) {
+      return true;
+    }
     // TODO(T275196808): Remove the `enable_param_exit_value_summary` guard once
     // the feature is fully rolled out.
     if (!enable_param_exit_value_summary || wps_accessor == nullptr) {
@@ -541,6 +555,16 @@ class WpsAwareNoThrowAnalyzer final
       }
     }
     return false;
+  }
+
+ private:
+  static bool cut_off_if_bottom(const ConstantValue& value,
+                                ConstantEnvironment* env) {
+    if (!value.is_bottom()) {
+      return false;
+    }
+    env->set_to_bottom();
+    return true;
   }
 };
 

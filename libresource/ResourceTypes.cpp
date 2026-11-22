@@ -41,6 +41,9 @@
 #include "utils/String16.h"
 #include "utils/String8.h"
 
+#ifdef __TERMUX__
+#undef __ANDROID__
+#endif
 #ifdef __ANDROID__
 #include <binder/TextOutput.h>
 #endif

@@ -195,7 +195,7 @@ template<typename TYPE>
 typename std::enable_if<use_trivial_move<TYPE>::value>::type
 inline
 move_forward_type(TYPE* d, const TYPE* s, size_t n = 1) {
-    memmove(d, s, n*sizeof(TYPE));
+    memmove((void *)d, (void *)s, n*sizeof(TYPE));
 }
 
 template<typename TYPE>
@@ -222,7 +222,7 @@ template<typename TYPE>
 typename std::enable_if<use_trivial_move<TYPE>::value>::type
 inline
 move_backward_type(TYPE* d, const TYPE* s, size_t n = 1) {
-    memmove(d, s, n*sizeof(TYPE));
+    memmove((void *)d, (void *)s, n*sizeof(TYPE));
 }
 
 template<typename TYPE>

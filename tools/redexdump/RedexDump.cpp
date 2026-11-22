@@ -68,7 +68,7 @@ int main(int argc, char* argv[]) {
   uint32_t ddebug_offset = 0;
   int no_headers = 0;
 
-  char c;
+  int c;
   static const struct option options[] = {
       {"all", no_argument, nullptr, 'a'},
       {"string", no_argument, nullptr, 's'},

@@ -144,6 +144,9 @@ TEST_F(StaticFieldTest, ClinitCallsPreserveOnlyInitializerConfinedFields) {
   auto* kept = DexField::get_field("LFoo;.kept:I")->as_def();
   auto* unwritten = DexField::get_field("LFoo;.unwritten:I")->as_def();
   kept->rstate.set_root();
+  const auto written_outside_clinit =
+      cp::get_static_fields_written_outside_clinit({cls});
+  EXPECT_EQ(written_outside_clinit, UnorderedSet<const DexField*>{changed});
   const auto fields = cp::get_clinit_only_written_fields({cls});
   EXPECT_NE(fields.count(fixed), 0);
   EXPECT_EQ(fields.count(changed), 0);

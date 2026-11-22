@@ -257,6 +257,11 @@ struct ClinitFieldAnalyzerState {
       : class_under_init(type), clinit_only_fields(fields) {}
 };
 
+// Returns the static fields that code other than their declaring class's
+// <clinit> writes.
+UnorderedSet<const DexField*> get_static_fields_written_outside_clinit(
+    const Scope& scope);
+
 // Returns the static fields that no code other than their declaring class's
 // <clinit> writes, excluding volatile, external and kept fields. The returned
 // set must outlive any analyzer state that refers to it.

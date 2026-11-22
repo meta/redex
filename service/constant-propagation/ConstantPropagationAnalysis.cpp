@@ -1078,7 +1078,7 @@ bool InjectionIdAnalyzer::analyze_injection_id(const IRInstruction* insn,
   return true;
 }
 
-UnorderedSet<const DexField*> get_clinit_only_written_fields(
+UnorderedSet<const DexField*> get_static_fields_written_outside_clinit(
     const Scope& scope) {
   InsertOnlyConcurrentSet<const DexField*> written_outside_clinit;
   walk::parallel::opcodes(scope, [&](DexMethod* method, IRInstruction* insn) {
@@ -1091,6 +1091,15 @@ UnorderedSet<const DexField*> get_clinit_only_written_fields(
       written_outside_clinit.insert(field);
     }
   });
+  UnorderedSet<const DexField*> fields;
+  insert_unordered_iterable(fields, written_outside_clinit);
+  return fields;
+}
+
+UnorderedSet<const DexField*> get_clinit_only_written_fields(
+    const Scope& scope) {
+  const auto written_outside_clinit =
+      get_static_fields_written_outside_clinit(scope);
   UnorderedSet<const DexField*> fields;
   for (const auto* cls : scope) {
     for (const auto* field : cls->get_sfields()) {

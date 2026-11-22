@@ -57,3 +57,10 @@ website/.cache-loader
 
 package-lock.json
 yarn.lock
+
+
+
+# IDE specific
+.idea/
+
+cmake-build-*/

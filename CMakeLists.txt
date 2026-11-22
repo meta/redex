@@ -105,18 +105,20 @@ file(GLOB_RECURSE tool_srcs
         "tools/tool/*.h"
         )
 
-add_library(tool STATIC ${tool_srcs})
+add_library(redexTool STATIC ${tool_srcs})
 
-install(TARGETS tool ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
+install(TARGETS redexTool ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
 
 file(GLOB_RECURSE resource_srcs
         "libresource/*.cpp"
         "libresource/*.h"
         )
 
-add_library(resource STATIC ${resource_srcs})
+add_library(redexResource STATIC ${resource_srcs})
 
-install(TARGETS resource ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
+target_compile_options(redexResource PUBLIC -Wno-unused-variable)
+
+install(TARGETS redexResource ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
 
 file(GLOB redex_all_srcs
         "tools/redex-all/*.cpp"
@@ -140,7 +142,7 @@ target_link_libraries(redex-all
         ZLIB::ZLIB
         ${CMAKE_DL_LIBS}
         redex
-        resource
+        redexResource
         ${MINGW_EXTRA_LIBS}
         m
         )

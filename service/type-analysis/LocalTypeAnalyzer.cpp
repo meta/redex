@@ -161,32 +161,15 @@ bool RegisterTypeAnalyzer::analyze_invoke(const IRInstruction* insn,
 
 namespace {
 
-bool field_get_helper(const DexType* class_under_init,
-                      const IRInstruction* insn,
-                      DexTypeEnvironment* env) {
-  auto* field = resolve_field(insn->get_field());
-  if (field == nullptr) {
-    return false;
+// The access `insn` makes to a field of the class under construction.
+const local_pointers::FieldAccess* get_field_access(
+    const CtorFieldAnalyzer::State& state, const IRInstruction* insn) {
+  if (state.accesses == nullptr) {
+    return nullptr;
   }
-  if (field->get_class() == class_under_init) {
-    env->set(RESULT_REGISTER, env->get(field));
-    return true;
-  }
-  return false;
-}
-
-bool field_put_helper(const DexType* class_under_init,
-                      const IRInstruction* insn,
-                      DexTypeEnvironment* env) {
-  auto* field = resolve_field(insn->get_field());
-  if (field == nullptr) {
-    return false;
-  }
-  if (field->get_class() == class_under_init) {
-    env->set(field, env->get(insn->src(0)));
-    return true;
-  }
-  return false;
+  const auto& accesses = state.accesses->field_accesses();
+  auto it = accesses.find(insn);
+  return it == accesses.end() ? nullptr : &it->second;
 }
 
 } // namespace
@@ -224,19 +207,38 @@ bool CtorFieldAnalyzer::analyze_load_param(const State& state,
 bool CtorFieldAnalyzer::analyze_iget(const State& state,
                                      const IRInstruction* insn,
                                      DexTypeEnvironment* env) {
-  if (!env->is_this_ptr(insn->src(0))) {
+  const auto* access = get_field_access(state, insn);
+  if (access == nullptr || access->receiver != local_pointers::Receiver::This) {
     return false;
   }
-  return field_get_helper(state.class_under_init, insn, env);
+  if (access->after_escape &&
+      state.constructor_only_fields->count(access->field) == 0u) {
+    return false;
+  }
+  auto type = env->get(access->field);
+  if (type.is_top()) {
+    // The constructor has not stored a known type; let the whole-program
+    // state answer.
+    return false;
+  }
+  env->set(RESULT_REGISTER, type);
+  return true;
 }
 
 bool CtorFieldAnalyzer::analyze_iput(const State& state,
                                      const IRInstruction* insn,
                                      DexTypeEnvironment* env) {
-  if (!env->is_this_ptr(insn->src(1))) {
+  const auto* access = get_field_access(state, insn);
+  if (access == nullptr ||
+      access->receiver == local_pointers::Receiver::Other) {
     return false;
   }
-  return field_put_helper(state.class_under_init, insn, env);
+  auto type = env->get(insn->src(0));
+  if (access->receiver == local_pointers::Receiver::MaybeThis) {
+    type.join_with(env->get(access->field));
+  }
+  env->set(access->field, type);
+  return true;
 }
 
 bool CtorFieldAnalyzer::analyze_move(const State& state,
@@ -262,12 +264,8 @@ bool CtorFieldAnalyzer::analyze_move_result(const State& state,
 bool CtorFieldAnalyzer::analyze_invoke(const State& state,
                                        const IRInstruction* insn,
                                        DexTypeEnvironment* env) {
-  // Similar to the logic in constant_propagation::InitFieldAnalyzer, we try to
-  // be conservative when the ctor invokes other virtual methods on the same
-  // class, and reset the field environment.
-  auto opcode = insn->opcode();
-  if ((opcode == OPCODE_INVOKE_VIRTUAL || opcode == OPCODE_INVOKE_DIRECT) &&
-      state.class_under_init == insn->get_method()->get_class()) {
+  if (state.accesses != nullptr &&
+      state.accesses->get_delegating_call(insn) != nullptr) {
     env->clear_field_environment();
   }
   return false;

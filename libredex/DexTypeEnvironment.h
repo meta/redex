@@ -466,7 +466,7 @@ class DexTypeEnvironment final
 
   DexTypeDomain get(reg_t reg) const { return get_reg_environment().get(reg); }
 
-  DexTypeDomain get(DexField* field) const {
+  DexTypeDomain get(const DexField* field) const {
     return get_field_environment().get(field);
   }
 

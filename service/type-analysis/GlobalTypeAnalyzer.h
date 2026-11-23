@@ -67,9 +67,13 @@ class GlobalTypeAnalyzer : public sparta::ParallelMonotonicFixpointIterator<
                                ArgumentTypePartition> {
  public:
   explicit GlobalTypeAnalyzer(
-      std::shared_ptr<const call_graph::Graph> call_graph)
+      std::shared_ptr<const call_graph::Graph> call_graph,
+      local_pointers::ConstructorAccessesMap constructor_accesses,
+      UnorderedSet<const DexField*> constructor_only_fields)
       : ParallelMonotonicFixpointIterator(*call_graph),
-        m_call_graph(std::move(call_graph)) {
+        m_call_graph(std::move(call_graph)),
+        m_constructor_accesses(std::move(constructor_accesses)),
+        m_constructor_only_fields(std::move(constructor_only_fields)) {
     auto* wps = new WholeProgramState();
     wps->set_to_top();
     m_wps.reset(wps);
@@ -99,12 +103,23 @@ class GlobalTypeAnalyzer : public sparta::ParallelMonotonicFixpointIterator<
 
   bool is_reachable(const DexMethod* method) const;
 
+  // Once the global fixpoint is reached, nothing needs the constructor
+  // analyses: the replayable analysis does not use them. They refer to
+  // instructions that later passes may change or delete.
+  void release_constructor_accesses() { m_constructor_accesses.clear(); }
+
  private:
-  // What the analysis of `method` knows about how it uses its own fields.
+  // What the analysis of `method` knows about how it uses its own fields;
+  // accesses are null unless `method` is a constructor.
   local::CtorFields get_ctor_fields(const DexMethod* method) const;
 
   std::unique_ptr<const WholeProgramState> m_wps;
   std::shared_ptr<const call_graph::Graph> m_call_graph;
+  // Constructors without an entry are analyzed without following their own
+  // fields.
+  local_pointers::ConstructorAccessesMap m_constructor_accesses;
+  // Fields that only constructors of their class write, through `this`.
+  UnorderedSet<const DexField*> m_constructor_only_fields;
 
   /*
    * An unsafe variant that runs the local analysis on the given method, and

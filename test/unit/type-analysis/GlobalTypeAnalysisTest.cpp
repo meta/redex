@@ -40,6 +40,105 @@ struct GlobalTypeAnalysisTest : public RedexTest {
  protected:
   void prepare_scope(Scope& scope) { scope.push_back(m_cls_o); }
 
+  // Analyzes a constructor `LFoo;.<init>:(LFoo;Z)V` with body `ctor_body`,
+  // whose class extends `LBase;`, has a kept field `f`, a static field
+  // `sInstance` and a method `mutate` that stores a `B` into `f`, and returns
+  // the argument types of `take`, which the constructor may call.
+  // `LBase;.<init>:()V` keeps `this`. The class also gets the methods in
+  // `extra_methods`.
+  ArgumentTypeEnvironment arguments_of_take(
+      const std::string& ctor_body,
+      const std::vector<std::string>& extra_methods = {}) {
+    Scope scope;
+    prepare_scope(scope);
+    ClassCreator b(DexType::make_type("LB;"));
+    b.set_super(type::java_lang_Object());
+    b.add_method(assembler::method_from_string(R"(
+      (method (public constructor) "LB;.<init>:()V"
+        ((load-param-object v0)
+         (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+         (return-void))))"));
+    scope.push_back(b.create());
+    ClassCreator base(DexType::make_type("LBase;"));
+    base.set_super(type::java_lang_Object());
+    base.add_method(assembler::method_from_string(R"(
+      (method (public constructor) "LBase;.<init>:()V"
+        ((load-param-object v0)
+         (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+         (return-void))))"));
+    scope.push_back(base.create());
+    ClassCreator foo(DexType::make_type("LFoo;"));
+    foo.set_super(DexType::make_type("LBase;"));
+    auto* f = DexField::make_field("LFoo;.f:Ljava/lang/Object;")
+                  ->make_concrete(ACC_PUBLIC);
+    f->rstate.set_root();
+    foo.add_field(f);
+    // Only constructors write `g`.
+    foo.add_field(DexField::make_field("LFoo;.g:Ljava/lang/Object;")
+                      ->make_concrete(ACC_PUBLIC));
+    foo.add_field(DexField::make_field("LFoo;.sInstance:LFoo;")
+                      ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+    foo.add_method(assembler::method_from_string(
+        R"((method (public constructor) "LFoo;.<init>:(LFoo;Z)V" ()" +
+        ctor_body + "))"));
+    foo.add_method(assembler::method_from_string(R"(
+      (method (public static) "LFoo;.mutate:(LFoo;)V"
+       (
+        (load-param-object v0)
+        (new-instance "LB;")
+        (move-result-pseudo-object v1)
+        (invoke-direct (v1) "LB;.<init>:()V")
+        (iput-object v1 v0 "LFoo;.f:Ljava/lang/Object;")
+        (return-void)
+       )
+      )
+    )"));
+    foo.add_method(assembler::method_from_string(R"(
+      (method (public) "LFoo;.reset:()V"
+       (
+        (load-param-object v0)
+        (new-instance "LB;")
+        (move-result-pseudo-object v1)
+        (invoke-direct (v1) "LB;.<init>:()V")
+        (iput-object v1 v0 "LFoo;.f:Ljava/lang/Object;")
+        (return-void)
+       )
+      )
+    )"));
+    auto* take = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.take:(Ljava/lang/Object;)V"
+       ((load-param-object v0) (return-void)))
+    )");
+    foo.add_method(take);
+    for (const auto& method : extra_methods) {
+      foo.add_method(assembler::method_from_string(method));
+    }
+    auto* main = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.main:(LFoo;Z)V"
+       (
+        (load-param-object v0)
+        (load-param v1)
+        (new-instance "LFoo;")
+        (move-result-pseudo-object v2)
+        (invoke-direct (v2 v0 v1) "LFoo;.<init>:(LFoo;Z)V")
+        (return-void)
+       )
+      )
+    )");
+    main->rstate.set_root();
+    foo.add_method(main);
+    scope.push_back(foo.create());
+    walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+    // As GlobalTypeAnalysisPass runs it, with a call graph that resolves
+    // calls.
+    GlobalTypeAnalysis analysis(/* max_global_analysis_iteration */ 10,
+                                /* use_multiple_callee_callgraph */ true);
+    auto gta = analysis.analyze(scope);
+    const auto& graph = gta->get_call_graph();
+    return gta->get_entry_state_at(graph.node(take))
+        .get(CURRENT_PARTITION_LABEL);
+  }
+
   DexTypeDomain get_type_domain(const std::string& type_name) {
     return DexTypeDomain::create_not_null(
         DexType::make_type(DexString::make_string(type_name)));
@@ -90,7 +189,7 @@ TEST_F(GlobalTypeAnalysisTest, SimpleArgumentPassingTest) {
   auto cg = std::make_shared<call_graph::Graph>(call_graph::single_callee_graph(
       *method_override_graph::build_graph(scope), scope));
   walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
-  GlobalTypeAnalyzer gta(cg);
+  GlobalTypeAnalyzer gta(cg, {}, {});
   gta.run(ArgumentTypePartition{
       {CURRENT_PARTITION_LABEL, ArgumentTypeEnvironment()}});
 
@@ -152,7 +251,7 @@ TEST_F(GlobalTypeAnalysisTest, ArgumentPassingJoinWithNullTest) {
   auto cg = std::make_shared<call_graph::Graph>(call_graph::single_callee_graph(
       *method_override_graph::build_graph(scope), scope));
   walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
-  GlobalTypeAnalyzer gta(cg);
+  GlobalTypeAnalyzer gta(cg, {}, {});
   gta.run(ArgumentTypePartition{
       {CURRENT_PARTITION_LABEL, ArgumentTypeEnvironment()}});
 
@@ -219,7 +318,7 @@ TEST_F(GlobalTypeAnalysisTest, CaughtExceptionArgumentTest) {
   auto cg = std::make_shared<call_graph::Graph>(call_graph::single_callee_graph(
       *method_override_graph::build_graph(scope), scope));
   walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
-  GlobalTypeAnalyzer gta(cg);
+  GlobalTypeAnalyzer gta(cg, {}, {});
   gta.run(ArgumentTypePartition{
       {CURRENT_PARTITION_LABEL, ArgumentTypeEnvironment()}});
 
@@ -625,4 +724,184 @@ TEST_F(GlobalTypeAnalysisTest, StaticFieldWithEncodedValueTest) {
   EXPECT_EQ(wps.get_return_type(meth_buk),
             DexTypeDomain::create_not_null(type::java_lang_Class())
                 .join(DexTypeDomain::null()));
+}
+
+TEST_F(GlobalTypeAnalysisTest, ConstructorReadAfterEscapeSeesOtherStores) {
+  const auto args = arguments_of_take(R"(
+    (load-param-object v0)
+    (load-param-object v3)
+    (load-param v4)
+    (new-instance "LO;")
+    (move-result-pseudo-object v1)
+    (invoke-direct (v1) "LO;.<init>:()V")
+    (iput-object v1 v0 "LFoo;.f:Ljava/lang/Object;")
+    (invoke-static (v0) "LFoo;.mutate:(LFoo;)V")
+    (iget-object v0 "LFoo;.f:Ljava/lang/Object;")
+    (move-result-pseudo-object v2)
+    (invoke-static (v2) "LFoo;.take:(Ljava/lang/Object;)V")
+    (return-void)
+  )");
+  // `mutate` stored a `B`, so nothing is known about what `take` receives.
+  EXPECT_TRUE(args.get(0).is_top()) << args;
+}
+
+TEST_F(GlobalTypeAnalysisTest,
+       ConstructorReadOfConstructorOnlyFieldAfterEscape) {
+  const auto args = arguments_of_take(R"(
+    (load-param-object v0)
+    (load-param-object v3)
+    (load-param v4)
+    (invoke-direct (v0) "LBase;.<init>:()V")
+    (new-instance "LO;")
+    (move-result-pseudo-object v1)
+    (invoke-direct (v1) "LO;.<init>:()V")
+    (iput-object v1 v0 "LFoo;.g:Ljava/lang/Object;")
+    (sput-object v0 "LFoo;.sInstance:LFoo;")
+    (iget-object v0 "LFoo;.g:Ljava/lang/Object;")
+    (move-result-pseudo-object v2)
+    (invoke-static (v2) "LFoo;.take:(Ljava/lang/Object;)V")
+    (return-void)
+  )");
+  // Code that sees the published `this` cannot store to `g`.
+  EXPECT_EQ(args, ArgumentTypeEnvironment({{0, get_type_domain("LO;")}}))
+      << args;
+}
+
+TEST_F(GlobalTypeAnalysisTest, ConstructorReadBeforeOwnStoreUsesWholeProgram) {
+  const auto args = arguments_of_take(R"(
+    (load-param-object v0)
+    (load-param-object v3)
+    (load-param v4)
+    (iget-object v0 "LFoo;.g:Ljava/lang/Object;")
+    (move-result-pseudo-object v2)
+    (invoke-static (v2) "LFoo;.take:(Ljava/lang/Object;)V")
+    (new-instance "LO;")
+    (move-result-pseudo-object v1)
+    (invoke-direct (v1) "LO;.<init>:()V")
+    (iput-object v1 v0 "LFoo;.g:Ljava/lang/Object;")
+    (return-void)
+  )");
+  // The constructor has stored nothing yet, so the field's type comes from
+  // the whole program.
+  EXPECT_FALSE(args.get(0).is_top()) << args;
+}
+
+TEST_F(GlobalTypeAnalysisTest, ConstructorReadAfterOwnMethodCallOnThis) {
+  const auto args = arguments_of_take(R"(
+    (load-param-object v0)
+    (load-param-object v3)
+    (load-param v4)
+    (new-instance "LO;")
+    (move-result-pseudo-object v1)
+    (invoke-direct (v1) "LO;.<init>:()V")
+    (iput-object v1 v0 "LFoo;.f:Ljava/lang/Object;")
+    (invoke-virtual (v0) "LFoo;.reset:()V")
+    (iget-object v0 "LFoo;.f:Ljava/lang/Object;")
+    (move-result-pseudo-object v2)
+    (invoke-static (v2) "LFoo;.take:(Ljava/lang/Object;)V")
+    (return-void)
+  )");
+  // `this.reset()` stored a `B`, so nothing is known about what `take`
+  // receives.
+  EXPECT_TRUE(args.get(0).is_top()) << args;
+}
+
+TEST_F(GlobalTypeAnalysisTest, ConstructorReadAfterOwnMethodCallOnOther) {
+  const auto args = arguments_of_take(R"(
+    (load-param-object v0)
+    (load-param-object v3)
+    (load-param v4)
+    (new-instance "LO;")
+    (move-result-pseudo-object v1)
+    (invoke-direct (v1) "LO;.<init>:()V")
+    (iput-object v1 v0 "LFoo;.f:Ljava/lang/Object;")
+    (invoke-virtual (v3) "LFoo;.reset:()V")
+    (iget-object v0 "LFoo;.f:Ljava/lang/Object;")
+    (move-result-pseudo-object v2)
+    (invoke-static (v2) "LFoo;.take:(Ljava/lang/Object;)V")
+    (return-void)
+  )");
+  // `other.reset()` cannot store into `this`.
+  EXPECT_EQ(args, ArgumentTypeEnvironment({{0, get_type_domain("LO;")}}))
+      << args;
+}
+
+TEST_F(GlobalTypeAnalysisTest, ConstructorReadAfterMaybeThisStore) {
+  const auto args = arguments_of_take(R"(
+    (load-param-object v0)
+    (load-param-object v3)
+    (load-param v4)
+    (new-instance "LO;")
+    (move-result-pseudo-object v1)
+    (invoke-direct (v1) "LO;.<init>:()V")
+    (iput-object v1 v0 "LFoo;.f:Ljava/lang/Object;")
+    (move-object v5 v3)
+    (if-eqz v4 :other)
+    (move-object v5 v0)
+    (:other)
+    (new-instance "LB;")
+    (move-result-pseudo-object v1)
+    (invoke-direct (v1) "LB;.<init>:()V")
+    (iput-object v1 v5 "LFoo;.f:Ljava/lang/Object;")
+    (iget-object v0 "LFoo;.f:Ljava/lang/Object;")
+    (move-result-pseudo-object v2)
+    (invoke-static (v2) "LFoo;.take:(Ljava/lang/Object;)V")
+    (return-void)
+  )");
+  // The store may have written a `B` to `this`.
+  EXPECT_EQ(args.get(0), get_type_domain("LO;").join(get_type_domain("LB;")))
+      << args;
+}
+
+TEST_F(GlobalTypeAnalysisTest,
+       ConstructorReadAfterSuperConstructorKeepingThis) {
+  const auto args = arguments_of_take(R"(
+    (load-param-object v0)
+    (load-param-object v3)
+    (load-param v4)
+    (invoke-direct (v0) "LBase;.<init>:()V")
+    (new-instance "LO;")
+    (move-result-pseudo-object v1)
+    (invoke-direct (v1) "LO;.<init>:()V")
+    (iput-object v1 v0 "LFoo;.f:Ljava/lang/Object;")
+    (iget-object v0 "LFoo;.f:Ljava/lang/Object;")
+    (move-result-pseudo-object v2)
+    (invoke-static (v2) "LFoo;.take:(Ljava/lang/Object;)V")
+    (return-void)
+  )");
+  // The superclass constructor keeps `this`, so the read sees the store.
+  EXPECT_EQ(args, ArgumentTypeEnvironment({{0, get_type_domain("LO;")}}))
+      << args;
+}
+
+TEST_F(GlobalTypeAnalysisTest, ConstructorReadAfterOwnConstructorCall) {
+  // `Foo()` keeps `this` but stores a `B` into `f`.
+  const auto args = arguments_of_take(R"(
+    (load-param-object v0)
+    (load-param-object v3)
+    (load-param v4)
+    (new-instance "LO;")
+    (move-result-pseudo-object v1)
+    (invoke-direct (v1) "LO;.<init>:()V")
+    (iput-object v1 v0 "LFoo;.f:Ljava/lang/Object;")
+    (invoke-direct (v0) "LFoo;.<init>:()V")
+    (iget-object v0 "LFoo;.f:Ljava/lang/Object;")
+    (move-result-pseudo-object v2)
+    (invoke-static (v2) "LFoo;.take:(Ljava/lang/Object;)V")
+    (return-void)
+  )",
+                                      {R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "LBase;.<init>:()V")
+      (new-instance "LB;")
+      (move-result-pseudo-object v1)
+      (invoke-direct (v1) "LB;.<init>:()V")
+      (iput-object v1 v0 "LFoo;.f:Ljava/lang/Object;")
+      (return-void)
+     )
+    )
+  )"});
+  EXPECT_TRUE(args.get(0).is_top()) << args;
 }

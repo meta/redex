@@ -248,9 +248,12 @@ bool GlobalTypeAnalyzer::is_reachable(const DexMethod* method) const {
   return !args_domain.is_bottom();
 }
 
+// CtorFieldAnalyzer comes first: with a call graph, WholeProgramAwareAnalyzer
+// handles every call it can type through it, and CtorFieldAnalyzer must still
+// see the calls of the class's constructors that may overwrite its fields.
 using CombinedAnalyzer =
-    InstructionAnalyzerCombiner<WholeProgramAwareAnalyzer,
-                                local::CtorFieldAnalyzer,
+    InstructionAnalyzerCombiner<local::CtorFieldAnalyzer,
+                                WholeProgramAwareAnalyzer,
                                 local::RegisterTypeAnalyzer>;
 
 using CombinedReplayAnalyzer =
@@ -282,7 +285,7 @@ std::unique_ptr<local::LocalTypeAnalyzer> GlobalTypeAnalyzer::analyze_method(
                 code.cfg(), CombinedReplayAnalyzer(&wps, nullptr))
           : std::make_unique<local::LocalTypeAnalyzer>(
                 code.cfg(),
-                CombinedAnalyzer(&wps, get_ctor_fields(method), nullptr));
+                CombinedAnalyzer(get_ctor_fields(method), &wps, nullptr));
   local_ta->run(env);
 
   return local_ta;
@@ -290,8 +293,10 @@ std::unique_ptr<local::LocalTypeAnalyzer> GlobalTypeAnalyzer::analyze_method(
 
 local::CtorFields GlobalTypeAnalyzer::get_ctor_fields(
     const DexMethod* method) const {
-  return local::CtorFields(method::is_init(method) ? method->get_class()
-                                                   : nullptr);
+  auto it = m_constructor_accesses.find(method);
+  return {method::is_init(method) ? method->get_class() : nullptr,
+          it == m_constructor_accesses.end() ? nullptr : it->second.get(),
+          m_constructor_only_fields};
 }
 
 bool args_have_type(const DexProto* proto, const DexType* type) {
@@ -471,10 +476,22 @@ std::unique_ptr<GlobalTypeAnalyzer> GlobalTypeAnalysis::analyze(
   });
   find_any_init_reachables(*method_override_graph, scope, cg);
 
+  // How each constructor uses `this` does not change between iterations.
+  auto constructor_accesses = local_pointers::analyze_constructors(
+      scope, local_pointers::get_constructors_keeping_this(scope));
+
   // Run the bootstrap. All field value and method return values are
   // represented by Top.
   TRACE(TYPE, 2, "[global] Bootstrap run");
-  auto gta = std::make_unique<GlobalTypeAnalyzer>(cg);
+  // Without safe aggregation no field counts as constructor-only, so reads
+  // after `this` escapes fall back to the whole-program type.
+  auto constructor_only_fields =
+      m_only_aggregate_safely_inferrable_fields
+          ? constant_propagation::gather_constructor_only_ifields(
+                scope, constructor_accesses)
+          : UnorderedSet<const DexField*>();
+  auto gta = std::make_unique<GlobalTypeAnalyzer>(
+      cg, std::move(constructor_accesses), std::move(constructor_only_fields));
   gta->run(ArgumentTypePartition{
       {CURRENT_PARTITION_LABEL, ArgumentTypeEnvironment()}});
   auto non_true_virtuals =
@@ -522,6 +539,7 @@ std::unique_ptr<GlobalTypeAnalyzer> GlobalTypeAnalysis::analyze(
     ++iteration_cnt;
   }
 
+  gta->release_constructor_accesses();
   global_analysis_iterations = iteration_cnt;
 
   TRACE(TYPE,

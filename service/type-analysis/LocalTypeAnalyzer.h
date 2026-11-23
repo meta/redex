@@ -8,6 +8,7 @@
 #pragma once
 
 #include "BaseIRAnalyzer.h"
+#include "ConstructorAccesses.h"
 #include "DexTypeEnvironment.h"
 #include "InstructionAnalyzer.h"
 
@@ -72,6 +73,25 @@ class RegisterTypeAnalyzer final
                              DexTypeEnvironment* env);
 };
 
+// The state of CtorFieldAnalyzer.
+struct CtorFields {
+  CtorFields(const DexType* class_under_init,
+             const local_pointers::ConstructorAccesses* accesses,
+             const UnorderedSet<const DexField*>& constructor_only_fields)
+      : class_under_init(class_under_init),
+        accesses(accesses),
+        constructor_only_fields(&constructor_only_fields) {}
+
+  // The class whose constructor is analyzed; null when not analyzing a
+  // constructor.
+  const DexType* class_under_init;
+  // How the constructor uses `this`; null when not analyzing a constructor.
+  const local_pointers::ConstructorAccesses* accesses;
+  // Fields that only constructors of their class write, and only through
+  // `this`.
+  const UnorderedSet<const DexField*>* constructor_only_fields;
+};
+
 /*
  * Similarly CtorFieldAnalyzer populates local FieldTypeEnvironment when
  * analyzing a ctor. We only do so for instance fields that belong to the class
@@ -79,20 +99,14 @@ class RegisterTypeAnalyzer final
  * the end state of the FieldTypeEnvironment for all ctors. We use that as the
  * initial type mapping for all instance fields.
  *
- * Note that we only update Field type mapping for operations on `this` obj. We
- * do not want to collect field type update on another instance of the same
- * class. That's not correct. As a result, we might incorrectly initialize the
- * nullness of a field without the instance tracking.
+ * Only a store whose receiver is `this` sets a field's type, and a store that
+ * may or may not target `this` widens it; a store to another instance of the
+ * class leaves it alone. A read is answered from these stores only while
+ * `this` cannot have escaped, since code that sees `this` may store to its
+ * fields, unless no code but the class's constructors writes the field. A call
+ * of another constructor of the class on `this` may store to them too, so it
+ * forgets them.
  */
-struct CtorFields {
-  explicit CtorFields(const DexType* class_under_init)
-      : class_under_init(class_under_init) {}
-
-  // The class whose constructor is analyzed; null when not analyzing a
-  // constructor.
-  const DexType* class_under_init;
-};
-
 class CtorFieldAnalyzer final
     : public InstructionAnalyzerBase<CtorFieldAnalyzer,
                                      DexTypeEnvironment,

@@ -1863,6 +1863,18 @@ struct LinearizationOrderGraph : public GraphInterface {
   }
 };
 
+// Whether `b` takes the try region, if any, of the block laid out before it
+// (see `insert_try_catch_markers`): it has no catch handler edges, cannot throw
+// and is not the entry block, which is laid out first. Catch blocks are
+// excluded: a try region that contains one of its own catch blocks makes an
+// invalid dex try entry.
+bool takes_try_region_of_block_before(const Block* b) {
+  const auto& cfg = b->cfg();
+  return b != cfg.entry_block() &&
+         cfg.get_succ_edge_of_type(b, EDGE_THROW) == nullptr &&
+         b->cannot_throw() && !b->is_catch();
+}
+
 // Whether the goto `e` puts its target into the chain of its source (see
 // `build_chains`). A block that starts with a move-result stays with the block
 // before it, so for such a source the try region compared is that of the
@@ -2209,17 +2221,12 @@ void ControlFlowGraph::insert_try_catch_markers(
   MethodItemEntry* active_catch = nullptr;
   for (auto it = ordering.begin(); it != ordering.end(); prev = *(it++)) {
     Block* b = *it;
-    MethodItemEntry* new_catch = create_catch(b, &catch_to_containing_block);
-
-    if (new_catch == nullptr && b->cannot_throw() && !b->is_catch()) {
+    if (takes_try_region_of_block_before(b)) {
       // Generate fewer try regions by merging blocks that cannot throw into the
       // previous try region.
-      //
-      // But, we have to be careful to not include the catch block of this try
-      // region, which would create invalid Dex Try entries. For any given try
-      // region, none of its catches may be inside that region.
       continue;
     }
+    MethodItemEntry* new_catch = create_catch(b, &catch_to_containing_block);
 
     if (active_catch != new_catch) {
       // If we're switching try regions between these blocks, the TRY_END must

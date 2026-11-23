@@ -479,8 +479,11 @@ std::unique_ptr<GlobalTypeAnalyzer> GlobalTypeAnalysis::analyze(
   EligibleIfields eligible_ifields;
   if (m_only_aggregate_safely_inferrable_fields) {
     eligible_ifields =
-        constant_propagation::gather_safely_inferable_ifield_candidates(scope,
-                                                                        {});
+        constant_propagation::gather_safely_inferable_ifield_candidates(
+            scope,
+            constant_propagation::gather_ifields_written_only_by_constructors(
+                scope),
+            {});
   }
   size_t iteration_cnt = 0;
 

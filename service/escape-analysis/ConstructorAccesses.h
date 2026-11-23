@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <memory>
+
 #include "DeterministicContainers.h"
 #include "DexClass.h"
 #include "LocalPointersAnalysis.h"
@@ -49,6 +51,11 @@ struct DelegatingCall {
  * Every call that receives `this` lets it escape, except a call of a
  * constructor that keeps its receiver: Object's constructor, and those in
  * `constructors_keeping_this`.
+ *
+ * The code of a constructor excluded from optimization may differ at runtime,
+ * so no consumer credits it: it never keeps its receiver, and each of its
+ * stores to a field of its class disqualifies that field as written only by
+ * constructors.
  */
 class ConstructorAccesses {
  public:
@@ -94,6 +101,18 @@ class ConstructorAccesses {
   UnorderedSet<const IRInstruction*> m_escapes;
   bool m_accesses_other_fields{false};
 };
+
+// How each constructor uses the object it builds, by constructor.
+using ConstructorAccessesMap =
+    UnorderedMap<const DexMethod*, std::unique_ptr<const ConstructorAccesses>>;
+
+/*
+ * Analyzes every constructor with code in `scope`, given the constructors that
+ * keep their receiver. The constructors' CFGs must be built, as in a pass.
+ */
+ConstructorAccessesMap analyze_constructors(
+    const Scope& scope,
+    const UnorderedSet<const DexMethod*>& constructors_keeping_this);
 
 /*
  * The constructors in `scope` that keep their receiver (see

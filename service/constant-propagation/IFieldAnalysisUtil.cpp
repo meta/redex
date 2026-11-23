@@ -329,25 +329,14 @@ ConcurrentSet<DexField*> get_ifields_read_in_callees(
 
 namespace constant_propagation {
 
-EligibleIfields gather_safely_inferable_ifield_candidates(
-    const Scope& scope,
-    const UnorderedSet<std::string>& allowlist_method_names) {
-  EligibleIfields eligible_ifields;
+UnorderedSet<const DexField*> gather_ifields_written_only_by_constructors(
+    const Scope& scope) {
   UnorderedSet<DexField*> ifields_candidates;
   walk::fields(scope, [&](DexField* field) {
-    // Collect non-final instance field candidates that are non external,
+    // Collect instance field candidates that are non external,
     // and can be deleted.
     if (is_static(field) || field->is_external() || !can_delete(field) ||
         is_volatile(field)) {
-      return;
-    }
-    if (is_final(field)) {
-      eligible_ifields.emplace(field);
-      return;
-    }
-    DexClass* field_cls = type_class(field->get_class());
-    if (field_cls != nullptr && field_cls->get_ctors().size() > 1) {
-      // Class with multiple constructors, ignore it now.
       return;
     }
     ifields_candidates.emplace(field);
@@ -356,16 +345,23 @@ EligibleIfields gather_safely_inferable_ifield_candidates(
   ConcurrentSet<DexField*> invalid_candidates;
   walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {
     // Remove candidate field if it was written in code other than its class'
-    // init function.
+    // init function, or in an init function excluded from optimization.
     cfg_adapter::iterate_with_iterator(&code, [&](const IRList::iterator& it) {
       auto* insn = it->insn;
       auto op = insn->opcode();
       if (opcode::is_an_iput(op)) {
         auto* field = resolve_field(insn->get_field(), FieldSearch::Instance);
-        if (field == nullptr || (method::is_init(method) &&
-                                 method->get_class() == field->get_class())) {
-          // If couldn't resolve the field, or this method is this field's
-          // class's init function, move on.
+        if (field == nullptr) {
+          // If couldn't resolve the field, move on.
+          return cfg_adapter::LOOP_CONTINUE;
+        }
+        if (method::is_init(method) &&
+            method->get_class() == field->get_class()) {
+          // See `ConstructorAccesses` on constructors excluded from
+          // optimization.
+          if (method->rstate.no_optimizations()) {
+            invalid_candidates.insert(field);
+          }
           return cfg_adapter::LOOP_CONTINUE;
         }
         // We assert that final fields are not modified outside of <init>
@@ -386,11 +382,78 @@ EligibleIfields gather_safely_inferable_ifield_candidates(
       return cfg_adapter::LOOP_CONTINUE;
     });
   });
+  UnorderedSet<const DexField*> written_only_by_constructors;
   for (DexField* field : UnorderedIterable(ifields_candidates)) {
     if (invalid_candidates.count(field) == 0u) {
-      eligible_ifields.emplace(field);
+      written_only_by_constructors.emplace(field);
     }
   }
+  return written_only_by_constructors;
+}
+
+UnorderedSet<const DexField*> gather_constructor_only_ifields(
+    const Scope& scope,
+    const local_pointers::ConstructorAccessesMap& constructor_accesses) {
+  auto constructor_only_ifields =
+      gather_ifields_written_only_by_constructors(scope);
+  ConcurrentSet<const DexField*> stored_on_other_objects;
+  walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {
+    if (!method::is_init(method) || method->rstate.no_optimizations()) {
+      return;
+    }
+    // Remove candidate field if its class's init function writes it to an
+    // object other than the one it initializes.
+    const local_pointers::ConstructorAccesses* accesses = nullptr;
+    for (const auto& mie : cfg::InstructionIterable(code.cfg())) {
+      auto* insn = mie.insn;
+      if (!opcode::is_an_iput(insn->opcode())) {
+        continue;
+      }
+      auto* field = resolve_field(insn->get_field(), FieldSearch::Instance);
+      if (field == nullptr || field->get_class() != method->get_class() ||
+          constructor_only_ifields.count(field) == 0u) {
+        continue;
+      }
+      if (accesses == nullptr) {
+        auto it = constructor_accesses.find(method);
+        always_assert_log(it != constructor_accesses.end(),
+                          "Unanalyzed constructor %s", SHOW(method));
+        accesses = it->second.get();
+      }
+      // `ConstructorAccesses` records every access to a resolved field of
+      // the constructor's class, so it knows this store.
+      auto access = accesses->field_accesses().find(insn);
+      always_assert_log(access != accesses->field_accesses().end(),
+                        "Unclassified store to an own field in %s: %s",
+                        SHOW(method), SHOW(insn));
+      if (access->second.receiver != local_pointers::Receiver::This) {
+        stored_on_other_objects.insert(field);
+      }
+    }
+  });
+  for (const auto* field : UnorderedIterable(stored_on_other_objects)) {
+    constructor_only_ifields.erase(field);
+  }
+  return constructor_only_ifields;
+}
+
+EligibleIfields gather_safely_inferable_ifield_candidates(
+    const Scope& scope,
+    const UnorderedSet<const DexField*>& candidate_ifields,
+    const UnorderedSet<std::string>& allowlist_method_names) {
+  EligibleIfields eligible_ifields;
+  walk::fields(scope, [&](DexField* field) {
+    if (candidate_ifields.count(field) == 0u) {
+      return;
+    }
+    DexClass* field_cls = type_class(field->get_class());
+    if (!is_final(field) && field_cls != nullptr &&
+        field_cls->get_ctors().size() > 1) {
+      // Class with multiple constructors, ignore it now.
+      return;
+    }
+    eligible_ifields.emplace(field);
+  });
   auto blocklist_ifields =
       get_ifields_read_in_callees(scope, allowlist_method_names);
   for (DexField* field : UnorderedIterable(blocklist_ifields)) {

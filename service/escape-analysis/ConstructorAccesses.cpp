@@ -13,6 +13,7 @@
 #include "MethodUtil.h"
 #include "Resolver.h"
 #include "ScopedCFG.h"
+#include "Show.h"
 #include "TypeUtil.h"
 #include "Walkers.h"
 
@@ -128,6 +129,27 @@ ConstructorAccesses::ConstructorAccesses(
       }
     }
   }
+}
+
+ConstructorAccessesMap analyze_constructors(
+    const Scope& scope,
+    const UnorderedSet<const DexMethod*>& constructors_keeping_this) {
+  ConcurrentMap<const DexMethod*, std::unique_ptr<const ConstructorAccesses>>
+      analyzed;
+  walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {
+    if (method::is_init(method)) {
+      always_assert_log(code.cfg_built(), "No CFG for %s", SHOW(method));
+      analyzed.emplace(method,
+                       std::make_unique<const ConstructorAccesses>(
+                           code.cfg(), type_class(method->get_class()),
+                           constructors_keeping_this));
+    }
+  });
+  ConstructorAccessesMap result;
+  for (auto&& [method, accesses] : UnorderedIterable(analyzed)) {
+    result.emplace(method, std::move(accesses));
+  }
+  return result;
 }
 
 UnorderedSet<const DexMethod*> get_constructors_keeping_this(

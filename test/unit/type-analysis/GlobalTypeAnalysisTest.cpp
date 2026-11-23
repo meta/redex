@@ -27,6 +27,8 @@ struct GlobalTypeAnalysisTest : public RedexTest {
     auto* m_init = assembler::method_from_string(R"(
       (method (public constructor) "LO;.<init>:()V"
        (
+        (load-param-object v0)
+        (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
         (return-void)
        )
       )
@@ -349,6 +351,78 @@ TEST_F(GlobalTypeAnalysisTest, SimpleFieldTypeTest) {
   auto* code = meth_foo->get_code();
   auto foo_exit_env = lta->get_exit_state_at(code->cfg().exit_block());
   EXPECT_EQ(foo_exit_env.get_reg_environment().get(1),
+            get_type_domain("LO;").join(DexTypeDomain::null()));
+}
+
+TEST_F(GlobalTypeAnalysisTest, FieldStoredOnOtherObjectByConstructorTest) {
+  // Java: class A { O f1; A(A other) { O o = new O(); f1 = o; other.f1 = o; } }
+  // Every store to f1 comes from A's constructor, so the type of every store
+  // in the program bounds the type of f1, even though one store goes to
+  // another A.
+  Scope scope;
+  prepare_scope(scope);
+
+  auto* cls_a = DexType::make_type("LA;");
+  ClassCreator creator(cls_a);
+  creator.set_super(type::java_lang_Object());
+
+  auto* field_1 = DexField::make_field("LA;.f1:LO;")->make_concrete(ACC_PUBLIC);
+  creator.add_field(field_1);
+
+  auto* meth_init = assembler::method_from_string(R"(
+    (method (public constructor) "LA;.<init>:(LA;)V"
+     (
+      (load-param-object v1) ; 'this' argument
+      (load-param-object v2)
+      (invoke-direct (v1) "Ljava/lang/Object;.<init>:()V")
+      (new-instance "LO;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "LO;.<init>:()V")
+      (iput-object v0 v1 "LA;.f1:LO;")
+      (iput-object v0 v2 "LA;.f1:LO;")
+      (return-void)
+     )
+    )
+  )");
+  creator.add_method(meth_init);
+
+  auto* meth_bar = assembler::method_from_string(R"(
+    (method (public) "LA;.bar:()LO;"
+     (
+      (load-param-object v1) ; 'this' argument
+      (iget-object v1 "LA;.f1:LO;")
+      (move-result-pseudo-object v0)
+      (return-object v0)
+     )
+    )
+  )");
+  creator.add_method(meth_bar);
+
+  auto* meth_foo = assembler::method_from_string(R"(
+    (method (public static) "LA;.foo:(LA;)V"
+     (
+      (load-param-object v2)
+      (new-instance "LA;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0 v2) "LA;.<init>:(LA;)V")
+      (invoke-virtual (v0) "LA;.bar:()LO;")
+      (move-result-object v1)
+      (return-void)
+     )
+    )
+  )");
+  meth_foo->rstate.set_root();
+  creator.add_method(meth_foo);
+  scope.push_back(creator.create());
+
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  GlobalTypeAnalysis analysis;
+  auto gta = analysis.analyze(scope);
+  auto wps = gta->get_whole_program_state();
+  EXPECT_EQ(wps.get_field_type(field_1),
+            get_type_domain("LO;").join(DexTypeDomain::null()));
+  EXPECT_EQ(wps.get_return_type(meth_bar),
             get_type_domain("LO;").join(DexTypeDomain::null()));
 }
 

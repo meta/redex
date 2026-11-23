@@ -26,6 +26,7 @@ struct TypeAnalysisTransformTest : public RedexTest {
     auto* method_arg_init = assembler::method_from_string(R"(
       (method (public constructor) "LARG;.<init>:()V"
        (
+        (load-param-object v0)
         (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
         (return-void)
        )

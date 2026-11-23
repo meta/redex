@@ -84,34 +84,43 @@ class RegisterTypeAnalyzer final
  * class. That's not correct. As a result, we might incorrectly initialize the
  * nullness of a field without the instance tracking.
  */
+struct CtorFields {
+  explicit CtorFields(const DexType* class_under_init)
+      : class_under_init(class_under_init) {}
+
+  // The class whose constructor is analyzed; null when not analyzing a
+  // constructor.
+  const DexType* class_under_init;
+};
+
 class CtorFieldAnalyzer final
     : public InstructionAnalyzerBase<CtorFieldAnalyzer,
                                      DexTypeEnvironment,
-                                     DexType* /* class_under_init */> {
+                                     CtorFields> {
  public:
-  static bool analyze_default(const DexType* class_under_init,
+  static bool analyze_default(const State& state,
                               const IRInstruction* insn,
                               DexTypeEnvironment* env);
-  static bool analyze_load_param(const DexType* class_under_init,
+  static bool analyze_load_param(const State& state,
                                  const IRInstruction* insn,
                                  DexTypeEnvironment* env);
-  static bool analyze_iget(const DexType* class_under_init,
+  static bool analyze_iget(const State& state,
                            const IRInstruction* insn,
                            DexTypeEnvironment* env);
 
-  static bool analyze_iput(const DexType* class_under_init,
+  static bool analyze_iput(const State& state,
                            const IRInstruction* insn,
                            DexTypeEnvironment* env);
 
-  static bool analyze_move(const DexType* class_under_init,
+  static bool analyze_move(const State& state,
                            const IRInstruction* insn,
                            DexTypeEnvironment* env);
 
-  static bool analyze_move_result(const DexType* class_under_init,
+  static bool analyze_move_result(const State& state,
                                   const IRInstruction* insn,
                                   DexTypeEnvironment* env);
 
-  static bool analyze_invoke(const DexType* class_under_init,
+  static bool analyze_invoke(const State& state,
                              const IRInstruction* insn,
                              DexTypeEnvironment* env);
 };

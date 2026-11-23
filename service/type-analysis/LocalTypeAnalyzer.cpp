@@ -191,10 +191,10 @@ bool field_put_helper(const DexType* class_under_init,
 
 } // namespace
 
-bool CtorFieldAnalyzer::analyze_default(const DexType* class_under_init,
+bool CtorFieldAnalyzer::analyze_default(const State& state,
                                         const IRInstruction* insn,
                                         DexTypeEnvironment* env) {
-  if (class_under_init == nullptr) {
+  if (state.class_under_init == nullptr) {
     return false;
   }
   if (insn->has_dest()) {
@@ -208,10 +208,10 @@ bool CtorFieldAnalyzer::analyze_default(const DexType* class_under_init,
   return false;
 }
 
-bool CtorFieldAnalyzer::analyze_load_param(const DexType* class_under_init,
+bool CtorFieldAnalyzer::analyze_load_param(const State& state,
                                            const IRInstruction* insn,
                                            DexTypeEnvironment* env) {
-  if ((class_under_init == nullptr) ||
+  if ((state.class_under_init == nullptr) ||
       insn->opcode() != IOPCODE_LOAD_PARAM_OBJECT) {
     return false;
   }
@@ -221,45 +221,45 @@ bool CtorFieldAnalyzer::analyze_load_param(const DexType* class_under_init,
   return false;
 }
 
-bool CtorFieldAnalyzer::analyze_iget(const DexType* class_under_init,
+bool CtorFieldAnalyzer::analyze_iget(const State& state,
                                      const IRInstruction* insn,
                                      DexTypeEnvironment* env) {
   if (!env->is_this_ptr(insn->src(0))) {
     return false;
   }
-  return field_get_helper(class_under_init, insn, env);
+  return field_get_helper(state.class_under_init, insn, env);
 }
 
-bool CtorFieldAnalyzer::analyze_iput(const DexType* class_under_init,
+bool CtorFieldAnalyzer::analyze_iput(const State& state,
                                      const IRInstruction* insn,
                                      DexTypeEnvironment* env) {
   if (!env->is_this_ptr(insn->src(1))) {
     return false;
   }
-  return field_put_helper(class_under_init, insn, env);
+  return field_put_helper(state.class_under_init, insn, env);
 }
 
-bool CtorFieldAnalyzer::analyze_move(const DexType* class_under_init,
+bool CtorFieldAnalyzer::analyze_move(const State& state,
                                      const IRInstruction* insn,
                                      DexTypeEnvironment* env) {
-  if (class_under_init == nullptr) {
+  if (state.class_under_init == nullptr) {
     return false;
   }
   env->set_this_ptr(insn->dest(), env->get_this_ptr(insn->src(0)));
   return false;
 }
 
-bool CtorFieldAnalyzer::analyze_move_result(const DexType* class_under_init,
+bool CtorFieldAnalyzer::analyze_move_result(const State& state,
                                             const IRInstruction* insn,
                                             DexTypeEnvironment* env) {
-  if (class_under_init == nullptr) {
+  if (state.class_under_init == nullptr) {
     return false;
   }
   env->set_this_ptr(insn->dest(), env->get_this_ptr(RESULT_REGISTER));
   return false;
 }
 
-bool CtorFieldAnalyzer::analyze_invoke(const DexType* class_under_init,
+bool CtorFieldAnalyzer::analyze_invoke(const State& state,
                                        const IRInstruction* insn,
                                        DexTypeEnvironment* env) {
   // Similar to the logic in constant_propagation::InitFieldAnalyzer, we try to
@@ -267,7 +267,7 @@ bool CtorFieldAnalyzer::analyze_invoke(const DexType* class_under_init,
   // class, and reset the field environment.
   auto opcode = insn->opcode();
   if ((opcode == OPCODE_INVOKE_VIRTUAL || opcode == OPCODE_INVOKE_DIRECT) &&
-      class_under_init == insn->get_method()->get_class()) {
+      state.class_under_init == insn->get_method()->get_class()) {
     env->clear_field_environment();
   }
   return false;

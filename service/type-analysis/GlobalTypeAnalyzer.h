@@ -100,6 +100,9 @@ class GlobalTypeAnalyzer : public sparta::ParallelMonotonicFixpointIterator<
   bool is_reachable(const DexMethod* method) const;
 
  private:
+  // What the analysis of `method` knows about how it uses its own fields.
+  local::CtorFields get_ctor_fields(const DexMethod* method) const;
+
   std::unique_ptr<const WholeProgramState> m_wps;
   std::shared_ptr<const call_graph::Graph> m_call_graph;
 

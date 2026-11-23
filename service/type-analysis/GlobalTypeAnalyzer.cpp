@@ -275,20 +275,23 @@ std::unique_ptr<local::LocalTypeAnalyzer> GlobalTypeAnalyzer::analyze_method(
   }
 
   auto env = env_with_params(&code, args);
-  DexType* ctor_type{nullptr};
-  if (method::is_init(method)) {
-    ctor_type = method->get_class();
-  }
   TRACE(TYPE, 5, "%s", SHOW(code.cfg()));
   auto local_ta =
       is_replayable
           ? std::make_unique<local::LocalTypeAnalyzer>(
                 code.cfg(), CombinedReplayAnalyzer(&wps, nullptr))
           : std::make_unique<local::LocalTypeAnalyzer>(
-                code.cfg(), CombinedAnalyzer(&wps, ctor_type, nullptr));
+                code.cfg(),
+                CombinedAnalyzer(&wps, get_ctor_fields(method), nullptr));
   local_ta->run(env);
 
   return local_ta;
+}
+
+local::CtorFields GlobalTypeAnalyzer::get_ctor_fields(
+    const DexMethod* method) const {
+  return local::CtorFields(method::is_init(method) ? method->get_class()
+                                                   : nullptr);
 }
 
 bool args_have_type(const DexProto* proto, const DexType* type) {

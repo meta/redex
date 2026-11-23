@@ -146,7 +146,7 @@ OP(SPUT_BYTE         , sput_byte         , Ref::Field, "sput-byte")
 OP(SPUT_CHAR         , sput_char         , Ref::Field, "sput-char")
 OP(SPUT_SHORT        , sput_short        , Ref::Field, "sput-short")
 
-OPRANGE(an_invoke, OPCODE_INVOKE_VIRTUAL, OPCODE_INVOKE_INTERFACE)
+OPRANGE(a_method_invoke, OPCODE_INVOKE_VIRTUAL, OPCODE_INVOKE_INTERFACE)
 OP(INVOKE_VIRTUAL    , invoke_virtual    , Ref::Method, "invoke-virtual")
 OP(INVOKE_SUPER      , invoke_super      , Ref::Method, "invoke-super")
 OP(INVOKE_DIRECT     , invoke_direct     , Ref::Method, "invoke-direct")

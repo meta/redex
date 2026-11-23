@@ -55,7 +55,7 @@ TEST_F(LocalPointersTest, domainOperations) {
 ptrs::InvokeToSummaryMap mark_all_invokes_as_non_escaping(const IRCode& code) {
   ptrs::InvokeToSummaryMap invoke_to_summary_map;
   for (const auto& mie : InstructionIterable(code.cfg())) {
-    if (opcode::is_an_invoke(mie.insn->opcode())) {
+    if (opcode::is_a_method_invoke(mie.insn->opcode())) {
       ptrs::ParamSet returned_params;
       if (!type::is_primitive(
               mie.insn->get_method()->get_proto()->get_rtype())) {
@@ -344,7 +344,7 @@ TEST_F(LocalPointersTest, returnFreshValue) {
     const IRInstruction* invoke_insn{nullptr};
     for (const auto& mie : InstructionIterable(cfg)) {
       auto* insn = mie.insn;
-      if (opcode::is_an_invoke(insn->opcode())) {
+      if (opcode::is_a_method_invoke(insn->opcode())) {
         invoke_insn = insn;
         invoke_to_summary_map.emplace(insn, fresh_return_summary);
       }
@@ -414,7 +414,7 @@ TEST_F(LocalPointersTest, returnEscapedValue) {
     const IRInstruction* invoke_insn{nullptr};
     for (const auto& mie : InstructionIterable(cfg)) {
       auto* insn = mie.insn;
-      if (opcode::is_an_invoke(insn->opcode())) {
+      if (opcode::is_a_method_invoke(insn->opcode())) {
         invoke_insn = insn;
         invoke_to_summary_map.emplace(insn, fresh_return_summary);
       }

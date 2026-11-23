@@ -110,7 +110,7 @@ void load_external_method_summaries(
     if (code != nullptr) {
       auto ii = cfg::ConstInstructionIterable(code->cfg());
       if (std::any_of(ii.begin(), ii.end(), [&](const auto& mie) {
-            return opcode::is_an_invoke(mie.insn->opcode()) &&
+            return opcode::is_a_method_invoke(mie.insn->opcode()) &&
                    null_check_methods.count(mie.insn->get_method()) != 0u &&
                    is_untrusted_copy(mie.insn->get_method());
           })) {

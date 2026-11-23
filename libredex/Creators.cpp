@@ -73,7 +73,7 @@ void MethodBlock::invoke(DexMethod* meth, const std::vector<Location>& args) {
 void MethodBlock::invoke(IROpcode opcode,
                          DexMethodRef* meth,
                          const std::vector<Location>& args) {
-  always_assert(opcode::is_an_invoke(opcode));
+  always_assert(opcode::is_a_method_invoke(opcode));
   auto* invk = new IRInstruction(opcode);
   uint16_t arg_count = static_cast<uint16_t>(args.size());
   invk->set_method(meth)->set_srcs_size(arg_count);

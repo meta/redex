@@ -78,7 +78,7 @@ class TypeAnalysisBasedStrategy : public MultipleCalleeBaseStrategy {
         auto* insn = mie.insn;
         // Replay analysis for individual instruction
         lta->analyze_instruction(insn, &env);
-        if (!opcode::is_an_invoke(insn->opcode())) {
+        if (!opcode::is_a_method_invoke(insn->opcode())) {
           continue;
         }
         auto* resolved_callee = resolve_invoke_method_deprecated(insn, method);

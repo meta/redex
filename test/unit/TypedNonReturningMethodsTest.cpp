@@ -337,7 +337,7 @@ class TypedNonReturningMethodsTest : public RedexTest {
   static size_t count_invokes(const std::string& in, const std::string& of) {
     size_t count = 0;
     for (const auto& mie : InstructionIterable(*get_linear_code(in))) {
-      if (opcode::is_an_invoke(mie.insn->opcode()) &&
+      if (opcode::is_a_method_invoke(mie.insn->opcode()) &&
           show(mie.insn->get_method()) == of) {
         count++;
       }

@@ -173,7 +173,7 @@ live_range::DefUseChains get_augmented_du_chains(
   auto is_inlinable_invoke = [&](const auto* insn,
                                  std::optional<src_index_t> src_index =
                                      std::nullopt) {
-    if (!opcode::is_an_invoke(insn->opcode())) {
+    if (!opcode::is_a_method_invoke(insn->opcode())) {
       return false;
     }
 
@@ -258,9 +258,9 @@ class InlinedEstimator {
       return;
     }
     always_assert(opcode::is_new_instance(allocation_insn->opcode()) ||
-                  opcode::is_an_invoke(allocation_insn->opcode()) ||
+                  opcode::is_a_method_invoke(allocation_insn->opcode()) ||
                   opcode::is_load_param_object(allocation_insn->opcode()));
-    if (opcode::is_an_invoke(allocation_insn->opcode())) {
+    if (opcode::is_a_method_invoke(allocation_insn->opcode())) {
       auto* callee = resolve_invoke_method_deprecated(allocation_insn, method);
       always_assert(callee);
       const auto* callee_allocation_insn =
@@ -271,7 +271,7 @@ class InlinedEstimator {
     }
     for (const auto& use :
          UnorderedIterable(m_uses[{method, allocation_insn}])) {
-      if (opcode::is_an_invoke(use.insn->opcode())) {
+      if (opcode::is_a_method_invoke(use.insn->opcode())) {
         if (is_benign(use.insn->get_method())) {
           continue;
         }
@@ -334,10 +334,10 @@ class InlinedEstimator {
           auto [method, allocation_insn] = key;
           always_assert(
               opcode::is_new_instance(allocation_insn->opcode()) ||
-              opcode::is_an_invoke(allocation_insn->opcode()) ||
+              opcode::is_a_method_invoke(allocation_insn->opcode()) ||
               opcode::is_load_param_object(allocation_insn->opcode()));
           int64_t delta = 0;
-          if (opcode::is_an_invoke(allocation_insn->opcode())) {
+          if (opcode::is_a_method_invoke(allocation_insn->opcode())) {
             auto* callee =
                 resolve_invoke_method_deprecated(allocation_insn, method);
             always_assert(callee);
@@ -351,7 +351,7 @@ class InlinedEstimator {
             delta -= config.cost_new_instance;
           }
           for (const auto& use : UnorderedIterable(m_uses[key])) {
-            if (opcode::is_an_invoke(use.insn->opcode())) {
+            if (opcode::is_a_method_invoke(use.insn->opcode())) {
               delta -= config.cost_invoke;
               if (is_benign(use.insn->get_method())) {
                 continue;
@@ -657,7 +657,7 @@ size_t shrink_root_methods(
       }
       const auto* allocation_insn = it2->second.allocation_insn();
       if ((allocation_insn != nullptr) &&
-          opcode::is_an_invoke(allocation_insn->opcode())) {
+          opcode::is_a_method_invoke(allocation_insn->opcode())) {
         auto* callee =
             resolve_invoke_method_deprecated(allocation_insn, caller);
         always_assert(callee);
@@ -1309,7 +1309,7 @@ class RootMethodReducer {
       }
       for (auto&& [uses_insn, src_indices] :
            UnorderedIterable(aggregated_uses)) {
-        if (!opcode::is_an_invoke(uses_insn->opcode()) ||
+        if (!opcode::is_a_method_invoke(uses_insn->opcode()) ||
             is_benign(uses_insn->get_method()) ||
             is_incomplete_marker(uses_insn)) {
           continue;
@@ -1502,7 +1502,8 @@ class RootMethodReducer {
       auto opcode = use.insn->opcode();
       if (opcode::is_an_iput(opcode)) {
         always_assert(use.src_index == 1);
-      } else if (opcode::is_an_invoke(opcode) || opcode::is_a_monitor(opcode) ||
+      } else if (opcode::is_a_method_invoke(opcode) ||
+                 opcode::is_a_monitor(opcode) ||
                  opcode::is_check_cast(opcode) || opcode::is_an_iget(opcode) ||
                  opcode::is_instance_of(opcode) ||
                  opcode::is_move_object(opcode) || opcode == OPCODE_IF_EQZ ||
@@ -1552,7 +1553,7 @@ class RootMethodReducer {
                              ->set_src(0, insn->src(0))
                              ->set_dest(get_field_reg(insn->get_field()));
         mutation.replace(it, {new_insn});
-      } else if (opcode::is_an_invoke(opcode)) {
+      } else if (opcode::is_a_method_invoke(opcode)) {
         always_assert(is_benign(insn->get_method()) ||
                       is_incomplete_marker(insn));
         mutation.remove(it);

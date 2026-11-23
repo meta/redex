@@ -199,7 +199,7 @@ void analyze_reflection(const Scope& scope) {
     auto& cfg = code.cfg();
     for (auto& mie : InstructionIterable(cfg)) {
       IRInstruction* insn = mie.insn;
-      if (!opcode::is_an_invoke(insn->opcode())) {
+      if (!opcode::is_a_method_invoke(insn->opcode())) {
         continue;
       }
 

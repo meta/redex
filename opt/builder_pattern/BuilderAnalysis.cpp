@@ -315,7 +315,7 @@ void BuilderAnalysis::populate_usage() {
         m_usage[val].push_back(use);
 
         auto* insn = use->insn;
-        if (opcode::is_an_invoke(insn->opcode())) {
+        if (opcode::is_a_method_invoke(insn->opcode())) {
           m_invoke_to_builder_instance[insn] = referenced_type;
         }
       }
@@ -387,13 +387,13 @@ UnorderedSet<IRInstruction*> BuilderAnalysis::get_all_inlinable_insns() {
   UnorderedSet<IRInstruction*> result;
 
   for (const auto& pair : UnorderedIterable(m_usage)) {
-    if (opcode::is_an_invoke(pair.first->opcode())) {
+    if (opcode::is_a_method_invoke(pair.first->opcode())) {
       result.emplace(const_cast<IRInstruction*>(pair.first));
     }
 
     for (const auto& it : pair.second) {
       auto* insn = it->insn;
-      if (opcode::is_an_invoke(insn->opcode())) {
+      if (opcode::is_a_method_invoke(insn->opcode())) {
         result.emplace(insn);
       }
     }
@@ -475,7 +475,7 @@ ConstTypeHashSet BuilderAnalysis::non_removable_types() {
     }
 
     // Check if the instantiation is an invoke and non-inlinable.
-    if (opcode::is_an_invoke(instantiation->opcode())) {
+    if (opcode::is_a_method_invoke(instantiation->opcode())) {
       auto* method = resolve_method_deprecated(instantiation->get_method(),
                                                opcode_to_search(instantiation));
       if ((method == nullptr) || (method->get_code() == nullptr)) {
@@ -511,7 +511,7 @@ ConstTypeHashSet BuilderAnalysis::escape_types() {
     for (const auto& it : pair.second) {
       auto* insn = it->insn;
       // If there is any invoke here, it is because we couldn't inline it.
-      if (opcode::is_an_invoke(insn->opcode())) {
+      if (opcode::is_a_method_invoke(insn->opcode())) {
         // We accept Object.<init> calls.
         if (insn->get_method() == acceptable_method) {
           continue;

@@ -19,7 +19,7 @@
 cfg::InstructionIterator get_invoke(cfg::ControlFlowGraph* cfg) {
   auto iterable = cfg::InstructionIterable(*cfg);
   for (auto it = iterable.begin(); it != iterable.end(); ++it) {
-    if (opcode::is_an_invoke(it->insn->opcode())) {
+    if (opcode::is_a_method_invoke(it->insn->opcode())) {
       return it;
     }
   }
@@ -145,7 +145,7 @@ TEST_F(CFGInlinerTest, partial_inline_fallback_keeps_exact_callsite_position) {
   auto instructions = cfg::InstructionIterable(caller);
   size_t fallback_invokes = 0;
   for (auto it = instructions.begin(); it != instructions.end(); ++it) {
-    if (!opcode::is_an_invoke(it->insn->opcode())) {
+    if (!opcode::is_a_method_invoke(it->insn->opcode())) {
       continue;
     }
     ++fallback_invokes;

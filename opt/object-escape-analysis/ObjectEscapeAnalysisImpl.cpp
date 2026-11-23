@@ -210,7 +210,7 @@ void analyze_scope(
             vec.emplace_back(method, insn);
           });
         }
-      } else if (opcode::is_an_invoke(insn->opcode())) {
+      } else if (opcode::is_a_method_invoke(insn->opcode())) {
         const auto* callees = resolve_invoke_callees(insn);
         if (!callees->any_unknown && callees->with_code.size() == 1) {
           single_callee_invokes->update(
@@ -410,7 +410,7 @@ void Analyzer::analyze_instruction(const IRInstruction* insn,
       escape(0);
       return;
     }
-  } else if (opcode::is_an_invoke(insn->opcode())) {
+  } else if (opcode::is_a_method_invoke(insn->opcode())) {
     if (is_benign(insn->get_method()) || is_incomplete_marker(insn)) {
       current_state->set(RESULT_REGISTER, Domain(NO_ALLOCATION));
       return;
@@ -459,7 +459,8 @@ UnorderedSet<IRInstruction*> Analyzer::get_inlinables() const {
     if (uses.empty() && insn->opcode() != IOPCODE_LOAD_PARAM_OBJECT &&
         (m_returns.count(insn) == 0u)) {
       auto op = insn->opcode();
-      always_assert(op == OPCODE_NEW_INSTANCE || opcode::is_an_invoke(op));
+      always_assert(op == OPCODE_NEW_INSTANCE ||
+                    opcode::is_a_method_invoke(op));
       if (op == OPCODE_NEW_INSTANCE ||
           (resolve_invoke_method_if_unambiguous(m_method_override_graph, insn,
                                                 m_method) != nullptr)) {
@@ -512,7 +513,7 @@ MethodSummaries compute_method_summaries(
             } else {
               auto op = returned_insn->opcode();
               always_assert(op == OPCODE_NEW_INSTANCE ||
-                            opcode::is_an_invoke(op));
+                            opcode::is_a_method_invoke(op));
               if (op == OPCODE_NEW_INSTANCE ||
                   (resolve_invoke_method_if_unambiguous(method_override_graph,
                                                         returned_insn,
@@ -585,10 +586,10 @@ std::pair<DexMethod*, const DexType*> resolve_inlinable(
     DexMethod* method,
     const IRInstruction* insn) {
   always_assert(insn->opcode() == OPCODE_NEW_INSTANCE ||
-                opcode::is_an_invoke(insn->opcode()));
+                opcode::is_a_method_invoke(insn->opcode()));
   DexMethod* first_callee{nullptr};
   while (insn->opcode() != OPCODE_NEW_INSTANCE) {
-    always_assert(opcode::is_an_invoke(insn->opcode()));
+    always_assert(opcode::is_a_method_invoke(insn->opcode()));
     method = resolve_invoke_method_deprecated(insn, method);
     if (first_callee == nullptr) {
       first_callee = method;

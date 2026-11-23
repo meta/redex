@@ -1122,7 +1122,7 @@ size_t compute_method_violations(const call_graph::Graph& call_graph,
       for (auto it = block->rbegin(); it != block->rend(); ++it) {
         if (it->type == MFLOW_OPCODE) {
           auto* instruction = it->insn;
-          if (opcode::is_an_invoke(instruction->opcode())) {
+          if (opcode::is_a_method_invoke(instruction->opcode())) {
             current_invoke_insn = instruction;
           }
         } else if (it->type == MFLOW_SOURCE_BLOCK) {

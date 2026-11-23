@@ -396,7 +396,7 @@ bool is_ineligible_because_of_fill_in_stack_trace(const IRInstruction* insn) {
   }
   // We should not collapse the callsites of methods marked as dont-inline to
   // preserve their stack traces more accurately.
-  if (opcode::is_an_invoke(op)) {
+  if (opcode::is_a_method_invoke(op)) {
     if (resolved_method == nullptr) {
       if (opcode::is_invoke_super(op)) {
         // We don't have the caller method available, and thus cannot resolve an
@@ -1617,7 +1617,7 @@ class DedupBlocksImpl {
                    (*live_ranges->def_use_chains)[reaching_def])) {
             auto op = use.insn->opcode();
             if (opcode::is_an_aget(op) || opcode::is_an_iput(op) ||
-                opcode::is_an_sput(op) || opcode::is_an_invoke(op) ||
+                opcode::is_an_sput(op) || opcode::is_a_method_invoke(op) ||
                 opcode::is_a_return(op)) {
               return true;
             }

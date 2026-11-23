@@ -82,7 +82,7 @@ class ObjectEscapeAnalysisTest : public RedexIntegrationTest {
     auto* code = method->as_def()->get_code();
     always_assert(code);
     for (auto& mie : InstructionIterable(code)) {
-      if (opcode::is_an_invoke(mie.insn->opcode())) {
+      if (opcode::is_a_method_invoke(mie.insn->opcode())) {
         return true;
       }
     }

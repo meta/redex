@@ -169,7 +169,7 @@ TEST_F(NeverInlineEligibilityTest, IsSimplePopulatesInvokeInsnForForwarder) {
   IRInstruction* invoke_insn = nullptr;
   EXPECT_TRUE(never_inline_analysis::is_simple(caller, &invoke_insn));
   ASSERT_NE(invoke_insn, nullptr);
-  EXPECT_TRUE(opcode::is_an_invoke(invoke_insn->opcode()));
+  EXPECT_TRUE(opcode::is_a_method_invoke(invoke_insn->opcode()));
 }
 
 TEST_F(NeverInlineEligibilityTest, ExactCallSites) {

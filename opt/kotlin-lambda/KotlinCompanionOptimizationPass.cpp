@@ -752,7 +752,7 @@ void filter_untrackable_usages(
               for (const auto& use : UnorderedIterable(du.at(def_insn))) {
                 auto* u = use.insn;
                 // Allow companion construction sequence.
-                if ((opcode::is_an_invoke(u->opcode()) &&
+                if ((opcode::is_a_method_invoke(u->opcode()) &&
                      method::is_init(u->get_method()) &&
                      u->get_method()->get_class() == from->get_type()) ||
                     (opcode::is_an_sput(u->opcode()) &&
@@ -965,7 +965,7 @@ void cleanup_clinits_and_fields(
                insn->get_type() == comp_type;
       };
       auto is_companion_init = [&](IRInstruction* insn) {
-        return opcode::is_an_invoke(insn->opcode()) &&
+        return opcode::is_a_method_invoke(insn->opcode()) &&
                method::is_init(insn->get_method()) &&
                insn->get_method()->get_class() == comp_type;
       };

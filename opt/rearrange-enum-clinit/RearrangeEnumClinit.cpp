@@ -312,7 +312,7 @@ struct Rearranger {
     if (producer.opcode() == OPCODE_NEW_INSTANCE ||
         producer.opcode() == OPCODE_CHECK_CAST) {
       type = producer.get_type();
-    } else if (opcode::is_an_invoke(producer.opcode())) {
+    } else if (opcode::is_a_method_invoke(producer.opcode())) {
       type = producer.get_method()->get_proto()->get_rtype();
     }
     return type != nullptr && type::check_cast(type, m->get_class());

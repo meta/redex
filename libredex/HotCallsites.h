@@ -87,7 +87,7 @@ void for_each_block_callsite(cfg::Block* block, F&& f) {
   auto throw_invokes = throw_constructing_invokes(block);
   for (auto& mie : InstructionIterable(block).reversed()) {
     auto* insn = mie.insn;
-    if (!opcode::is_an_invoke(insn->opcode()) ||
+    if (!opcode::is_a_method_invoke(insn->opcode()) ||
         throw_invokes.count(insn) != 0u) {
       continue;
     }

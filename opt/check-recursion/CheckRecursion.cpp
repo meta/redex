@@ -37,7 +37,7 @@ static CheckRecursionResult do_check_recursion(DexMethod* method,
   auto iterable = cfg::InstructionIterable(code.cfg());
   for (auto it = iterable.begin(); it != iterable.end(); ++it) {
     auto* insn = it->insn;
-    if (!opcode::is_an_invoke(insn->opcode())) {
+    if (!opcode::is_a_method_invoke(insn->opcode())) {
       continue;
     }
 

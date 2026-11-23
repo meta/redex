@@ -343,7 +343,7 @@ size_t ExpandableMethodParams::flush(
   // First, find all expanded_method_ref that made it into the updated code.
   ConcurrentSet<DexMethodRef*> used_expanded_method_refs;
   walk::parallel::opcodes(scope, [&](DexMethod*, IRInstruction* insn) {
-    if (opcode::is_an_invoke(insn->opcode()) &&
+    if (opcode::is_a_method_invoke(insn->opcode()) &&
         (m_candidates.count(insn->get_method()) != 0u)) {
       used_expanded_method_refs.insert(insn->get_method());
     }

@@ -1276,7 +1276,7 @@ namespace {
 // (runtime entry points) and `unreachable`, which is lowered to a call of
 // `UnreachableException.createAndThrow`.
 bool is_runtime_call(IROpcode op) {
-  return opcode::is_an_invoke(op) || op == OPCODE_NEW_INSTANCE ||
+  return opcode::is_a_method_invoke(op) || op == OPCODE_NEW_INSTANCE ||
          op == OPCODE_NEW_ARRAY || op == OPCODE_FILLED_NEW_ARRAY ||
          op == IOPCODE_UNREACHABLE;
 }

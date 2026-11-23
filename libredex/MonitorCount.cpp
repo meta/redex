@@ -53,7 +53,7 @@ static bool is_invoke_insn_in_try(const cfg::ControlFlowGraph& cfg,
       continue;
     }
     for (auto& mie : InstructionIterable(block)) {
-      if (opcode::is_an_invoke(mie.insn->opcode())) {
+      if (opcode::is_a_method_invoke(mie.insn->opcode())) {
         return true;
       }
     }
@@ -72,7 +72,7 @@ static bool contains_invoke_insn(
     }
   } else {
     for (const auto& it : insns) {
-      if (opcode::is_an_invoke(it->insn->opcode())) {
+      if (opcode::is_a_method_invoke(it->insn->opcode())) {
         return true;
       }
     }

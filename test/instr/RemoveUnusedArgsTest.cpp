@@ -20,7 +20,7 @@ void check_callsite_regs(DexMethod* method,
   uint i = 0;
   for (const auto& mie : InstructionIterable(method->get_code())) {
     auto* insn = mie.insn;
-    if (opcode::is_an_invoke(insn->opcode())) {
+    if (opcode::is_a_method_invoke(insn->opcode())) {
       if (i == callsite_index) {
         auto* actual_method = insn->get_method();
         EXPECT_EQ(insn->srcs_size(), num_args_expected) << show(actual_method);

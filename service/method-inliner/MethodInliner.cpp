@@ -142,7 +142,7 @@ static void filter_candidates_local_only(
     }
     size_t relevant_invokes{0};
     for (auto& mie : InstructionIterable(code.cfg())) {
-      if (!opcode::is_an_invoke(mie.insn->opcode())) {
+      if (!opcode::is_a_method_invoke(mie.insn->opcode())) {
         continue;
       }
       auto* callee = resolve_method_deprecated(

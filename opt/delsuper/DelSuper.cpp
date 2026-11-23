@@ -296,19 +296,19 @@ class DelSuper {
         auto it2 = it->second.find(method);
         return it2 == it->second.end() ? nullptr : it2->second;
       };
-      walk::parallel::opcodes(m_scope,
-                              [&](DexMethod* /*meth*/, IRInstruction* insn) {
-                                if (opcode::is_an_invoke(insn->opcode())) {
-                                  auto* method = insn->get_method()->as_def();
-                                  if (method == nullptr) {
-                                    return;
-                                  }
-                                  while (auto* m = get_delmeth(method)) {
-                                    method = m;
-                                  }
-                                  insn->set_method(method);
-                                }
-                              });
+      walk::parallel::opcodes(
+          m_scope, [&](DexMethod* /*meth*/, IRInstruction* insn) {
+            if (opcode::is_a_method_invoke(insn->opcode())) {
+              auto* method = insn->get_method()->as_def();
+              if (method == nullptr) {
+                return;
+              }
+              while (auto* m = get_delmeth(method)) {
+                method = m;
+              }
+              insn->set_method(method);
+            }
+          });
       auto wq = workqueue_foreach<DexType*>([&](DexType* type) {
         auto& map = m_delmeths.at_unsafe(type);
         auto* clazz = type_class(type);

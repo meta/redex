@@ -42,7 +42,7 @@ using PointerEnvironment =
 
 inline bool may_alloc(IROpcode op) {
   return op == OPCODE_NEW_INSTANCE || op == OPCODE_NEW_ARRAY ||
-         op == OPCODE_FILLED_NEW_ARRAY || opcode::is_an_invoke(op);
+         op == OPCODE_FILLED_NEW_ARRAY || opcode::is_a_method_invoke(op);
 }
 
 /*

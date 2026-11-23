@@ -317,7 +317,7 @@ bool IRInstruction::invoke_src_is_wide(src_index_t i) const {
 bool IRInstruction::src_is_wide(src_index_t i) const {
   always_assert(i < srcs_size());
 
-  if (opcode::is_an_invoke(m_opcode)) {
+  if (opcode::is_a_method_invoke(m_opcode)) {
     return invoke_src_is_wide(i);
   }
 
@@ -373,7 +373,7 @@ bool IRInstruction::src_is_wide(src_index_t i) const {
 }
 
 bool IRInstruction::normalize_registers(std::string* error_msg) {
-  if (opcode::is_an_invoke(opcode())) {
+  if (opcode::is_a_method_invoke(opcode())) {
     auto* args = get_method()->get_proto()->get_args();
     size_t old_srcs_idx{0};
     size_t srcs_idx{0};
@@ -403,7 +403,7 @@ bool IRInstruction::normalize_registers(std::string* error_msg) {
 }
 
 void IRInstruction::denormalize_registers() {
-  if (opcode::is_an_invoke(m_opcode)) {
+  if (opcode::is_a_method_invoke(m_opcode)) {
     auto* args = get_method()->get_proto()->get_args();
     bool has_wide = false;
     for (const auto& arg : *args) {

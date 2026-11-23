@@ -444,7 +444,7 @@ std::optional<std::string> TypedefAnnoChecker::check_typedef_value(
         // annotated and might not be in the IntDef. Since the checker will
         // check that the default value is a member of the IntDef, passing in 0
         // is safe. Example caller and default methods: P1222824190 P1222829651
-        if (const_value == 0 && opcode::is_an_invoke(insn->opcode())) {
+        if (const_value == 0 && opcode::is_a_method_invoke(insn->opcode())) {
           DexMethodRef* callee = insn->get_method();
           if (callee->is_def() &&
               callee->as_def()->get_simple_deobfuscated_name().ends_with(

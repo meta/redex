@@ -582,7 +582,7 @@ TEST_F(RearrangeEnumClinitTest, SourceBlocksCoverage) {
                  !last_was_new_array_mrp) {
         last_was_new_array_mrp = true;
         continue;
-      } else if (opcode::is_an_invoke(mie.insn->opcode()) &&
+      } else if (opcode::is_a_method_invoke(mie.insn->opcode()) &&
                  method::is_constructor(mie.insn->get_method())) {
         invoke_direct_count++;
         last_was_invoke_direct = true;

@@ -25,7 +25,7 @@ std::vector<DexMethod*> delete_methods(
   walk::parallel::opcodes(
       scope, [](DexMethod* /*meth*/) { return true; },
       [&](DexMethod* meth, IRInstruction* insn) {
-        if (opcode::is_an_invoke(insn->opcode())) {
+        if (opcode::is_a_method_invoke(insn->opcode())) {
           auto* callee = concurrent_resolver(insn->get_method(),
                                              opcode_to_search(insn), meth);
           if (callee != nullptr && (removable.count(callee) != 0u)) {

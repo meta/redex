@@ -229,7 +229,7 @@ AppModuleUsagePass::analyze_method_xstore_references(const Scope& scope) {
 
     auto get_reflective_type_ref_for_insn =
         [&analysis](IRInstruction* insn) -> const DexType* {
-      if (!opcode::is_an_invoke(insn->opcode())) {
+      if (!opcode::is_a_method_invoke(insn->opcode())) {
         // If an object type is from reflection it will be in the
         // RESULT_REGISTER for some instruction.
         const auto& o = analysis->get_abstract_object(RESULT_REGISTER, insn);

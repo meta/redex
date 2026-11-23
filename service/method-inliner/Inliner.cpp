@@ -245,7 +245,7 @@ MultiMethodInliner::MultiMethodInliner(
   walk::parallel::opcodes(
       scope, [](DexMethod*) { return true; },
       [&](DexMethod* caller, IRInstruction* insn) {
-        if (!opcode::is_an_invoke(insn->opcode())) {
+        if (!opcode::is_a_method_invoke(insn->opcode())) {
           return;
         }
         auto* callee = m_concurrent_resolver(insn->get_method(),
@@ -433,7 +433,7 @@ void MultiMethodInliner::inline_methods() {
 
 std::optional<DexMethod*> MultiMethodInliner::get_callee(DexMethod* caller,
                                                          IRInstruction* insn) {
-  if (!opcode::is_an_invoke(insn->opcode())) {
+  if (!opcode::is_a_method_invoke(insn->opcode())) {
     return std::nullopt;
   }
   auto* callee =
@@ -579,7 +579,7 @@ size_t MultiMethodInliner::inline_callees(
     }
     auto* callee = it->second;
     always_assert(callee->is_concrete());
-    always_assert(opcode::is_an_invoke(insn->opcode()));
+    always_assert(opcode::is_a_method_invoke(insn->opcode()));
     const auto* needs_receiver_cast = get_needs_receiver_cast(insn, callee);
     inlinables.push_back((Inlinable){callee, insn, false, false, false, nullptr,
                                      get_callee_insn_size(callee),
@@ -2172,7 +2172,7 @@ bool MultiMethodInliner::should_partially_inline(cfg::Block* block,
                                                  IRInstruction* insn,
                                                  DexMethod* callee,
                                                  PartialCode* partial_code) {
-  always_assert(opcode::is_an_invoke(insn->opcode()));
+  always_assert(opcode::is_a_method_invoke(insn->opcode()));
   always_assert(insn->has_method());
   // Partial inlining peels off the callee's hot prefix and lets the peeled-off
   // code fall back to a plain invocation of the callee, which must be a valid
@@ -2742,7 +2742,7 @@ void MultiMethodInliner::build_hot_callsite_count_ramp() {
   std::vector<float> counts = source_blocks::gather_block_counts(
       m_scope, [](DexMethod*, cfg::Block* block) {
         for (const auto& mie : InstructionIterable(block)) {
-          if (opcode::is_an_invoke(mie.insn->opcode())) {
+          if (opcode::is_a_method_invoke(mie.insn->opcode())) {
             return true;
           }
         }

@@ -77,7 +77,7 @@ TEST_F(KotlinCompanionOptimizationTest, CompanionMethodsRelocatedToStatic) {
   outer_classes.insert(outer2);
   for (const auto& mie : iterable) {
     auto* insn = mie.insn;
-    if (!opcode::is_an_invoke(insn->opcode())) {
+    if (!opcode::is_a_method_invoke(insn->opcode())) {
       continue;
     }
     if (insn->opcode() == OPCODE_INVOKE_STATIC) {
@@ -131,7 +131,7 @@ TEST_F(KotlinCompanionOptimizationTest, MethodNameCollisionRenaming) {
   outer_classes.insert(outer1);
   for (const auto& mie : iterable) {
     auto* insn = mie.insn;
-    if (!opcode::is_an_invoke(insn->opcode())) {
+    if (!opcode::is_a_method_invoke(insn->opcode())) {
       continue;
     }
     if (insn->opcode() == OPCODE_INVOKE_STATIC) {
@@ -242,7 +242,7 @@ TEST_F(KotlinCompanionOptimizationTest, CompanionInterCalls) {
     auto* code = m->as_def()->get_code();
     auto iterable = InstructionIterable(code);
     for (const auto& mie : iterable) {
-      if (opcode::is_an_invoke(mie.insn->opcode())) {
+      if (opcode::is_a_method_invoke(mie.insn->opcode())) {
         ASSERT_EQ(mie.insn->opcode(), OPCODE_INVOKE_STATIC)
             << "Expected invoke-static in " << show(m) << " but found "
             << show(mie.insn);
@@ -257,7 +257,7 @@ TEST_F(KotlinCompanionOptimizationTest, CompanionInterCalls) {
   unsigned static_calls = 0;
   for (const auto& mie : iterable) {
     auto* insn = mie.insn;
-    if (!opcode::is_an_invoke(insn->opcode())) {
+    if (!opcode::is_a_method_invoke(insn->opcode())) {
       continue;
     }
     if (insn->opcode() == OPCODE_INVOKE_STATIC) {

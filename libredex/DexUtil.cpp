@@ -401,7 +401,7 @@ bool gather_invoked_methods_that_prevent_relocation(
   for (const auto& mie : InstructionIterable(cfg)) {
     auto* insn = mie.insn;
     auto opcode = insn->opcode();
-    if (opcode::is_an_invoke(opcode)) {
+    if (opcode::is_a_method_invoke(opcode)) {
       auto* meth = resolve_method_deprecated(insn->get_method(),
                                              opcode_to_search(insn), method);
       if ((meth == nullptr) && opcode == OPCODE_INVOKE_VIRTUAL &&

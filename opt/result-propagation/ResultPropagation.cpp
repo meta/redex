@@ -241,7 +241,7 @@ std::optional<ParamIndex> ReturnParamResolver::get_return_param_index(
     const UnorderedMap<const DexMethod*, ParamIndex>&
         methods_which_return_parameter,
     MethodRefCache& resolved_refs) const {
-  always_assert(opcode::is_an_invoke(insn->opcode()));
+  always_assert(opcode::is_a_method_invoke(insn->opcode()));
   auto* const method = insn->get_method();
   auto* const proto = method->get_proto();
   if (proto->is_void()) {
@@ -454,7 +454,7 @@ void ResultPropagation::patch(PassManager& mgr, cfg::ControlFlowGraph& cfg) {
 
     auto* primary_insn = primary_it->insn;
 
-    if (!opcode::is_an_invoke(primary_insn->opcode())) {
+    if (!opcode::is_a_method_invoke(primary_insn->opcode())) {
       TRACE(RP, 6, "  primary instruction not an invoke.");
       continue;
     }

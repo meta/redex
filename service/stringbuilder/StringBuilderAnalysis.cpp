@@ -72,7 +72,7 @@ void FixpointIterator::analyze_instruction(const IRInstruction* insn,
   ptrs::escape_heap_referenced_objects(insn, env);
 
   auto op = insn->opcode();
-  if (opcode::is_an_invoke(op) &&
+  if (opcode::is_a_method_invoke(op) &&
       insn->get_method()->get_class() == m_stringbuilder) {
     auto* method = insn->get_method();
     if (method == m_stringbuilder_init_with_string ||

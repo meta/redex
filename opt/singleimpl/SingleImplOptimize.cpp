@@ -416,7 +416,7 @@ CheckCastSet OptimizationImpl::fix_instructions(
             return out;
           };
 
-          if (opcode::is_an_invoke(insn->opcode())) {
+          if (opcode::is_a_method_invoke(insn->opcode())) {
             // We need check-casts for receiver and parameters, but not
             // return type.
 

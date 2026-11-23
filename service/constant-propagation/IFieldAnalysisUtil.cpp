@@ -57,7 +57,7 @@ class ThisObjectAnalysis final
       for (auto it = ii.begin(); it != ii.end(); it++) {
         IRInstruction* insn = it->insn;
         auto op = insn->opcode();
-        if (opcode::is_an_invoke(op)) {
+        if (opcode::is_a_method_invoke(op)) {
           bool use_this = false;
           for (auto src : insn->srcs()) {
             auto this_info = env.get(src).get_constant();
@@ -190,7 +190,7 @@ bool get_ifields_read(const UnorderedSet<std::string>& allowlist_method_names,
               field->get_class() == ifield_cls->get_type()) {
             blocklist_ifields->emplace(field);
           }
-        } else if (opcode::is_an_invoke(insn->opcode())) {
+        } else if (opcode::is_a_method_invoke(insn->opcode())) {
           auto* insn_method = insn->get_method();
           auto* callee = resolve_method_deprecated(
               insn_method, opcode_to_search(insn), method);

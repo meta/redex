@@ -23,7 +23,7 @@ RedundantCheckCastRemover::RedundantCheckCastRemover(
     : m_mgr(mgr), m_scope(scope) {}
 
 void RedundantCheckCastRemover::run() {
-  auto match = std::make_tuple(m::an_invoke(),
+  auto match = std::make_tuple(m::a_method_invoke(),
                                m::move_result_object_(),
                                m::check_cast_(),
                                m::move_result_pseudo_object_());

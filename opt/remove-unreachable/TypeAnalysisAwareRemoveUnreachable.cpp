@@ -78,7 +78,8 @@ struct TypeAnalysisAwareClosureMarkerSharedState final
                   const MethodItemEntry& mie,
                   reachability::References* refs) const {
     bool default_gather_methods =
-        mie.type != MFLOW_OPCODE || !opcode::is_an_invoke(mie.insn->opcode());
+        mie.type != MFLOW_OPCODE ||
+        !opcode::is_a_method_invoke(mie.insn->opcode());
     mrefs_gatherer->default_gather_mie(mie, refs, default_gather_methods);
     if (!default_gather_methods) {
       if (insns_methods_cache->empty()) {
@@ -263,7 +264,7 @@ struct TypeAnalysisAwareClosureMarkerSharedState final
         auto* insn = mie.insn;
         // Replay analysis for individual instruction
         lta->analyze_instruction(insn, &env);
-        if (!opcode::is_an_invoke(insn->opcode())) {
+        if (!opcode::is_a_method_invoke(insn->opcode())) {
           continue;
         }
         auto* method_ref = insn->get_method();

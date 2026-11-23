@@ -186,7 +186,7 @@ TEST_F(CallGraphTest, test_resolve_static_callees) {
   IRInstruction* invoke_insn = nullptr;
   for (const auto& mie : InstructionIterable(code)) {
     auto* insn = mie.insn;
-    if (opcode::is_an_invoke(insn->opcode()) &&
+    if (opcode::is_a_method_invoke(insn->opcode()) &&
         insn->get_method()->str() == "foo") {
       invoke_insn = mie.insn;
     }
@@ -202,7 +202,7 @@ TEST_F(CallGraphTest, test_resolve_virtual_callees) {
   IRCode* code = calls_returns_int->get_code();
   IRInstruction* invoke_insn = nullptr;
   for (const auto& mie : InstructionIterable(code)) {
-    if (opcode::is_an_invoke(mie.insn->opcode())) {
+    if (opcode::is_a_method_invoke(mie.insn->opcode())) {
       invoke_insn = mie.insn;
     }
   }

@@ -280,7 +280,7 @@ bool RuntimeAssertTransform::insert_return_value_assert(
     cfg::InstructionIterator& it,
     Stats& stats) {
   auto* insn = it->insn;
-  if (!opcode::is_an_invoke(insn->opcode())) {
+  if (!opcode::is_a_method_invoke(insn->opcode())) {
     return false;
   }
 

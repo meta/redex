@@ -938,7 +938,7 @@ void rewrite_callers(
 
   auto make_partial_application_invoke_insn =
       [&](DexMethod* caller, IRInstruction* insn) -> IRInstruction* {
-    if (!opcode::is_an_invoke(insn->opcode())) {
+    if (!opcode::is_a_method_invoke(insn->opcode())) {
       return nullptr;
     }
     auto it = selected_invokes.find(insn);
@@ -1305,7 +1305,7 @@ void PartialApplicationPass::run_pass(DexStoresVector& stores,
   auto get_callee_fn = [&excluded_classes, &excluded_invoke_insns](
                            DexMethod* caller,
                            IRInstruction* insn) -> DexMethod* {
-    if (!opcode::is_an_invoke(insn->opcode()) ||
+    if (!opcode::is_a_method_invoke(insn->opcode()) ||
         insn->opcode() == OPCODE_INVOKE_SUPER ||
         method::is_init(insn->get_method()) ||
         (excluded_invoke_insns.count(insn) != 0u) ||

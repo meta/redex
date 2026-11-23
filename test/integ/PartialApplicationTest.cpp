@@ -467,7 +467,7 @@ TEST_F(PartialApplicationTest, does_not_bind_unproven_constant) {
       "Lcom/facebook/redextest/PartialApplication;.call_regression_c1:(II)V");
   std::vector<IRInstruction*> invokes;
   for (const auto& mie : InstructionIterable(code)) {
-    if (opcode::is_an_invoke(mie.insn->opcode())) {
+    if (opcode::is_a_method_invoke(mie.insn->opcode())) {
       invokes.push_back(mie.insn);
     }
   }

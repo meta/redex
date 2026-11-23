@@ -256,7 +256,7 @@ StaticFieldReadAnalysis::Result StaticFieldReadAnalysis::analyze(
 
   cfg_adapter::iterate_with_iterator(code, [&](const IRList::iterator& it) {
     auto* insn = it->insn;
-    if (opcode::is_an_invoke(insn->opcode())) {
+    if (opcode::is_a_method_invoke(insn->opcode())) {
       auto* callee_ref = insn->get_method();
       auto* callee_method_def =
           resolve_method_deprecated(callee_ref, opcode_to_search(insn), method);

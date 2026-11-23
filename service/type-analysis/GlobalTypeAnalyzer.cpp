@@ -73,7 +73,7 @@ void scan_any_init_reachables(
   TRACE(TYPE, 5, "[any init reachables] insert %s", SHOW(method));
   for (auto& mie : cfg::InstructionIterable(cfg)) {
     auto* insn = mie.insn;
-    if (!opcode::is_an_invoke(insn->opcode())) {
+    if (!opcode::is_a_method_invoke(insn->opcode())) {
       continue;
     }
     auto* callee_method_def = resolve_method_deprecated(
@@ -392,7 +392,7 @@ void GlobalTypeAnalysis::find_any_init_reachables(
     auto& cfg = code->cfg();
     for (auto& mie : InstructionIterable(cfg)) {
       auto* insn = mie.insn;
-      if (!opcode::is_an_invoke(insn->opcode())) {
+      if (!opcode::is_a_method_invoke(insn->opcode())) {
         continue;
       }
       auto* callee_method_def = resolve_method_deprecated(

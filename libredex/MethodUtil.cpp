@@ -144,7 +144,7 @@ class ClInitSideEffectsAnalysis {
     cfg_adapter::iterate_with_iterator(
         method->get_code(), [&](const IRList::iterator& it) {
           auto* insn = it->insn;
-          if (opcode::is_an_invoke(insn->opcode())) {
+          if (opcode::is_a_method_invoke(insn->opcode())) {
             if (invoke_may_have_side_effects(effective_caller, insn)) {
               non_trivial = true;
               return cfg_adapter::LOOP_BREAK;

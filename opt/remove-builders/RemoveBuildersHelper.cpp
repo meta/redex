@@ -263,7 +263,7 @@ UnorderedSet<DexMethod*> get_non_trivial_init_methods(IRCode* code,
   UnorderedSet<DexMethod*> methods;
   for (auto const& mie : InstructionIterable(cfg)) {
     auto* insn = mie.insn;
-    if (opcode::is_an_invoke(insn->opcode())) {
+    if (opcode::is_a_method_invoke(insn->opcode())) {
       auto* invoked =
           resolve_method_deprecated(insn->get_method(), opcode_to_search(insn));
       if (invoked != nullptr && invoked->get_class() == type) {
@@ -292,7 +292,7 @@ UnorderedSet<IRInstruction*> get_super_class_initializations(
 
   for (auto& mie : InstructionIterable(cfg)) {
     auto* insn = mie.insn;
-    if (opcode::is_an_invoke(insn->opcode())) {
+    if (opcode::is_a_method_invoke(insn->opcode())) {
       auto* invoked =
           resolve_method_deprecated(insn->get_method(), opcode_to_search(insn));
       if (invoked != nullptr && invoked->get_class() == parent_type &&
@@ -592,7 +592,7 @@ bool remove_builder(DexMethod* method, DexClass* builder) {
           continue;
         }
 
-      } else if (opcode::is_an_invoke(opcode)) {
+      } else if (opcode::is_a_method_invoke(opcode)) {
         auto* invoked = insn->get_method();
         if (invoked->get_class() == builder->get_type() &&
             invoked->get_name() == init) {
@@ -826,7 +826,7 @@ std::vector<cfg::InstructionIterator> get_invokes_for_method(
   auto ii = InstructionIterable(cfg);
   for (auto it = ii.begin(); it != ii.end(); ++it) {
     auto* insn = it->insn;
-    if (opcode::is_an_invoke(insn->opcode())) {
+    if (opcode::is_a_method_invoke(insn->opcode())) {
       auto* invoked = insn->get_method();
       auto* def = resolve_method_deprecated(invoked, MethodSearch::Any);
       if (def != nullptr) {
@@ -976,7 +976,7 @@ void transfer_object_reach(const DexType* obj,
   } else if (opcode::is_a_move_result(op)) {
     regs[insn->dest()] = regs[regs_size];
   } else if (opcode::writes_result_register(op)) {
-    if (opcode::is_an_invoke(op)) {
+    if (opcode::is_a_method_invoke(op)) {
       auto* invoked = insn->get_method();
       auto* def = resolve_method_deprecated(invoked, MethodSearch::Any);
       if (def != nullptr) {
@@ -1005,7 +1005,7 @@ bool tainted_reg_escapes(
     auto* insn = it.first;
     auto tainted = it.second.bits();
     auto op = insn->opcode();
-    if (opcode::is_an_invoke(op)) {
+    if (opcode::is_a_method_invoke(op)) {
       auto* invoked =
           resolve_method_deprecated(insn->get_method(), opcode_to_search(insn));
       size_t args_reg_start{0};
@@ -1154,7 +1154,7 @@ UnorderedSet<DexMethod*> get_all_methods(cfg::ControlFlowGraph& cfg,
   UnorderedSet<DexMethod*> methods;
   for (auto const& mie : InstructionIterable(cfg)) {
     auto* insn = mie.insn;
-    if (opcode::is_an_invoke(insn->opcode())) {
+    if (opcode::is_a_method_invoke(insn->opcode())) {
       auto* invoked =
           resolve_method_deprecated(insn->get_method(), opcode_to_search(insn));
       if (invoked != nullptr && invoked->get_class() == type) {

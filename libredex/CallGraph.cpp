@@ -59,7 +59,7 @@ CallSites SingleCalleeStrategy::get_callsites(const DexMethod* method) const {
   cfg_adapter::iterate_with_iterator(
       code, [&](const IRList::const_iterator& it) {
         auto* insn = it->insn;
-        if (opcode::is_an_invoke(insn->opcode())) {
+        if (opcode::is_a_method_invoke(insn->opcode())) {
           auto* callee = resolve_invoke_method_deprecated(insn, method);
           if (callee == nullptr || is_definitely_virtual(callee)) {
             return cfg_adapter::LOOP_CONTINUE;
@@ -209,7 +209,7 @@ CompleteCallGraphStrategy::get_invoke_targets(const DexMethod* method) const {
   cfg_adapter::iterate_with_iterator(
       code, [&](const IRList::const_iterator& it) {
         auto* insn = it->insn;
-        if (opcode::is_an_invoke(insn->opcode())) {
+        if (opcode::is_a_method_invoke(insn->opcode())) {
           auto* callee = resolve_invoke_method_deprecated(insn, method);
           if (callee == nullptr) {
             return cfg_adapter::LOOP_CONTINUE;
@@ -297,7 +297,7 @@ MultipleCalleeStrategy::MultipleCalleeStrategy(
   ConcurrentSet<const DexMethod*> concurrent_callees;
   walk::parallel::opcodes(scope, [&](const DexMethod* method,
                                      IRInstruction* insn) {
-    if (opcode::is_an_invoke(insn->opcode())) {
+    if (opcode::is_a_method_invoke(insn->opcode())) {
       auto* callee = resolve_invoke_method_deprecated(insn, method);
       if (callee == nullptr) {
         return;
@@ -337,7 +337,7 @@ CallSites MultipleCalleeStrategy::get_callsites(const DexMethod* method) const {
   cfg_adapter::iterate_with_iterator(
       code, [&](const IRList::const_iterator& it) {
         auto* insn = it->insn;
-        if (opcode::is_an_invoke(insn->opcode())) {
+        if (opcode::is_a_method_invoke(insn->opcode())) {
           auto* callee = resolve_invoke_method_deprecated(insn, method);
           if (callee == nullptr) {
             return cfg_adapter::LOOP_CONTINUE;

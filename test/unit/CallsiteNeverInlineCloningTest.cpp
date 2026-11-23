@@ -123,7 +123,7 @@ std::atomic<size_t> CallsiteNeverInlineCloningTest::s_counter{0};
 DexMethod* find_invoked_method(DexMethod* caller) {
   for (auto& mie : InstructionIterable(caller->get_code()->cfg())) {
     auto* insn = mie.insn;
-    if (opcode::is_an_invoke(insn->opcode())) {
+    if (opcode::is_a_method_invoke(insn->opcode())) {
       return insn->get_method()->as_def();
     }
   }
@@ -133,7 +133,7 @@ DexMethod* find_invoked_method(DexMethod* caller) {
 IROpcode find_invoke_opcode(DexMethod* caller) {
   for (auto& mie : InstructionIterable(caller->get_code()->cfg())) {
     auto* insn = mie.insn;
-    if (opcode::is_an_invoke(insn->opcode())) {
+    if (opcode::is_a_method_invoke(insn->opcode())) {
       return insn->opcode();
     }
   }

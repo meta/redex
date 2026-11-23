@@ -136,7 +136,7 @@ size_t count_fields(DexMethod* m, std::string_view prefix) {
 cfg::Block* launchpad_of(DexMethod* host, const DexMethod* split) {
   for (auto* b : host->get_code()->cfg().blocks()) {
     for (const auto& mie : InstructionIterable(b)) {
-      if (opcode::is_an_invoke(mie.insn->opcode()) &&
+      if (opcode::is_a_method_invoke(mie.insn->opcode()) &&
           mie.insn->get_method() == split) {
         return b;
       }

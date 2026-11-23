@@ -42,7 +42,7 @@ void FixpointIterator::analyze_instruction(const IRInstruction* insn,
   auto op = insn->opcode();
   if (op == OPCODE_RETURN_OBJECT) {
     env->set_may_escape(insn->src(0), insn);
-  } else if (opcode::is_an_invoke(op)) {
+  } else if (opcode::is_a_method_invoke(op)) {
     if (!is_safe_method(insn->get_method())) {
       escape_invoke_params(insn, env);
     }

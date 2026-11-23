@@ -197,7 +197,7 @@ class StringBuilderOutlinerTest : public RedexTest {
     for (const auto* block : cfg.blocks()) {
       for (const auto& mie : InstructionIterable(block)) {
         const auto* insn = mie.insn;
-        if (!opcode::is_an_invoke(insn->opcode())) {
+        if (!opcode::is_a_method_invoke(insn->opcode())) {
           continue;
         }
         auto* method = insn->get_method();

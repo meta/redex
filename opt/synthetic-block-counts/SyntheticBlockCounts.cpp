@@ -2000,7 +2000,7 @@ SyntheticBlockCountsPass::run_intermethod_core(
         const double bf = (shape.count(b) != 0u) ? shape[b] : 0.0;
         for (const auto& mie : *b) {
           if (mie.type == MFLOW_OPCODE &&
-              opcode::is_an_invoke(mie.insn->opcode())) {
+              opcode::is_a_method_invoke(mie.insn->opcode())) {
             k_by_insn.emplace(mie.insn, bf);
           }
         }

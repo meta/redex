@@ -634,7 +634,7 @@ Result check_structure(DexMethod* method,
                                       " at start of the method");
           }
           auto prev_op = prev->insn->opcode();
-          if (!(opcode::is_an_invoke(prev_op) ||
+          if (!(opcode::is_a_method_invoke(prev_op) ||
                 opcode::is_filled_new_array(prev_op))) {
             return Result::make_error(
                 "Encountered " + show(*it) +

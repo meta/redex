@@ -294,7 +294,7 @@ class Analyzer final : public BaseEdgeAwareIRAnalyzer<CseEnvironment> {
       if (location !=
           CseLocation(CseSpecialLocations::GENERAL_MEMORY_BARRIER)) {
         read_location_counts[location]++;
-      } else if (opcode::is_an_invoke(insn->opcode()) &&
+      } else if (opcode::is_a_method_invoke(insn->opcode()) &&
                  shared_state->has_pure_method(insn)) {
         for (auto l : UnorderedIterable(
                  shared_state->get_read_locations_of_conditionally_pure_method(
@@ -702,18 +702,18 @@ class Analyzer final : public BaseEdgeAwareIRAnalyzer<CseEnvironment> {
     if (is_unboxed) {
       // for unboxing in boxing-unboxing pattern, the value could be an invoke
       // or IOPCODE_POSITIONAL_UNBOXING.
-      if (!opcode::is_an_invoke(value.opcode) &&
+      if (!opcode::is_a_method_invoke(value.opcode) &&
           value.opcode != IOPCODE_POSITIONAL_UNBOXING) {
         return std::nullopt;
       }
     } else {
       // for boxing, we only consider invoke value.
-      if (!opcode::is_an_invoke(value.opcode)) {
+      if (!opcode::is_a_method_invoke(value.opcode)) {
         return std::nullopt;
       }
     }
 
-    const auto* value_method = opcode::is_an_invoke(value.opcode)
+    const auto* value_method = opcode::is_a_method_invoke(value.opcode)
                                    ? value.method
                                    : value.positional_insn->get_method();
     bool has_unwrap_method = is_unboxed ? (value_method == unwrap_method ||
@@ -731,7 +731,7 @@ class Analyzer final : public BaseEdgeAwareIRAnalyzer<CseEnvironment> {
     const auto& inner_value = it->second;
     // For unboxing-boxing pattern, we don't consider abs-unboxing (i.e.
     // Ljava/lang/Number;.*value()*) at this time.
-    if (opcode::is_an_invoke(inner_value.opcode) &&
+    if (opcode::is_a_method_invoke(inner_value.opcode) &&
         inner_value.method == wrap_method) {
       auto unwrapped_value = inner_value.srcs.at(0);
       if (!is_pre_state_src(unwrapped_value)) {
@@ -759,7 +759,7 @@ class Analyzer final : public BaseEdgeAwareIRAnalyzer<CseEnvironment> {
         return std::nullopt;
       }
       id |= get_location_value_id_mask(location);
-    } else if (opcode::is_an_invoke(value.opcode)) {
+    } else if (opcode::is_a_method_invoke(value.opcode)) {
       id |= get_invoke_value_id_mask(value);
     }
     if (value.opcode != IOPCODE_PRE_STATE_SRC) {
@@ -1023,7 +1023,7 @@ class Analyzer final : public BaseEdgeAwareIRAnalyzer<CseEnvironment> {
   }
 
   value_id_t get_invoke_value_id_mask(const IRValue& value) const {
-    always_assert(opcode::is_an_invoke(value.opcode));
+    always_assert(opcode::is_a_method_invoke(value.opcode));
     value_id_t mask = 0;
     for (auto l : UnorderedIterable(
              m_shared_state->get_read_locations_of_conditionally_pure_method(
@@ -1239,7 +1239,7 @@ void SharedState::init_method_barriers(const Scope& scope) {
           auto* insn = mie.insn;
           if (may_be_barrier(insn, nullptr /* exact_virtual_scope */)) {
             auto barrier = make_barrier(insn);
-            if (!opcode::is_an_invoke(barrier.opcode)) {
+            if (!opcode::is_a_method_invoke(barrier.opcode)) {
               auto location = get_written_location(barrier);
               if (location ==
                   CseLocation(CseSpecialLocations::GENERAL_MEMORY_BARRIER)) {
@@ -1332,7 +1332,7 @@ CseUnorderedLocationSet SharedState::get_relevant_written_locations(
     const DexType* exact_virtual_scope,
     const CseUnorderedLocationSet& read_locations) {
   if (may_be_barrier(insn, exact_virtual_scope)) {
-    if (opcode::is_an_invoke(insn->opcode())) {
+    if (opcode::is_a_method_invoke(insn->opcode())) {
       return get_relevant_written_locations(insn, read_locations);
     } else {
       auto barrier = make_barrier(insn);
@@ -1356,7 +1356,7 @@ bool SharedState::may_be_barrier(const IRInstruction* insn,
     if (opcode::is_an_aput(opcode) || opcode::is_an_iput(opcode) ||
         opcode::is_an_sput(opcode)) {
       return true;
-    } else if (opcode::is_an_invoke(opcode)) {
+    } else if (opcode::is_a_method_invoke(opcode)) {
       return !is_invoke_safe(insn, exact_virtual_scope);
     }
     if (insn->has_field()) {
@@ -1373,7 +1373,7 @@ bool SharedState::may_be_barrier(const IRInstruction* insn,
 
 bool SharedState::is_invoke_safe(const IRInstruction* insn,
                                  const DexType* exact_virtual_scope) {
-  always_assert(opcode::is_an_invoke(insn->opcode()));
+  always_assert(opcode::is_a_method_invoke(insn->opcode()));
   auto* method_ref = insn->get_method();
   auto opcode = insn->opcode();
 
@@ -1414,7 +1414,7 @@ bool SharedState::is_invoke_safe(const IRInstruction* insn,
 
 CseUnorderedLocationSet SharedState::get_relevant_written_locations(
     const IRInstruction* insn, const CseUnorderedLocationSet& read_locations) {
-  always_assert(opcode::is_an_invoke(insn->opcode()));
+  always_assert(opcode::is_a_method_invoke(insn->opcode()));
 
   auto opcode = insn->opcode();
   if (opcode == OPCODE_INVOKE_SUPER) {
@@ -1532,7 +1532,7 @@ void SharedState::cleanup() {
   for (const auto& p : ordered_barriers) {
     const auto& b = p.first;
     auto c = p.second;
-    if (opcode::is_an_invoke(b.opcode)) {
+    if (opcode::is_a_method_invoke(b.opcode)) {
       TRACE(CSE, 2, "%s %s x %zu", SHOW(b.opcode), SHOW(b.method), c);
     } else if (opcode::is_an_ifield_op(b.opcode) ||
                opcode::is_an_sfield_op(b.opcode)) {
@@ -1846,7 +1846,7 @@ bool CommonSubexpressionElimination::patch(bool runtime_assertions) {
 
     if (opcode::is_move_result_any(insn->opcode())) {
       insn = m_cfg.primary_instruction_of_move_result(it)->insn;
-      if (opcode::is_an_invoke(insn->opcode())) {
+      if (opcode::is_a_method_invoke(insn->opcode())) {
         TRACE(CSE, 3, "[CSE] eliminating invocation of %s",
               SHOW(insn->get_method()));
       }

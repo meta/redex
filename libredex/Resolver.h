@@ -80,7 +80,7 @@ using ConcurrentMethodRefCache = InsertOnlyConcurrentMap<MethodRefCacheKey,
  * Helper to map an opcode to a MethodSearch rule.
  */
 inline MethodSearch opcode_to_search(const IROpcode opcode) {
-  always_assert(opcode::is_an_invoke(opcode));
+  always_assert(opcode::is_a_method_invoke(opcode));
   switch (opcode) {
   case OPCODE_INVOKE_DIRECT:
     return MethodSearch::Direct;

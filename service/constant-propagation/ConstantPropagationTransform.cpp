@@ -913,7 +913,7 @@ void Transform::simplify_instruction(const ConstantEnvironment& env,
 
     auto& cfg = cfg_it.cfg();
     auto* primary_insn = cfg.primary_instruction_of_move_result(cfg_it)->insn;
-    if (!opcode::is_an_invoke(primary_insn->opcode())) {
+    if (!opcode::is_a_method_invoke(primary_insn->opcode())) {
       break;
     }
     auto* invoked = resolve_method_deprecated(primary_insn->get_method(),
@@ -1608,7 +1608,7 @@ bool Transform::has_problematic_return(cfg::ControlFlowGraph& cfg,
               return true;
             }
           } else if (def->has_method()) {
-            always_assert(opcode::is_an_invoke(op));
+            always_assert(opcode::is_a_method_invoke(op));
             if (is_problematic_return_type(
                     def->get_method()->get_proto()->get_rtype(), def)) {
               return true;

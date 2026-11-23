@@ -494,7 +494,7 @@ class Analyzer final : public BaseIRAnalyzer<AbstractObjectEnvironment> {
       AbstractObjectEnvironment* current_state) const override {
     AbstractObjectDomain callee_return;
     callee_return.set_to_bottom();
-    if (opcode::is_an_invoke(insn->opcode())) {
+    if (opcode::is_a_method_invoke(insn->opcode())) {
       CallingContext cc;
       auto srcs = insn->srcs();
       for (param_index_t i = 0; i < srcs.size(); i++) {

@@ -195,7 +195,7 @@ Stats replace_uninstantiable_refs(
       continue;
     }
 
-    if (opcode::is_an_invoke(op) &&
+    if (opcode::is_a_method_invoke(op) &&
         (scoped_uninstantiable_types.count(
              insn->get_method()->get_proto()->get_rtype()) != 0u)) {
       auto move_result_it = cfg.move_result_of(it);

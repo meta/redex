@@ -592,7 +592,7 @@ void EarlyClassLoadsAnalysis::walk_callgraph(
     // Processes callees from a single instruction, adding them to the worklist.
     auto process_callees = [&](IRInstruction* insn) {
       auto opcode = insn->opcode();
-      if (!opcode::is_an_invoke(opcode)) {
+      if (!opcode::is_a_method_invoke(opcode)) {
         return;
       }
 

@@ -94,7 +94,7 @@ void RemoveArgs::gather_results_used() {
         auto ii = InstructionIterable(cfg);
         for (auto it = ii.begin(); it != ii.end(); ++it) {
           auto* insn = it->insn;
-          if (!opcode::is_an_invoke(insn->opcode())) {
+          if (!opcode::is_a_method_invoke(insn->opcode())) {
             continue;
           }
           auto move_result = cfg.move_result_of(it);
@@ -864,7 +864,7 @@ std::pair<size_t, LocalDce::Stats> RemoveArgs::update_callsites() {
         size_t callsite_args_removed = 0;
         for (const auto& mie : InstructionIterable(cfg)) {
           auto* insn = mie.insn;
-          if (opcode::is_an_invoke(insn->opcode())) {
+          if (opcode::is_a_method_invoke(insn->opcode())) {
             size_t insn_args_removed = update_callsite(insn);
             if (insn_args_removed > 0) {
               log_opt(CALLSITE_ARGS_REMOVED, method, insn);

@@ -19,7 +19,7 @@
 const DexMethodRef* get_invoked_method(cfg::ControlFlowGraph* cfg) {
   auto iterable = cfg::InstructionIterable(*cfg);
   for (auto it = iterable.begin(); it != iterable.end(); ++it) {
-    if (opcode::is_an_invoke(it->insn->opcode())) {
+    if (opcode::is_a_method_invoke(it->insn->opcode())) {
       return it->insn->get_method();
     }
   }

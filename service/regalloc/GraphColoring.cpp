@@ -97,7 +97,7 @@ RangeSet init_range_set(cfg::ControlFlowGraph& cfg) {
     bool is_range{false};
     if (op == OPCODE_FILLED_NEW_ARRAY) {
       is_range = insn->srcs_size() > dex_opcode::NON_RANGE_MAX;
-    } else if (opcode::is_an_invoke(op)) {
+    } else if (opcode::is_a_method_invoke(op)) {
       is_range = sum_src_sizes(insn) > dex_opcode::NON_RANGE_MAX;
     }
     if (is_range) {

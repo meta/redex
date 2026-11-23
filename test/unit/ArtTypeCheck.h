@@ -763,7 +763,7 @@ inline std::vector<Use> uses_of(const DexMethod* m,
     }
     return uses;
   }
-  if (opcode::is_an_invoke(op)) {
+  if (opcode::is_a_method_invoke(op)) {
     const auto* args = insn->get_method()->get_proto()->get_args();
     const size_t first = op == OPCODE_INVOKE_STATIC ? 0 : 1;
     if (insn->srcs_size() != args->size() + first) {
@@ -1135,7 +1135,7 @@ inline void transfer(DexMethod* m,
     }
     return;
   }
-  if (opcode::is_an_invoke(op)) {
+  if (opcode::is_a_method_invoke(op)) {
     const auto* rtype = insn->get_method()->get_proto()->get_rtype();
     if (rtype != type::_void()) {
       set_result(of_type(rtype));
@@ -1324,7 +1324,7 @@ inline void check_method(
           }
         }
         if (rejected == bit(kUninitialized)) {
-          const bool into_split = opcode::is_an_invoke(insn->opcode()) &&
+          const bool into_split = opcode::is_a_method_invoke(insn->opcode()) &&
                                   checked.contains(insn->get_method());
           report(u.what + " may be an uninitialized object" +
                  (into_split ? ", which crosses the boundary of the split " +

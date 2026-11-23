@@ -50,7 +50,7 @@ bool is_simple(IRCode& code, IRInstruction** invoke_insn) {
              opcode::is_an_sget(it->insn->opcode())) {
     ++it;
     always_assert(it != ii.end());
-  } else if (opcode::is_an_invoke(it->insn->opcode())) {
+  } else if (opcode::is_a_method_invoke(it->insn->opcode())) {
     if (invoke_insn != nullptr) {
       *invoke_insn = it->insn;
     }
@@ -177,7 +177,7 @@ UnorderedSet<IRInstruction*> throw_constructing_invokes(cfg::Block* block) {
   bool has_non_init_invoke = false;
   for (auto& mie : InstructionIterable(block).reversed()) {
     auto* insn = mie.insn;
-    if (!opcode::is_an_invoke(insn->opcode())) {
+    if (!opcode::is_a_method_invoke(insn->opcode())) {
       if (opcode::is_throw(insn->opcode())) {
         has_throw = true;
       }
@@ -205,7 +205,7 @@ ExactCallSiteSkips for_each_exact_call_site(
     for (auto& mie : InstructionIterable(block)) {
       auto* insn = mie.insn;
       auto op = insn->opcode();
-      if (!opcode::is_an_invoke(op)) {
+      if (!opcode::is_a_method_invoke(op)) {
         continue;
       }
       if (throw_adjacent_invokes.count(insn) != 0u) {
@@ -222,7 +222,8 @@ ExactCallSiteSkips for_each_exact_call_site(
       }
       if (op != OPCODE_INVOKE_STATIC && op != OPCODE_INVOKE_DIRECT &&
           op != OPCODE_INVOKE_VIRTUAL) {
-        // Not reachable given is_an_invoke(), kept as a defensive default.
+        // Not reachable given is_a_method_invoke(), kept as a defensive
+        // default.
         continue;
       }
       auto* callee = resolve_invoke_method_deprecated(insn, caller);

@@ -878,7 +878,7 @@ struct Injector {
               SourceBlock* prev_sb = nullptr;
               for (auto it = block->begin(); it != block->end(); it++) {
                 if (it->type == MFLOW_OPCODE) {
-                  if (opcode::is_an_invoke(it->insn->opcode())) {
+                  if (opcode::is_a_method_invoke(it->insn->opcode())) {
                     if ((prev_sb != nullptr) && prev_sb->vals_size > 0) {
                       auto* invoke_insn = it->insn;
                       bool hit = prev_sb->get_val(0).value_or(0) > 0;

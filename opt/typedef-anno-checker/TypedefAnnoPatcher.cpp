@@ -275,7 +275,7 @@ void patch_param_from_method_invoke(TypeEnvironments& envs,
                                     IRInstruction* invoke,
                                     live_range::UseDefChains* ud_chains,
                                     PatchingCandidates& candidates) {
-  always_assert(opcode::is_an_invoke(invoke->opcode()));
+  always_assert(opcode::is_a_method_invoke(invoke->opcode()));
   auto* def_method = resolve_method(caller, invoke);
   if ((def_method == nullptr) || ((def_method->get_param_anno() == nullptr) &&
                                   (def_method->get_anno_set() == nullptr))) {
@@ -343,7 +343,7 @@ void collect_param_candidates_impl(DexMethod* m,
     for (auto& mie : InstructionIterable(b)) {
       auto* insn = mie.insn;
       IROpcode opcode = insn->opcode();
-      if (opcode::is_an_invoke(opcode)) {
+      if (opcode::is_a_method_invoke(opcode)) {
         patch_param_from_method_invoke(envs, analysis.inference(), m, insn,
                                        &ud_chains, candidates);
       } else if (opcode::is_an_iput(opcode) || opcode::is_an_sput(opcode)) {

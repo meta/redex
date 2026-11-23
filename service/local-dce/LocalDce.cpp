@@ -50,7 +50,7 @@ void update_liveness(const IRInstruction* inst,
   auto op = inst->opcode();
   // The destination of an `invoke` is its return value, which is encoded as
   // the max position in the bitvector.
-  if (opcode::is_an_invoke(op) || opcode::is_filled_new_array(op) ||
+  if (opcode::is_a_method_invoke(op) || opcode::is_filled_new_array(op) ||
       inst->has_move_result_pseudo()) {
     bliveness.reset(bliveness.size() - 1);
   }
@@ -245,7 +245,7 @@ bool LocalDce::is_required(const cfg::ControlFlowGraph& cfg,
                            IRInstruction* inst,
                            const boost::dynamic_bitset<>& bliveness) {
   if (opcode::has_side_effects(inst->opcode())) {
-    if (opcode::is_an_invoke(inst->opcode())) {
+    if (opcode::is_a_method_invoke(inst->opcode())) {
       auto* const meth =
           resolve_method_deprecated(inst->get_method(), opcode_to_search(inst));
       if (meth == nullptr) {

@@ -88,7 +88,7 @@ TEST_F(MatchTest, InvokeBasic) {
   invoke->set_method(method);
 
   std::vector<MethodItemEntry> input{MethodItemEntry(invoke.get())};
-  auto match = m::find_insn_match(input, m::an_invoke());
+  auto match = m::find_insn_match(input, m::a_method_invoke());
 
   ASSERT_EQ(match.size(), 1);
   EXPECT_EQ(match[0], invoke.get());

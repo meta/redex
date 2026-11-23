@@ -48,7 +48,7 @@ DexMethod* find_invoked_method(DexMethod* caller) {
   // output); a caller inspecting the result after `run_passes` returns must
   // walk that linear form, not a (by then absent) CFG.
   for (auto& mie : InstructionIterable(*caller->get_code())) {
-    if (opcode::is_an_invoke(mie.insn->opcode())) {
+    if (opcode::is_a_method_invoke(mie.insn->opcode())) {
       return mie.insn->get_method()->as_def();
     }
   }

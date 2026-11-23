@@ -59,7 +59,7 @@ TEST_F(TypeInferenceTest, test_move_exception_type) {
   auto& envs = inference.get_type_environments();
   for (auto& mie : InstructionIterable(cfg)) {
     auto* insn = mie.insn;
-    if (opcode::is_an_invoke(insn->opcode()) &&
+    if (opcode::is_a_method_invoke(insn->opcode()) &&
         insn->get_method() == m_what_is_this) {
       auto& env = envs.at(insn);
       auto dex_type = env.get_dex_type(insn->src(0));
@@ -98,7 +98,7 @@ TEST_F(TypeInferenceTest, test_dedup_blocks_exception_type) {
   auto& envs = inference.get_type_environments();
   for (auto& mie : InstructionIterable(cfg)) {
     auto* insn = mie.insn;
-    if (opcode::is_an_invoke(insn->opcode()) &&
+    if (opcode::is_a_method_invoke(insn->opcode()) &&
         insn->get_method() == m_what_is_this) {
       auto& env = envs.at(insn);
       auto dex_type = env.get_dex_type(insn->src(0));
@@ -222,7 +222,7 @@ TEST_F(TypeInferenceTest, test_small_set_domain) {
   auto exit_env = inference.get_exit_state_at(exit_block);
   for (auto& mie : InstructionIterable(exit_block)) {
     auto* insn = mie.insn;
-    if (!opcode::is_an_invoke(insn->opcode())) {
+    if (!opcode::is_a_method_invoke(insn->opcode())) {
       continue;
     }
     auto ret_type = exit_env.get_type_domain(insn->src(0));
@@ -252,7 +252,7 @@ TEST_F(TypeInferenceTest, test_join_with_interface) {
   auto exit_env = inference.get_exit_state_at(exit_block);
   for (auto& mie : InstructionIterable(exit_block)) {
     auto* insn = mie.insn;
-    if (!opcode::is_an_invoke(insn->opcode())) {
+    if (!opcode::is_a_method_invoke(insn->opcode())) {
       continue;
     }
     auto ret_type = exit_env.get_type_domain(insn->src(0));

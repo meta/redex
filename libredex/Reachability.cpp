@@ -777,7 +777,7 @@ std::optional<MethodReferencesGatherer::ReturningDependency>
 MethodReferencesGatherer::get_returning_dependency(
     const IRInstruction* insn, const References* refs) const {
   auto op = insn->opcode();
-  always_assert(opcode::is_an_invoke(op));
+  always_assert(opcode::is_a_method_invoke(op));
   auto is_method_returning = [&](const auto* method) -> bool {
     always_assert(method);
     always_assert(!is_abstract(method));
@@ -1044,7 +1044,7 @@ void MethodReferencesGatherer::advance(const Advance& advance,
           return std::make_optional<Dependency>(*instantiable_dep);
         }
         m_instructions_visited++;
-        if (opcode::is_an_invoke(it->insn->opcode()) &&
+        if (opcode::is_a_method_invoke(it->insn->opcode()) &&
             m_shared_state->cfg_gathering_check_returning &&
             !m_method->rstate.no_optimizations()) {
           auto methods = std::move(refs->methods);

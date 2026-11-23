@@ -323,7 +323,7 @@ void escape_invoke_params(const IRInstruction* insn,
 void default_instruction_handler(const IRInstruction* insn,
                                  EnvironmentWithStore* env) {
   auto op = insn->opcode();
-  if (opcode::is_an_invoke(op)) {
+  if (opcode::is_a_method_invoke(op)) {
     analyze_generic_invoke(insn, env);
   } else if (opcode::is_a_move(op)) {
     env->set_pointers(insn->dest(), env->get_pointers(insn->src(0)));
@@ -343,7 +343,7 @@ void FixpointIterator::analyze_instruction(const IRInstruction* insn,
   escape_heap_referenced_objects(insn, env);
 
   auto op = insn->opcode();
-  if (opcode::is_an_invoke(op)) {
+  if (opcode::is_a_method_invoke(op)) {
     auto* method = insn->get_method();
     // If the method is an init and the class is excluded, we label is as
     // escaping to prevent further optimizations.
@@ -472,7 +472,7 @@ call_graph::CallSites EscapeCallGraphStrategy::get_callsites(
   always_assert(code->cfg_built());
   for (const auto& mie : cfg::ConstInstructionIterable(code->cfg())) {
     auto* insn = mie.insn;
-    if (!opcode::is_an_invoke(insn->opcode())) {
+    if (!opcode::is_a_method_invoke(insn->opcode())) {
       continue;
     }
     auto* callee = resolve_invoke_method_deprecated(insn, method);

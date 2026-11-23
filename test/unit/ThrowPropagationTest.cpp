@@ -66,7 +66,7 @@ void run_throw_propagation(const ConcurrentSet<DexMethod*>& no_return_methods,
   auto& cfg = code->cfg();
   std::vector<DexMethod*> return_methods;
   auto is_no_return_invoke = [&](IRInstruction* insn) {
-    if (!opcode::is_an_invoke(insn->opcode()) ||
+    if (!opcode::is_a_method_invoke(insn->opcode()) ||
         insn->opcode() == OPCODE_INVOKE_SUPER) {
       return false;
     }
@@ -363,7 +363,7 @@ TEST_F(ThrowPropagationTest, source_block_coverage_preserved_after_split) {
     bool found_sb_after_invoke = false;
     for (auto& mie : *block) {
       if (mie.type == MFLOW_OPCODE &&
-          opcode::is_an_invoke(mie.insn->opcode())) {
+          opcode::is_a_method_invoke(mie.insn->opcode())) {
         found_invoke = true;
       } else if (found_invoke && mie.type == MFLOW_SOURCE_BLOCK) {
         found_sb_after_invoke = true;
@@ -383,7 +383,7 @@ TEST_F(ThrowPropagationTest, source_block_coverage_preserved_after_split) {
       if (mie.type != MFLOW_OPCODE) {
         continue;
       }
-      if (opcode::is_an_invoke(mie.insn->opcode())) {
+      if (opcode::is_a_method_invoke(mie.insn->opcode())) {
         has_invoke = true;
       }
       if (mie.insn->opcode() == OPCODE_THROW) {

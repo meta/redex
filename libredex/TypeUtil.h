@@ -250,6 +250,16 @@ std::optional<int32_t> evaluate_type_check(const DexType* src_type,
                                            const DexType* test_type);
 
 /**
+ * Whether every instance of the class `type` is an instance of `base_type`,
+ * judged from the classes Redex has loaded. Unlike `check_cast`, which answers
+ * false where it does not know a class, this answers nullopt when `type` is not
+ * `base_type` and is not loaded itself, or when no class or interface above
+ * `type` leads to `base_type` and one of those it visited is not loaded.
+ */
+std::optional<bool> is_instance_of_if_known(const DexType* type,
+                                            const DexType* base_type);
+
+/**
  * Validate if the caller has the permit to call a method or access a field.
  *
  * +-------------------------+--------+----------+-----------+-------+

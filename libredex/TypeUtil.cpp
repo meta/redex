@@ -278,20 +278,7 @@ bool check_cast(const DexType* type, const DexType* base_type) {
     }
     return base_type == java_lang_Object();
   }
-  auto* const cls = type_class(type);
-  if (cls == nullptr) {
-    return false;
-  }
-  if (check_cast(cls->get_super_class(), base_type)) {
-    return true;
-  }
-  auto* intfs = cls->get_interfaces();
-  for (auto* intf : *intfs) {
-    if (check_cast(intf, base_type)) {
-      return true;
-    }
-  }
-  return false;
+  return is_instance_of_if_known(type, base_type).value_or(false);
 }
 
 /**
@@ -567,6 +554,36 @@ std::optional<int32_t> evaluate_type_check(const DexType* src_type,
   }
 
   return std::nullopt;
+}
+
+std::optional<bool> is_instance_of_if_known(const DexType* type,
+                                            const DexType* base_type) {
+  if (type == base_type) {
+    return true;
+  }
+  if (type == nullptr) {
+    // The superclass of java.lang.Object: an instance of nothing else.
+    return false;
+  }
+  const auto* cls = type_class(type);
+  if (cls == nullptr) {
+    return std::nullopt;
+  }
+  bool known = true;
+  auto reaches_base = [&](const DexType* super) {
+    auto result = is_instance_of_if_known(super, base_type);
+    known &= result.has_value();
+    return result.value_or(false);
+  };
+  if (reaches_base(cls->get_super_class())) {
+    return true;
+  }
+  for (const auto* intf : *cls->get_interfaces()) {
+    if (reaches_base(intf)) {
+      return true;
+    }
+  }
+  return known ? std::optional<bool>(false) : std::nullopt;
 }
 
 /*

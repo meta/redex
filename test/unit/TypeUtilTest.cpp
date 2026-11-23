@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "Creators.h"
 #include "RedexTest.h"
 
 class TypeUtilTest : public RedexTest {
@@ -261,4 +262,31 @@ TEST_F(TypeUtilTest, concurrent_first_use_of_well_known_types) {
   for (auto* loaded : objects) {
     EXPECT_EQ(loaded, object);
   }
+}
+
+TEST_F(TypeUtilTest, is_instance_of_if_known) {
+  using namespace type;
+  auto* object = java_lang_Object();
+  auto* serializable = DexType::make_type("Ljava/io/Serializable;");
+  auto* number = DexType::make_type("Ljava/lang/Number;");
+  auto* integer = java_lang_Integer();
+  // Unlike `check_cast`, no answer while Integer's hierarchy is unknown.
+  EXPECT_EQ(is_instance_of_if_known(integer, serializable), std::nullopt);
+
+  ClassCreator(object).create();
+  ClassCreator sc(serializable);
+  sc.set_super(object);
+  sc.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  sc.create();
+  ClassCreator nc(number);
+  nc.set_super(object);
+  nc.add_interface(serializable);
+  nc.create();
+  ClassCreator ic(integer);
+  ic.set_super(number);
+  ic.create();
+
+  EXPECT_EQ(is_instance_of_if_known(integer, serializable), true);
+  EXPECT_EQ(is_instance_of_if_known(integer, java_lang_String()), false);
+  EXPECT_EQ(is_instance_of_if_known(number, integer), false);
 }

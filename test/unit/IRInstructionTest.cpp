@@ -519,3 +519,11 @@ TEST_F(IRInstructionTest, MoveResultPseudoFor) {
   EXPECT_EQ(opcode::move_result_pseudo_for_sget(OPCODE_SGET_OBJECT),
             IOPCODE_MOVE_RESULT_PSEUDO_OBJECT);
 }
+
+TEST_F(IRInstructionTest, DynamicInvokesAreExactlyPolymorphicAndCustom) {
+  for (auto op : all_opcodes) {
+    EXPECT_EQ(opcode::is_a_dynamic_invoke(op),
+              op == OPCODE_INVOKE_POLYMORPHIC || op == OPCODE_INVOKE_CUSTOM)
+        << SHOW(op);
+  }
+}

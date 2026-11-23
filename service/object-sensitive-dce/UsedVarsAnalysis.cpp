@@ -207,6 +207,11 @@ bool FixpointIterator::is_required(const IRInstruction* insn,
       return is_used_or_escaping_write(env, used_vars, insn->src(idx));
     });
   }
+  case OPCODE_INVOKE_POLYMORPHIC:
+  case OPCODE_INVOKE_CUSTOM: {
+    // Neither names the method that runs, so its effects are unknown.
+    return true;
+  }
   default: {
     if (insn->has_dest()) {
       return used_vars.contains(insn->dest());

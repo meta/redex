@@ -59,6 +59,30 @@ DexClass* create_simple_class(const std::string& name) {
   return cc.create();
 }
 
+TEST_F(UsedVarsTest, UnusedInvokePolymorphicRemains) {
+  ClassCreator handles(DexType::make_type("Ljava/lang/invoke/MethodHandle;"));
+  handles.set_super(type::java_lang_Object());
+  handles.add_method(
+      DexMethod::make_method(
+          "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)"
+          "Ljava/lang/Object;")
+          ->make_concrete(ACC_PUBLIC | ACC_NATIVE, true));
+  handles.create();
+  auto code = assembler::ircode_from_string(R"(
+    ((load-param-object v0)
+     (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;")
+     (move-result-object v1)
+     (return-void))
+  )");
+  code->build_cfg();
+  auto& cfg = code->cfg();
+  auto fp_iter = analyze(cfg, {}, {});
+  optimize(*fp_iter, cfg);
+  code->clear_cfg();
+  const auto output = assembler::to_string(code.get());
+  EXPECT_NE(output.find("invoke-polymorphic"), std::string::npos) << output;
+}
+
 TEST_F(UsedVarsTest, simple) {
   create_simple_class("LFoo;");
 

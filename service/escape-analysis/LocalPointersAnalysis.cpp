@@ -206,8 +206,12 @@ bool dest_may_be_pointer(const IRInstruction* insn) {
   case OPCODE_INVOKE_STATIC:
   case OPCODE_INVOKE_INTERFACE:
     return !type::is_primitive(insn->get_method()->get_proto()->get_rtype());
+  case OPCODE_INVOKE_POLYMORPHIC:
+  case OPCODE_INVOKE_CUSTOM:
   case OPCODE_CONST_STRING:
   case OPCODE_CONST_CLASS:
+  case OPCODE_CONST_METHOD_HANDLE:
+  case OPCODE_CONST_METHOD_TYPE:
   case OPCODE_CHECK_CAST:
     return true;
   case OPCODE_INSTANCE_OF:
@@ -306,6 +310,13 @@ void escape_dest(const IRInstruction* insn,
 
 void escape_invoke_params(const IRInstruction* insn,
                           EnvironmentWithStore* env) {
+  // A call site or method handle may do anything with any of its arguments.
+  if (opcode::is_a_dynamic_invoke(insn->opcode())) {
+    for (size_t i = 0; i < insn->srcs_size(); ++i) {
+      env->set_may_escape(insn->src(i), insn);
+    }
+    return;
+  }
   size_t idx{0};
   if (insn->opcode() != OPCODE_INVOKE_STATIC) {
     env->set_may_escape(insn->src(0), insn);
@@ -323,7 +334,7 @@ void escape_invoke_params(const IRInstruction* insn,
 void default_instruction_handler(const IRInstruction* insn,
                                  EnvironmentWithStore* env) {
   auto op = insn->opcode();
-  if (opcode::is_a_method_invoke(op)) {
+  if (opcode::is_a_method_invoke(op) || opcode::is_a_dynamic_invoke(op)) {
     analyze_generic_invoke(insn, env);
   } else if (opcode::is_a_move(op)) {
     env->set_pointers(insn->dest(), env->get_pointers(insn->src(0)));

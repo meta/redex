@@ -191,6 +191,12 @@ void SummaryBuilder::analyze_instruction_effects(
     }
     break;
   }
+  case OPCODE_INVOKE_POLYMORPHIC:
+  case OPCODE_INVOKE_CUSTOM: {
+    // Neither names the method that runs.
+    summary->effects |= EFF_UNKNOWN_INVOKE;
+    break;
+  }
   default: {
     break;
   }

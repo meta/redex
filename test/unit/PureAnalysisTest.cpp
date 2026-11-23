@@ -179,3 +179,23 @@ TEST_F(PureAnalysisTest, simple9) {
   const char* signature = "LFoo;.add:(LBar;)V;";
   test(signature, code_str, false);
 }
+
+TEST_F(PureAnalysisTest, InvokePolymorphicIsNotPure) {
+  ClassCreator handles(DexType::make_type("Ljava/lang/invoke/MethodHandle;"));
+  handles.set_super(type::java_lang_Object());
+  handles.add_method(
+      DexMethod::make_method(
+          "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)"
+          "Ljava/lang/Object;")
+          ->make_concrete(ACC_PUBLIC | ACC_NATIVE, true));
+  handles.create();
+  test("LFoo;.dynamic:(Ljava/lang/invoke/MethodHandle;)V",
+       R"(
+    ((load-param-object v0)
+     (load-param-object v1)
+     (invoke-polymorphic (v1) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;")
+     (move-result-object v2)
+     (return-void))
+  )",
+       false);
+}

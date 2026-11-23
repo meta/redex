@@ -9,6 +9,8 @@
 
 #include <gtest/gtest.h>
 
+#include "Creators.h"
+#include "DexAccess.h"
 #include "IRAssembler.h"
 #include "LocalPointersAnalysis.h"
 #include "RedexTest.h"
@@ -94,6 +96,25 @@ TEST_F(SideEffectSummaryTest, locks) {
     )
   )");
   EXPECT_EQ(analyze_code_effects(code.get()), Summary(EFF_LOCKS, {}, true));
+}
+
+TEST_F(SideEffectSummaryTest, InvokePolymorphicHasUnknownEffects) {
+  ClassCreator handles(DexType::make_type("Ljava/lang/invoke/MethodHandle;"));
+  handles.set_super(type::java_lang_Object());
+  handles.add_method(
+      DexMethod::make_method(
+          "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)"
+          "Ljava/lang/Object;")
+          ->make_concrete(ACC_PUBLIC | ACC_NATIVE, true));
+  handles.create();
+  auto code = assembler::ircode_from_string(R"(
+    ((load-param-object v0)
+     (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;")
+     (move-result-object v1)
+     (return-void))
+  )");
+  auto summary = analyze_code_effects(code.get());
+  EXPECT_NE(summary.effects & EFF_UNKNOWN_INVOKE, 0u);
 }
 
 TEST_F(SideEffectSummaryTest, unknownWrite) {

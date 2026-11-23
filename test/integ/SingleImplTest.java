@@ -59,3 +59,38 @@ interface Sender {}
 class EmailSender implements Sender {
   public String send(MessageImpl m) { return "email"; }
 }
+
+// `R` is the only implementation of both interfaces that declare it.
+interface P {
+  interface Q {
+    class R implements P, Q {}
+  }
+}
+
+// `Impl` is the only implementation of both interfaces that declare it.
+// `AAA` makes SingleImpl remove `ZInner` in a later round than `AOuter`.
+interface AOuter {
+  void m(AOuter.ZInner x);
+
+  interface AAA {
+    void k(AOuter.ZInner z);
+  }
+
+  interface ZInner {
+    class Impl implements AOuter, ZInner {
+      public void m(ZInner x) {}
+    }
+  }
+}
+
+class AAAImpl implements AOuter.AAA {
+  public void k(AOuter.ZInner z) {}
+}
+
+// `Impl3` is the only implementation of `Deep`, which declares it inside the
+// class `Middle`.
+interface Deep {
+  class Middle {
+    class Impl3 implements Deep {}
+  }
+}

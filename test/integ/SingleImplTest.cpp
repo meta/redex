@@ -189,3 +189,193 @@ TEST_F(SingleImplTest, KeepsOverloadsOfDefaultMethods) {
       is_def("Lcom/facebook/redextest/Sender;.send:(Lcom/facebook/redextest/"
              "Message;)Ljava/lang/String;"));
 }
+
+namespace {
+
+void attach_annotations(DexClass* cls,
+                        std::vector<std::unique_ptr<DexAnnotation>> annos) {
+  auto set = std::make_unique<DexAnnotationSet>();
+  for (auto& anno : annos) {
+    set->add_annotation(std::move(anno));
+  }
+  always_assert(cls->attach_annotation_set(std::move(set)));
+}
+
+std::unique_ptr<DexAnnotation> make_system_annotation(
+    const char* type, std::unique_ptr<DexEncodedValue> value) {
+  auto anno =
+      std::make_unique<DexAnnotation>(DexType::make_type(type), DAV_SYSTEM);
+  anno->add_element("value", std::move(value));
+  return anno;
+}
+
+std::unique_ptr<DexAnnotation> make_enclosing_class(DexType* outer) {
+  return make_system_annotation("Ldalvik/annotation/EnclosingClass;",
+                                std::make_unique<DexEncodedValueType>(outer));
+}
+
+std::unique_ptr<DexAnnotation> make_inner_class(const char* name) {
+  return make_system_annotation(
+      "Ldalvik/annotation/InnerClass;",
+      std::make_unique<DexEncodedValueString>(DexString::make_string(name)));
+}
+
+const DexAnnotation* find_annotation(const DexClass* cls, const char* type) {
+  if (cls->get_anno_set() == nullptr) {
+    return nullptr;
+  }
+  for (const auto& anno : cls->get_anno_set()->get_annotations()) {
+    if (anno->type() == DexType::get_type(type)) {
+      return anno.get();
+    }
+  }
+  return nullptr;
+}
+
+std::vector<std::string> annotation_names(const DexClass* cls) {
+  std::vector<std::string> names;
+  if (cls->get_anno_set() != nullptr) {
+    for (const auto& anno : cls->get_anno_set()->get_annotations()) {
+      names.push_back(show(anno.get()));
+    }
+  }
+  return names;
+}
+
+} // namespace
+
+// Java: `interface Intf { class Impl implements Intf { ... } }`. `Impl` takes
+// the place of the top-level `Intf`, so it becomes a top-level class instead
+// of enclosing itself.
+TEST_F(SingleImplTest, ImplDeclaredInTopLevelInterfaceBecomesTopLevel) {
+  auto* intf = type_class(DexType::get_type("Lcom/facebook/redextest/Intf;"));
+  auto* impl = type_class(DexType::get_type("Lcom/facebook/redextest/Impl;"));
+  std::vector<std::unique_ptr<DexAnnotation>> impl_annos;
+  impl_annos.push_back(make_enclosing_class(intf->get_type()));
+  impl_annos.push_back(make_inner_class("Impl"));
+  attach_annotations(impl, std::move(impl_annos));
+
+  auto si = std::make_unique<SingleImplPass>();
+  std::vector<Pass*> passes{si.get()};
+  run_passes(passes);
+
+  ASSERT_TRUE(impl->get_interfaces()->empty());
+  EXPECT_EQ(impl->get_anno_set(), nullptr);
+}
+
+// Java: `class Helper { interface Intf { class Impl implements Intf { ... } }
+// }`. `Impl` takes the place of `Intf` as a member class of `Helper`.
+TEST_F(SingleImplTest, ImplDeclaredInNestedInterfaceTakesItsPlace) {
+  auto* intf = type_class(DexType::get_type("Lcom/facebook/redextest/Intf;"));
+  auto* impl = type_class(DexType::get_type("Lcom/facebook/redextest/Impl;"));
+  auto* helper = DexType::get_type("Lcom/facebook/redextest/Helper;");
+  std::vector<std::unique_ptr<DexAnnotation>> intf_annos;
+  intf_annos.push_back(make_enclosing_class(helper));
+  intf_annos.push_back(make_inner_class("Intf"));
+  attach_annotations(intf, std::move(intf_annos));
+  std::vector<std::unique_ptr<DexAnnotation>> impl_annos;
+  impl_annos.push_back(make_enclosing_class(intf->get_type()));
+  impl_annos.push_back(make_inner_class("Impl"));
+  attach_annotations(impl, std::move(impl_annos));
+
+  auto si = std::make_unique<SingleImplPass>();
+  std::vector<Pass*> passes{si.get()};
+  run_passes(passes);
+
+  ASSERT_TRUE(impl->get_interfaces()->empty());
+  auto names = annotation_names(impl);
+  std::sort(names.begin(), names.end());
+  std::vector<std::string> expected{show(make_enclosing_class(helper).get()),
+                                    show(make_inner_class("Impl").get())};
+  std::sort(expected.begin(), expected.end());
+  EXPECT_EQ(names, expected);
+}
+
+// `R` takes the place of `P`, the outermost interface that declares it, so it
+// becomes a top-level class.
+TEST_F(SingleImplTest, ImplDeclaredInTwoOfItsInterfacesBecomesTopLevel) {
+  auto* r = type_class(DexType::get_type("Lcom/facebook/redextest/P$Q$R;"));
+  ASSERT_NE(r, nullptr);
+
+  auto si = std::make_unique<SingleImplPass>();
+  std::vector<Pass*> passes{si.get()};
+  run_passes(passes);
+
+  ASSERT_TRUE(r->get_interfaces()->empty());
+  EXPECT_EQ(find_annotation(r, "Ldalvik/annotation/EnclosingClass;"), nullptr);
+  EXPECT_EQ(find_annotation(r, "Ldalvik/annotation/InnerClass;"), nullptr);
+}
+
+// As above, with the two interfaces removed in different rounds: `Impl` takes
+// the place of `AOuter` in the first round and is no longer declared inside
+// `ZInner` when the second round removes it.
+TEST_F(SingleImplTest,
+       ImplDeclaredInInterfacesRemovedInTwoRoundsBecomesTopLevel) {
+  auto* impl = type_class(
+      DexType::get_type("Lcom/facebook/redextest/AOuter$ZInner$Impl;"));
+  ASSERT_NE(impl, nullptr);
+
+  auto si = std::make_unique<SingleImplPass>();
+  std::vector<Pass*> passes{si.get()};
+  run_passes(passes);
+
+  ASSERT_TRUE(impl->get_interfaces()->empty());
+  EXPECT_EQ(find_annotation(impl, "Ldalvik/annotation/EnclosingClass;"),
+            nullptr);
+  EXPECT_EQ(find_annotation(impl, "Ldalvik/annotation/InnerClass;"), nullptr);
+}
+
+// `Impl3` takes the place of `Deep` at the top level instead of being
+// enclosed by `Middle`, which `Impl3` would enclose in turn.
+TEST_F(SingleImplTest, ImplDeclaredInClassInsideInterfaceBecomesTopLevel) {
+  auto* impl = type_class(
+      DexType::get_type("Lcom/facebook/redextest/Deep$Middle$Impl3;"));
+  ASSERT_NE(impl, nullptr);
+
+  auto si = std::make_unique<SingleImplPass>();
+  std::vector<Pass*> passes{si.get()};
+  run_passes(passes);
+
+  ASSERT_TRUE(impl->get_interfaces()->empty());
+  EXPECT_EQ(find_annotation(impl, "Ldalvik/annotation/EnclosingClass;"),
+            nullptr);
+}
+
+// `Intf` stands for a local interface declared in `Helper.retIntf()`, which
+// declares `Impl`. `Impl` takes the place of `Intf` in `retIntf()`.
+TEST_F(SingleImplTest, ImplDeclaredInLocalInterfaceTakesItsPlace) {
+  auto* intf = type_class(DexType::get_type("Lcom/facebook/redextest/Intf;"));
+  auto* impl = type_class(DexType::get_type("Lcom/facebook/redextest/Impl;"));
+  auto* ret_intf = DexMethod::get_method(
+      "Lcom/facebook/redextest/Helper;.retIntf:()Lcom/facebook/redextest/"
+      "Intf;");
+  ASSERT_NE(ret_intf, nullptr);
+  std::vector<std::unique_ptr<DexAnnotation>> intf_annos;
+  intf_annos.push_back(make_system_annotation(
+      "Ldalvik/annotation/EnclosingMethod;",
+      std::make_unique<DexEncodedValueMethod>(ret_intf)));
+  intf_annos.push_back(make_inner_class("Intf"));
+  attach_annotations(intf, std::move(intf_annos));
+  std::vector<std::unique_ptr<DexAnnotation>> impl_annos;
+  impl_annos.push_back(make_enclosing_class(intf->get_type()));
+  impl_annos.push_back(make_inner_class("Impl"));
+  attach_annotations(impl, std::move(impl_annos));
+
+  auto si = std::make_unique<SingleImplPass>();
+  std::vector<Pass*> passes{si.get()};
+  run_passes(passes);
+
+  ASSERT_TRUE(impl->get_interfaces()->empty());
+  EXPECT_EQ(find_annotation(impl, "Ldalvik/annotation/EnclosingClass;"),
+            nullptr);
+  const auto* enclosing_method =
+      find_annotation(impl, "Ldalvik/annotation/EnclosingMethod;");
+  ASSERT_NE(enclosing_method, nullptr);
+  EXPECT_EQ(show(enclosing_method->anno_elems().front().encoded_value.get()),
+            show(std::make_unique<DexEncodedValueMethod>(
+                     DexMethod::get_method(
+                         "Lcom/facebook/redextest/Helper;.retIntf:()Lcom/"
+                         "facebook/redextest/Impl;"))
+                     .get()));
+  EXPECT_NE(find_annotation(impl, "Ldalvik/annotation/InnerClass;"), nullptr);
+}

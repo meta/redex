@@ -15,6 +15,7 @@
 #include "CheckCastTransform.h"
 #include "ClassHierarchy.h"
 #include "Debug.h"
+#include "DexAnnotation.h"
 #include "IRCode.h"
 #include "IRList.h"
 #include "LocalDce.h"
@@ -117,6 +118,29 @@ void combine_class_annotations(DexClass* cls, DexClass* intf_cls) {
     }
   }
   cls->combine_annotations_with(&filtered);
+}
+
+/**
+ * The type named by the `EnclosingClass` annotation of `cls`, or null if
+ * `cls` has no such annotation.
+ */
+DexType* get_enclosing_class(const DexClass* cls) {
+  const auto* annos = cls->get_anno_set();
+  if (annos == nullptr) {
+    return nullptr;
+  }
+  for (const auto& anno : annos->get_annotations()) {
+    if (anno->type() != type::dalvik_annotation_EnclosingClass()) {
+      continue;
+    }
+    for (const auto& elem : anno->anno_elems()) {
+      if (elem.encoded_value->evtype() == DEVT_TYPE) {
+        return dynamic_cast<DexEncodedValueType*>(elem.encoded_value.get())
+            ->type();
+      }
+    }
+  }
+  return nullptr;
 }
 
 /**
@@ -237,6 +261,7 @@ struct OptimizationImpl {
   void rewrite_interface_methods(const DexType* intf,
                                  const SingleImplData& data);
   void rewrite_annotations(Scope& scope, const SingleImplConfig& config);
+  void place_nested_impls();
   void rename_possible_collisions(const DexType* intf,
                                   const SingleImplData& data);
 
@@ -629,6 +654,10 @@ void OptimizationImpl::rewrite_annotations(Scope& scope,
     return;
   }
 
+  if (must_set_interface_annotations(config)) {
+    place_nested_impls();
+  }
+
   for (const auto& cls : scope) {
     auto* anno_set = cls->get_anno_set();
     if (anno_set == nullptr) {
@@ -644,6 +673,71 @@ void OptimizationImpl::rewrite_annotations(Scope& scope,
       for (const auto& elem : elems) {
         const auto& value = elem.encoded_value;
         rewrite_fn(cls, anno.get(), value.get());
+      }
+    }
+  }
+}
+
+/**
+ * `rewrite_annotations` points the `EnclosingClass` of every class declared
+ * directly in an optimized interface at its implementation. An implementation
+ * nested in that interface, through member classes at any depth, would then
+ * end up enclosing itself, directly or through the classes in between, as in
+ * `interface Callback { class Empty implements Callback {} }`, and
+ * `getCanonicalName()` would recurse until the stack overflows. So such an
+ * implementation takes the place of the outermost such interface instead: its
+ * nesting annotations say it is declared where that interface was declared, in
+ * a class, in a method, or at the top level.
+ */
+void OptimizationImpl::place_nested_impls() {
+  auto* enclosing_class = type::dalvik_annotation_EnclosingClass();
+  auto* enclosing_method = type::dalvik_annotation_EnclosingMethod();
+  auto* inner_class = type::dalvik_annotation_InnerClass();
+  UnorderedSet<const DexType*> impl_types;
+  for (const auto* intf : UnorderedIterable(optimized)) {
+    impl_types.insert(single_impls->get_single_impl_data(intf).cls);
+  }
+  for (const auto* impl_type :
+       unordered_to_ordered(impl_types, compare_dextypes)) {
+    auto* impl = type_class(impl_type);
+    const DexType* outermost = nullptr;
+    UnorderedSet<const DexType*> visited;
+    for (auto* outer = get_enclosing_class(impl);
+         outer != nullptr && visited.insert(outer).second;) {
+      if (optimized.find(outer) != optimized.end() &&
+          single_impls->get_single_impl_data(outer).cls == impl_type) {
+        outermost = outer;
+      }
+      const auto* outer_cls = type_class(outer);
+      outer = outer_cls == nullptr ? nullptr : get_enclosing_class(outer_cls);
+    }
+    if (outermost == nullptr) {
+      continue;
+    }
+    TRACE(INTF, 3, "(NEST) %s takes the place of %s", SHOW(impl),
+          SHOW(outermost));
+    auto& annos = impl->get_anno_set()->get_annotations();
+    std::erase_if(annos, [&](const auto& anno) {
+      return anno->type() == enclosing_class ||
+             anno->type() == enclosing_method;
+    });
+    bool is_nested = false;
+    const auto* intf_annos = type_class(outermost)->get_anno_set();
+    if (intf_annos != nullptr) {
+      for (const auto& intf_anno : intf_annos->get_annotations()) {
+        if (intf_anno->type() != enclosing_class &&
+            intf_anno->type() != enclosing_method) {
+          continue;
+        }
+        annos.push_back(std::make_unique<DexAnnotation>(intf_anno->clone()));
+        is_nested = true;
+      }
+    }
+    if (!is_nested) {
+      std::erase_if(
+          annos, [&](const auto& anno) { return anno->type() == inner_class; });
+      if (annos.empty()) {
+        impl->clear_annotations();
       }
     }
   }

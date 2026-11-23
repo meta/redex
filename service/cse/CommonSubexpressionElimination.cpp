@@ -226,7 +226,7 @@ static Barrier make_barrier(const IRInstruction* insn) {
         resolve_field(insn->get_field(), opcode::is_an_sfield_op(insn->opcode())
                                              ? FieldSearch::Static
                                              : FieldSearch::Instance);
-  } else if (insn->has_method()) {
+  } else if (opcode::is_a_method_invoke(insn->opcode())) {
     b.method =
         resolve_method_deprecated(insn->get_method(), opcode_to_search(insn));
   }
@@ -1354,7 +1354,9 @@ bool SharedState::may_be_barrier(const IRInstruction* insn,
     return true;
   default:
     if (opcode::is_an_aput(opcode) || opcode::is_an_iput(opcode) ||
-        opcode::is_an_sput(opcode)) {
+        opcode::is_an_sput(opcode) ||
+        // Neither dynamic invoke names the method that runs.
+        opcode::is_a_dynamic_invoke(opcode)) {
       return true;
     } else if (opcode::is_a_method_invoke(opcode)) {
       return !is_invoke_safe(insn, exact_virtual_scope);

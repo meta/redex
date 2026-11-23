@@ -2579,3 +2579,18 @@ TEST_F(CommonSubexpressionEliminationTest, if_lt_memory) {
   )";
   test(Scope{type_class(type::java_lang_Object())}, code_str, expected_str, 1);
 }
+
+TEST_F(CommonSubexpressionEliminationTest, invoke_polymorphic_is_barrier) {
+  const auto* code_str = R"(
+    (
+      (const v0 0)
+      (sget "LFoo;.s:I")
+      (move-result-pseudo v1)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:()V")
+      (sget "LFoo;.s:I")
+      (move-result-pseudo v2)
+    )
+  )";
+  const auto* expected_str = code_str;
+  test(Scope{type_class(type::java_lang_Object())}, code_str, expected_str, 0);
+}

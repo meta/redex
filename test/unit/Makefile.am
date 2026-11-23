@@ -75,6 +75,7 @@ check_PROGRAMS = \
     concurrent_hashtable_test \
     configurable_test \
     config_files_test \
+    constructor_accesses_test \
     constructor_analysis_test \
     control_flow_test \
     copy_propagation_test \
@@ -347,6 +348,8 @@ configurable_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 config_files_test_SOURCES = ConfigFilesTest.cpp
 EXTRA_config_files_test_DEPENDENCIES = config_files_test.env
 $(eval $(call make_env,config_files_test,class_frequencies_path=$(srcdir)/class_frequencies.txt))
+
+constructor_accesses_test_SOURCES = ConstructorAccessesTest.cpp
 
 constructor_analysis_test_SOURCES = ConstructorAnalysisTest.cpp
 

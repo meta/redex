@@ -681,3 +681,44 @@ TEST_F(ResolverTest, HasSignatureCollisionWithUndefinedInterface) {
   EXPECT_FALSE(
       has_signature_collision(build_subtype_maps({cls}), method, string_proto));
 }
+
+namespace {
+
+DexClass* make_class(const char* name,
+                     DexAccessFlags access,
+                     const char* super = nullptr,
+                     const char* intf = nullptr) {
+  ClassCreator creator(DexType::make_type(name));
+  creator.set_access(access);
+  creator.set_super(super == nullptr ? type::java_lang_Object()
+                                     : DexType::make_type(super));
+  if (intf != nullptr) {
+    creator.add_interface(DexType::make_type(intf));
+  }
+  return creator.create();
+}
+
+DexMethod* add_method(DexClass* cls, const char* name) {
+  auto* method =
+      DexMethod::make_method(show(cls->get_type()) + "." + name + ":()V")
+          ->make_concrete(ACC_PUBLIC, /* is_virtual */ true);
+  cls->add_method(method);
+  return method;
+}
+
+} // namespace
+
+// class S { public void m() {} }
+// invoke-interface S.m()V, as in code compiled against a version of S that was
+// an interface: the verifier accepts it, and it throws when it runs.
+TEST_F(ResolverTest, ResolveInterfaceMethodOfClass) {
+  create_object_class();
+  auto* s = make_class("LS;", ACC_PUBLIC);
+  add_method(s, "m");
+
+  const auto* name = DexString::make_string("m");
+  auto* proto =
+      DexProto::make_proto(type::_void(), DexTypeList::make_type_list({}));
+  EXPECT_EQ(resolve_method(s, name, proto, MethodSearch::Interface), nullptr);
+  EXPECT_EQ(resolve_interface_method(s, name, proto), nullptr);
+}

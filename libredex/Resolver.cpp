@@ -189,8 +189,12 @@ DexMethod* resolve_method_impl(const DexClass* cls,
   }
   if (search == MethodSearch::Interface) {
     if (cls != nullptr) {
-      always_assert_log(is_interface(cls), "Class %s is not an interface\n",
-                        SHOW(cls));
+      if (!is_interface(cls)) {
+        // Interface method resolution fails (JVMS 5.4.3.4). The verifier
+        // accepts such an invoke-interface, e.g. in code compiled against an
+        // older library; the runtime throws only when the instruction runs.
+        return nullptr;
+      }
       return resolve_intf_method_ref(cls, name, proto);
     }
   }

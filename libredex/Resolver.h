@@ -196,22 +196,12 @@ inline DexMethod* resolve_static(const DexClass* cls,
 inline DexMethod* resolve_interface_method_deprecated(const DexClass* cls,
                                                       const DexString* name,
                                                       const DexProto* proto) {
-  if (cls == nullptr) {
-    return nullptr;
-  }
-  always_assert_log(is_interface(cls), "Class %s is not an interface\n",
-                    SHOW(cls));
   return resolve_method_deprecated(cls, name, proto, MethodSearch::Interface);
 }
 
 inline DexMethod* resolve_interface_method(const DexClass* cls,
                                            const DexString* name,
                                            const DexProto* proto) {
-  if (cls == nullptr) {
-    return nullptr;
-  }
-  always_assert_log(is_interface(cls), "Class %s is not an interface\n",
-                    SHOW(cls));
   return resolve_method(cls, name, proto, MethodSearch::Interface);
 }
 

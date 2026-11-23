@@ -311,6 +311,39 @@ TEST_F(LocalDceEnhanceTest, NoImplementorIntfTest) {
   EXPECT_CODE_EQ(ircode, expected_code.get());
 }
 
+TEST_F(LocalDceEnhanceTest, MethodHandleCallHasSideEffects) {
+  Scope scope = create_empty_scope();
+  DexType* a_type = DexType::make_type("LA;");
+  DexClass* a_cls = create_internal_class(a_type, type::java_lang_Object(), {});
+  a_cls->add_method(assembler::method_from_string(R"(
+    (method (public static) "LA;.call:(Ljava/lang/invoke/MethodHandle;)V"
+     (
+      (load-param-object v0)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:()V")
+      (return-void)
+     )
+    )
+  )"));
+  scope.push_back(a_cls);
+
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (invoke-static (v0) "LA;.call:(Ljava/lang/invoke/MethodHandle;)V")
+      (return-void)
+    )
+  )");
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (invoke-static (v0) "LA;.call:(Ljava/lang/invoke/MethodHandle;)V")
+      (return-void)
+    )
+  )");
+  dce(scope, code.get());
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
 TEST_F(LocalDceEnhanceTest, HaveImplementorWithoutSideEffectsTest) {
   Scope scope = create_empty_scope();
   auto* void_t = type::_void();

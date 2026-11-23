@@ -875,6 +875,8 @@ static size_t analyze_read_locations(
               case OPCODE_THROW:
               case IOPCODE_INIT_CLASS:
               case IOPCODE_WRITE_BARRIER:
+              case OPCODE_INVOKE_POLYMORPHIC:
+              case OPCODE_INVOKE_CUSTOM:
                 unknown = true;
                 break;
               case OPCODE_NEW_INSTANCE:

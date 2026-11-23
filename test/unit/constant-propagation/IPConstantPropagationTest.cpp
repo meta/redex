@@ -280,12 +280,11 @@ TEST_F(InterproceduralConstantPropagationTest,
     code.cfg().calculate_exit_block();
   });
   auto assigned =
-      definitely_assigned_ifields::get_definitely_assigned_ifields(scope, true);
+      definitely_assigned_ifields::get_definitely_assigned_ifields(scope);
   EXPECT_NE(assigned.count(field), 0u);
   PassImpl::Config config;
   config.max_heap_analysis_iterations = 3;
   config.use_multiple_callee_callgraph = true;
-  config.analyze_ancestor_constructors = true;
   PassImpl(config).run(make_simple_stores(scope), conf);
   auto expected = assembler::ircode_from_string(R"((
     (load-param-object v0)
@@ -297,7 +296,6 @@ TEST_F(InterproceduralConstantPropagationTest,
 }
 
 enum class AncestorFieldProofCase {
-  Disabled,
   Enabled,
   Publication,
   NoOptimizations,
@@ -311,7 +309,6 @@ class AncestorFieldProofTest
 
 TEST_P(AncestorFieldProofTest, preservesInitializationBoundaries) {
   auto scenario = GetParam();
-  const bool enabled = scenario != AncestorFieldProofCase::Disabled;
   const bool inferred = scenario == AncestorFieldProofCase::Enabled;
   ClassCreator other(DexType::make_type("LOther;"));
   other.set_super(type::java_lang_Object());
@@ -404,13 +401,12 @@ TEST_P(AncestorFieldProofTest, preservesInitializationBoundaries) {
     code.build_cfg();
     code.cfg().calculate_exit_block();
   });
-  auto assigned = definitely_assigned_ifields::get_definitely_assigned_ifields(
-      scope, enabled);
+  auto assigned =
+      definitely_assigned_ifields::get_definitely_assigned_ifields(scope);
   EXPECT_EQ(assigned.count(field) != 0u, inferred);
   PassImpl::Config config;
   config.max_heap_analysis_iterations = 3;
   config.use_multiple_callee_callgraph = true;
-  config.analyze_ancestor_constructors = enabled;
   PassImpl(config).run(make_simple_stores(scope), conf);
   auto expected = assembler::ircode_from_string(inferred ? R"((
     (load-param-object v0)
@@ -426,8 +422,7 @@ TEST_P(AncestorFieldProofTest, preservesInitializationBoundaries) {
 INSTANTIATE_TEST_SUITE_P(
     AncestorInitialization,
     AncestorFieldProofTest,
-    ::testing::Values(AncestorFieldProofCase::Disabled,
-                      AncestorFieldProofCase::Enabled,
+    ::testing::Values(AncestorFieldProofCase::Enabled,
                       AncestorFieldProofCase::Publication,
                       AncestorFieldProofCase::NoOptimizations,
                       AncestorFieldProofCase::ConditionalWrite,
@@ -520,12 +515,11 @@ TEST_P(AncestorCalleeProofTest, doesNotAssumeAncestorsAreNonEscaping) {
     code.cfg().calculate_exit_block();
   });
   auto assigned =
-      definitely_assigned_ifields::get_definitely_assigned_ifields(scope, true);
+      definitely_assigned_ifields::get_definitely_assigned_ifields(scope);
   EXPECT_EQ(assigned.count(field), 0u);
   PassImpl::Config config;
   config.max_heap_analysis_iterations = 3;
   config.use_multiple_callee_callgraph = true;
-  config.analyze_ancestor_constructors = true;
   PassImpl(config).run(make_simple_stores(scope), conf);
   auto expected = assembler::ircode_from_string(read_body);
   reader->get_code()->clear_cfg();

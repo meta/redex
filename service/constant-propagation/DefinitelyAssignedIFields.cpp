@@ -157,14 +157,12 @@ class Analyzer final : public BaseIRAnalyzer<ConstructorAnalysisEnvironment> {
   Analyzer(const cfg::ControlFlowGraph& cfg,
            const DexType* declaring_type,
            const std::function<const AnalysisResult*(DexMethod*)>&
-               get_analysis_result,
-           bool analyze_ancestor_constructors)
+               get_analysis_result)
       : BaseIRAnalyzer(cfg),
         m_declaring_type(declaring_type),
         m_get_analysis_result(get_analysis_result),
         m_super_type(type_class(declaring_type)->get_super_class()),
-        m_first_load_param(cfg.get_first_param_instruction()),
-        m_analyze_ancestor_constructors(analyze_ancestor_constructors) {
+        m_first_load_param(cfg.get_first_param_instruction()) {
     always_assert(m_first_load_param != nullptr &&
                   m_first_load_param->opcode() == IOPCODE_LOAD_PARAM_OBJECT);
     MonotonicFixpointIterator::run({});
@@ -234,7 +232,7 @@ class Analyzer final : public BaseIRAnalyzer<ConstructorAnalysisEnvironment> {
             auto* method_class = method->get_class();
             if (method_class == m_declaring_type ||
                 method_class == m_super_type ||
-                (m_analyze_ancestor_constructors && is_first_param &&
+                (is_first_param &&
                  type::is_subclass(method_class, m_declaring_type))) {
               invoked_ctor_on_this = method;
               continue;
@@ -288,14 +286,13 @@ class Analyzer final : public BaseIRAnalyzer<ConstructorAnalysisEnvironment> {
   const std::function<const AnalysisResult*(DexMethod*)>& m_get_analysis_result;
   const DexType* m_super_type;
   const IRInstruction* m_first_load_param;
-  bool m_analyze_ancestor_constructors;
 };
 } // namespace
 
 namespace constant_propagation {
 namespace definitely_assigned_ifields {
 UnorderedSet<const DexField*> get_definitely_assigned_ifields(
-    const Scope& scope, bool analyze_ancestor_constructors) {
+    const Scope& scope) {
   Timer t("get_definitely_assigned_ifields");
   InsertOnlyConcurrentMap<DexMethod*, AnalysisResult> analysis_results;
   std::function<const AnalysisResult*(DexMethod*)> get_analysis_result;
@@ -304,16 +301,14 @@ UnorderedSet<const DexField*> get_definitely_assigned_ifields(
         .get_or_create_and_assert_equal(
             ctor,
             [&](auto*) {
-              if (analyze_ancestor_constructors && !ctor->is_external() &&
-                  ctor->rstate.no_optimizations()) {
+              if (!ctor->is_external() && ctor->rstate.no_optimizations()) {
                 AnalysisResult res;
                 res.may_this_have_escaped = true;
                 return res;
               }
               if (!ctor->is_external() && ctor->get_code()) {
                 auto& cfg = ctor->get_code()->cfg();
-                Analyzer analyzer(cfg, ctor->get_class(), get_analysis_result,
-                                  analyze_ancestor_constructors);
+                Analyzer analyzer(cfg, ctor->get_class(), get_analysis_result);
                 const auto& env = analyzer.get_exit_state_at(cfg.exit_block());
                 auto* cls = type_class(ctor->get_class());
                 return env.get_analysis_result(cls);

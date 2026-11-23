@@ -67,6 +67,7 @@ class DelSuper {
   std::atomic<int> m_num_culled_super_is_non_public_sdk;
   std::atomic<int> m_num_culled_super_cls_non_public;
   std::atomic<int> m_num_culled_super_not_def;
+  std::atomic<int> m_num_culled_super_is_interface;
 
   /**
    * This method ensures that the method arguments pass directly through
@@ -228,6 +229,15 @@ class DelSuper {
       m_num_culled_super_not_def++;
       return nullptr;
     }
+    // An invoke-super of a class method dispatches through the superclass's
+    // vtable, which is what the class inherits once the forwarder is gone. An
+    // invoke-super of an interface method runs that interface's default, which
+    // the class need not inherit: a superclass method takes precedence. A call
+    // rewritten to name the interface method would also need another opcode.
+    if (is_interface(type_class(meth_def->get_class()))) {
+      m_num_culled_super_is_interface++;
+      return nullptr;
+    }
     // If invoked method is not public, make it public
     if (!is_public(meth_def)) {
       if (!meth_def->is_concrete()) {
@@ -266,7 +276,8 @@ class DelSuper {
         m_num_culled_args_differs(0),
         m_num_culled_super_is_non_public_sdk(0),
         m_num_culled_super_cls_non_public(0),
-        m_num_culled_super_not_def(0) {}
+        m_num_culled_super_not_def(0),
+        m_num_culled_super_is_interface(0) {}
 
   void run(bool do_delete, PassManager& mgr) {
     walk::parallel::methods(m_scope, [&](DexMethod* meth) {
@@ -334,6 +345,8 @@ class DelSuper {
     TRACE(SUPER, 1, "Found %d candidate trivial methods", (int)m_num_trivial);
     TRACE(SUPER, 5, "Culled %d due to super not defined",
           (int)m_num_culled_super_not_def);
+    TRACE(SUPER, 5, "Culled %d due to super is an interface method",
+          (int)m_num_culled_super_is_interface);
     TRACE(SUPER, 5, "Culled %d due to method is static",
           (int)m_num_culled_static);
     TRACE(SUPER, 5, "Culled %d due to method name doesn't match super",

@@ -174,36 +174,6 @@ const local_pointers::FieldAccess* get_field_access(
 
 } // namespace
 
-bool CtorFieldAnalyzer::analyze_default(const State& state,
-                                        const IRInstruction* insn,
-                                        DexTypeEnvironment* env) {
-  if (state.class_under_init == nullptr) {
-    return false;
-  }
-  if (insn->has_dest()) {
-    env->set_this_ptr(insn->dest(), IsDomain::top());
-    if (insn->dest_is_wide()) {
-      env->set_this_ptr(insn->dest() + 1, IsDomain::top());
-    }
-  } else if (insn->has_move_result_any()) {
-    env->set_this_ptr(RESULT_REGISTER, IsDomain::top());
-  }
-  return false;
-}
-
-bool CtorFieldAnalyzer::analyze_load_param(const State& state,
-                                           const IRInstruction* insn,
-                                           DexTypeEnvironment* env) {
-  if ((state.class_under_init == nullptr) ||
-      insn->opcode() != IOPCODE_LOAD_PARAM_OBJECT) {
-    return false;
-  }
-  if (env->get_this_ptr_environment().is_top()) {
-    env->set_this_ptr(insn->dest(), IsDomain(true));
-  }
-  return false;
-}
-
 bool CtorFieldAnalyzer::analyze_iget(const State& state,
                                      const IRInstruction* insn,
                                      DexTypeEnvironment* env) {
@@ -239,26 +209,6 @@ bool CtorFieldAnalyzer::analyze_iput(const State& state,
   }
   env->set(access->field, type);
   return true;
-}
-
-bool CtorFieldAnalyzer::analyze_move(const State& state,
-                                     const IRInstruction* insn,
-                                     DexTypeEnvironment* env) {
-  if (state.class_under_init == nullptr) {
-    return false;
-  }
-  env->set_this_ptr(insn->dest(), env->get_this_ptr(insn->src(0)));
-  return false;
-}
-
-bool CtorFieldAnalyzer::analyze_move_result(const State& state,
-                                            const IRInstruction* insn,
-                                            DexTypeEnvironment* env) {
-  if (state.class_under_init == nullptr) {
-    return false;
-  }
-  env->set_this_ptr(insn->dest(), env->get_this_ptr(RESULT_REGISTER));
-  return false;
 }
 
 bool CtorFieldAnalyzer::analyze_invoke(const State& state,

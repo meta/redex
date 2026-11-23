@@ -75,16 +75,10 @@ class RegisterTypeAnalyzer final
 
 // The state of CtorFieldAnalyzer.
 struct CtorFields {
-  CtorFields(const DexType* class_under_init,
-             const local_pointers::ConstructorAccesses* accesses,
+  CtorFields(const local_pointers::ConstructorAccesses* accesses,
              const UnorderedSet<const DexField*>& constructor_only_fields)
-      : class_under_init(class_under_init),
-        accesses(accesses),
-        constructor_only_fields(&constructor_only_fields) {}
+      : accesses(accesses), constructor_only_fields(&constructor_only_fields) {}
 
-  // The class whose constructor is analyzed; null when not analyzing a
-  // constructor.
-  const DexType* class_under_init;
   // How the constructor uses `this`; null when not analyzing a constructor.
   const local_pointers::ConstructorAccesses* accesses;
   // Fields that only constructors of their class write, and only through
@@ -112,12 +106,6 @@ class CtorFieldAnalyzer final
                                      DexTypeEnvironment,
                                      CtorFields> {
  public:
-  static bool analyze_default(const State& state,
-                              const IRInstruction* insn,
-                              DexTypeEnvironment* env);
-  static bool analyze_load_param(const State& state,
-                                 const IRInstruction* insn,
-                                 DexTypeEnvironment* env);
   static bool analyze_iget(const State& state,
                            const IRInstruction* insn,
                            DexTypeEnvironment* env);
@@ -125,14 +113,6 @@ class CtorFieldAnalyzer final
   static bool analyze_iput(const State& state,
                            const IRInstruction* insn,
                            DexTypeEnvironment* env);
-
-  static bool analyze_move(const State& state,
-                           const IRInstruction* insn,
-                           DexTypeEnvironment* env);
-
-  static bool analyze_move_result(const State& state,
-                                  const IRInstruction* insn,
-                                  DexTypeEnvironment* env);
 
   static bool analyze_invoke(const State& state,
                              const IRInstruction* insn,

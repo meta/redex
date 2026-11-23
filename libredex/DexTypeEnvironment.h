@@ -12,7 +12,6 @@
 #include <optional>
 
 #include <sparta/AbstractDomain.h>
-#include <sparta/ConstantAbstractDomain.h>
 #include <sparta/FiniteAbstractDomain.h>
 #include <sparta/PatriciaTreeMapAbstractEnvironment.h>
 #include <sparta/PatriciaTreeSet.h>
@@ -411,25 +410,12 @@ using FieldTypeEnvironment =
     sparta::PatriciaTreeMapAbstractEnvironment<const DexField*, DexTypeDomain>;
 
 /*
- * A simple Environment that tracks the registers possibly holding the value of
- * `this` pointer.
- *
- * The purpose of this is to make the FieldTypeEnvironment propagation in
- * CtorFieldAnalyzer instance sensitive. We can ignore field operations that do
- * not update field types on `this` obj.
- */
-using IsDomain = sparta::ConstantAbstractDomain<bool>;
-using ThisPointerEnvironment =
-    sparta::PatriciaTreeMapAbstractEnvironment<reg_t, IsDomain>;
-
-/*
  * Combining the register mapping and the field mapping to the DexTypeDomain.
  */
 class DexTypeEnvironment final
     : public sparta::ReducedProductAbstractDomain<DexTypeEnvironment,
                                                   RegTypeEnvironment,
-                                                  FieldTypeEnvironment,
-                                                  ThisPointerEnvironment> {
+                                                  FieldTypeEnvironment> {
  public:
   using ReducedProductAbstractDomain::ReducedProductAbstractDomain;
 
@@ -441,13 +427,10 @@ class DexTypeEnvironment final
 
   DexTypeEnvironment(std::initializer_list<std::pair<reg_t, DexTypeDomain>> l)
       : ReducedProductAbstractDomain(
-            std::make_tuple(RegTypeEnvironment(l),
-                            FieldTypeEnvironment(),
-                            ThisPointerEnvironment())) {}
+            std::make_tuple(RegTypeEnvironment(l), FieldTypeEnvironment())) {}
 
-  static void reduce_product(std::tuple<RegTypeEnvironment,
-                                        FieldTypeEnvironment,
-                                        ThisPointerEnvironment>&) {}
+  static void reduce_product(
+      std::tuple<RegTypeEnvironment, FieldTypeEnvironment>&) {}
 
   /*
    * Getters and setters
@@ -458,10 +441,6 @@ class DexTypeEnvironment final
 
   const FieldTypeEnvironment& get_field_environment() const {
     return ReducedProductAbstractDomain::get<1>();
-  }
-
-  const ThisPointerEnvironment& get_this_ptr_environment() const {
-    return ReducedProductAbstractDomain::get<2>();
   }
 
   DexTypeDomain get(reg_t reg) const { return get_reg_environment().get(reg); }
@@ -495,18 +474,5 @@ class DexTypeEnvironment final
   DexTypeEnvironment& clear_field_environment() {
     return mutate_field_environment(
         [](FieldTypeEnvironment* env) { env->set_to_top(); });
-  }
-
-  bool is_this_ptr(reg_t reg) const {
-    auto is_this = get_this_ptr_environment().get(reg).get_constant();
-    return is_this && *is_this;
-  }
-
-  IsDomain get_this_ptr(reg_t reg) const {
-    return get_this_ptr_environment().get(reg);
-  }
-
-  void set_this_ptr(reg_t reg, const IsDomain& is_this) {
-    apply<2>([&](ThisPointerEnvironment* env) { env->set(reg, is_this); });
   }
 };

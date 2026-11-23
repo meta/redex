@@ -294,8 +294,7 @@ std::unique_ptr<local::LocalTypeAnalyzer> GlobalTypeAnalyzer::analyze_method(
 local::CtorFields GlobalTypeAnalyzer::get_ctor_fields(
     const DexMethod* method) const {
   auto it = m_constructor_accesses.find(method);
-  return {method::is_init(method) ? method->get_class() : nullptr,
-          it == m_constructor_accesses.end() ? nullptr : it->second.get(),
+  return {it == m_constructor_accesses.end() ? nullptr : it->second.get(),
           m_constructor_only_fields};
 }
 

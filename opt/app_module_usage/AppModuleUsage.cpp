@@ -22,6 +22,7 @@
 #include "DexUtil.h"
 #include "IRInstruction.h"
 #include "PassManager.h"
+#include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
 #include "Walkers.h"
@@ -204,17 +205,6 @@ void AppModuleUsagePass::load_preexisting_violations(DexStoresVector& stores) {
 app_module_usage::MethodStoresReferenced
 AppModuleUsagePass::analyze_method_xstore_references(const Scope& scope) {
 
-  auto get_type_ref_for_insn = [](IRInstruction* insn) -> const DexType* {
-    if (insn->has_method()) {
-      return insn->get_method()->get_class();
-    } else if (insn->has_field()) {
-      return insn->get_field()->get_class();
-    } else if (insn->has_type()) {
-      return insn->get_type();
-    }
-    return nullptr;
-  };
-
   app_module_usage::MethodStoresReferenced method_store_refs;
   reflection::MetadataCache refl_metadata_cache;
 
@@ -260,17 +250,25 @@ AppModuleUsagePass::analyze_method_xstore_references(const Scope& scope) {
     };
 
     app_module_usage::StoresReferenced stores_referenced;
+    auto add_type_ref = [&](const DexType* type_ref) {
+      auto* maybe_store = get_store_if_access_is_xstore(type_ref);
+      if (maybe_store != nullptr) {
+        // Creates the value if it doesn't exist.
+        stores_referenced[maybe_store] = false /* used_only_reflectively */;
+      }
+    };
     auto& cfg = code.cfg();
     for (const auto& mie : cfg::InstructionIterable(cfg)) {
       IRInstruction* insn = mie.insn;
-      const auto* maybe_type_ref = get_type_ref_for_insn(insn);
-      if (maybe_type_ref != nullptr) {
-        auto* maybe_store = get_store_if_access_is_xstore(maybe_type_ref);
-        if (maybe_store != nullptr) {
-          // Creates the value if it doesn't exist.
-          stores_referenced[maybe_store] = false /* used_only_reflectively */;
-        }
-      }
+      for_each_named_type(insn, add_type_ref);
+      for_each_field_access(
+          insn, [&](IROpcode, DexFieldRef* field, const DexMethodHandle*) {
+            add_type_ref(field->get_class());
+          });
+      for_each_invoke(
+          insn, [&](IROpcode, DexMethodRef* method, const DexMethodHandle*) {
+            add_type_ref(method->get_class());
+          });
       const auto* maybe_refl_type_ref = get_reflective_type_ref_for_insn(insn);
       if (maybe_refl_type_ref != nullptr) {
         auto* maybe_store = get_store_if_access_is_xstore(maybe_refl_type_ref);

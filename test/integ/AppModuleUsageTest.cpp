@@ -10,8 +10,10 @@
 #include <json/json.h>
 
 #include "AppModuleUsage.h"
+#include "Creators.h"
 #include "Debug.h"
 #include "DexAccess.h"
+#include "IRAssembler.h"
 #include "RedexTest.h"
 
 namespace {
@@ -162,4 +164,36 @@ TEST_F(AppModuleUsageTest, testThreeStoresCrash) {
   // third_store holds AppModuleUsageThirdClass
   // will crash on violation with config
   EXPECT_ANY_THROW(run_passes({new AppModuleUsagePass}, nullptr, cfg));
+}
+
+// A method handle refers to the class of its method like an invoke does.
+TEST_F(AppModuleUsageTest, testTwoStoresMethodHandle) {
+  split_two_stores(stores);
+  ClassCreator creator(DexType::make_type("LAppModuleUsageHandleUser;"));
+  creator.set_super(type::java_lang_Object());
+  creator.add_method(assembler::method_from_string(R"(
+    (method (public static) "LAppModuleUsageHandleUser;.use:()V"
+      (
+        (const-method-handle invoke-static "LAppModuleUsageOtherClass;.otherMethod:()V")
+        (move-result-pseudo-object v0)
+        (return-void)
+      )
+    )
+  )"));
+  stores.at(0).add_classes({creator.create()});
+  auto* config_file_env = std::getenv("default_config_file");
+  std::ifstream config_file(config_file_env, std::ifstream::binary);
+  Json::Value cfg;
+  config_file >> cfg;
+  auto* preexisting_violation_env =
+      std::getenv("app_module_violation_allowlist");
+  cfg["AppModuleUsagePass"]["preexisting_violations_filepath"] =
+      preexisting_violation_env;
+  run_passes({new AppModuleUsagePass}, nullptr, cfg);
+
+  // One more than in testTwoStores.
+  EXPECT_EQ(pass_manager->get_pass_info()[0].metrics.at(
+                "num_methods_access_app_module"),
+            11);
+  EXPECT_EQ(pass_manager->get_pass_info()[0].metrics.at("num_violations"), 6);
 }

@@ -548,9 +548,6 @@ void IRInstruction::gather_types(std::vector<const DexType*>& ltype) const {
   case opcode::Ref::String:
   case opcode::Ref::Literal:
   case opcode::Ref::Data:
-  case opcode::Ref::CallSite:
-  case opcode::Ref::MethodHandle:
-  case opcode::Ref::Proto:
     break;
 
   case opcode::Ref::Type:
@@ -567,6 +564,30 @@ void IRInstruction::gather_types(std::vector<const DexType*>& ltype) const {
 
   case opcode::Ref::SignaturePolymorphic:
     m_signature_polymorphic->method()->gather_types_shallow(ltype);
+    get_callsite_proto()->gather_types(ltype);
+    break;
+
+  case opcode::Ref::CallSite:
+    m_callsite->gather_types(ltype);
+    [[fallthrough]];
+  case opcode::Ref::MethodHandle: {
+    // The methods and fields that the call site or method handle refers to
+    // contribute their types as a method or field reference does.
+    std::vector<DexMethodRef*> methods;
+    gather_methods(methods);
+    for (const auto* method : methods) {
+      method->gather_types_shallow(ltype);
+    }
+    std::vector<DexFieldRef*> fields;
+    gather_fields(fields);
+    for (const auto* field : fields) {
+      field->gather_types_shallow(ltype);
+    }
+    break;
+  }
+
+  case opcode::Ref::Proto:
+    m_proto->gather_types(ltype);
     break;
   }
 }

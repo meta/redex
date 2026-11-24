@@ -22,6 +22,11 @@ void DexEncodedValueMethodType::gather_strings(
   proto()->gather_strings(lstring);
 }
 
+void DexEncodedValueMethodType::gather_types(
+    std::vector<const DexType*>& ltype) const {
+  proto()->gather_types(ltype);
+}
+
 void DexEncodedValueString::gather_strings(
     std::vector<const DexString*>& lstring) const {
   lstring.push_back(string());

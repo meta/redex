@@ -265,6 +265,7 @@ class DexEncodedValueMethodType : public DexEncodedValuePtr {
       : DexEncodedValuePtr(DEVT_METHOD_TYPE, proto) {}
 
   void gather_strings(std::vector<const DexString*>& lstring) const override;
+  void gather_types(std::vector<const DexType*>& ltype) const override;
   void encode(DexOutputIdx* dodx, std::vector<uint8_t>& encdata) override;
 
   DexProto* proto() const { return static_cast<DexProto*>(m_val.m_value_ptr); }

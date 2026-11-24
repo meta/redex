@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include <set>
+
 #include "DexAsm.h"
 #include "DexCallSite.h"
 #include "DexClass.h"
@@ -710,4 +712,60 @@ TEST_F(IRInstructionTest, CallsiteProtoWithoutReferenceIsChecked) {
       DexProto::make_proto("()V"));
   polymorphic.set_srcs_size(2);
   EXPECT_THROW(polymorphic.src_is_wide(1), RedexException);
+}
+
+// Besides its callee, a method handle call names the types of its call-site
+// prototype. A method type, a method handle and a call site name types too:
+// those of the method type and the bootstrap arguments, and those of the
+// methods and fields that the method handles refer to.
+TEST_F(IRInstructionTest, GatherTypesOfMethodTypesMethodHandlesAndCallSites) {
+  auto types_of = [](const IRInstruction& insn) {
+    std::vector<const DexType*> types;
+    insn.gather_types(types);
+    std::set<std::string> names;
+    for (const auto* type : types) {
+      names.insert(show(type));
+    }
+    return names;
+  };
+
+  IRInstruction polymorphic(OPCODE_INVOKE_POLYMORPHIC);
+  polymorphic.set_signature_polymorphic(
+      DexMethod::make_method("Ljava/lang/invoke/MethodHandle;.invokeExact:([L"
+                             "java/lang/Object;)Ljava/lang/Object;"),
+      DexProto::make_proto("(LK;)LL;"));
+  EXPECT_EQ(types_of(polymorphic),
+            (std::set<std::string>{"Ljava/lang/invoke/MethodHandle;",
+                                   "[Ljava/lang/Object;", "Ljava/lang/Object;",
+                                   "LK;", "LL;"}));
+
+  IRInstruction method_type(OPCODE_CONST_METHOD_TYPE);
+  method_type.set_proto(DexProto::make_proto("(LA;)LB;"));
+  EXPECT_EQ(types_of(method_type), (std::set<std::string>{"LA;", "LB;"}));
+
+  IRInstruction method_handle(OPCODE_CONST_METHOD_HANDLE);
+  method_handle.set_methodhandle(redex::make_method_handle(
+      METHOD_HANDLE_TYPE_INVOKE_STATIC, "LC;.m:(LD;)V"));
+  EXPECT_EQ(types_of(method_handle),
+            (std::set<std::string>{"LC;", "LD;", "V"}));
+
+  IRInstruction field_handle(OPCODE_CONST_METHOD_HANDLE);
+  field_handle.set_methodhandle(
+      redex::make_method_handle(METHOD_HANDLE_TYPE_INSTANCE_GET, "LE;.f:LF;"));
+  EXPECT_EQ(types_of(field_handle), (std::set<std::string>{"LE;", "LF;"}));
+
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.emplace_back(new DexEncodedValueMethodHandle(redex::make_method_handle(
+      METHOD_HANDLE_TYPE_INVOKE_STATIC, "LI;.m:()V")));
+  args.emplace_back(
+      new DexEncodedValueMethodType(DexProto::make_proto("(LJ;)V")));
+  IRInstruction custom(OPCODE_INVOKE_CUSTOM);
+  custom.set_callsite(redex::make_callsite("run", "(LG;)LH;", std::move(args)));
+  EXPECT_EQ(
+      types_of(custom),
+      (std::set<std::string>{
+          "LG;", "LH;", "LBoot;", "Ljava/lang/invoke/MethodHandles$Lookup;",
+          "Ljava/lang/String;", "Ljava/lang/invoke/MethodType;",
+          "Ljava/lang/invoke/MethodHandle;", "Ljava/lang/invoke/CallSite;",
+          "LI;", "V", "LJ;"}));
 }

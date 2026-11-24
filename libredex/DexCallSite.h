@@ -45,6 +45,9 @@ class DexCallSite {
   }
 
   void gather_strings(std::vector<const DexString*>& lstring) const;
+  // The types the method type and the bootstrap arguments name, not those of
+  // the methods and fields the method handles refer to.
+  void gather_types(std::vector<const DexType*>& ltype) const;
   void gather_methodhandles(std::vector<DexMethodHandle*>& lmethodhandle) const;
   void gather_methods(std::vector<DexMethodRef*>& lmethod) const;
   void gather_fields(std::vector<DexFieldRef*>& lfield) const;

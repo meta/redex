@@ -19,6 +19,13 @@ void DexCallSite::gather_strings(std::vector<const DexString*>& lstring) const {
   }
 }
 
+void DexCallSite::gather_types(std::vector<const DexType*>& ltype) const {
+  m_linker_method_type->gather_types(ltype);
+  for (const auto& ev : m_linker_method_args) {
+    ev->gather_types(ltype);
+  }
+}
+
 void DexCallSite::gather_methodhandles(
     std::vector<DexMethodHandle*>& lmethodhandle) const {
   lmethodhandle.push_back(m_linker_method_handle);

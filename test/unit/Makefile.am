@@ -709,7 +709,7 @@ split_huge_switch_test_SOURCES = SplitHugeSwitchTest.cpp
 
 static_field_dependency_graph_test_SOURCES = StaticFieldDependencyGraphTest.cpp
 
-static_relo_v2_test_SOURCES = StaticReloV2Test.cpp
+static_relo_v2_test_SOURCES = StaticReloV2Test.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 stringbuilder_append_chain_test_SOURCES = constant-propagation/StringBuilderAppendChainTest.cpp
 

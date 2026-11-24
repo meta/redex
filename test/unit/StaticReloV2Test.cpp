@@ -11,7 +11,9 @@
 #include "ControlFlow.h"
 #include "Creators.h"
 #include "DexAsm.h"
+#include "IRAssembler.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "StaticReloV2.h"
 
 namespace static_relo_v2 {
@@ -34,8 +36,8 @@ struct StaticReloV2Test : public RedexTest {
                            const char* method_name,
                            DexAccessFlags access) {
     DexMethod* method =
-        DexMethod::make_method(
-            cls->get_type(), DexString::make_string(method_name), m_proto)
+        DexMethod::make_method(cls->get_type(),
+                               DexString::make_string(method_name), m_proto)
             ->make_concrete(access, false);
     method->set_code(std::make_unique<IRCode>(method, 1));
     method->get_code()->push_back(dex_asm::dasm(OPCODE_RETURN_VOID));
@@ -288,5 +290,122 @@ TEST_F(StaticReloV2Test, relocatePrivateStaticMethod) {
   EXPECT_EQ(method_private_a->get_class(), classOuter->get_type());
   EXPECT_EQ(method_b->get_class(), classOuter->get_type());
   EXPECT_EQ(method_c->get_class(), classInner->get_type());
+}
+
+/**
+ * A static method that holds an invoke-direct method handle of a method that
+ * is not private (tool-generated) stays in its class: ART runs the
+ * implementation of the method that the holding class has, which `Screen`,
+ * not a subclass of `Base`, does not have.
+ *
+ * class Base { public void log() {} }
+ * class Logging extends Base {
+ *   public static void logAsBase(Base b) {
+ *     MethodHandle h = const-method-handle invoke-direct LBase;.log:()V;
+ *     h.invokeExact(b);
+ *   }
+ * }
+ * class Screen {
+ *   public void show(Base b) { Logging.logAsBase(b); }
+ * }
+ */
+TEST_F(StaticReloV2Test, keepMethodWithMethodHandleThatCallsLikeSuper) {
+  ClassCreator base_creator(DexType::make_type("LBase;"));
+  base_creator.set_super(type::java_lang_Object());
+  auto* log = DexMethod::make_method("LBase;.log:()V")
+                  ->make_concrete(ACC_PUBLIC,
+                                  assembler::ircode_from_string(
+                                      "((load-param-object v0) (return-void))"),
+                                  /*is_virtual=*/true);
+  base_creator.add_method(log);
+  DexClass* class_base = base_creator.create();
+
+  ClassCreator logging_creator(DexType::make_type("LLogging;"));
+  logging_creator.set_super(class_base->get_type());
+  auto* log_as_base = DexMethod::make_method("LLogging;.logAsBase:(LBase;)V")
+                          ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                                          assembler::ircode_from_string(R"((
+                            (load-param-object v1)
+                            (const-method-handle invoke-direct "LBase;.log:()V")
+                            (move-result-pseudo-object v0)
+                            (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LBase;)V")
+                            (return-void)
+                          ))"),
+                                          /*is_virtual=*/false);
+  logging_creator.add_method(log_as_base);
+  DexClass* class_logging = logging_creator.create();
+
+  DexClass* class_screen = create_class("LScreen;");
+  auto* show = DexMethod::make_method("LScreen;.show:(LBase;)V")
+                   ->make_concrete(ACC_PUBLIC,
+                                   assembler::ircode_from_string(R"((
+                            (load-param-object v0)
+                            (load-param-object v1)
+                            (invoke-static (v1) "LLogging;.logAsBase:(LBase;)V")
+                            (return-void)
+                          ))"),
+                                   /*is_virtual=*/true);
+  class_screen->add_method(show);
+
+  Scope scope({class_base, class_logging, class_screen});
+  for (auto* cls : scope) {
+    for (auto* m : cls->get_all_methods()) {
+      m->get_code()->build_cfg();
+    }
+  }
+  api::LevelChecker::init(0, scope);
+  std::vector<DexClass*> candidate_classes =
+      StaticReloPassV2::gen_candidates(scope);
+  EXPECT_EQ(candidate_classes, std::vector<DexClass*>{class_logging});
+  int relocated_methods =
+      StaticReloPassV2::run_relocation(scope, candidate_classes);
+
+  EXPECT_EQ(relocated_methods, 0);
+  EXPECT_EQ(log_as_base->get_class(), class_logging->get_type());
+}
+/**
+ * A static method that holds an invoke-custom stays in its class: the
+ * bootstrap method receives a lookup in the class of the code that holds it.
+ */
+TEST_F(StaticReloV2Test, keepMethodWithInvokeCustom) {
+  ClassCreator logging_creator(DexType::make_type("LLogging;"));
+  logging_creator.set_super(type::java_lang_Object());
+  auto log_code = assembler::ircode_from_string(R"((
+    (invoke-static () "LLogging;.placeholder:()V")
+    (return-void)
+  ))");
+  redex::make_invoke_custom(log_code.get(), "run", "()V");
+  auto* log = DexMethod::make_method("LLogging;.log:()V")
+                  ->make_concrete(ACC_PUBLIC | ACC_STATIC, std::move(log_code),
+                                  /*is_virtual=*/false);
+  logging_creator.add_method(log);
+  DexClass* class_logging = logging_creator.create();
+
+  DexClass* class_screen = create_class("LScreen;");
+  auto* show = DexMethod::make_method("LScreen;.show:()V")
+                   ->make_concrete(ACC_PUBLIC,
+                                   assembler::ircode_from_string(R"((
+                            (load-param-object v0)
+                            (invoke-static () "LLogging;.log:()V")
+                            (return-void)
+                          ))"),
+                                   /*is_virtual=*/true);
+  class_screen->add_method(show);
+
+  Scope scope({class_logging, class_screen});
+  for (auto* cls : scope) {
+    for (auto* m : cls->get_all_methods()) {
+      m->get_code()->build_cfg();
+    }
+  }
+  api::LevelChecker::init(0, scope);
+  std::vector<DexClass*> candidate_classes =
+      StaticReloPassV2::gen_candidates(scope);
+  EXPECT_EQ(candidate_classes, std::vector<DexClass*>{class_logging});
+  int relocated_methods =
+      StaticReloPassV2::run_relocation(scope, candidate_classes);
+
+  EXPECT_EQ(relocated_methods, 0);
+  EXPECT_EQ(log->get_class(), class_logging->get_type());
 }
 } // namespace static_relo_v2

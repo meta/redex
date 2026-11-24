@@ -191,12 +191,26 @@ void color_from_a_class(StaticCallGraph& graph, DexClass* cls, int color) {
   }
 }
 
+// Code whose behavior depends on the class that holds it
+// (`depends_on_holder_class`), such as an invoke-direct method handle of a
+// method that is not private or an invoke-custom, stays in its class.
+bool depends_on_its_class(const DexMethod* method) {
+  for (const auto& mie :
+       cfg::ConstInstructionIterable(method->get_code()->cfg())) {
+    if (depends_on_holder_class(mie.insn)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Relocate static methods in the graph to their callers
  */
 int relocate_clusters(const StaticCallGraph& graph, const Scope& scope) {
   int relocated_methods = 0;
   for (const StaticCallGraph::Vertex& vertex : graph.vertices) {
+    bool can_move = !depends_on_its_class(vertex.method);
     // Vertex is not colored, which means the method is unreachable outside the
     // static call graph. Do the proper logging or relocation for them if there
     // are such kind of unreachable static methods.
@@ -207,7 +221,7 @@ int relocate_clusters(const StaticCallGraph& graph, const Scope& scope) {
             "callers are all unreachable from other classes. Enable "
             "RemoveUnreachablePass to remove them.",
             show(vertex.method).c_str(), number_of_callers);
-      if (number_of_callers == 1) {
+      if (number_of_callers == 1 && can_move) {
         // Relocate the unreachable method to its caller class if only one
         // caller
         int caller_id = *unordered_any(graph.callers[vertex.id]);
@@ -222,8 +236,8 @@ int relocate_clusters(const StaticCallGraph& graph, const Scope& scope) {
       auto* to_class = type_class(scope[vertex.color]->get_type());
       // We can relocate method to a class only if the api level of the class is
       // higher or equal to the api level of the method.
-      if (to_class->rstate.get_api_level() >=
-          api::LevelChecker::get_method_level(vertex.method)) {
+      if (can_move && to_class->rstate.get_api_level() >=
+                          api::LevelChecker::get_method_level(vertex.method)) {
         change_visibility(vertex.method, to_class->get_type());
         relocate_method(vertex.method, to_class->get_type());
         relocated_methods++;

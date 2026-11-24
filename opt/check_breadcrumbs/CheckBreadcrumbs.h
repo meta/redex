@@ -14,8 +14,10 @@
 #include "DeterministicContainers.h"
 #include "DexClass.h" // All the comparators.
 #include "DexStore.h" // XStoreRefs.
+#include "IROpcode.h"
 #include "Pass.h"
 
+class DexMethodHandle;
 class IRInstruction;
 
 class CheckBreadcrumbsPass : public Pass {
@@ -168,8 +170,18 @@ class Breadcrumbs {
                                  const DexField* res_field);
   bool check_method_accessibility(const DexMethod* method,
                                   const DexMethod* res_called_method);
-  void check_type_opcode(const DexMethod* method, IRInstruction* insn);
-  void check_field_opcode(const DexMethod* method, IRInstruction* insn);
-  void check_method_opcode(const DexMethod* method, IRInstruction* insn);
+  void check_type_ref(const DexMethod* method,
+                      const IRInstruction* insn,
+                      const DexType* type);
+  // `method_handle` is the method handle that accesses `field`, if any.
+  void check_field_ref(const DexMethod* method,
+                       const IRInstruction* insn,
+                       DexFieldRef* field,
+                       const DexMethodHandle* method_handle);
+  void check_method_ref(const DexMethod* method,
+                        const IRInstruction* insn,
+                        IROpcode op,
+                        DexMethodRef* meth,
+                        const DexMethodHandle* method_handle);
   void check_opcodes();
 };

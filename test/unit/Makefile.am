@@ -333,7 +333,7 @@ cfg_positions_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 chrome_trace_writer_test_SOURCES = ChromeTraceWriterTest.cpp
 
-check_breadcrumbs_test_SOURCES = CheckBreadCrumbsTest.cpp
+check_breadcrumbs_test_SOURCES = CheckBreadCrumbsTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 check_cast_analysis_test_SOURCES = CheckCastAnalysisTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 

@@ -17,6 +17,7 @@
 #include "PassManager.h"
 #include "RedexException.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "Walkers.h"
 
 // Create the following hierarchy
@@ -441,5 +442,148 @@ TEST_F(CheckBreadcrumbsTest, IllegalFieldTypeRefNamesStoreOfType) {
                         "LOther; (Module1)\n"),
             std::string::npos)
       << report;
+}
+
+DexClass* create_class_with_methods(const char* name,
+                                    std::vector<DexMethod*> methods) {
+  std::vector<DexField*> no_fields;
+  return create_class(DexType::make_type(name), type::java_lang_Object(),
+                      methods, no_fields);
+}
+
+// The class `LOther;`, in the module store, with a static method `m()` and a
+// static field `f`.
+DexClass* create_module_class() {
+  auto* other_t = DexType::make_type("LOther;");
+  std::vector<DexField*> fields{
+      make_field_def(other_t, "f", type::_int(), ACC_PUBLIC | ACC_STATIC)};
+  std::vector<DexMethod*> methods{
+      DexMethod::make_method("LOther;.m:()V")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC, false)};
+  return create_class(other_t, type::java_lang_Object(), methods, fields);
+}
+
+// `LUser;.use:()V`, in the root store, with `code` as its body.
+DexClass* create_user_class(const std::string& code) {
+  return create_class_with_methods(
+      "LUser;",
+      {DexMethod::make_method("LUser;.use:()V")
+           ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                           assembler::ircode_from_string(code), false)});
+}
+
+// The method or field that a method handle names is referenced like the one
+// an invoke or field instruction names.
+TEST_F(CheckBreadcrumbsTest, MethodHandleOfModuleMethodIsIllegal) {
+  auto report = failure_report({create_user_class(R"((
+    (const-method-handle invoke-static "LOther;.m:()V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))")},
+                               {create_module_class()});
+  EXPECT_NE(report.find("Illegal method call in method  (classes)\n"
+                        "\tCONST_METHOD_HANDLE "),
+            std::string::npos)
+      << report;
+  EXPECT_NE(report.find("LOther;.m:()V (Module1)  By  LOther; (Module1)\n"),
+            std::string::npos)
+      << report;
+}
+
+TEST_F(CheckBreadcrumbsTest, MethodHandleOfModuleFieldIsIllegal) {
+  auto report = failure_report({create_user_class(R"((
+    (const-method-handle static-get "LOther;.f:I")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))")},
+                               {create_module_class()});
+  EXPECT_NE(report.find("Illegal field class refs in method  (classes)\n"
+                        "\tCONST_METHOD_HANDLE "),
+            std::string::npos)
+      << report;
+  EXPECT_NE(report.find("LOther;.f:I (Module1)  By  LOther; (Module1)\n"),
+            std::string::npos)
+      << report;
+}
+
+// So are the types that a method type names.
+TEST_F(CheckBreadcrumbsTest, MethodTypeOfModuleTypeIsIllegal) {
+  auto report = failure_report({create_user_class(R"((
+    (const-method-type "(LOther;)V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))")},
+                               {create_module_class()});
+  EXPECT_NE(report.find("Illegal type refs in method  (classes)\n"
+                        "\tCONST_METHOD_TYPE (LOther;)V (Module1)  By  "
+                        "LOther; (Module1)\n"),
+            std::string::npos)
+      << report;
+}
+
+// And the bootstrap method of a call site.
+TEST_F(CheckBreadcrumbsTest, CallSiteOfModuleBootstrapMethodIsIllegal) {
+  auto* user = create_user_class(R"((
+    (invoke-static () "LUser;.placeholder:()V")
+    (return-void)
+  ))");
+  redex::make_invoke_custom(user->get_dmethods().front()->get_code(), "run",
+                            "()V");
+  auto report = failure_report(
+      {user}, {create_module_class(), create_class_with_methods("LBoot;", {})});
+  EXPECT_NE(report.find("Illegal method call in method  (classes)\n"
+                        "\tINVOKE_CUSTOM "),
+            std::string::npos)
+      << report;
+  EXPECT_NE(report.find("(Module1)  By  LBoot; (Module1)\n"), std::string::npos)
+      << report;
+}
+
+// A method handle of a method of a class that was deleted is a dangling
+// reference.
+TEST_F(CheckBreadcrumbsTest, MethodHandleOfDeletedClassIsDangling) {
+  // Defined, but in no store.
+  create_class_with_methods(
+      "LGone;", {DexMethod::make_method("LGone;.m:()V")
+                     ->make_concrete(ACC_PUBLIC | ACC_STATIC, false)});
+  auto report = failure_report({create_user_class(R"((
+    (const-method-handle invoke-static "LGone;.m:()V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))")},
+                               {});
+  EXPECT_NE(report.find("Reference to deleted type LGone; in instruction "
+                        "CONST_METHOD_HANDLE"),
+            std::string::npos)
+      << report;
+}
+
+// A method handle of a private method of another class is an illegal access.
+TEST_F(CheckBreadcrumbsTest, MethodHandleOfPrivateMethodIsIllegalAccess) {
+  std::vector<DexClass*> classes = create_classes();
+  DexMetadata dm;
+  dm.set_id("classes");
+  DexStore store(dm);
+  store.add_classes(classes);
+  std::vector<DexStore> stores;
+  stores.emplace_back(std::move(store));
+  auto scope = build_class_scope(stores);
+  Breadcrumbs bc(scope, "", stores, conf, "",
+                 /* reject_illegal_refs_root_store= */ false,
+                 /* only_verify_primary_dex= */ false,
+                 /* verify_type_hierarchies= */ false,
+                 /* verify_proto_cross_dex= */ false,
+                 /* enforce_allowed_violations_file= */ false);
+  auto* method = assembler::method_from_string(R"(
+    (method (public) "LB;.handle_a_pri_fun:()V"
+      (
+        (const-method-handle invoke-static "LA;.a_pri_fun:()V")
+        (move-result-pseudo-object v0)
+        (return-void)
+      )
+    )
+  )");
+  method->get_code()->build_cfg();
+  EXPECT_TRUE(bc.has_illegal_access(method));
 }
 } // namespace

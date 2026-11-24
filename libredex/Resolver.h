@@ -260,6 +260,36 @@ void for_each_indirectly_named_type(const IRInstruction* insn, Fn&& f) {
 }
 
 /**
+ * Calls `f(type)` for every type that `insn` names other than as part of a
+ * method or field reference: its type operand, the types of its prototype (the
+ * method type of const-method-type, the call-site prototype of
+ * invoke-polymorphic), and the types of its call site's method type and of the
+ * Class and method type constants among the call site's bootstrap arguments.
+ * The methods and fields that `insn` calls and accesses are what
+ * `for_each_invoke` and `for_each_field_access` report. Unlike
+ * `for_each_indirectly_named_type`, this leaves out the types of the members
+ * that method handles name, and includes type operands.
+ */
+template <typename Fn>
+void for_each_named_type(const IRInstruction* insn, Fn&& f) {
+  std::vector<const DexType*> types;
+  if (insn->has_type()) {
+    types.push_back(insn->get_type());
+  } else if (insn->has_callsite()) {
+    insn->get_callsite()->gather_types(types);
+  } else {
+    std::vector<DexProto*> protos;
+    insn->gather_protos(protos);
+    for (const auto* proto : protos) {
+      proto->gather_types(types);
+    }
+  }
+  for (const auto* type : types) {
+    f(type);
+  }
+}
+
+/**
  * Given a scope defined by DexClass, a name and a proto look for a method
  * definition in scope.
  * The lookup is performed according to the search rules specified via

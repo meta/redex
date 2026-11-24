@@ -595,27 +595,31 @@ bool Breadcrumbs::has_illegal_access(const DexMethod* input_method) {
   auto& cfg = (const_cast<DexMethod*>(input_method))->get_code()->cfg();
   for (const auto& mie : cfg::InstructionIterable(cfg)) {
     auto* insn = mie.insn;
-    if (insn->has_field()) {
-      auto* res_field = resolve_field(insn->get_field());
+    for_each_field_access(insn, [&](IROpcode, DexFieldRef* field_ref,
+                                    const DexMethodHandle* method_handle) {
+      auto* res_field = method_handle == nullptr
+                            ? resolve_field(field_ref)
+                            : resolve_field_handle(method_handle);
       if (res_field != nullptr) {
         if (!check_field_accessibility(input_method, res_field)) {
           result = true;
         }
-      } else if (referenced_field_is_deleted(insn->get_field())) {
+      } else if (referenced_field_is_deleted(field_ref)) {
         result = true;
       }
-    }
-    if (insn->has_method()) {
-      auto* res_method = resolve_method_deprecated(
-          insn->get_method(), opcode_to_search(insn), input_method);
+    });
+    for_each_invoke(insn, [&](IROpcode op, DexMethodRef* method_ref,
+                              const DexMethodHandle* method_handle) {
+      auto* res_method =
+          resolve_call(op, method_ref, method_handle, input_method);
       if (res_method != nullptr) {
         if (!check_method_accessibility(input_method, res_method)) {
           result = true;
         }
-      } else if (referenced_method_is_deleted(insn->get_method())) {
+      } else if (referenced_method_is_deleted(method_ref)) {
         result = true;
       }
-    }
+    });
   }
   return result;
 }
@@ -816,26 +820,27 @@ bool Breadcrumbs::check_method_accessibility(
 }
 
 // verify that all opcodes are to non deleted references
-void Breadcrumbs::check_type_opcode(const DexMethod* method,
-                                    IRInstruction* insn) {
-  const DexType* type = insn->get_type();
-  type = check_type(type);
-  if (type != nullptr) {
-    bad_type(type, method, insn);
+void Breadcrumbs::check_type_ref(const DexMethod* method,
+                                 const IRInstruction* insn,
+                                 const DexType* type) {
+  const auto* bad_ref = check_type(type);
+  if (bad_ref != nullptr) {
+    bad_type(bad_ref, method, insn);
   } else {
     auto* const cls = method->get_class();
-    auto pair = is_illegal_cross_store(cls, insn->get_type());
+    auto pair = is_illegal_cross_store(cls, type);
     if (pair.first) {
-      m_illegal_type[method].push_back({insn, insn->get_type(), pair.second});
+      m_illegal_type[method].push_back({insn, type, pair.second});
     }
   }
 }
 
-void Breadcrumbs::check_field_opcode(const DexMethod* method,
-                                     IRInstruction* insn) {
+void Breadcrumbs::check_field_ref(const DexMethod* method,
+                                  const IRInstruction* insn,
+                                  DexFieldRef* field,
+                                  const DexMethodHandle* method_handle) {
   bool check_cross_store_ref = true;
 
-  auto* field = insn->get_field();
   std::vector<const DexType*> type_refs;
   field->gather_types_shallow(type_refs);
   for (const auto* type : type_refs) {
@@ -860,7 +865,9 @@ void Breadcrumbs::check_field_opcode(const DexMethod* method,
     }
   }
 
-  auto* res_field = resolve_field(field);
+  auto* res_field = method_handle == nullptr
+                        ? resolve_field(field)
+                        : resolve_field_handle(method_handle);
   if (res_field != nullptr) {
     // a resolved field can only differ in the owner class
     if (field != res_field) {
@@ -881,9 +888,11 @@ void Breadcrumbs::check_field_opcode(const DexMethod* method,
   }
 }
 
-void Breadcrumbs::check_method_opcode(const DexMethod* method,
-                                      IRInstruction* insn) {
-  const auto& meth = insn->get_method();
+void Breadcrumbs::check_method_ref(const DexMethod* method,
+                                   const IRInstruction* insn,
+                                   IROpcode op,
+                                   DexMethodRef* meth,
+                                   const DexMethodHandle* method_handle) {
   const DexType* type = check_method(meth);
   if (type != nullptr) {
     bad_type(type, method, insn);
@@ -895,8 +904,7 @@ void Breadcrumbs::check_method_opcode(const DexMethod* method,
         {insn, meth->get_class(), pair.second});
   }
 
-  DexMethod* res_meth =
-      resolve_method_deprecated(meth, opcode_to_search(insn), method);
+  DexMethod* res_meth = resolve_call(op, meth, method_handle, method);
   if (res_meth != nullptr) {
     // a resolved method can only differ in the owner class
     if (res_meth != meth) {
@@ -922,17 +930,19 @@ void Breadcrumbs::check_opcodes() {
       m_scope_to_walk,
       [](DexMethod*) { return true; },
       [&](DexMethod* method, IRInstruction* insn) {
-        if (insn->has_type()) {
-          check_type_opcode(method, insn);
-          return;
-        }
-        if (insn->has_field()) {
-          check_field_opcode(method, insn);
-          return;
-        }
-        if (insn->has_method()) {
-          check_method_opcode(method, insn);
-        }
+        for_each_named_type(insn, [&](const DexType* type) {
+          check_type_ref(method, insn, type);
+        });
+        for_each_field_access(insn, [&](IROpcode, DexFieldRef* field,
+                                        const DexMethodHandle* method_handle) {
+          check_field_ref(method, insn, field, method_handle);
+        });
+        for_each_invoke(insn,
+                        [&](IROpcode op, DexMethodRef* callee,
+                            const DexMethodHandle* method_handle) {
+                          check_method_ref(method, insn, op, callee,
+                                           method_handle);
+                        });
       });
 }
 

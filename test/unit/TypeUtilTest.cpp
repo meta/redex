@@ -311,3 +311,38 @@ TEST_F(TypeUtilTest, is_instance_of_if_known) {
   EXPECT_EQ(is_instance_of_if_known(baz, object), true);
   EXPECT_EQ(is_instance_of_if_known(baz, number), std::nullopt);
 }
+
+// I0 extends A1 and B1, A1 and B1 extend both A2 and B2, and so on: an
+// interface hierarchy with 2^40 paths to its top, which a walk that visits an
+// interface more than once does not finish.
+TEST_F(TypeUtilTest, is_instance_of_if_known_shared_interface_ancestors) {
+  using namespace type;
+  ClassCreator(java_lang_Object()).create();
+  auto make_interface = [](const std::string& name,
+                           const std::vector<DexType*>& supers) {
+    ClassCreator creator(DexType::make_type(name));
+    creator.set_super(java_lang_Object());
+    creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+    for (auto* super : supers) {
+      creator.add_interface(super);
+    }
+    return creator.create()->get_type();
+  };
+  constexpr int kLayers = 40;
+  std::vector<DexType*> layer;
+  for (int i = kLayers; i > 0; --i) {
+    auto n = std::to_string(i);
+    layer = {make_interface("LA" + n + ";", layer),
+             make_interface("LB" + n + ";", layer)};
+  }
+  auto* top = make_interface("LI0;", layer);
+  auto* unrelated = make_interface("LJ;", {});
+  ClassCreator cc(DexType::make_type("LC;"));
+  cc.set_super(java_lang_Object());
+  cc.add_interface(top);
+  auto* c = cc.create()->get_type();
+
+  EXPECT_EQ(is_instance_of_if_known(top, unrelated), false);
+  EXPECT_FALSE(check_cast(c, unrelated));
+  EXPECT_TRUE(check_cast(c, DexType::make_type("LB40;")));
+}

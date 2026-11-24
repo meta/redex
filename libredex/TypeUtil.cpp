@@ -8,6 +8,7 @@
 #include "TypeUtil.h"
 
 #include "Debug.h"
+#include "DeterministicContainers.h"
 #include "DexUtil.h"
 #include "KotlinLambdaAnalyzer.h"
 #include "Lazy.h"
@@ -558,36 +559,40 @@ std::optional<int32_t> evaluate_type_check(const DexType* src_type,
 
 std::optional<bool> is_instance_of_if_known(const DexType* type,
                                             const DexType* base_type) {
-  if (type == base_type) {
-    return true;
-  }
-  if (type == nullptr) {
-    // The superclass of java.lang.Object: an instance of nothing else.
-    return false;
-  }
-  const auto* cls = type_class(type);
-  if (cls == nullptr) {
-    return std::nullopt;
-  }
-  bool known = true;
-  auto reaches_base = [&](const DexType* super) {
-    auto result = is_instance_of_if_known(super, base_type);
-    known &= result.has_value();
-    return result.value_or(false);
-  };
-  if (reaches_base(cls->get_super_class())) {
-    return true;
-  }
   // An interface extends only interfaces and Object, so the superclass chain
   // alone decides whether a class is an instance of a class other than Object.
   const auto* base_cls = type_class(base_type);
-  if (base_cls != nullptr && !is_interface(base_cls) &&
-      base_type != type::java_lang_Object()) {
-    return known ? std::optional<bool>(false) : std::nullopt;
-  }
-  for (const auto* intf : *cls->get_interfaces()) {
-    if (reaches_base(intf)) {
+  bool superclasses_only = base_cls != nullptr && !is_interface(base_cls) &&
+                           base_type != type::java_lang_Object();
+  // Each type is visited once: interface hierarchies can share ancestors.
+  UnorderedSet<const DexType*> visited{type};
+  std::vector<const DexType*> work{type};
+  bool known = true;
+  while (!work.empty()) {
+    const auto* t = work.back();
+    work.pop_back();
+    if (t == base_type) {
       return true;
+    }
+    if (t == nullptr) {
+      // The superclass of java.lang.Object: an instance of nothing else.
+      continue;
+    }
+    const auto* cls = type_class(t);
+    if (cls == nullptr) {
+      known = false;
+      continue;
+    }
+    auto visit = [&](const DexType* super) {
+      if (visited.insert(super).second) {
+        work.push_back(super);
+      }
+    };
+    visit(cls->get_super_class());
+    if (!superclasses_only) {
+      for (const auto* intf : *cls->get_interfaces()) {
+        visit(intf);
+      }
     }
   }
   return known ? std::optional<bool>(false) : std::nullopt;

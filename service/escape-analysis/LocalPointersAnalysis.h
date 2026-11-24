@@ -274,12 +274,14 @@ using Environment = EnvironmentWithStoreImpl<MayEscapeStore>;
  * The uses of an object that can tell it apart from a replacement that a client
  * substitutes for it, as OptimizeEnumsPass substitutes a boxed Integer for an
  * enum constant: a check-cast, a monitor, an `instance-of` of a type for which
- * `instance_of_tells_apart` holds, and a reference comparison with a register
- * that may hold something other than `const 0`. A FixpointIterator refers to
- * the rule it is given, so the rule must outlive it. `instance_of_tells_apart`
- * must be set, safe to call from several threads at once, and give the same
- * answer for a type every time: methods are analyzed in parallel, and a summary
- * computed across calls may only grow from one round to the next.
+ * `instance_of_tells_apart` holds, a reference comparison with a register
+ * that may hold something other than `const 0`, and a virtual or interface
+ * call on it, whose receiver's class decides which method runs. A
+ * FixpointIterator refers to the rule it is given, so the rule must outlive it.
+ * `instance_of_tells_apart` must be set, safe to call from several threads at
+ * once, and give the same answer for a type every time: methods are analyzed in
+ * parallel, and a summary computed across calls may only grow from one round to
+ * the next.
  */
 struct TypeAndIdentityUses {
   std::function<bool(const DexType*)> instance_of_tells_apart;
@@ -360,12 +362,14 @@ struct AnalyzeScopeResult {
 };
 
 /*
- * A call graph that lets `analyze_scope` summarize every method with code: each
- * such method is a root, and a call gets edges only when they reach every
- * method that can run for it. A call that may reach a native method, a method
- * of a class created at runtime, an overridable or unsummarized external
- * method, an abstract method, or one of more than `big_override_threshold`
- * overrides gets none, so `analyze_scope` treats it as a call to unknown code.
+ * A call graph that lets `analyze_scope` summarize methods with code: each
+ * method that `is_root` accepts (by default, every method with code) is a root,
+ * the graph holds every method a root may call, and a call gets edges only
+ * when they reach every method that can run for it. A call that may reach a
+ * native method, a method of a class created at runtime, an overridable or
+ * unsummarized external method, an abstract method, or one of more than
+ * `big_override_threshold` overrides gets none, so `analyze_scope` treats it as
+ * a call to unknown code.
  */
 class EscapeCallGraphStrategy : public call_graph::MultipleCalleeStrategy {
  public:
@@ -374,7 +378,8 @@ class EscapeCallGraphStrategy : public call_graph::MultipleCalleeStrategy {
   EscapeCallGraphStrategy(
       const method_override_graph::Graph& method_override_graph,
       const Scope& scope,
-      uint32_t big_override_threshold = DEFAULT_BIG_OVERRIDE_THRESHOLD);
+      uint32_t big_override_threshold = DEFAULT_BIG_OVERRIDE_THRESHOLD,
+      const std::function<bool(const DexMethod*)>& is_root = {});
 
   call_graph::CallSites get_callsites(const DexMethod* method) const override;
 
@@ -403,12 +408,28 @@ class EscapeCallGraphStrategy : public call_graph::MultipleCalleeStrategy {
  *
  * If a non-null SummaryMap pointer is passed in, it will get populated
  * with the escape summaries of the methods in scope.
+ *
+ * `escape_type_and_identity_uses` is passed to the FixpointIterator of every
+ * method, so that the summaries count those uses as escapes too; the kept
+ * FixpointIterators refer to it, so it must outlive the result.
+ *
+ * The result keeps the FixpointIterator of every method that
+ * `keep_fixpoint_iterator` accepts, or of every method if it is empty. They
+ * take far more memory than the summaries.
+ *
+ * With `only_methods_in_call_graph`, only the methods that have a node in the
+ * call graph are analyzed. Every callee of such a method has a node too, so
+ * their summaries are the same as when analyzing the whole scope; the other
+ * methods get neither a summary nor a FixpointIterator.
  */
 AnalyzeScopeResult analyze_scope(
     const Scope&,
     const call_graph::Graph&,
     SummaryMap* = nullptr,
-    const UnorderedSet<DexClass*>* excluded_classes = nullptr);
+    const UnorderedSet<DexClass*>* excluded_classes = nullptr,
+    const TypeAndIdentityUses* escape_type_and_identity_uses = nullptr,
+    const std::function<bool(const DexMethod*)>& keep_fixpoint_iterator = {},
+    bool only_methods_in_call_graph = false);
 
 /*
  * Join over all possible returned and thrown values.

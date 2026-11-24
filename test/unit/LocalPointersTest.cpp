@@ -810,3 +810,238 @@ TEST_F(LocalPointersTest, constMethodHandleIsAPointer) {
   const auto& exit_env = fp_iter.get_exit_state_at(cfg.exit_block());
   EXPECT_FALSE(exit_env.get_pointers(0).is_top());
 }
+
+// static void pass(Object o) { inner(o); }
+// static void inner(Object o) { if (o instanceof Integer) { ... } }
+// With type and identity uses counted as escapes, `pass` lets `o` escape
+// through `inner`; only the requested fixpoint iterator is kept.
+TEST_F(LocalPointersTest, analyzeScopeCountsTypeUsesAcrossCalls) {
+  ClassCreator creator(DexType::make_type("LFoo;"));
+  creator.set_super(type::java_lang_Object());
+  creator.set_access(ACC_PUBLIC);
+  auto* pass = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.pass:(Ljava/lang/Object;)V"
+      (
+        (load-param-object v0)
+        (invoke-static (v0) "LFoo;.inner:(Ljava/lang/Object;)V")
+        (return-void)
+      )
+    )
+  )");
+  auto* inner = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.inner:(Ljava/lang/Object;)V"
+      (
+        (load-param-object v0)
+        (instance-of v0 "Ljava/lang/Integer;")
+        (move-result-pseudo v1)
+        (return-void)
+      )
+    )
+  )");
+  creator.add_method(pass);
+  creator.add_method(inner);
+  Scope scope{creator.create()};
+  for (auto* method : {pass, inner}) {
+    method->get_code()->build_cfg();
+    method->get_code()->cfg().calculate_exit_block();
+  }
+  auto override_graph = method_override_graph::build_graph(scope);
+  call_graph::Graph call_graph(
+      ptrs::EscapeCallGraphStrategy(*override_graph, scope));
+
+  ptrs::SummaryMap plain;
+  ptrs::analyze_scope(scope, call_graph, &plain);
+  EXPECT_THAT(unordered_unsafe_unwrap(plain.at(pass).escaping_parameters),
+              UnorderedElementsAre());
+
+  ptrs::SummaryMap observing;
+  auto result = ptrs::analyze_scope(
+      scope, call_graph, &observing, /* excluded_classes */ nullptr,
+      /* escape_type_and_identity_uses */ &ALL_TYPE_AND_IDENTITY_USES,
+      [pass](const DexMethod* method) { return method == pass; });
+  EXPECT_THAT(unordered_unsafe_unwrap(observing.at(pass).escaping_parameters),
+              UnorderedElementsAre(0));
+  EXPECT_NE(result.data.get_unsafe(pass), nullptr);
+  EXPECT_EQ(result.data.get_unsafe(inner), nullptr);
+}
+
+// static boolean f(Object x) { return x == id(null); }
+// static Object id(Object o) { return o; }
+// `id(null)` is null, so the comparison cannot tell what `x` is. While `id` has
+// no summary yet, the call holds no value, which compares like null too:
+// counting it as an observation of `x` and taking that back once the summary
+// of `id` arrives would shrink the summary of `f`.
+TEST_F(LocalPointersTest,
+       analyzeScopeComparisonWithNullFromHelperLetsNothingEscape) {
+  ClassCreator creator(DexType::make_type("LIds;"));
+  creator.set_super(type::java_lang_Object());
+  creator.set_access(ACC_PUBLIC);
+  auto* f = assembler::method_from_string(R"(
+    (method (public static) "LIds;.f:(Ljava/lang/Object;)Z"
+      (
+        (load-param-object v0)
+        (const v1 0)
+        (invoke-static (v1) "LIds;.id:(Ljava/lang/Object;)Ljava/lang/Object;")
+        (move-result-object v2)
+        (if-eq v0 v2 :same)
+        (const v3 0)
+        (return v3)
+        (:same)
+        (const v3 1)
+        (return v3)
+      )
+    )
+  )");
+  auto* id = assembler::method_from_string(R"(
+    (method (public static) "LIds;.id:(Ljava/lang/Object;)Ljava/lang/Object;"
+      (
+        (load-param-object v0)
+        (return-object v0)
+      )
+    )
+  )");
+  creator.add_method(f);
+  creator.add_method(id);
+  Scope scope{creator.create()};
+  for (auto* method : {f, id}) {
+    method->get_code()->build_cfg();
+    method->get_code()->cfg().calculate_exit_block();
+  }
+  auto override_graph = method_override_graph::build_graph(scope);
+  call_graph::Graph call_graph(
+      ptrs::EscapeCallGraphStrategy(*override_graph, scope));
+
+  ptrs::SummaryMap summaries;
+  ptrs::analyze_scope(
+      scope, call_graph, &summaries, /* excluded_classes */ nullptr,
+      /* escape_type_and_identity_uses */ &ALL_TYPE_AND_IDENTITY_USES);
+  EXPECT_THAT(unordered_unsafe_unwrap(summaries.at(f).escaping_parameters),
+              UnorderedElementsAre());
+}
+
+// interface J { int read(); }
+// class E implements J { public int read() { return 7; } }
+// static int probe(Object o) { return ((J) o).read(); }  // cast removed
+// `E.read` lets its receiver go nowhere, but the class of `o` decides whether
+// it runs at all: with type and identity uses counted as escapes, `probe` lets
+// `o` escape.
+TEST_F(LocalPointersTest, analyzeScopeCountsDispatchAsTypeUse) {
+  auto* j_type = DexType::make_type("LJ;");
+  ClassCreator jc(j_type);
+  jc.set_super(type::java_lang_Object());
+  jc.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  jc.add_method(DexMethod::make_method("LJ;.read:()I")
+                    ->make_concrete(ACC_PUBLIC | ACC_ABSTRACT, true));
+  ClassCreator ec(DexType::make_type("LE;"));
+  ec.set_super(type::java_lang_Object());
+  ec.set_access(ACC_PUBLIC | ACC_FINAL);
+  ec.add_interface(j_type);
+  auto* read = assembler::method_from_string(R"(
+    (method (public) "LE;.read:()I"
+      (
+        (load-param-object v0)
+        (const v1 7)
+        (return v1)
+      )
+    )
+  )");
+  ec.add_method(read);
+  ClassCreator fc(DexType::make_type("LFoo;"));
+  fc.set_super(type::java_lang_Object());
+  fc.set_access(ACC_PUBLIC);
+  auto* probe = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.probe:(Ljava/lang/Object;)I"
+      (
+        (load-param-object v0)
+        (invoke-interface (v0) "LJ;.read:()I")
+        (move-result v1)
+        (return v1)
+      )
+    )
+  )");
+  fc.add_method(probe);
+  Scope scope{jc.create(), ec.create(), fc.create()};
+  for (auto* method : {read, probe}) {
+    method->get_code()->build_cfg();
+    method->get_code()->cfg().calculate_exit_block();
+  }
+  auto override_graph = method_override_graph::build_graph(scope);
+  call_graph::Graph call_graph(
+      ptrs::EscapeCallGraphStrategy(*override_graph, scope));
+
+  ptrs::SummaryMap plain;
+  ptrs::analyze_scope(scope, call_graph, &plain);
+  EXPECT_THAT(unordered_unsafe_unwrap(plain.at(probe).escaping_parameters),
+              UnorderedElementsAre());
+
+  ptrs::SummaryMap observing;
+  ptrs::analyze_scope(
+      scope, call_graph, &observing, /* excluded_classes */ nullptr,
+      /* escape_type_and_identity_uses */ &ALL_TYPE_AND_IDENTITY_USES);
+  EXPECT_THAT(unordered_unsafe_unwrap(observing.at(probe).escaping_parameters),
+              UnorderedElementsAre(0));
+}
+
+// static void pass(Object o) { inner(o); }
+// static void inner(Object o) { if (o instanceof Integer) { ... } }
+// static void unrelated(Object o) {}
+// Rooting the graph at `pass` and analyzing only the methods in it summarizes
+// `pass` and `inner` as before, and leaves `unrelated` out.
+TEST_F(LocalPointersTest, analyzeScopeCanSkipMethodsOutsideCallGraph) {
+  ClassCreator creator(DexType::make_type("LBar;"));
+  creator.set_super(type::java_lang_Object());
+  creator.set_access(ACC_PUBLIC);
+  auto* pass = assembler::method_from_string(R"(
+    (method (public static) "LBar;.pass:(Ljava/lang/Object;)V"
+      (
+        (load-param-object v0)
+        (invoke-static (v0) "LBar;.inner:(Ljava/lang/Object;)V")
+        (return-void)
+      )
+    )
+  )");
+  auto* inner = assembler::method_from_string(R"(
+    (method (public static) "LBar;.inner:(Ljava/lang/Object;)V"
+      (
+        (load-param-object v0)
+        (instance-of v0 "Ljava/lang/Integer;")
+        (move-result-pseudo v1)
+        (return-void)
+      )
+    )
+  )");
+  auto* unrelated = assembler::method_from_string(R"(
+    (method (public static) "LBar;.unrelated:(Ljava/lang/Object;)V"
+      (
+        (load-param-object v0)
+        (return-void)
+      )
+    )
+  )");
+  for (auto* method : {pass, inner, unrelated}) {
+    creator.add_method(method);
+  }
+  Scope scope{creator.create()};
+  for (auto* method : {pass, inner, unrelated}) {
+    method->get_code()->build_cfg();
+    method->get_code()->cfg().calculate_exit_block();
+  }
+  auto override_graph = method_override_graph::build_graph(scope);
+  call_graph::Graph call_graph(ptrs::EscapeCallGraphStrategy(
+      *override_graph, scope,
+      ptrs::EscapeCallGraphStrategy::DEFAULT_BIG_OVERRIDE_THRESHOLD,
+      [pass](const DexMethod* method) { return method == pass; }));
+
+  ptrs::SummaryMap summaries;
+  ptrs::analyze_scope(
+      scope, call_graph, &summaries,
+      /* excluded_classes */ nullptr,
+      /* escape_type_and_identity_uses */ &ALL_TYPE_AND_IDENTITY_USES,
+      /* keep_fixpoint_iterator */ {},
+      /* only_methods_in_call_graph */ true);
+  EXPECT_THAT(unordered_unsafe_unwrap(summaries.at(pass).escaping_parameters),
+              UnorderedElementsAre(0));
+  EXPECT_THAT(unordered_unsafe_unwrap(summaries.at(inner).escaping_parameters),
+              UnorderedElementsAre(0));
+  EXPECT_EQ(summaries.count(unrelated), 0u);
+}

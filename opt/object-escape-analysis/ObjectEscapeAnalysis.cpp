@@ -723,6 +723,7 @@ struct Stats {
       0};
   alignas(CACHE_LINE_SIZE) std::atomic<size_t> invoke_supers{0};
   alignas(CACHE_LINE_SIZE) std::atomic<size_t> stackify_returns_objects{0};
+  alignas(CACHE_LINE_SIZE) std::atomic<size_t> stackify_unknown_instance_ofs{0};
   alignas(CACHE_LINE_SIZE)
       AtomicStatCounter<size_t> stackify_overlapping_lifetimes{0};
   alignas(CACHE_LINE_SIZE) AtomicStatCounter<size_t> stackify_lifetime_analyses{
@@ -1502,10 +1503,17 @@ class RootMethodReducer {
       auto opcode = use.insn->opcode();
       if (opcode::is_an_iput(opcode)) {
         always_assert(use.src_index == 1);
+      } else if (opcode::is_instance_of(opcode)) {
+        always_assert(use.src_index == 0);
+        // The test is folded below, so its answer must be known.
+        if (!type::is_instance_of_if_known(new_instance_insn->get_type(),
+                                           use.insn->get_type())) {
+          m_stats->stackify_unknown_instance_ofs++;
+          return false;
+        }
       } else if (opcode::is_a_method_invoke(opcode) ||
                  opcode::is_a_monitor(opcode) ||
                  opcode::is_check_cast(opcode) || opcode::is_an_iget(opcode) ||
-                 opcode::is_instance_of(opcode) ||
                  opcode::is_move_object(opcode) || opcode == OPCODE_IF_EQZ ||
                  opcode == OPCODE_IF_NEZ) {
         always_assert(use.src_index == 0);
@@ -1564,7 +1572,8 @@ class RootMethodReducer {
         // tested type. This must consider implemented interfaces, not just the
         // superclass chain.
         auto* new_insn =
-            (type::check_cast(new_instance_insn->get_type(), insn->get_type())
+            (*type::is_instance_of_if_known(new_instance_insn->get_type(),
+                                            insn->get_type())
                  ? (new IRInstruction(OPCODE_MOVE))
                        ->set_src(0, get_created_reg(insn->src(0)))
                  : (new IRInstruction(OPCODE_CONST))->set_literal(0))
@@ -2333,6 +2342,8 @@ void ObjectEscapeAnalysisPass::run_pass(DexStoresVector& stores,
   mgr.incr_metric("root_method_invoke_supers", (size_t)stats.invoke_supers);
   mgr.incr_metric("root_method_stackify_returns_objects",
                   (size_t)stats.stackify_returns_objects);
+  mgr.incr_metric("root_method_stackify_unknown_instance_ofs",
+                  (size_t)stats.stackify_unknown_instance_ofs);
   mgr.incr_metric("root_method_stackify_overlapping_lifetimes",
                   stats.stackify_overlapping_lifetimes.load());
   mgr.incr_metric("root_method_stackify_lifetime_analyses",

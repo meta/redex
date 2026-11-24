@@ -633,4 +633,25 @@ public class ObjectEscapeAnalysisTest {
     Object s = S.allocator(42);
     return s instanceof R;
   }
+
+  static class S3 implements java.io.Closeable {
+    int x;
+
+    public S3(int x) {
+      this.x = x;
+    }
+
+    public void close() {}
+
+    public static S3 allocator(int x) {
+      return new S3(x);
+    }
+  }
+
+  // Closeable, which is not in Redex's input, extends AutoCloseable, so the
+  // instance-of is true at runtime and must not fold to false.
+  public static boolean reduceInstanceOfUnloadedInterface() {
+    Object s = S3.allocator(42);
+    return s instanceof AutoCloseable;
+  }
 }

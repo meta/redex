@@ -898,3 +898,14 @@ TEST_F(ObjectEscapeAnalysisTest, reduceInstanceOfInterface) {
 )");
   ASSERT_EQ(actual.str(), assembler::to_s_expr(expected.get()).str());
 }
+
+TEST_F(ObjectEscapeAnalysisTest, reduceInstanceOfUnloadedInterface) {
+  run();
+
+  auto actual = get_s_expr(
+      "Lcom/facebook/redextest/"
+      "ObjectEscapeAnalysisTest;.reduceInstanceOfUnloadedInterface:()Z");
+  // Whether an S3 is an AutoCloseable is unknown, so the test stays.
+  EXPECT_NE(actual.str().find("instance-of"), std::string::npos)
+      << actual.str();
+}

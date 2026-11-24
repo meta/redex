@@ -5653,3 +5653,141 @@ TEST_F(InterproceduralConstantPropagationTest,
   EXPECT_EQ(fp_iter->get_whole_program_state().get_field_value(base_qux),
             ConstantValue::top());
 }
+
+class ClinitPutHandleTest : public InterproceduralConstantPropagationTest,
+                            public ::testing::WithParamInterface<bool> {};
+
+// Tool-generated: <clinit> calls run(), which writes Foo.x through a
+// static-put method handle, so the read of Foo.x after the call is not the 5
+// that <clinit> wrote before it. The handle is either loaded in run() or
+// loaded in <clinit> and passed to run() through a field.
+TEST_P(ClinitPutHandleTest, clinitReadAfterPutHandleCall) {
+  const bool handle_in_clinit = GetParam();
+  ClassCreator creator(DexType::make_type("LFoo;"));
+  creator.set_super(type::java_lang_Object());
+  for (const auto* spec :
+       {"LFoo;.x:I", "LFoo;.y:I", "LFoo;.h:Ljava/lang/invoke/MethodHandle;"}) {
+    creator.add_field(
+        DexField::make_field(spec)->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  }
+
+  const std::string load_handle = R"(
+      (const-method-handle static-put "LFoo;.x:I")
+      (move-result-pseudo-object v0)
+  )";
+  auto* clinit = assembler::method_from_string(
+      R"((method (public static constructor) "LFoo;.<clinit>:()V" ()" +
+      (handle_in_clinit
+           ? load_handle +
+                 R"((sput-object v0 "LFoo;.h:Ljava/lang/invoke/MethodHandle;"))"
+           : std::string()) +
+      R"(
+      (const v0 5)
+      (sput v0 "LFoo;.x:I")
+      (invoke-static () "LFoo;.run:()V")
+      (sget "LFoo;.x:I")
+      (move-result-pseudo v0)
+      (sput v0 "LFoo;.y:I")
+      (return-void)
+    ))
+  )");
+  clinit->rstate.set_root();
+  creator.add_method(clinit);
+
+  auto* run = assembler::method_from_string(
+      R"((method (public static) "LFoo;.run:()V" ()" +
+      (handle_in_clinit
+           ? std::string(
+                 R"((sget-object "LFoo;.h:Ljava/lang/invoke/MethodHandle;"))"
+                 R"((move-result-pseudo-object v0))")
+           : load_handle) +
+      R"(
+      (const v1 7)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(I)V")
+      (return-void)
+    ))
+  )");
+  creator.add_method(run);
+  auto expected = assembler::to_s_expr(clinit->get_code());
+
+  Scope scope{creator.create()};
+  walk::code(scope, [](DexMethod*, IRCode& code) {
+    code.build_cfg();
+    code.cfg().calculate_exit_block();
+  });
+
+  InterproceduralConstantPropagationPass::Config config;
+  config.max_heap_analysis_iterations = 1;
+  InterproceduralConstantPropagationPass(config).run(make_simple_stores(scope),
+                                                     conf);
+  clinit->get_code()->clear_cfg();
+  EXPECT_EQ(assembler::to_s_expr(clinit->get_code()), expected);
+}
+
+INSTANTIATE_TEST_SUITE_P(HandleLocation,
+                         ClinitPutHandleTest,
+                         ::testing::Bool(),
+                         [](const ::testing::TestParamInfo<bool>& info) {
+                           return info.param ? "HandleInClinit"
+                                             : "HandleInCallee";
+                         });
+
+// Tool-generated: Base.<clinit> calls Child.run(), which writes through a
+// static-put method handle of LChild;.x. ART resolves it to the static Base.x,
+// past the instance field Child.x, so the read of Base.x after the call is
+// not the 5 that Base.<clinit> wrote before it.
+TEST_F(InterproceduralConstantPropagationTest,
+       clinitReadAfterPutHandleCallOfInheritedField) {
+  ClassCreator base_creator(DexType::make_type("LBase;"));
+  base_creator.set_super(type::java_lang_Object());
+  for (const auto* spec : {"LBase;.x:I", "LBase;.y:I"}) {
+    base_creator.add_field(
+        DexField::make_field(spec)->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  }
+  auto* clinit = assembler::method_from_string(R"(
+    (method (public static constructor) "LBase;.<clinit>:()V"
+     (
+      (const v0 5)
+      (sput v0 "LBase;.x:I")
+      (invoke-static () "LChild;.run:()V")
+      (sget "LBase;.x:I")
+      (move-result-pseudo v0)
+      (sput v0 "LBase;.y:I")
+      (return-void)
+     )
+    )
+  )");
+  clinit->rstate.set_root();
+  base_creator.add_method(clinit);
+  auto* base_cls = base_creator.create();
+
+  ClassCreator child_creator(DexType::make_type("LChild;"));
+  child_creator.set_super(base_cls->get_type());
+  child_creator.add_field(
+      DexField::make_field("LChild;.x:I")->make_concrete(ACC_PUBLIC));
+  child_creator.add_method(assembler::method_from_string(R"(
+    (method (public static) "LChild;.run:()V"
+     (
+      (const-method-handle static-put "LChild;.x:I")
+      (move-result-pseudo-object v0)
+      (const v1 7)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(I)V")
+      (return-void)
+     )
+    )
+  )"));
+  auto expected = assembler::to_s_expr(clinit->get_code());
+
+  Scope scope{base_cls, child_creator.create()};
+  walk::code(scope, [](DexMethod*, IRCode& code) {
+    code.build_cfg();
+    code.cfg().calculate_exit_block();
+  });
+
+  InterproceduralConstantPropagationPass::Config config;
+  config.max_heap_analysis_iterations = 1;
+  InterproceduralConstantPropagationPass(config).run(make_simple_stores(scope),
+                                                     conf);
+  clinit->get_code()->clear_cfg();
+  EXPECT_EQ(assembler::to_s_expr(clinit->get_code()), expected);
+}

@@ -1087,14 +1087,22 @@ UnorderedSet<const DexField*> get_static_fields_written_outside_clinit(
     const Scope& scope) {
   InsertOnlyConcurrentSet<const DexField*> written_outside_clinit;
   walk::parallel::opcodes(scope, [&](DexMethod* method, IRInstruction* insn) {
-    if (!opcode::is_an_sput(insn->opcode())) {
-      return;
-    }
-    auto* field = resolve_field(insn->get_field(), FieldSearch::Static);
-    if (field != nullptr && (!method::is_clinit(method) ||
-                             field->get_class() != method->get_class())) {
-      written_outside_clinit.insert(field);
-    }
+    for_each_field_access(insn, [&](IROpcode op, DexFieldRef* field_ref,
+                                    const DexMethodHandle* method_handle) {
+      if (!opcode::is_an_sput(op)) {
+        return;
+      }
+      auto* field = method_handle == nullptr
+                        ? resolve_field(field_ref, FieldSearch::Static)
+                        : resolve_field_handle(method_handle);
+      // A method handle can be called anywhere, so a write through one is
+      // never confined to the <clinit>.
+      if (field != nullptr &&
+          (method_handle != nullptr || !method::is_clinit(method) ||
+           field->get_class() != method->get_class())) {
+        written_outside_clinit.insert(field);
+      }
+    });
   });
   UnorderedSet<const DexField*> fields;
   insert_unordered_iterable(fields, written_outside_clinit);

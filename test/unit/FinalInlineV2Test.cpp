@@ -9,6 +9,7 @@
 
 #include "Creators.h"
 #include "DexAccess.h"
+#include "EditableCfgAdapter.h"
 #include "FinalInlineV2.h"
 #include "IFieldAnalysisUtil.h"
 #include "IRAssembler.h"
@@ -1192,4 +1193,210 @@ TEST_F(FinalInlineTest, inheritedInstanceFieldWrittenThroughPutHandle) {
   run(scope, &xstores);
 
   EXPECT_CODE_EQ(reader->get_code(), expected.get());
+}
+
+namespace {
+
+// Whether the code of `method` still writes `field`.
+bool writes_field(DexMethod* method, const DexField* field) {
+  bool writes = false;
+  cfg_adapter::iterate(method->get_code(), [&](MethodItemEntry& mie) {
+    writes = writes || (opcode::is_an_sput(mie.insn->opcode()) &&
+                        mie.insn->get_field() == field);
+    return cfg_adapter::LOOP_CONTINUE;
+  });
+  return writes;
+}
+
+} // namespace
+
+// How <clinit> reads Foo.x before it writes 5 to it.
+enum class ClinitRead {
+  // Tool-generated: invoke-polymorphic of a handle from another class.
+  InvokePolymorphic,
+  // Tool-generated: invoke-custom of a call site.
+  InvokeCustom,
+  // Tool-generated: a static-get handle of Foo.x, called by the library.
+  FieldHandleCalledByLibrary,
+  // Tool-generated: a handle of readX(), called by the library.
+  MethodHandleCalledByLibrary,
+};
+
+class FinalInlineClinitReadTest
+    : public FinalInlineTest,
+      public ::testing::WithParamInterface<ClinitRead> {};
+
+// The read sees 0, so Foo.x must keep its zero encoded value and the write.
+TEST_P(FinalInlineClinitReadTest, fieldReadBeforeWriteIsNotEncoded) {
+  auto* field = create_field_with_zero_value("LFoo;.x:I", m_cc.get());
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public static) "LFoo;.readX:()I"
+     (
+      (sget "LFoo;.x:I")
+      (move-result-pseudo v0)
+      (return v0)
+     )
+    )
+  )"));
+
+  std::string read;
+  switch (GetParam()) {
+  case ClinitRead::InvokePolymorphic:
+    read = R"(
+      (sget-object "LBar;.h:Ljava/lang/invoke/MethodHandle;")
+      (move-result-pseudo-object v0)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()I")
+    )";
+    break;
+  case ClinitRead::InvokeCustom:
+    read = R"((invoke-static () "LFoo;.placeholder:()I"))";
+    break;
+  case ClinitRead::FieldHandleCalledByLibrary:
+  case ClinitRead::MethodHandleCalledByLibrary:
+    read =
+        std::string(
+            GetParam() == ClinitRead::FieldHandleCalledByLibrary
+                ? R"((const-method-handle static-get "LFoo;.x:I"))"
+                : R"((const-method-handle invoke-static "LFoo;.readX:()I"))") +
+        R"(
+      (move-result-pseudo-object v0)
+      (const v1 0)
+      (new-array v1 "[Ljava/lang/Object;")
+      (move-result-pseudo-object v1)
+      (invoke-virtual (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeWithArguments:([Ljava/lang/Object;)Ljava/lang/Object;")
+    )";
+    break;
+  }
+  auto* clinit = assembler::method_from_string(
+      R"((method (public static) "LFoo;.<clinit>:()V" ()" + read + R"(
+      (const v2 5)
+      (sput v2 "LFoo;.x:I")
+      (return-void)
+    ))
+  )");
+  if (GetParam() == ClinitRead::InvokeCustom) {
+    redex::make_invoke_custom(clinit->get_code(), "readX", "()I");
+  }
+  m_cc->add_method(clinit);
+  auto* cls = m_cc->create();
+
+  run({cls}, /* xstores */ nullptr);
+
+  EXPECT_EQ(field->get_static_value()->value(), 0);
+  ASSERT_EQ(cls->get_clinit(), clinit);
+  EXPECT_TRUE(writes_field(clinit, field));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ReadKind,
+    FinalInlineClinitReadTest,
+    ::testing::Values(ClinitRead::InvokePolymorphic,
+                      ClinitRead::InvokeCustom,
+                      ClinitRead::FieldHandleCalledByLibrary,
+                      ClinitRead::MethodHandleCalledByLibrary),
+    [](const ::testing::TestParamInfo<ClinitRead>& info) {
+      switch (info.param) {
+      case ClinitRead::InvokePolymorphic:
+        return "InvokePolymorphic";
+      case ClinitRead::InvokeCustom:
+        return "InvokeCustom";
+      case ClinitRead::FieldHandleCalledByLibrary:
+        return "FieldHandleCalledByLibrary";
+      case ClinitRead::MethodHandleCalledByLibrary:
+        return "MethodHandleCalledByLibrary";
+      }
+      return "Unknown";
+    });
+
+// Tool-generated: Base.<clinit> reads through a static-get method handle of
+// LChild;.x, called by the library, before it writes 5 to Base.x. ART resolves
+// the handle to the static Base.x, past the instance field Child.x, so the read
+// sees 0 and Base.x must keep its zero encoded value and the write.
+TEST_F(FinalInlineTest,
+       inheritedFieldReadThroughHandleBeforeWriteIsNotEncoded) {
+  ClassCreator base_creator(DexType::make_type("LBase;"));
+  base_creator.set_super(type::java_lang_Object());
+  auto* base_x = create_field_with_zero_value("LBase;.x:I", &base_creator);
+  auto* clinit = assembler::method_from_string(R"(
+    (method (public static) "LBase;.<clinit>:()V"
+     (
+      (const-method-handle static-get "LChild;.x:I")
+      (move-result-pseudo-object v0)
+      (const v1 0)
+      (new-array v1 "[Ljava/lang/Object;")
+      (move-result-pseudo-object v1)
+      (invoke-virtual (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeWithArguments:([Ljava/lang/Object;)Ljava/lang/Object;")
+      (const v2 5)
+      (sput v2 "LBase;.x:I")
+      (return-void)
+     )
+    )
+  )");
+  base_creator.add_method(clinit);
+  auto* base_cls = base_creator.create();
+
+  ClassCreator child_creator(DexType::make_type("LChild;"));
+  child_creator.set_super(base_cls->get_type());
+  child_creator.add_field(
+      DexField::make_field("LChild;.x:I")->make_concrete(ACC_PUBLIC));
+  auto* child_cls = child_creator.create();
+
+  run({base_cls, child_cls}, /* xstores */ nullptr);
+
+  EXPECT_EQ(base_x->get_static_value()->value(), 0);
+  ASSERT_EQ(base_cls->get_clinit(), clinit);
+  EXPECT_TRUE(writes_field(clinit, base_x));
+}
+
+// Tool-generated: Sub.<clinit> loads an invoke-direct method handle of
+// `LBase;.m`. In `LSub;`, whose superclass `LMid;` overrides `m`, the handle
+// runs `LMid;.m` on Android 9, which reads Sub.x before <clinit> writes 5 to
+// it, so Sub.x must keep its zero encoded value and the write.
+TEST_F(FinalInlineTest,
+       fieldReadByMethodThatInvokeDirectHandleCanRunIsNotEncoded) {
+  ClassCreator base_creator(DexType::make_type("LBase;"));
+  base_creator.set_super(type::java_lang_Object());
+  base_creator.add_method(assembler::method_from_string(R"(
+    (method (public) "LBase;.m:()I"
+     ((load-param-object v0) (const v1 0) (return v1)))
+  )"));
+  auto* base_cls = base_creator.create();
+  ClassCreator mid_creator(DexType::make_type("LMid;"));
+  mid_creator.set_super(base_cls->get_type());
+  mid_creator.add_method(assembler::method_from_string(R"(
+    (method (public) "LMid;.m:()I"
+     (
+      (load-param-object v0)
+      (sget "LSub;.x:I")
+      (move-result-pseudo v1)
+      (return v1)
+     )
+    )
+  )"));
+  auto* mid_cls = mid_creator.create();
+  ClassCreator sub_creator(DexType::make_type("LSub;"));
+  sub_creator.set_super(mid_cls->get_type());
+  auto* field = create_field_with_zero_value("LSub;.x:I", &sub_creator);
+  auto* clinit = assembler::method_from_string(R"(
+    (method (public static) "LSub;.<clinit>:()V"
+     (
+      (const-method-handle invoke-direct "LBase;.m:()I")
+      (move-result-pseudo-object v0)
+      (sput-object v0 "LSub;.h:Ljava/lang/invoke/MethodHandle;")
+      (const v2 5)
+      (sput v2 "LSub;.x:I")
+      (return-void)
+     )
+    )
+  )");
+  sub_creator.add_method(clinit);
+  create_field_with_zero_value("LSub;.h:Ljava/lang/invoke/MethodHandle;",
+                               &sub_creator);
+  auto* sub_cls = sub_creator.create();
+
+  run({base_cls, mid_cls, sub_cls}, /* xstores */ nullptr);
+
+  EXPECT_EQ(field->get_static_value()->value(), 0);
+  ASSERT_EQ(sub_cls->get_clinit(), clinit);
+  EXPECT_TRUE(writes_field(clinit, field));
 }

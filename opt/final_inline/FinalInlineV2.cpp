@@ -19,6 +19,7 @@
 #include "InitDeps.h"
 #include "LocalDce.h"
 #include "PassManager.h"
+#include "Resolver.h"
 #include "Show.h"
 #include "Shrinker.h"
 #include "Timer.h"
@@ -242,10 +243,18 @@ StaticFieldReadAnalysis::Result StaticFieldReadAnalysis::analyze(
 
   Result ret{};
   cfg_adapter::iterate_with_iterator(code, [&](const IRList::iterator& it) {
-    auto* insn = it->insn;
-    if (opcode::is_an_sget(insn->opcode())) {
-      ret.add(insn->get_field());
-    }
+    for_each_field_access(it->insn, [&](IROpcode op, DexFieldRef* field_ref,
+                                        const DexMethodHandle* method_handle) {
+      if (!opcode::is_an_sget(op)) {
+        return;
+      }
+      // The encoding checks definitions: a handle reads the field that ART
+      // resolves for it, which can be inherited.
+      auto* field = method_handle == nullptr
+                        ? nullptr
+                        : resolve_field_handle(method_handle);
+      ret.add(field != nullptr ? field : field_ref);
+    });
     return cfg_adapter::LOOP_CONTINUE;
   });
 
@@ -254,48 +263,103 @@ StaticFieldReadAnalysis::Result StaticFieldReadAnalysis::analyze(
 
   bool callee_pending = false;
 
-  cfg_adapter::iterate_with_iterator(code, [&](const IRList::iterator& it) {
-    auto* insn = it->insn;
-    if (opcode::is_a_method_invoke(insn->opcode())) {
-      auto* callee_ref = insn->get_method();
-      auto* callee_method_def =
-          resolve_method_deprecated(callee_ref, opcode_to_search(insn), method);
-      if (is_external_call(callee_ref, callee_method_def) ||
-          (callee_method_def != nullptr &&
-           (!callee_method_def->is_concrete() ||
-            (m_allowed_opaque_callees.count(callee_method_def) != 0u)))) {
-        return cfg_adapter::LOOP_CONTINUE;
+  // Joins what `callees` read into `ret`; returns false once `ret` is top.
+  auto join_callees = [&](const call_graph::MethodSet& callees) {
+    for (const DexMethod* callee : UnorderedIterable(callees)) {
+      Result callee_result;
+      if (pending_methods.count(callee) != 0u) {
+        callee_pending = true;
+        callee_result = m_summaries.at(callee);
+      } else {
+        callee_result = analyze(callee, pending_methods);
       }
-      // A call whose target is unknown has no callees in the graph, so the
-      // analysis gives up on it.
-      const auto& callees = resolve_callees_in_graph(m_graph, insn);
-      if (callees.empty()) {
-        TRACE(FINALINLINE, 2, "%s has opaque callees %s", SHOW(method),
-              SHOW(insn->get_method()));
-        ret = Result::top();
+      ret.join_with(callee_result);
+      if (ret.is_top()) {
         callee_pending = false;
-        return cfg_adapter::LOOP_BREAK;
+        return false;
       }
-
-      for (const DexMethod* callee : UnorderedIterable(callees)) {
-        Result callee_result;
-        if (pending_methods.count(callee) != 0u) {
-          callee_pending = true;
-          callee_result = m_summaries.at(callee);
-        } else {
-          callee_result = analyze(callee, pending_methods);
-        }
-        ret.join_with(callee_result);
-        if (ret.is_top()) {
-          callee_pending = false;
-          return cfg_adapter::LOOP_BREAK;
-        }
-        if (pending_methods.count(callee) != 0u) {
-          callee_pending = true;
-        }
+      if (pending_methods.count(callee) != 0u) {
+        callee_pending = true;
       }
     }
-    return cfg_adapter::LOOP_CONTINUE;
+    return true;
+  };
+
+  cfg_adapter::iterate_with_iterator(code, [&](const IRList::iterator& it) {
+    auto* insn = it->insn;
+    if (opcode::is_invoke_polymorphic(insn->opcode()) ||
+        opcode::is_invoke_custom(insn->opcode())) {
+      // The method handle or call site decides at run time what runs.
+      ret = Result::top();
+      callee_pending = false;
+      return cfg_adapter::LOOP_BREAK;
+    }
+    bool keep_going = true;
+    for_each_invoke(insn, [&](IROpcode op, DexMethodRef* method_ref,
+                              const DexMethodHandle* method_handle) {
+      if (!keep_going) {
+        return;
+      }
+      // Like the callee of an invoke, a method that is external or allowed to
+      // be opaque is assumed to read none of the fields.
+      auto reads_nothing = [&](const DexMethod* callee) {
+        return is_external_call(method_ref, callee) ||
+               (callee != nullptr &&
+                (!callee->is_concrete() ||
+                 m_allowed_opaque_callees.count(callee) != 0u));
+      };
+      auto give_up = [&]() {
+        TRACE(FINALINLINE, 2, "%s has opaque callees %s", SHOW(method),
+              SHOW(method_ref));
+        ret = Result::top();
+        callee_pending = false;
+        keep_going = false;
+      };
+      bool dispatches =
+          opcode::is_invoke_virtual(op) || opcode::is_invoke_interface(op);
+      if (method_handle != nullptr && !dispatches) {
+        // The call graph has no edges for the calls that method handles make.
+        // A handle that does not dispatch runs one of these methods, which for
+        // an invoke-direct handle can depend on the ART version.
+        auto handle_callees =
+            resolve_method_handle_callees(method_handle, method);
+        if (handle_callees.empty()) {
+          // Its target is unknown, unless it is external.
+          if (!reads_nothing(nullptr)) {
+            give_up();
+          }
+          return;
+        }
+        call_graph::MethodSet analyzed_callees;
+        for (auto* callee : handle_callees) {
+          if (!reads_nothing(callee)) {
+            analyzed_callees.insert(callee);
+          }
+        }
+        keep_going = join_callees(analyzed_callees);
+        return;
+      }
+      auto* callee_method_def =
+          method_handle == nullptr
+              ? resolve_method_deprecated(method_ref, opcode_to_search(op),
+                                          method)
+              : resolve_method_handle(method_handle, method);
+      if (reads_nothing(callee_method_def)) {
+        return;
+      }
+      // A call whose target is unknown, and a method handle that dispatches,
+      // have no callees in the graph, so the analysis gives up on them.
+      static const call_graph::MethodSet no_callees;
+      const auto& callees = method_handle == nullptr
+                                ? resolve_callees_in_graph(m_graph, insn)
+                                : no_callees;
+      if (callees.empty()) {
+        give_up();
+        return;
+      }
+      keep_going = join_callees(callees);
+    });
+    return keep_going ? cfg_adapter::LOOP_CONTINUE : cfg_adapter::LOOP_BREAK;
   });
   if (!callee_pending) {
     pending_methods.erase(method);

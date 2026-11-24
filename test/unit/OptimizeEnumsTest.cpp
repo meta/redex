@@ -249,6 +249,16 @@ DexStore create_enum_store() {
       )
     )
   )"));
+  ec.add_method(assembler::method_from_string(R"(
+    (method (public static) "Ljava/lang/Enum;.valueOf:(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (const v2 0)
+        (return-object v2)
+      )
+    )
+  )"));
   // The JDK hierarchy that decides which type checks boxing can change.
   auto* comparable = DexType::make_type("Ljava/lang/Comparable;");
   auto* serializable = DexType::make_type("Ljava/io/Serializable;");
@@ -1493,6 +1503,112 @@ TEST_F(OptimizeEnumsTest, rejectsEnumReturnedWithNull) {
   EXPECT_FALSE(is_candidate_after_pick("(const v2 0)"));
 }
 
+// A call through Bar, or through an array of Bar, that resolves to a method
+// Bar does not define has no form on the boxed representation, so Bar must
+// stay an enum, like these calls in Java code:
+//
+//   Class<?> c = Bar.Y.getDeclaringClass();  // Enum.getDeclaringClass()
+//   Bar.valueOf(Bar.class, "Y");             // Enum.valueOf(Class, String)
+//   Object copy = bars.clone();              // [LBar;.clone(), no cast back
+struct InheritedCallCase {
+  const char* name;
+  const char* method;
+};
+
+class OptimizeEnumsInheritedCallTest
+    : public OptimizeEnumsTest,
+      public WithParamInterface<InheritedCallCase> {};
+
+TEST_P(OptimizeEnumsInheritedCallTest, keepsEnum) {
+  auto store = create_enum_store();
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  uc.add_method(assembler::method_from_string(GetParam().method));
+  store.add_classes({uc.create()});
+  DexStoresVector stores({std::move(store)});
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  auto* bar_type = DexType::get_type("LBar;");
+  optimize_enums::Config config(100);
+  config.candidate_enums.insert(bar_type);
+  auto bar_reasons = rejection_reasons(scope, &config, bar_type);
+
+  EXPECT_EQ(config.candidate_enums.count_unsafe(bar_type), 0u);
+  EXPECT_TRUE(bar_reasons.contains(
+      optimize_enums::UnsafeType::kUsageUnsafeInvocationOnCandidateEnum));
+}
+
+INSTANTIATE_TEST_SUITE_P(InheritedCalls,
+                         OptimizeEnumsInheritedCallTest,
+                         Values(InheritedCallCase{"virtual", R"(
+          (method (public static) "LUser;.f:()Ljava/lang/Class;"
+            (
+              (sget-object "LBar;.Y:LBar;")
+              (move-result-pseudo-object v0)
+              (invoke-virtual (v0) "LBar;.getDeclaringClass:()Ljava/lang/Class;")
+              (move-result-object v0)
+              (return-object v0)
+            )
+          )
+        )"},
+                                InheritedCallCase{"static", R"(
+          (method (public static) "LUser;.f:()Ljava/lang/Enum;"
+            (
+              (const v0 0)
+              (const-string "Y")
+              (move-result-pseudo-object v1)
+              (invoke-static (v0 v1) "LBar;.valueOf:(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;")
+              (move-result-object v0)
+              (return-object v0)
+            )
+          )
+        )"},
+                                InheritedCallCase{"arrayClone", R"(
+          (method (public static) "LUser;.f:([LBar;)V"
+            (
+              (load-param-object v0)
+              (invoke-virtual (v0) "[LBar;.clone:()Ljava/lang/Object;")
+              (move-result-object v1)
+              (return-void)
+            )
+          )
+        )"}),
+                         [](const auto& info) { return info.param.name; });
+
+// A field reference through Bar that names a field Bar does not define has no
+// form on the boxed representation either. An enum that implements no
+// interface inherits no field javac could name, so this check is defensive.
+TEST_F(OptimizeEnumsTest, inheritedFieldRefKeepsEnum) {
+  auto store = create_enum_store();
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  uc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LUser;.f:()Ljava/lang/Object;"
+      (
+        (sget-object "LBar;.inherited:Ljava/lang/Object;")
+        (move-result-pseudo-object v0)
+        (return-object v0)
+      )
+    )
+  )"));
+  store.add_classes({uc.create()});
+  DexStoresVector stores({std::move(store)});
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  auto* bar_type = DexType::get_type("LBar;");
+  optimize_enums::Config config(100);
+  config.candidate_enums.insert(bar_type);
+  auto bar_reasons = rejection_reasons(scope, &config, bar_type);
+
+  EXPECT_EQ(config.candidate_enums.count_unsafe(bar_type), 0u);
+  EXPECT_TRUE(bar_reasons.contains(
+      optimize_enums::UnsafeType::kUsageInheritedFieldRef));
+}
+
 /* Create an enum with constants A and B whose <clinit> runs `clinit_prefix`
 and then passes the given ordinals to the constructor, like this hand-written
 Java-like code:
@@ -2637,16 +2753,25 @@ TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsValuesCallBeforeAllAssigned) {
             0);
 }
 
-// Likewise `valueOf("SLOW")`, which looks the name up in the values array.
+// Likewise `valueOf("SLOW")`, which looks the name up in the values array
+// through the library method `Enum.valueOf`, whose code Redex does not have.
 TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsValueOfCallBeforeAllAssigned) {
-  EXPECT_EQ(constants_with_code_before_slow(R"(
-              (const-string "SLOW")
-              (move-result-pseudo-object v0)
-              (invoke-static (v0) "LMode;.valueOf:(Ljava/lang/String;)LMode;")
-              (move-result-object v0)
-              (sput-object v0 "LMode;.sink:Ljava/lang/Object;")
-            )",
-                                            mode_values_methods()),
+  EXPECT_EQ(constants_with_code_before_slow(
+                R"(
+                  (const-string "SLOW")
+                  (move-result-pseudo-object v0)
+                  (invoke-static (v0) "LMode;.valueOf:(Ljava/lang/String;)LMode;")
+                  (move-result-object v0)
+                  (sput-object v0 "LMode;.sink:Ljava/lang/Object;")
+                )",
+                mode_values_methods(),
+                [] {
+                  DexMethod::get_method(
+                      "Ljava/lang/Enum;.valueOf:(Ljava/lang/Class;Ljava/lang/"
+                      "String;)Ljava/lang/Enum;")
+                      ->as_def()
+                      ->set_code(nullptr);
+                }),
             0);
 }
 

@@ -154,6 +154,7 @@ class EnumUpcastDetector {
    */
   void process_instruction(const IRInstruction* insn,
                            const EnumTypeEnvironment* env) {
+    reject_unless_candidate_defines(insn);
     switch (insn->opcode()) {
     case OPCODE_CHECK_CAST: {
       const auto* type = insn->get_type();
@@ -715,6 +716,43 @@ class EnumUpcastDetector {
     for (const auto* type : types) {
       reject(insn, type, UnsafeType::kUsageNamedByCallSiteOrMethodHandle);
     }
+  }
+
+  /**
+   * Reject the candidate that a method or field reference names, directly or
+   * as the element type of an array, unless the candidate defines that member,
+   * or `process_virtual_invocation` rewrites the call: `equals`, `compareTo`,
+   * `toString`, `hashCode`, `name` and `ordinal`. The transformation turns a
+   * candidate into a subclass of `Object` whose methods are static, so a member
+   * it inherits, such as `Enum.valueOf(Class, String)` or
+   * `Enum.getDeclaringClass()`, does not exist on it, and it rewrites a call
+   * through an array of the candidate, like `clone()`, as a call of the
+   * candidate's own method.
+   */
+  void reject_unless_candidate_defines(const IRInstruction* insn) const {
+    if (insn->has_method()) {
+      const auto* method = insn->get_method();
+      if (is_candidate(method->get_class()) && !method->is_def() &&
+          !is_rewritten_enum_method(method)) {
+        reject(insn, method->get_class(),
+               UnsafeType::kUsageUnsafeInvocationOnCandidateEnum);
+      }
+    } else if (insn->has_field()) {
+      const auto* field = insn->get_field();
+      if (m_candidate_enums->count_unsafe(field->get_class()) != 0u &&
+          !field->is_def()) {
+        reject(insn, field->get_class(), UnsafeType::kUsageInheritedFieldRef);
+      }
+    }
+  }
+
+  bool is_rewritten_enum_method(const DexMethodRef* method) const {
+    return method::signatures_match(method, ENUM_EQUALS_METHOD) ||
+           method::signatures_match(method, ENUM_COMPARETO_METHOD) ||
+           method::signatures_match(method, ENUM_TOSTRING_METHOD) ||
+           method::signatures_match(method, ENUM_HASHCODE_METHOD) ||
+           method::signatures_match(method, ENUM_NAME_METHOD) ||
+           method::signatures_match(method, ENUM_ORDINAL_METHOD);
   }
 
   void reject(const IRInstruction* insn,

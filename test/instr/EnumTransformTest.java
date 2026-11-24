@@ -217,6 +217,25 @@ enum USED_IN_INSTANCE_OF {
   public static void method(boolean b) {}
   public static void method() { method(ONE instanceof USED_IN_INSTANCE_OF); }
 }
+// CHECK: class: redex.INHERITED_METHOD_CALL
+// CHECK-NEXT: Access flags:
+// CHECK-NEXT: Superclass: java.lang.Enum
+enum INHERITED_METHOD_CALL {
+  ONE;
+  static Class<?> declaringClass(INHERITED_METHOD_CALL e) {
+    return e.getDeclaringClass();
+  }
+}
+// CHECK: class: redex.ARRAY_CLONED_TO_OBJECT
+// CHECK-NEXT: Access flags:
+// CHECK-NEXT: Superclass: java.lang.Enum
+enum ARRAY_CLONED_TO_OBJECT {
+  ONE;
+  // javac emits `[LARRAY_CLONED_TO_OBJECT;.clone()` with no cast back.
+  static Object snapshot(ARRAY_CLONED_TO_OBJECT[] values) {
+    return values.clone();
+  }
+}
 // CHECK: class: redex.CAST_CHECK_CAST
 // CHECK-NEXT: Access flags:
 // CHECK-NEXT: Superclass: java.lang.Enum
@@ -683,4 +702,19 @@ public class EnumTransformTest {
   // POSTCHECK-NEXT: xor-int{{(/2addr)?}} [[DST:v[0-9]+]], {{.*}}
   // POSTCHECK-NEXT: return [[DST]]
   // POSTCHECK-NOT: redex.EnumTransformTest$COUNT.redex$OE$name
+
+  @Test
+  public void array_cloned_to_object() {
+    ARRAY_CLONED_TO_OBJECT[] values = {ARRAY_CLONED_TO_OBJECT.ONE};
+    Object copy = ARRAY_CLONED_TO_OBJECT.snapshot(values);
+    assertThat(copy == values).isFalse();
+    assertThat(((Object[]) copy).length).isEqualTo(1);
+  }
+
+  @Test
+  public void inherited_method_call() {
+    assertThat(INHERITED_METHOD_CALL.declaringClass(INHERITED_METHOD_CALL.ONE)
+                   .isEnum())
+        .isTrue();
+  }
 }

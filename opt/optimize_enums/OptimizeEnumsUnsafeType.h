@@ -51,6 +51,7 @@ enum class UnsafeType {
   kUsageConstantSetOutsideClinit,
   kUsagePassedToCallSiteOrMethodHandle,
   kUsageNamedByCallSiteOrMethodHandle,
+  kUsageInheritedFieldRef,
 };
 
 inline std::ostream& operator<<(std::ostream& os, const UnsafeType& u) {
@@ -159,6 +160,9 @@ inline std::ostream& operator<<(std::ostream& os, const UnsafeType& u) {
     break;
   case UnsafeType::kUsageNamedByCallSiteOrMethodHandle:
     os << "UsageNamedByCallSiteOrMethodHandle";
+    break;
+  case UnsafeType::kUsageInheritedFieldRef:
+    os << "UsageInheritedFieldRef";
     break;
   }
   return os;

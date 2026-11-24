@@ -27,6 +27,7 @@
 #include "IRCode.h"
 #include "IRInstruction.h"
 #include "InlineEnumValues.h"
+#include "LiveRange.h"
 #include "MatchFlow.h"
 #include "OptimizeEnumsAnalysis.h"
 #include "OptimizeEnumsUnmap.h"
@@ -716,7 +717,11 @@ class OptimizeEnums {
              opcode == OPCODE_CONST_STRING ||
              opcode == IOPCODE_MOVE_RESULT_PSEUDO_OBJECT;
     };
+    std::vector<IRInstruction*> iputs;
     while (it != ii.end() && is_iput_or_const(it->insn->opcode())) {
+      if (opcode::is_an_iput(it->insn->opcode())) {
+        iputs.push_back(it->insn);
+      }
       ++it;
     }
     if (it == ii.end()) {
@@ -728,7 +733,33 @@ class OptimizeEnums {
       return false;
     }
     ++it;
-    return it == ii.end();
+    if (it != ii.end()) {
+      return false;
+    }
+    return only_writes_own_fields(method, iputs);
+  }
+
+  /**
+   * Whether every iput writes an instance field of the constructor's own class
+   * on `this`. Removing the constructor call from <clinit> would also remove
+   * a write to any other object, which the program may observe.
+   */
+  static bool only_writes_own_fields(const DexMethod* method,
+                                     const std::vector<IRInstruction*>& iputs) {
+    if (iputs.empty()) {
+      return true;
+    }
+    const auto& cfg = method->get_code()->cfg();
+    const auto* this_param =
+        InstructionIterable(cfg.get_param_instructions()).begin()->insn;
+    live_range::MoveAwareChains chains(cfg);
+    const auto use_def_chains = chains.get_use_def_chains();
+    return std::all_of(iputs.begin(), iputs.end(), [&](IRInstruction* iput) {
+      if (iput->get_field()->get_class() != method->get_class()) {
+        return false;
+      }
+      return live_range::get_single_def(use_def_chains, iput, 1) == this_param;
+    });
   }
 
   /**

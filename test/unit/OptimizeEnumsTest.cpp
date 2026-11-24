@@ -3648,3 +3648,96 @@ TEST_F(OptimizeEnumsTest, objectCastResultGetsIntegerCast) {
   checker.run();
   EXPECT_TRUE(checker.good()) << checker.what();
 }
+
+/* An enum whose constructor writes a field of another object, like this Java
+code:
+
+class Box { int n; }
+class Holder { static Box BOX = new Box(); }
+enum WritesBox {
+  A(Holder.BOX);
+  WritesBox(Box b) { b.n = 7; }
+}
+
+Initializing WritesBox sets Holder.BOX.n to 7. Boxing the enum would delete
+the constructor call from <clinit>, and the write with it, so the enum must
+stay.
+*/
+TEST_F(OptimizeEnumsTest, constructorWritingAnotherObjectKeepsEnum) {
+  auto store = create_enum_store();
+
+  ClassCreator bc(DexType::make_type("LBox;"));
+  bc.set_super(type::java_lang_Object());
+  bc.set_access(ACC_PUBLIC);
+  bc.add_field(DexField::make_field("LBox;.n:I")->make_concrete(ACC_PUBLIC));
+  auto* box = bc.create();
+
+  ClassCreator hc(DexType::make_type("LHolder;"));
+  hc.set_super(type::java_lang_Object());
+  hc.set_access(ACC_PUBLIC);
+  hc.add_field(DexField::make_field("LHolder;.BOX:LBox;")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  auto* holder = hc.create();
+
+  ClassCreator ec(DexType::make_type("LWritesBox;"));
+  ec.set_super(type::java_lang_Enum());
+  ec.set_access(ACC_PUBLIC | ACC_FINAL | ACC_ENUM);
+  ec.add_field(DexField::make_field("LWritesBox;.A:LWritesBox;")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_ENUM));
+  ec.add_field(DexField::make_field("LWritesBox;.$VALUES:[LWritesBox;")
+                   ->make_concrete(ACC_STATIC | ACC_FINAL | ACC_SYNTHETIC));
+  ec.add_method(assembler::method_from_string(R"(
+    (method (private constructor) "LWritesBox;.<init>:(Ljava/lang/String;ILBox;)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (load-param v2)
+        (load-param-object v3)
+        (invoke-direct (v0 v1 v2) "Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V")
+        (const v4 7)
+        (iput v4 v3 "LBox;.n:I")
+        (return-void)
+      )
+    )
+  )"));
+  ec.add_method(assembler::method_from_string(R"(
+    (method (public static) "LWritesBox;.<clinit>:()V"
+      (
+        (sget-object "LHolder;.BOX:LBox;")
+        (move-result-pseudo-object v3)
+        (const-string "A")
+        (move-result-pseudo-object v0)
+        (const v1 0)
+        (new-instance "LWritesBox;")
+        (move-result-pseudo-object v2)
+        (invoke-direct (v2 v0 v1 v3) "LWritesBox;.<init>:(Ljava/lang/String;ILBox;)V")
+        (sput-object v2 "LWritesBox;.A:LWritesBox;")
+        (const v4 1)
+        (new-array v4 "[LWritesBox;")
+        (move-result-pseudo-object v4)
+        (const v5 0)
+        (aput-object v2 v4 v5)
+        (sput-object v4 "LWritesBox;.$VALUES:[LWritesBox;")
+        (return-void)
+      )
+    )
+  )"));
+  auto* writes_box = ec.create();
+  for (auto* m : writes_box->get_all_methods()) {
+    m->get_code()->build_cfg();
+  }
+  store.add_classes({box, holder, writes_box});
+  DexStoresVector stores({std::move(store)});
+
+  optimize_enums::OptimizeEnumsPass pass;
+  PassManager manager({&pass});
+  Json::Value conf_obj = Json::nullValue;
+  ConfigFiles dummy_config(conf_obj);
+  dummy_config.parse_global_config();
+  manager.run_passes(stores, dummy_config);
+
+  EXPECT_TRUE(is_enum(writes_box));
+  EXPECT_FALSE(writes_box->get_ctors().empty());
+  // Bar, whose constructor writes only its own field, is still boxed.
+  EXPECT_FALSE(is_enum(type_class(DexType::get_type("LBar;"))));
+}

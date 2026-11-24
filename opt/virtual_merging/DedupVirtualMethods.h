@@ -26,8 +26,9 @@ using Scope = std::vector<DexClass*>;
 
 /**
  * Remove small identical virtual methods.
- * 1. Consider non-root and renamable methods without invoke-super. Remove the
- * child method if it overrides a method with the same implementation.
+ * 1. Consider non-root and renamable methods whose code does not depend on the
+ * class that holds it (`depends_on_holder_class`). Remove the child method if
+ * it overrides a method with the same implementation.
  *
  * Example:
  * class P {
@@ -43,11 +44,14 @@ uint32_t dedup(const DexStoresVector& stores,
                positions::JoinStats* join_stats = nullptr);
 
 // Whether `method` may be removed in favor of an identical implementation in
-// a superclass: small code without invoke-super, renamable, not a root, and
-// not excluded from optimizations.
+// a superclass: small code that does not depend on the class that holds it
+// (`depends_on_holder_class`), renamable, not a root, and not excluded from
+// optimizations.
 bool is_removable_copy(const DexMethod* method);
 
-// Collects every method that an invoke-super in `scope` names.
+// Collects every method that an invoke-super in `scope` names, and every
+// method that a method handle calling like invoke-super names or can run
+// (`resolve_method_handle_callees`).
 void collect_all_invoke_super_called(
     const Scope& scope, ConcurrentSet<DexMethodRef*>* super_invoked_methods);
 } // namespace dedup_vmethods

@@ -782,7 +782,7 @@ vertical_merging_test_SOURCES = VerticalMergingTest.cpp
 
 vertical_merging_type_lookup_test_SOURCES = VerticalMergingTypeLookupTest.cpp
 
-virtual_merging_test_SOURCES = VirtualMergingTest.cpp
+virtual_merging_test_SOURCES = VirtualMergingTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 virtual_scopes_test_SOURCES = VirtualScopesTest.cpp ScopeHelper.cpp
 virtual_scopes_test_LDADD = $(COMMON_MOCK_TEST_LIBS)

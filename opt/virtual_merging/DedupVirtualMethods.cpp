@@ -16,6 +16,7 @@
 #include "MethodOverrideGraph.h"
 #include "MethodProfiles.h"
 #include "PositionAmbiguity.h"
+#include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
 #include "Walkers.h"
@@ -26,16 +27,17 @@ namespace {
 constexpr const uint32_t MAX_NUM_INSTRUCTIONS = 32;
 
 /**
- * Allow code without invoke-super and with less than MAX_NUM_INSTRUCTIONS
- * instructions.
+ * Allow code whose behavior does not depend on the class that holds it
+ * (`depends_on_holder_class`), so that identical code does the same in every
+ * class, and has less than MAX_NUM_INSTRUCTIONS instructions.
  */
 bool eligible_code(const cfg::ControlFlowGraph& cfg) {
   uint32_t count = 0;
   for (const auto& mie : cfg::ConstInstructionIterable(cfg)) {
-    auto opcode = mie.insn->opcode();
-    if (opcode::is_invoke_super(opcode)) {
+    if (depends_on_holder_class(mie.insn)) {
       return false;
     }
+    auto opcode = mie.insn->opcode();
     if (!opcode::is_an_internal(opcode)) {
       count++;
     }
@@ -247,17 +249,30 @@ uint32_t remove_duplicated_vmethods(
 namespace dedup_vmethods {
 
 /**
- * Collect all the methods that are called with INVOKE_SUPPER opcode
+ * Collect all the methods that are called with INVOKE_SUPPER opcode, and
+ * those that method handles which call like it name or can run.
  */
 void collect_all_invoke_super_called(
     const Scope& scope, ConcurrentSet<DexMethodRef*>* super_invoked_methods) {
-  walk::parallel::code(scope, [&](DexMethod* /*method*/, IRCode& code) {
+  walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {
     cfg_adapter::iterate(&code, [&](MethodItemEntry& mie) {
-      auto* insn = mie.insn;
-      if (insn->opcode() == OPCODE_INVOKE_SUPER) {
-        auto* callee_ref = insn->get_method();
+      for_each_invoke(mie.insn, [&](IROpcode opcode, DexMethodRef* callee_ref,
+                                    const DexMethodHandle* method_handle) {
+        if (opcode != OPCODE_INVOKE_SUPER) {
+          return;
+        }
         super_invoked_methods->insert(callee_ref);
-      }
+        if (method_handle == nullptr) {
+          return;
+        }
+        // Which method such a handle runs depends on which classes declare
+        // the method, and can differ by ART version; removing one of the
+        // methods it can run would change what it runs.
+        for (auto* callee :
+             resolve_method_handle_callees(method_handle, method)) {
+          super_invoked_methods->insert(callee);
+        }
+      });
       return cfg_adapter::LOOP_CONTINUE;
     });
   });

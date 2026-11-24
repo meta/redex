@@ -14,6 +14,7 @@
 #include "BaselineProfile.h"
 #include "Creators.h"
 #include "Debug.h"
+#include "DedupVirtualMethods.h"
 #include "DexClass.h"
 #include "DexStore.h"
 #include "Dominators.h"
@@ -266,6 +267,12 @@ class VirtualMergingTest : public RedexTest {
     return fail.result();
   }
 
+  void set_code(size_t idx, const char* name, std::unique_ptr<IRCode> code) {
+    auto* method = const_cast<DexMethod*>(get_method(idx, name));
+    method->set_code(std::move(code));
+    method->get_code()->build_cfg();
+  }
+
   ConfigFiles conf = ConfigFiles(Json::nullValue);
 
  protected:
@@ -309,6 +316,87 @@ TEST_F(VirtualMergingTest, DedupPreservesOverrideProfile) {
       baseline_profiles::get_huge_method_max(config));
   EXPECT_TRUE(baseline_profiles::dex2oat_compiles(
       baseline, ancestor, baseline_profiles::get_huge_method_max(config)));
+}
+
+// `LA1;.foo` and `LA11;.foo` have the same code, which calls `LA1;.bar`
+// through an invoke-direct method handle. What such a handle runs depends on
+// the class that holds it: in `LA1;` it runs `LA1;.bar`, in `LA11;` it runs
+// `LA11;.bar` on Android 9 and `LA;.bar` on Android 10 and later. So
+// `LA11;.foo` is not a copy of `LA1;.foo`, and it stays.
+TEST_F(VirtualMergingTest, DedupKeepsCodeWithMethodHandleThatCallsLikeSuper) {
+  const std::string code = R"((
+    (load-param-object v1)
+    (const-method-handle invoke-direct "LA1;.bar:()I")
+    (move-result-pseudo-object v0)
+    (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LA1;)I")
+    (move-result v2)
+    (return v2)
+  ))";
+  // Code that a dex file holds shares its method handle items.
+  auto a1_code = assembler::ircode_from_string(code);
+  auto a11_code = std::make_unique<IRCode>(*a1_code);
+  set_code(1, "foo", std::move(a1_code));
+  set_code(11, "foo", std::move(a11_code));
+
+  dedup_vmethods::dedup(stores);
+
+  EXPECT_NE(get_method(11, "foo"), nullptr);
+}
+
+// `LA1;.foo` and `LA11;.foo` have the same code, which holds an invoke-custom.
+// Its bootstrap method receives a lookup in the class of the code that holds
+// it, so `LA11;.foo` is not a copy of `LA1;.foo`, and it stays.
+TEST_F(VirtualMergingTest, DedupKeepsCodeWithInvokeCustom) {
+  auto a1_code = assembler::ircode_from_string(R"((
+    (load-param-object v1)
+    (invoke-static () "LA1;.placeholder:()V")
+    (const v0 1)
+    (return v0)
+  ))");
+  redex::make_invoke_custom(a1_code.get(), "run", "()V");
+  // Code that a dex file holds shares its call site items.
+  auto a11_code = std::make_unique<IRCode>(*a1_code);
+  set_code(1, "foo", std::move(a1_code));
+  set_code(11, "foo", std::move(a11_code));
+
+  dedup_vmethods::dedup(stores);
+
+  EXPECT_NE(get_method(11, "foo"), nullptr);
+}
+
+// `LA11;.foo` has the same code as `LA1;.foo`, but an invoke-direct method
+// handle of `LA1;.foo` in `LA111;` can run it: Android 9 runs `LA111;`'s
+// implementation, `LA11;.foo`, and Android 10 and later run `LA;.foo`. Without
+// `LA11;.foo`, every version would run `LA1;.foo`, so it stays.
+TEST_F(VirtualMergingTest, DedupKeepsMethodThatAMethodHandleCanRun) {
+  const char* code = R"((
+    (load-param-object v1)
+    (const v0 1)
+    (return v0)
+  ))";
+  set_code(1, "foo", assembler::ircode_from_string(code));
+  set_code(11, "foo", assembler::ircode_from_string(code));
+  ClassCreator a111(DexType::make_type("LA111;"));
+  a111.set_super(DexType::make_type("LA11;"));
+  auto* use = assembler::method_from_string(R"(
+    (method (public) "LA111;.use:()I"
+     (
+      (load-param-object v1)
+      (const-method-handle invoke-direct "LA1;.foo:()I")
+      (move-result-pseudo-object v0)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LA1;)I")
+      (move-result v2)
+      (return v2)
+     )
+    )
+  )");
+  use->get_code()->build_cfg();
+  a111.add_method(use);
+  stores[0].add_classes({a111.create()});
+
+  dedup_vmethods::dedup(stores);
+
+  EXPECT_NE(get_method(11, "foo"), nullptr);
 }
 
 TEST_F(VirtualMergingTest, Armv7HardLimitSkipsLateMerge) {

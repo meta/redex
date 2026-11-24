@@ -872,6 +872,34 @@ struct ClassLiteralMethodsReplacer {
 
 } // namespace
 
+/*
+ * A call that certainly reaches a registered attribute getter without side
+ * effects, on an object that is known not to be null, can be removed when its
+ * result is a known constant: the constant replaces the whole call.
+ */
+void Transform::remove_attribute_getter_call(
+    const ConstantEnvironment& env,
+    const cfg::InstructionIterator& cfg_it,
+    const XStoreRefs* xstores,
+    const DexType* declaring_type) {
+  if (m_config.getter_methods_for_immutable_fields == nullptr ||
+      m_config.pure_methods == nullptr) {
+    return;
+  }
+  auto* getter = resolve_attribute_getter_call(
+      *m_config.getter_methods_for_immutable_fields, cfg_it->insn, env);
+  if (getter == nullptr || !assumenosideeffects(getter, getter)) {
+    return;
+  }
+  auto move_result_it = cfg_it.cfg().move_result_of(cfg_it);
+  if (!move_result_it.is_end() &&
+      replace_primary_with_const(env.get(RESULT_REGISTER), move_result_it,
+                                 xstores, declaring_type)) {
+    m_redundant_move_results.insert(move_result_it->insn);
+    ++m_stats.attribute_getter_calls_removed;
+  }
+}
+
 bool Transform::assumenosideeffects(DexMethodRef* ref, DexMethod* meth) const {
   if (::assumenosideeffects(meth)) {
     return true;
@@ -1015,7 +1043,12 @@ void Transform::simplify_instruction(const ConstantEnvironment& env,
           insn, insn->get_method(), env, cfg_it, *m_mutation, m_stats, context);
       break;
     }
+    remove_attribute_getter_call(env, cfg_it, xstores, declaring_type);
+    break;
+  }
 
+  case OPCODE_INVOKE_INTERFACE: {
+    remove_attribute_getter_call(env, cfg_it, xstores, declaring_type);
     break;
   }
 
@@ -1717,6 +1750,8 @@ void Transform::Stats::log_metrics(ScopedMetrics& sm, bool with_scope) const {
   sm.set_metric("kotlin_areequal_replaced", kotlin_areequal_replaced);
   sm.set_metric("branches_with_both_successors_infeasible",
                 branches_with_both_successors_infeasible);
+  sm.set_metric("attribute_getter_calls_removed",
+                attribute_getter_calls_removed);
 }
 
 } // namespace constant_propagation

@@ -72,6 +72,7 @@ class Transform final {
     // Conditional branches in reachable code for which the analysis finds
     // neither successor feasible.
     size_t branches_with_both_successors_infeasible{0};
+    size_t attribute_getter_calls_removed{0};
 
     Stats& operator+=(const Stats& that) {
       branches_removed += that.branches_removed;
@@ -88,6 +89,7 @@ class Transform final {
       kotlin_areequal_replaced += that.kotlin_areequal_replaced;
       branches_with_both_successors_infeasible +=
           that.branches_with_both_successors_infeasible;
+      attribute_getter_calls_removed += that.attribute_getter_calls_removed;
       return *this;
     }
 
@@ -201,6 +203,10 @@ class Transform final {
                               DexProto* proto,
                               const XStoreRefs*);
 
+  void remove_attribute_getter_call(const ConstantEnvironment& env,
+                                    const cfg::InstructionIterator& cfg_it,
+                                    const XStoreRefs* xstores,
+                                    const DexType* declaring_type);
   bool assumenosideeffects(DexMethodRef* ref, DexMethod* meth) const;
 
   const Config m_config;

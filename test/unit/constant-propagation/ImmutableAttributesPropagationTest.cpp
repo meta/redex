@@ -46,6 +46,24 @@ struct ImmutableTest : public ConstantPropagationTest {
   cp::ImmutableAttributeAnalyzerState m_immut_analyzer_state;
   ImmutableAnalyzer m_analyzer;
   cp::Transform::Config m_config;
+  UnorderedSet<DexMethodRef*> m_pure_methods;
+
+  // Interprocedural constant propagation replaces call results only for
+  // registered getters and pure methods. Its pure methods include the
+  // registered getters of the JDK, as these tests' getters are taken to be.
+  cp::Transform::Config ipcp_config(
+      const cp::ImmutableAttributeAnalyzerState& state) {
+    cp::Transform::Config config;
+    config.getter_methods_for_immutable_fields = &state.attribute_methods;
+    for (auto* getter : UnorderedIterable(state.attribute_methods)) {
+      m_pure_methods.insert(getter);
+    }
+    config.pure_methods = &m_pure_methods;
+    return config;
+  }
+  cp::Transform::Config ipcp_config() {
+    return ipcp_config(m_immut_analyzer_state);
+  }
 
   static ObjectWithImmutAttrDomain create_integer_abstract_value(long value,
                                                                  bool cached) {
@@ -365,6 +383,28 @@ void create_number_and_integer() {
       ACC_PUBLIC | ACC_FINAL, "Ljava/lang/Integer;.intValue:()I", ACC_PUBLIC);
 }
 
+size_t count_number_int_value_calls(IRCode* code) {
+  const auto* number_int_value =
+      DexMethod::get_method("Ljava/lang/Number;.intValue:()I");
+  size_t count = 0;
+  for (const auto& mie : InstructionIterable(code)) {
+    if (mie.insn->has_method() && mie.insn->get_method() == number_int_value) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+bool has_const(IRCode* code, reg_t dest, int64_t value) {
+  for (const auto& mie : InstructionIterable(code)) {
+    if (mie.insn->opcode() == OPCODE_CONST && mie.insn->dest() == dest &&
+        mie.insn->get_literal() == value) {
+      return true;
+    }
+  }
+  return false;
+}
+
 } // namespace
 
 // `Number.intValue()` on a boxed Integer dispatches to `Integer.intValue()`:
@@ -391,6 +431,179 @@ TEST_F(ImmutableTest, integer_through_supertype) {
       (invoke-virtual (v0) "Ljava/lang/Number;.intValue:()I")
       (const v0 100)
       (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+// A direct call to the registered getter is replaced the same way.
+TEST_F(ImmutableTest, direct_getter_call_removed) {
+  create_number_and_integer();
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v1 100)
+      (invoke-static (v1) "Ljava/lang/Integer;.valueOf:(I)Ljava/lang/Integer;")
+      (move-result-object v0)
+      (invoke-virtual (v0) "Ljava/lang/Integer;.intValue:()I")
+      (move-result v0)
+      (return v0)
+    )
+  )");
+
+  do_const_prop(code.get(), m_analyzer, ipcp_config());
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const v1 100)
+      (invoke-static (v1) "Ljava/lang/Integer;.valueOf:(I)Ljava/lang/Integer;")
+      (move-result-object v0)
+      (const v0 100)
+      (return v0)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+// Without knowing that the getter has no side effects, the call stays.
+TEST_F(ImmutableTest, getter_call_not_known_pure_kept) {
+  create_number_and_integer();
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v1 100)
+      (invoke-static (v1) "Ljava/lang/Integer;.valueOf:(I)Ljava/lang/Integer;")
+      (move-result-object v0)
+      (invoke-virtual (v0) "Ljava/lang/Number;.intValue:()I")
+      (move-result v0)
+      (return v0)
+    )
+  )");
+  auto config = ipcp_config();
+  UnorderedSet<DexMethodRef*> no_pure_methods;
+  config.pure_methods = &no_pure_methods;
+
+  do_const_prop(code.get(), m_analyzer, config);
+  EXPECT_EQ(count_number_int_value_calls(code.get()), 1);
+}
+
+// The call through the supertype reaches the registered getter, so a constant
+// result replaces the whole call.
+TEST_F(ImmutableTest, call_through_supertype_removed) {
+  create_number_and_integer();
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v1 100)
+      (invoke-static (v1) "Ljava/lang/Integer;.valueOf:(I)Ljava/lang/Integer;")
+      (move-result-object v0)
+      (invoke-virtual (v0) "Ljava/lang/Number;.intValue:()I")
+      (move-result v0)
+      (return v0)
+    )
+  )");
+
+  do_const_prop(code.get(), m_analyzer, ipcp_config());
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const v1 100)
+      (invoke-static (v1) "Ljava/lang/Integer;.valueOf:(I)Ljava/lang/Integer;")
+      (move-result-object v0)
+      (const v0 100)
+      (return v0)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+// Inside a try, the call ends its block and its result starts the next one.
+TEST_F(ImmutableTest, call_through_supertype_in_try_removed) {
+  create_number_and_integer();
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v1 100)
+      (invoke-static (v1) "Ljava/lang/Integer;.valueOf:(I)Ljava/lang/Integer;")
+      (move-result-object v0)
+      (.try_start a)
+      (invoke-virtual (v0) "Ljava/lang/Number;.intValue:()I")
+      (move-result v0)
+      (.try_end a)
+      (return v0)
+      (.catch (a))
+      (const v0 -1)
+      (return v0)
+    )
+  )");
+
+  do_const_prop(code.get(), m_analyzer, ipcp_config());
+  EXPECT_EQ(count_number_int_value_calls(code.get()), 0);
+  EXPECT_TRUE(has_const(code.get(), 0, 100));
+}
+
+// An Integer whose value differs between two paths: the call stays.
+TEST_F(ImmutableTest, call_through_supertype_with_unknown_result_kept) {
+  create_number_and_integer();
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param v2)
+      (if-eqz v2 :other)
+      (const v1 7)
+      (invoke-static (v1) "Ljava/lang/Integer;.valueOf:(I)Ljava/lang/Integer;")
+      (move-result-object v0)
+      (goto :call)
+      (:other)
+      (const v1 8)
+      (invoke-static (v1) "Ljava/lang/Integer;.valueOf:(I)Ljava/lang/Integer;")
+      (move-result-object v0)
+      (:call)
+      (invoke-virtual (v0) "Ljava/lang/Number;.intValue:()I")
+      (move-result v0)
+      (return v0)
+    )
+  )");
+
+  do_const_prop(code.get(), m_analyzer, ipcp_config());
+  EXPECT_EQ(count_number_int_value_calls(code.get()), 1);
+}
+
+// A string result replaces the call with a `const-string`.
+TEST_F(ImmutableTest, call_through_supertype_with_string_result_removed) {
+  create_external_class_with_method(
+      DexType::make_type("LSuperLabel;"), type::java_lang_Object(),
+      ACC_PUBLIC | ACC_ABSTRACT, "LSuperLabel;.label:()Ljava/lang/String;",
+      ACC_PUBLIC);
+  create_external_class_with_method(
+      DexType::make_type("LLabel;"), DexType::make_type("LSuperLabel;"),
+      ACC_PUBLIC | ACC_FINAL, "LLabel;.label:()Ljava/lang/String;", ACC_PUBLIC);
+  cp::ImmutableAttributeAnalyzerState analyzer_state;
+  analyzer_state
+      .add_initializer(dynamic_cast<DexMethod*>(DexMethod::make_method(
+                           "LLabel;.<init>:(Ljava/lang/String;)V")),
+                       dynamic_cast<DexMethod*>(DexMethod::get_method(
+                           "LLabel;.label:()Ljava/lang/String;")))
+      .set_src_id_of_attr(1)
+      .set_src_id_of_obj(0);
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const-string "x")
+      (move-result-pseudo-object v1)
+      (new-instance "LLabel;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0 v1) "LLabel;.<init>:(Ljava/lang/String;)V")
+      (invoke-virtual (v0) "LSuperLabel;.label:()Ljava/lang/String;")
+      (move-result-object v2)
+      (return-object v2)
+    )
+  )");
+  do_const_prop(code.get(),
+                ImmutableAnalyzer(nullptr, &analyzer_state, nullptr),
+                ipcp_config(analyzer_state));
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const-string "x")
+      (move-result-pseudo-object v1)
+      (new-instance "LLabel;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0 v1) "LLabel;.<init>:(Ljava/lang/String;)V")
+      (const-string "x")
+      (move-result-pseudo-object v2)
+      (return-object v2)
     )
   )");
   EXPECT_CODE_EQ(code.get(), expected_code.get());
@@ -597,6 +810,48 @@ TEST_F(ImmutableTest, getter_through_package_private_supertype_method) {
 TEST_F(ImmutableTest, getter_through_undefined_method) {
   EXPECT_FALSE(getter_through_supertype_folds(
       ACC_PUBLIC | ACC_FINAL, ACC_PUBLIC, DexType::make_type("LUndefined;")));
+}
+
+// An interface call that reaches the registered getter is replaced by its
+// constant result too.
+TEST_F(ImmutableTest, interface_call_through_supertype_removed) {
+  create_external_class_with_method(DexType::make_type("LBase;"),
+                                    type::java_lang_Object(),
+                                    ACC_PUBLIC | ACC_FINAL, "LBase;.value:()I",
+                                    ACC_PUBLIC, create_interface());
+  cp::ImmutableAttributeAnalyzerState analyzer_state;
+  analyzer_state
+      .add_initializer(
+          dynamic_cast<DexMethod*>(
+              DexMethod::make_method("LBase;.<init>:(I)V")),
+          dynamic_cast<DexMethod*>(DexMethod::get_method("LBase;.value:()I")))
+      .set_src_id_of_attr(1)
+      .set_src_id_of_obj(0);
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v1 7)
+      (new-instance "LBase;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0 v1) "LBase;.<init>:(I)V")
+      (invoke-interface (v0) "LNamed;.value:()I")
+      (move-result v2)
+      (return v2)
+    )
+  )");
+  do_const_prop(code.get(),
+                ImmutableAnalyzer(nullptr, &analyzer_state, nullptr),
+                ipcp_config(analyzer_state));
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const v1 7)
+      (new-instance "LBase;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0 v1) "LBase;.<init>:(I)V")
+      (const v2 7)
+      (return v2)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
 TEST_F(ImmutableTest, cached_identity) {

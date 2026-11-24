@@ -230,3 +230,47 @@ TEST_F(ObfuscateMethodHandleTest, shared_call_site_stays_shared) {
   ASSERT_EQ(other_callsites.size(), 1);
   EXPECT_NE(other_callsites[0], callsites[0]);
 }
+
+// Method handles that static field values hold follow the rename too.
+TEST_F(ObfuscateMethodHandleTest,
+       static_field_value_handles_of_inherited_members) {
+  auto* a = make_class("LA;", type::java_lang_Object());
+  auto* f =
+      DexField::make_field("LA;.f:I")->make_concrete(ACC_PUBLIC | ACC_STATIC);
+  a->add_field(f);
+  auto* g =
+      DexMethod::make_method("LA;.g:()V")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                          assembler::ircode_from_string("((return-void))"),
+                          /* is_virtual */ false);
+  a->add_method(g);
+  auto* b = make_class("LB;", a->get_type());
+  auto* c = make_class("LC;", type::java_lang_Object());
+  auto* getter =
+      DexField::make_field("LC;.GETTER:Ljava/lang/invoke/MethodHandle;")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+                          std::make_unique<DexEncodedValueMethodHandle>(
+                              redex::make_method_handle(
+                                  METHOD_HANDLE_TYPE_STATIC_GET, "LB;.f:I")));
+  c->add_field(getter);
+  auto* invoker =
+      DexField::make_field("LC;.INVOKER:Ljava/lang/invoke/MethodHandle;")
+          ->make_concrete(
+              ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+              std::make_unique<DexEncodedValueMethodHandle>(
+                  redex::make_method_handle(METHOD_HANDLE_TYPE_INVOKE_STATIC,
+                                            "LB;.g:()V")));
+  c->add_field(invoker);
+
+  run_obfuscate({a, b, c});
+
+  ASSERT_NE(f->get_name()->str(), "f");
+  ASSERT_NE(g->get_name()->str(), "g");
+  auto handle_of = [](const DexField* field) {
+    return redex::encoded_value_as<DexEncodedValueMethodHandle>(
+               field->get_static_value())
+        ->methodhandle();
+  };
+  EXPECT_EQ(handle_of(getter)->fieldref(), f);
+  EXPECT_EQ(handle_of(invoker)->methodref(), g);
+}

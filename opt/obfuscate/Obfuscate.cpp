@@ -148,9 +148,12 @@ void update_refs(Scope& scope,
     }
     TRACE(OBFUSCATE, 4, "Found a method handle to fixup %s",
           SHOW(method_handle));
-    maybe_publicize_class(m, type_class(field_def != nullptr
-                                            ? field_def->get_class()
-                                            : method_def->get_class()));
+    // ART never resolves a handle that no code holds, so it accesses nothing.
+    if (m != nullptr) {
+      maybe_publicize_class(m, type_class(field_def != nullptr
+                                              ? field_def->get_class()
+                                              : method_def->get_class()));
+    }
     return field_def != nullptr
                ? DexMethodHandle(method_handle->type(), field_def)
                : DexMethodHandle(method_handle->type(), method_def);
@@ -193,6 +196,7 @@ void update_refs(Scope& scope,
       }
     }
   });
+  method_handle_rewriter.rewrite(scope);
 }
 
 void get_totals(Scope& scope, RenameStats& stats) {

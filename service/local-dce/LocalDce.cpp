@@ -50,8 +50,7 @@ void update_liveness(const IRInstruction* inst,
   auto op = inst->opcode();
   // The destination of an `invoke` is its return value, which is encoded as
   // the max position in the bitvector.
-  if (opcode::is_a_method_invoke(op) || opcode::is_filled_new_array(op) ||
-      inst->has_move_result_pseudo()) {
+  if (opcode::writes_result_register(op) || inst->has_move_result_pseudo()) {
     bliveness.reset(bliveness.size() - 1);
   }
   // Source registers are live.

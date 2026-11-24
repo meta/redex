@@ -76,6 +76,7 @@ COMMON_INCLUDES = \
 	-I$(top_srcdir)/opt/remove-uninstantiables \
 	-I$(top_srcdir)/opt/remove-unreachable \
 	-I$(top_srcdir)/opt/remove-unused-args \
+	-I$(top_srcdir)/opt/remove-unused-fields \
 	-I$(top_srcdir)/opt/renameclasses \
 	-I$(top_srcdir)/opt/reorder-interfaces \
 	-I$(top_srcdir)/opt/resolve-proguard-values \

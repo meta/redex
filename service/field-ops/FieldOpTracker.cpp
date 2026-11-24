@@ -139,6 +139,19 @@ class WritesAnalyzer {
               const auto& inferred_type = type_env.get_dex_type(reg);
               return !inferred_type || this->has_lifetime(*inferred_type);
             };
+        // A method handle that puts a field can put any value; the
+        // instruction that holds it stands for that value.
+        for_each_field_access(insn, [&](IROpcode access_op,
+                                        DexFieldRef* field_ref,
+                                        const DexMethodHandle* method_handle) {
+          if (method_handle == nullptr || !(opcode::is_an_iput(access_op) ||
+                                            opcode::is_an_sput(access_op))) {
+            return;
+          }
+          auto* field = resolve_field_handle(method_handle);
+          escape(sparta::PatriciaTreeSet<IRInstruction*>{insn}, field, nullptr,
+                 field == nullptr);
+        });
         auto op = insn->opcode();
         if (opcode::is_an_iput(op) || opcode::is_an_sput(op)) {
           auto non_zero_value_defs = get_non_zero_defs(insn->src(0));
@@ -449,24 +462,27 @@ FieldStatsMap analyze(const Scope& scope) {
     }
     bool is_clinit = method::is_clinit(method);
     cfg_adapter::iterate(method->get_code(), [&](const MethodItemEntry& mie) {
-      auto* insn = mie.insn;
-      auto op = insn->opcode();
-      if (!insn->has_field()) {
-        return cfg_adapter::LOOP_CONTINUE;
-      }
-      auto* field = resolve_field(insn->get_field());
-      if (field == nullptr) {
-        return cfg_adapter::LOOP_CONTINUE;
-      }
-      if (opcode::is_an_sget(op) || opcode::is_an_iget(op)) {
-        ++field_stats[field].reads;
-      } else if (opcode::is_an_sput(op) || opcode::is_an_iput(op)) {
-        ++field_stats[field].writes;
-        if (is_clinit && is_static(field) &&
-            field->get_class() == method->get_class()) {
-          ++field_stats[field].init_writes;
-        }
-      }
+      for_each_field_access(
+          mie.insn, [&](IROpcode op, DexFieldRef* field_ref,
+                        const DexMethodHandle* method_handle) {
+            auto* field = method_handle == nullptr
+                              ? resolve_field(field_ref)
+                              : resolve_field_handle(method_handle);
+            if (field == nullptr) {
+              return;
+            }
+            if (opcode::is_an_sget(op) || opcode::is_an_iget(op)) {
+              ++field_stats[field].reads;
+            } else if (opcode::is_an_sput(op) || opcode::is_an_iput(op)) {
+              ++field_stats[field].writes;
+              // A method handle can be called anywhere, so a write through one
+              // is never an initialization.
+              if (method_handle == nullptr && is_clinit && is_static(field) &&
+                  field->get_class() == method->get_class()) {
+                ++field_stats[field].init_writes;
+              }
+            }
+          });
       return cfg_adapter::LOOP_CONTINUE;
     });
     for (auto& p : UnorderedIterable(field_stats)) {

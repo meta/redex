@@ -111,6 +111,7 @@ check_PROGRAMS = \
     extract_native_test \
     fast_reg_alloc_test \
     fbjni_marker_test \
+    field_op_tracker_method_handle_test \
     final_inline_v2_test \
     fp_ev_test \
     global_type_analysis_test \
@@ -436,6 +437,8 @@ fast_reg_alloc_test_SOURCES = FastRegAllocTest.cpp
 fbjni_marker_test_SOURCES = FbjniMarkerTest.cpp
 EXTRA_fbjni_marker_test_DEPENDENCIES = fbjni_marker_test.env
 $(eval $(call make_env,fbjni_marker_test,test_fbjni_json=$(srcdir)/example_fbjni.json))
+
+field_op_tracker_method_handle_test_SOURCES = FieldOpTrackerMethodHandleTest.cpp
 
 final_inline_v2_test_SOURCES = FinalInlineV2Test.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 

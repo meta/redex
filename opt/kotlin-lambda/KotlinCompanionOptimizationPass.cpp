@@ -19,9 +19,11 @@
 #include "LiveRange.h"
 #include "Mutators.h"
 #include "PassManager.h"
+#include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
 #include "TypeInference.h"
+#include "TypeUtil.h"
 #include "Walkers.h"
 
 namespace {
@@ -274,6 +276,18 @@ bool is_clinit_field_init_only(DexMethod* clinit) {
   return true;
 }
 
+// Whether the code of `method` does something that depends on the class that
+// holds it (`depends_on_holder_class`), which moving it would change.
+bool depends_on_its_class(const DexMethod* method) {
+  for (const auto& mie :
+       cfg::ConstInstructionIterable(method->get_code()->cfg())) {
+    if (depends_on_holder_class(mie.insn)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 enum class RejectionReason {
   kAccepted,
   kRootedOrExternal,
@@ -373,7 +387,8 @@ std::pair<RejectionReason, DexClass*> candidate_for_companion_relocation(
     // No need to check is_final(meth) — the class-level hierarchy check
     // already guarantees no subclasses, so no virtual method can be overridden.
     if (root(meth) || !can_rename(meth) || meth->rstate.no_optimizations() ||
-        (meth->get_code() == nullptr) || uses_this(meth)) {
+        (meth->get_code() == nullptr) || uses_this(meth) ||
+        depends_on_its_class(meth)) {
       TRACE(KOTLIN_COMPANION, 5, "Method not relocatable: %s", SHOW(meth));
       return {RejectionReason::kMethodNotRelocatable, nullptr};
     }
@@ -390,7 +405,8 @@ std::pair<RejectionReason, DexClass*> candidate_for_companion_relocation(
       }
     } else if (root(meth) || !can_rename(meth) ||
                meth->rstate.no_optimizations() ||
-               (meth->get_code() == nullptr) || uses_this(meth)) {
+               (meth->get_code() == nullptr) || uses_this(meth) ||
+               depends_on_its_class(meth)) {
       TRACE(KOTLIN_COMPANION, 5, "Method not relocatable: %s", SHOW(meth));
       return {RejectionReason::kMethodNotRelocatable, nullptr};
     }
@@ -642,6 +658,27 @@ void filter_untrackable_usages(
            rejected.count(from) != 0u;
   };
 
+  // Relocation rewrites the invokes of the companion's methods and the reads of
+  // its instance, but not what a method handle, call site or method type
+  // names: the members of method handles, the prototypes of call sites and
+  // method types, and Class bootstrap arguments.
+  auto reject_named_in_method_handles_and_types =
+      [&](const IRInstruction* insn) {
+        for_each_indirectly_named_type(insn, [&](const DexType* type) {
+          const auto* element_type = type::get_element_type_if_array(type);
+          if (element_type == nullptr) {
+            return;
+          }
+          auto* from = type_class(element_type);
+          if (!skip(from)) {
+            rejected.insert(from);
+            TRACE(KOTLIN_COMPANION, 2,
+                  "Adding cls %s to bad list due to insn %s", SHOW(from),
+                  SHOW(insn));
+          }
+        });
+      };
+
   walk::parallel::methods(scope, [&](DexMethod* method) {
     auto* code = method->get_code();
     if (code == nullptr) {
@@ -686,6 +723,7 @@ void filter_untrackable_usages(
 
     for (auto it = iterable.begin(); it != iterable.end(); it++) {
       auto* insn = it->insn;
+      reject_named_in_method_handles_and_types(insn);
       switch (insn->opcode()) {
       case OPCODE_SPUT_OBJECT: {
         auto* from = type_class(insn->get_field()->get_type());

@@ -133,6 +133,7 @@ check_PROGRAMS = \
     ir_typechecker_test \
     jar_loader_test \
     java_parser_util_test \
+    kotlin_companion_method_handle_test \
     kotlin_lambda_analyzer_test \
     kotlin_lambda_dedup_pass_test \
     literals_test \
@@ -495,6 +496,8 @@ jar_loader_test_SOURCES = JarLoaderTest.cpp
 
 java_parser_util_test_SOURCES = JavaParserUtilTest.cpp
 java_parser_util_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
+
+kotlin_companion_method_handle_test_SOURCES = KotlinCompanionMethodHandleTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 kotlin_lambda_analyzer_test_SOURCES = KotlinLambdaAnalyzerTest.cpp
 kotlin_lambda_analyzer_test_LDADD = $(COMMON_MOCK_TEST_LIBS)

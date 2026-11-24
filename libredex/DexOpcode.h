@@ -42,7 +42,7 @@ bool has_range(DexOpcode);
 // If an opcode has a variable number of register operands
 inline bool has_arg_word_count(DexOpcode op) {
   auto fmt = format(op);
-  return fmt == FMT_f35c || fmt == FMT_f57c;
+  return fmt == FMT_f35c || fmt == FMT_f45cc || fmt == FMT_f57c;
 }
 
 bool is_commutative(DexOpcode op);

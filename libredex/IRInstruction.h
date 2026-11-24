@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "Debug.h"
+#include "DexSignaturePolymorphicRef.h"
 #include "IROpcode.h"
 
 class DexCallSite;
@@ -172,8 +173,15 @@ class IRInstruction final {
 
   bool has_field() const { return opcode::ref(m_opcode) == opcode::Ref::Field; }
 
+  // The five invokes that call the method they name. `invoke-polymorphic` also
+  // names a method, but calls whatever its method handle refers to; see
+  // has_signature_polymorphic().
   bool has_method() const {
     return opcode::ref(m_opcode) == opcode::Ref::Method;
+  }
+
+  bool has_signature_polymorphic() const {
+    return opcode::ref(m_opcode) == opcode::Ref::SignaturePolymorphic;
   }
 
   bool has_literal() const {
@@ -202,7 +210,8 @@ class IRInstruction final {
   }
 
   bool has_move_result() const {
-    return has_method() || m_opcode == OPCODE_FILLED_NEW_ARRAY;
+    return has_method() || has_signature_polymorphic() ||
+           m_opcode == OPCODE_FILLED_NEW_ARRAY;
   }
 
   bool has_move_result_any() const {
@@ -354,6 +363,30 @@ class IRInstruction final {
     return this;
   }
 
+  // The prototype of an `invoke-polymorphic` call site: the types of the
+  // arguments after the receiver, and of the result.
+  DexProto* get_callsite_proto() const {
+    always_assert(has_signature_polymorphic());
+    always_assert(m_signature_polymorphic != nullptr);
+    return m_signature_polymorphic->callsite_proto();
+  }
+
+  // The method and call-site prototype of an `invoke-polymorphic`. It is
+  // interned, so equal pairs are the same object.
+  const DexSignaturePolymorphicRef* get_signature_polymorphic() const {
+    always_assert(has_signature_polymorphic());
+    always_assert(m_signature_polymorphic != nullptr);
+    return m_signature_polymorphic;
+  }
+
+  IRInstruction* set_signature_polymorphic(DexMethodRef* method,
+                                           DexProto* callsite_proto) {
+    always_assert(has_signature_polymorphic());
+    m_signature_polymorphic =
+        DexSignaturePolymorphicRef::make(method, callsite_proto);
+    return this;
+  }
+
   DexCallSite* get_callsite() const {
     always_assert(has_callsite());
     return m_callsite;
@@ -419,6 +452,8 @@ class IRInstruction final {
   void gather_protos(std::vector<DexProto*>& lproto) const {
     if (has_proto()) {
       lproto.push_back(m_proto);
+    } else if (has_signature_polymorphic()) {
+      lproto.push_back(get_callsite_proto());
     }
   }
 
@@ -457,6 +492,7 @@ class IRInstruction final {
     DexCallSite* m_callsite;
     DexMethodHandle* m_methodhandle;
     DexProto* m_proto;
+    DexSignaturePolymorphicRef* m_signature_polymorphic;
   };
   // 16 bytes so far
   union {

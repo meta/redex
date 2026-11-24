@@ -136,6 +136,11 @@ IROperation BlockValues::get_operation(std::map<reg_t, value_id_t>& regs,
     operation.op_data.type = insn->get_type();
   } else if (insn->has_field()) {
     operation.op_data.field = insn->get_field();
+  } else if (insn->has_signature_polymorphic()) {
+    // The call-site prototype is part of the call: `invokeExact` typed `()V`
+    // and typed `()I` are different calls.
+    operation.op_data.literal =
+        reinterpret_cast<uintptr_t>(insn->get_signature_polymorphic());
   } else if (insn->has_method()) {
     operation.op_data.method = insn->get_method();
   } else if (insn->has_string()) {

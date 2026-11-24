@@ -1668,9 +1668,10 @@ TEST_F(OutlinerTypeAnalysisTest, get_type_demand_unsupported_invoke) {
   auto& cfg = foo_method->get_code()->cfg();
 
   auto* invoke = new IRInstruction(OPCODE_INVOKE_POLYMORPHIC);
-  invoke->set_method(DexMethod::make_method(
-      "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)"
-      "Ljava/lang/Object;"));
+  invoke->set_signature_polymorphic(
+      DexMethod::make_method("Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/"
+                             "lang/Object;)Ljava/lang/Object;"),
+      DexProto::make_proto("(I)V"));
   invoke->set_srcs_size(2);
   invoke->set_src(0, 0);
   invoke->set_src(1, 1);

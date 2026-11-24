@@ -193,7 +193,7 @@ TEST_F(PureAnalysisTest, InvokePolymorphicIsNotPure) {
        R"(
     ((load-param-object v0)
      (load-param-object v1)
-     (invoke-polymorphic (v1) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;")
+     (invoke-polymorphic (v1) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;" "()Ljava/lang/Object;")
      (move-result-object v2)
      (return-void))
   )",

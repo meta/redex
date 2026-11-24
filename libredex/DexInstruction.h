@@ -242,6 +242,30 @@ class DexOpcodeMethod : public DexInstruction {
   void set_method(DexMethodRef* method) { m_method = method; }
 };
 
+// `invoke-polymorphic` and `invoke-polymorphic/range` (formats 45cc and 4rcc):
+// a signature-polymorphic method, the argument registers, and the prototype of
+// the call site.
+class DexOpcodeSignaturePolymorphic : public DexOpcodeMethod {
+ private:
+  DexProto* m_callsite_proto;
+
+ public:
+  size_t size() const override;
+  void encode(DexOutputIdx* dodx, uint16_t*& insns) const override;
+  void gather_protos(std::vector<DexProto*>& lproto) const override;
+  DexOpcodeSignaturePolymorphic* clone() const override {
+    return new DexOpcodeSignaturePolymorphic(*this);
+  }
+
+  DexOpcodeSignaturePolymorphic(DexOpcode opcode,
+                                DexMethodRef* meth,
+                                DexProto* callsite_proto,
+                                uint16_t arg = 0)
+      : DexOpcodeMethod(opcode, meth, arg), m_callsite_proto(callsite_proto) {}
+
+  DexProto* get_callsite_proto() const { return m_callsite_proto; }
+};
+
 class DexOpcodeCallSite : public DexInstruction {
  private:
   DexCallSite* m_callsite;

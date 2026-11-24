@@ -170,6 +170,28 @@ TEST_F(DexUtilTest, create_abstract_method_error_block_emits_throw_sequence) {
   }
 }
 
+// Moving a method body that calls a method handle to another class needs no
+// visibility change for `MethodHandle.invokeExact`, which is public.
+TEST_F(DexUtilTest, visibility_changes_of_invoke_polymorphic) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.call:(Ljava/lang/invoke/MethodHandle;I)V"
+     (
+      (load-param-object v0)
+      (load-param v1)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(I)V")
+      (return-void)
+     )
+    )
+  )");
+  ClassCreator cc(DexType::make_type("LFoo;"));
+  cc.set_super(type::java_lang_Object());
+  cc.add_method(method);
+  cc.create();
+  method->get_code()->build_cfg();
+  EXPECT_TRUE(
+      get_visibility_changes(method, DexType::make_type("LBar;")).empty());
+}
+
 // An invoke-super calls the closest method above the class that makes the call,
 // so code that makes one cannot move to another class.
 TEST_F(DexUtilTest, invoke_super_prevents_relocation) {

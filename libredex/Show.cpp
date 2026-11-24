@@ -894,15 +894,16 @@ std::string show_opcode(const DexInstruction* insn, bool deobfuscated = false) {
                      deobfuscated);
     return ss.str();
   case DOPCODE_INVOKE_POLYMORPHIC:
-    ss << "invoke-polymorphic ";
-    ss << show_method(dynamic_cast<const DexOpcodeMethod*>(insn)->get_method(),
-                      deobfuscated);
+  case DOPCODE_INVOKE_POLYMORPHIC_RANGE: {
+    const auto* sp_insn =
+        dynamic_cast<const DexOpcodeSignaturePolymorphic*>(insn);
+    ss << (insn->opcode() == DOPCODE_INVOKE_POLYMORPHIC
+               ? "invoke-polymorphic "
+               : "invoke-polymorphic/range ");
+    ss << show_method(sp_insn->get_method(), deobfuscated) << ", "
+       << show_proto(sp_insn->get_callsite_proto(), deobfuscated);
     return ss.str();
-  case DOPCODE_INVOKE_POLYMORPHIC_RANGE:
-    ss << "invoke-polymorphic/range ";
-    ss << show_method(dynamic_cast<const DexOpcodeMethod*>(insn)->get_method(),
-                      deobfuscated);
-    return ss.str();
+  }
   case DOPCODE_INVOKE_CUSTOM:
     ss << "invoke-custom ";
     ss << show_method(dynamic_cast<const DexOpcodeMethod*>(insn)->get_method(),
@@ -995,6 +996,10 @@ std::string show_insn(const IRInstruction* insn, bool deobfuscated) {
     break;
   case opcode::Ref::Proto:
     ss << show_proto(insn->get_proto(), deobfuscated);
+    break;
+  case opcode::Ref::SignaturePolymorphic:
+    ss << show_method(insn->get_signature_polymorphic()->method(), deobfuscated)
+       << ", " << show_proto(insn->get_callsite_proto(), deobfuscated);
     break;
   }
   return ss.str();

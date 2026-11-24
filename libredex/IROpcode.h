@@ -33,7 +33,9 @@ enum class Ref {
   CallSite,
   MethodHandle,
   Data,
-  Proto
+  Proto,
+  // A DexSignaturePolymorphicRef: a method and the prototype of the call site.
+  SignaturePolymorphic,
 };
 
 } // namespace opcode

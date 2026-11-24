@@ -1239,7 +1239,9 @@ void TypeInference::analyze_instruction(const IRInstruction* insn,
   case OPCODE_INVOKE_DIRECT:
   case OPCODE_INVOKE_STATIC:
   case OPCODE_INVOKE_INTERFACE: {
-    DexMethodRef* dex_method = insn->get_method();
+    DexMethodRef* dex_method = insn->has_signature_polymorphic()
+                                   ? insn->get_signature_polymorphic()->method()
+                                   : insn->get_method();
     const auto* arg_types = dex_method->get_proto()->get_args();
     if (insn->opcode() == OPCODE_INVOKE_POLYMORPHIC) {
       // invoke-polymorphic can only be used to invoke MethodHandle.invoke and

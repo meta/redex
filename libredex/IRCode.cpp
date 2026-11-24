@@ -440,6 +440,11 @@ void translate_dex_to_ir(
     } else if (dex_insn->has_field()) {
       insn->set_field(
           dynamic_cast<const DexOpcodeField*>(dex_insn)->get_field());
+    } else if (const auto* sp_insn =
+                   dynamic_cast<const DexOpcodeSignaturePolymorphic*>(
+                       dex_insn)) {
+      insn->set_signature_polymorphic(sp_insn->get_method(),
+                                      sp_insn->get_callsite_proto());
     } else if (dex_insn->has_method()) {
       insn->set_method(
           dynamic_cast<const DexOpcodeMethod*>(dex_insn)->get_method());

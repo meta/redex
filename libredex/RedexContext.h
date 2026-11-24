@@ -39,6 +39,7 @@ class DexMethod;
 class DexMethodHandle;
 class DexMethodRef;
 class DexProto;
+class DexSignaturePolymorphicRef;
 class DexString;
 struct DexStringRepr;
 class DexType;
@@ -119,6 +120,9 @@ struct RedexContext {
                        const DexTypeList* args,
                        const DexString* shorty);
   DexProto* get_proto(const DexType* rtype, const DexTypeList* args);
+
+  DexSignaturePolymorphicRef* make_signature_polymorphic_ref(
+      DexMethodRef* method, DexProto* callsite_proto);
 
   DexMethodRef* make_method(const DexType* type,
                             const DexString* name,
@@ -514,6 +518,19 @@ struct RedexContext {
   };
   InsertOnlyConcurrentSet<DexProto*, DexProtoKeyHash, DexProtoKeyEqual>
       s_proto_set;
+
+  // DexSignaturePolymorphicRef
+  struct DexSignaturePolymorphicRefKeyHash {
+    size_t operator()(DexSignaturePolymorphicRef* k) const;
+  };
+  struct DexSignaturePolymorphicRefKeyEqual {
+    bool operator()(DexSignaturePolymorphicRef* a,
+                    DexSignaturePolymorphicRef* b) const;
+  };
+  InsertOnlyConcurrentSet<DexSignaturePolymorphicRef*,
+                          DexSignaturePolymorphicRefKeyHash,
+                          DexSignaturePolymorphicRefKeyEqual>
+      s_signature_polymorphic_ref_set;
 
   // DexMethod
   AtomicMap<DexMethodSpec, DexMethodRef*> s_method_map;

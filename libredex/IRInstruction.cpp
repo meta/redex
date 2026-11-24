@@ -19,6 +19,9 @@
 #include <cstring>
 #include <iterator>
 
+static_assert(sizeof(void*) != 8 || sizeof(IRInstruction) == 32,
+              "IRInstruction is laid out to take 32 bytes");
+
 IRInstruction::IRInstruction(IROpcode op) : m_opcode(op) {
   auto count = opcode_impl::min_srcs_size(op);
   m_num_srcs = count;
@@ -287,19 +290,26 @@ uint16_t IRInstruction::size() const {
       5, /* FMT_f51l   */
       4, /* FMT_f41c_d */
       4, /* FMT_f41c_s */
+      4, /* FMT_f45cc  */
+      4, /* FMT_f4rcc  */
       5, /* FMT_f52c_d */
       5, /* FMT_f52c_s */
       5, /* FMT_f5rc */
       5, /* FMT_f57c */
       0, /* FMT_fopcode   */
   };
+  static_assert(std::size(args) == FMT_fopcode + 1,
+                "one size for each instruction format");
   return args[dex_opcode::format(opcode::to_dex_opcode(op))];
 }
 
 // The instruction format doesn't tell us the width of registers for invoke
 // so we inspect the signature of the method we're calling
 bool IRInstruction::invoke_src_is_wide(src_index_t i) const {
-  always_assert(has_method());
+  // Only the five ordinary invokes get here: their callee's prototype is the
+  // one the call passes. The prototype of the method `invoke-polymorphic` names
+  // is not.
+  always_assert(opcode::is_a_method_invoke(m_opcode));
 
   // virtual methods have `this` as the 0th register argument, but the
   // arg list does NOT include `this`
@@ -495,6 +505,7 @@ uint64_t IRInstruction::hash() const {
   case opcode::Ref::MethodHandle:
   case opcode::Ref::Field:
   case opcode::Ref::Method:
+  case opcode::Ref::SignaturePolymorphic:
   case opcode::Ref::Literal:
   case opcode::Ref::String:
   case opcode::Ref::Type: {
@@ -538,6 +549,10 @@ void IRInstruction::gather_types(std::vector<const DexType*>& ltype) const {
   case opcode::Ref::Method:
     m_method->gather_types_shallow(ltype);
     break;
+
+  case opcode::Ref::SignaturePolymorphic:
+    m_signature_polymorphic->method()->gather_types_shallow(ltype);
+    break;
   }
 }
 
@@ -556,6 +571,9 @@ void IRInstruction::gather_fields(std::vector<DexFieldRef*>& lfield) const {
 void IRInstruction::gather_methods(std::vector<DexMethodRef*>& lmethod) const {
   if (has_method()) {
     lmethod.push_back(m_method);
+  }
+  if (has_signature_polymorphic()) {
+    lmethod.push_back(m_signature_polymorphic->method());
   }
   if (has_callsite()) {
     m_callsite->gather_methods(lmethod);

@@ -182,7 +182,7 @@ TEST_F(LocalPointersTest, invokePolymorphicArgumentsEscape) {
      (load-param-object v1)
      (new-instance "LFoo;")
      (move-result-pseudo-object v0)
-     (invoke-polymorphic (v1 v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;")
+     (invoke-polymorphic (v1 v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;" "(LFoo;)Ljava/lang/Object;")
      (move-result-object v2)
      (return-object v0)
     )

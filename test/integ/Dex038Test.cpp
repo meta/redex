@@ -7,8 +7,10 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <functional>
+#include <string>
 
 #include <boost/filesystem.hpp>
 
@@ -18,6 +20,7 @@
 #include "DexIdx.h"
 #include "DexLoader.h"
 #include "DexMethodHandle.h"
+#include "IRCode.h"
 #include "RedexContext.h"
 #include "RedexTestUtils.h"
 // NOLINTNEXTLINE(facebook-unused-include-check)
@@ -324,6 +327,7 @@ TEST(Dex038Test, ReadWriteDex038) {
   EXPECT_NE(nullptr, dexfile);
 
   auto classes = load_dex_file(dexfile, 38);
+  const auto instructions_before = redex::show_instructions_by_method(classes);
 
   auto tmpdir = redex::make_tmp_dir("dex038_test_%%%%%%%%");
   auto output_dex = write_dex_file(std::move(classes), tmpdir.path, 38);
@@ -331,7 +335,68 @@ TEST(Dex038Test, ReadWriteDex038) {
   delete g_redex;
   g_redex = new RedexContext();
 
+  // Every method reads back with the code it was written with.
+  EXPECT_EQ(redex::show_instructions_by_method(load_dex_file(output_dex, 38)),
+            instructions_before);
+
+  delete g_redex;
+  g_redex = new RedexContext();
+
   testReadDex(output_dex.c_str());
+
+  delete g_redex;
+}
+
+// `invoke-polymorphic` keeps the prototype of its call site, here `(J)J`,
+// and the instruction after it is read from the right offset.
+TEST(Dex038Test, InvokePolymorphicKeepsCallSiteProto) {
+  g_redex = new RedexContext();
+
+  const char* dexfile = std::getenv("dexfile");
+  ASSERT_NE(nullptr, dexfile);
+  load_dex_file(dexfile, 38);
+  auto* method = DexMethod::get_method(
+      "Lcom/facebook/redextest/Dex038;.addOneThroughMethodHandle:(J)J");
+  ASSERT_NE(nullptr, method);
+  auto* code = method->as_def()->get_code();
+  auto ii = InstructionIterable(code);
+  auto it = std::find_if(ii.begin(), ii.end(), [](const auto& mie) {
+    return mie.insn->opcode() == OPCODE_INVOKE_POLYMORPHIC;
+  });
+  ASSERT_NE(it, ii.end());
+  EXPECT_EQ(show(it->insn->get_signature_polymorphic()->method()),
+            "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/"
+            "Object;)Ljava/lang/Object;");
+  EXPECT_EQ(show(it->insn->get_callsite_proto()), "(J)J");
+  ++it;
+  ASSERT_NE(it, ii.end());
+  EXPECT_EQ(it->insn->opcode(), OPCODE_MOVE_RESULT_WIDE);
+
+  delete g_redex;
+}
+
+// With more than five registers the call is an `invoke-polymorphic/range`,
+// and its call-site prototype, `(IIIII)J`, is the prototype of no method.
+TEST(Dex038Test, InvokePolymorphicRangeKeepsCallSiteProto) {
+  g_redex = new RedexContext();
+
+  const char* dexfile = std::getenv("dexfile");
+  ASSERT_NE(nullptr, dexfile);
+  load_dex_file(dexfile, 38);
+  auto* method = DexMethod::get_method(
+      "Lcom/facebook/redextest/Dex038;.sumThroughMethodHandle:"
+      "(Ljava/lang/invoke/MethodHandle;IIIII)J");
+  ASSERT_NE(nullptr, method);
+  auto ii = InstructionIterable(method->as_def()->get_code());
+  auto it = std::find_if(ii.begin(), ii.end(), [](const auto& mie) {
+    return mie.insn->opcode() == OPCODE_INVOKE_POLYMORPHIC;
+  });
+  ASSERT_NE(it, ii.end());
+  EXPECT_EQ(it->insn->srcs_size(), 6u);
+  EXPECT_EQ(show(it->insn->get_callsite_proto()), "(IIIII)J");
+  ++it;
+  ASSERT_NE(it, ii.end());
+  EXPECT_EQ(it->insn->opcode(), OPCODE_MOVE_RESULT_WIDE);
 
   delete g_redex;
 }

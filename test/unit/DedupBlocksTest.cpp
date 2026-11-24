@@ -3132,3 +3132,33 @@ TEST_F(DedupBlocksTest, mergedBlocksCountOnlyRecordsThatChangeALine) {
   EXPECT_FALSE(inlined[0]->is_unreliable());
   code->clear_cfg();
 }
+
+// `handle.invokeExact();` and `int unused = (int) handle.invokeExact();` differ
+// only in the call-site prototype, and must not be merged: the handle would be
+// called with the wrong type and throw.
+TEST_F(DedupBlocksTest, invokePolymorphicWithDifferentCallSitePrototypes) {
+  const auto* str = R"(
+    (
+      (sget-object "LFoo;.handle:Ljava/lang/invoke/MethodHandle;")
+      (move-result-pseudo-object v0)
+      (sget "LFoo;.flag:I")
+      (move-result-pseudo v1)
+      (if-eqz v1 :int_result)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
+      (goto :end)
+      (:int_result)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()I")
+      (:end)
+      (return-void)
+    )
+  )";
+  auto* method =
+      get_fresh_method("invokePolymorphicWithDifferentCallSitePrototypes");
+  method->set_code(assembler::ircode_from_string(str));
+  run_dedup_blocks();
+  size_t calls = 0;
+  for (const auto& mie : InstructionIterable(*method->get_code())) {
+    calls += mie.insn->opcode() == OPCODE_INVOKE_POLYMORPHIC ? 1 : 0;
+  }
+  EXPECT_EQ(calls, 2);
+}

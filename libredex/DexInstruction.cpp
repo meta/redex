@@ -57,8 +57,8 @@ unsigned DexInstruction::count_from_opcode() const {
       4, /* FMT_f51l   */
       1, /* FMT_f41c_d */
       1, /* FMT_f41c_s */
-      1, /* FMT_f45cc  */ // TODO(T59275897)
-      1, /* FMT_f4rcc  */ // TODO(T59275897)
+      1, /* FMT_f45cc  */
+      1, /* FMT_f4rcc  */
       2, /* FMT_f52c_d */
       2, /* FMT_f52c_s */
       2, /* FMT_f5rc */
@@ -718,6 +718,19 @@ void DexOpcodeMethod::encode(DexOutputIdx* dodx, uint16_t*& insns) const {
   encode_args(insns);
 }
 
+size_t DexOpcodeSignaturePolymorphic::size() const { return 4; }
+
+void DexOpcodeSignaturePolymorphic::encode(DexOutputIdx* dodx,
+                                           uint16_t*& insns) const {
+  DexOpcodeMethod::encode(dodx, insns);
+  *insns++ = dodx->protoidx(m_callsite_proto);
+}
+
+void DexOpcodeSignaturePolymorphic::gather_protos(
+    std::vector<DexProto*>& lproto) const {
+  lproto.push_back(m_callsite_proto);
+}
+
 size_t DexOpcodeCallSite::size() const { return 3; }
 
 void DexOpcodeCallSite::encode(DexOutputIdx* dodx, uint16_t*& insns) const {
@@ -1083,10 +1096,13 @@ DexInstruction* DexInstruction::make_instruction(DexIdx* idx,
   /* MethodHandle: */
   case DOPCODE_INVOKE_POLYMORPHIC:
   case DOPCODE_INVOKE_POLYMORPHIC_RANGE: {
-    uint16_t csidx = *insns++;
+    uint16_t midx = *insns++;
     uint16_t arg = *insns++;
-    DexMethodRef* meth = idx->get_methodidx(csidx);
-    return new DexOpcodeMethod(fopcode, meth, arg);
+    uint16_t pidx = *insns++;
+    DexMethodRef* meth = idx->get_methodidx(midx);
+    DexProto* callsite_proto = idx->get_protoidx(pidx);
+    return new DexOpcodeSignaturePolymorphic(fopcode, meth, callsite_proto,
+                                             arg);
   }
   /* CallSite: */
   case DOPCODE_INVOKE_CUSTOM:
@@ -1179,15 +1195,16 @@ DexInstruction* DexInstruction::make_instruction(DexOpcode op) {
   case DOPCODE_INVOKE_STATIC:
   case DOPCODE_INVOKE_INTERFACE:
   case DOPCODE_INVOKE_CUSTOM:
-  case DOPCODE_INVOKE_POLYMORPHIC:
   case DOPCODE_INVOKE_VIRTUAL_RANGE:
   case DOPCODE_INVOKE_SUPER_RANGE:
   case DOPCODE_INVOKE_DIRECT_RANGE:
   case DOPCODE_INVOKE_STATIC_RANGE:
   case DOPCODE_INVOKE_INTERFACE_RANGE:
   case DOPCODE_INVOKE_CUSTOM_RANGE:
-  case DOPCODE_INVOKE_POLYMORPHIC_RANGE:
     return new DexOpcodeMethod(op, nullptr);
+  case DOPCODE_INVOKE_POLYMORPHIC:
+  case DOPCODE_INVOKE_POLYMORPHIC_RANGE:
+    return new DexOpcodeSignaturePolymorphic(op, nullptr, nullptr);
   /* StringRef: */
   case DOPCODE_CONST_STRING:
   case DOPCODE_CONST_STRING_JUMBO:
@@ -1240,7 +1257,16 @@ bool DexInstruction::operator==(const DexInstruction& that) const {
   case REF_METHOD: {
     const auto* this_ = dynamic_cast<const DexOpcodeMethod*>(this);
     const auto* that_ = dynamic_cast<const DexOpcodeMethod*>(&that);
-    return this_->get_method() == that_->get_method();
+    if (this_->get_method() != that_->get_method()) {
+      return false;
+    }
+    const auto* this_sp =
+        dynamic_cast<const DexOpcodeSignaturePolymorphic*>(this);
+    const auto* that_sp =
+        dynamic_cast<const DexOpcodeSignaturePolymorphic*>(&that);
+    return this_sp == nullptr || that_sp == nullptr
+               ? this_sp == that_sp
+               : this_sp->get_callsite_proto() == that_sp->get_callsite_proto();
   }
   case REF_CALLSITE: {
     const auto* this_ = dynamic_cast<const DexOpcodeCallSite*>(this);

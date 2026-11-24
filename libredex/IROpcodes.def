@@ -155,7 +155,7 @@ OP(INVOKE_INTERFACE  , invoke_interface  , Ref::Method, "invoke-interface")
 
 // Calls through a method handle or a call site, which name no callee method.
 OPRANGE(a_dynamic_invoke, OPCODE_INVOKE_POLYMORPHIC, OPCODE_INVOKE_CUSTOM)
-OP(INVOKE_POLYMORPHIC, invoke_polymorphic, Ref::Method, "invoke-polymorphic")
+OP(INVOKE_POLYMORPHIC, invoke_polymorphic, Ref::SignaturePolymorphic, "invoke-polymorphic")
 OP(INVOKE_CUSTOM     , invoke_custom     , Ref::CallSite, "invoke-custom")
 OP(NEG_INT           , neg_int           , Ref::None, "neg-int")
 OP(NOT_INT           , not_int           , Ref::None, "not-int")

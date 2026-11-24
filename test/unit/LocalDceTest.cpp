@@ -319,7 +319,7 @@ TEST_F(LocalDceEnhanceTest, MethodHandleCallHasSideEffects) {
     (method (public static) "LA;.call:(Ljava/lang/invoke/MethodHandle;)V"
      (
       (load-param-object v0)
-      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:()V")
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
       (return-void)
      )
     )

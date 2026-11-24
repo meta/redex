@@ -3125,9 +3125,9 @@ TEST_F(IRTypeCheckerTest, invokePolymorphic) {
       (move-result-pseudo-object v1)
       (const-string "S2")
       (move-result-pseudo-object v2)
-      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;")
-      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;")
-      (invoke-polymorphic (v0 v1 v2) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;")
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;" "(Ljava/lang/String;)V")
+      (invoke-polymorphic (v0 v1 v2) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;" "(Ljava/lang/String;Ljava/lang/String;)V")
       (return-void)
   ))"));
   cls_foo_creator.add_method(method);
@@ -3170,7 +3170,7 @@ TEST_F(IRTypeCheckerTest, invokePolymorphicOnUnexpectedExternalMethod) {
       (move-result-pseudo-object v1)
       (const-string "S2")
       (move-result-pseudo-object v2)
-      (invoke-polymorphic (v0 v1 v2) "Ljava/lang/invoke/MethodHandle;.notInvoke:([Ljava/lang/Object;)Ljava/lang/Object;")
+      (invoke-polymorphic (v0 v1 v2) "Ljava/lang/invoke/MethodHandle;.notInvoke:([Ljava/lang/Object;)Ljava/lang/Object;" "(Ljava/lang/String;Ljava/lang/String;)V")
       (return-void)
   ))"));
   cls_foo_creator.add_method(method);
@@ -3200,7 +3200,7 @@ TEST_F(IRTypeCheckerTest, invokePolymorphicOnWrongArgMethod) {
   method->set_code(assembler::ircode_from_string(R"(
     (
       (load-param-object v0)
-      (invoke-polymorphic (v0) "LFoo;.bar:()V")
+      (invoke-polymorphic (v0) "LFoo;.bar:()V" "()V")
       (return-void)
   ))"));
   IRTypeChecker checker(method);
@@ -3225,7 +3225,7 @@ TEST_F(IRTypeCheckerTest, invokePolymorphicOnFixedArgMethod) {
     (
       (load-param-object v0)
       (load-param-object v1)
-      (invoke-polymorphic (v0 v1) "LFoo;.bar:(Ljava/lang/Object;)V")
+      (invoke-polymorphic (v0 v1) "LFoo;.bar:(Ljava/lang/Object;)V" "(Ljava/lang/Object;)V")
       (return-void)
   ))"));
   IRTypeChecker checker(method);

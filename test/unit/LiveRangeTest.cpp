@@ -400,7 +400,7 @@ TEST_F(LiveRangeTest, TypeDemandOfInvokes) {
       (load-param-object v0)
       (load-param-object v1)
       (invoke-super (v0 v1) "LBase;.take:(LArg;)V")
-      (invoke-polymorphic (v1 v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;")
+      (invoke-polymorphic (v1 v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;" "(LArg;)V")
       (return-void)
     )
   )");

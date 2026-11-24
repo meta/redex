@@ -318,6 +318,10 @@ DexInstruction* create_dex_instruction(const IRInstruction* insn) {
     return new DexOpcodeField(op, insn->get_field());
   case opcode::Ref::Method:
     return new DexOpcodeMethod(op, insn->get_method());
+  case opcode::Ref::SignaturePolymorphic:
+    return new DexOpcodeSignaturePolymorphic(
+        op, insn->get_signature_polymorphic()->method(),
+        insn->get_callsite_proto());
   case opcode::Ref::CallSite:
     return new DexOpcodeCallSite(op, insn->get_callsite());
   case opcode::Ref::MethodHandle:

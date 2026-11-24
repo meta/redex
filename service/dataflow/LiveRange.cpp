@@ -238,8 +238,8 @@ const DexType* get_type_demand(DexType* method_rtype, const Use& use) {
   case OPCODE_FILLED_NEW_ARRAY:
     return type::make_array_component_type(use.insn->get_type());
   case OPCODE_INVOKE_POLYMORPHIC:
-    // The call site's prototype decides what the arguments must be, and Redex
-    // does not keep it for invoke-polymorphic.
+    // The call site's prototype decides what the arguments must be; the
+    // sources are not mapped to it here, so the demand is unknown.
     return nullptr;
   case OPCODE_INVOKE_CUSTOM: {
     // The verifier requires one argument per source; anything else is not

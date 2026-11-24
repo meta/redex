@@ -169,6 +169,10 @@ s_expr to_s_expr(const IRInstruction* insn, const LabelRefs& label_refs) {
   case opcode::Ref::Proto:
     s_exprs.emplace_back(show(insn->get_proto()));
     break;
+  case opcode::Ref::SignaturePolymorphic:
+    s_exprs.emplace_back(show(insn->get_signature_polymorphic()->method()));
+    s_exprs.emplace_back(show(insn->get_callsite_proto()));
+    break;
   }
 
   if (opcode::is_branch(op)) {
@@ -380,6 +384,16 @@ std::unique_ptr<IRInstruction> instruction_from_s_expr(
     s_patn({s_patn(&proto_str)}, tail)
         .must_match(tail, "Expecting prototype for " + opcode_str);
     insn->set_proto(DexProto::make_proto(proto_str));
+    break;
+  }
+  case opcode::Ref::SignaturePolymorphic: {
+    std::string method_str;
+    std::string proto_str;
+    s_patn({s_patn(&method_str), s_patn(&proto_str)}, tail)
+        .must_match(
+            tail, "Expecting method and call-site prototype for " + opcode_str);
+    insn->set_signature_polymorphic(DexMethod::make_method(method_str),
+                                    DexProto::make_proto(proto_str));
     break;
   }
   }

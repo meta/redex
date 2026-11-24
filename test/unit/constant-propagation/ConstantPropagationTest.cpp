@@ -12,6 +12,8 @@
 #include <gtest/gtest.h>
 
 #include "ConstantPropagationTestUtil.h"
+#include "Creators.h"
+#include "DexStore.h"
 #include "IRAssembler.h"
 #include "SourceBlocks.h"
 
@@ -2076,5 +2078,70 @@ TEST_F(ConstantPropagationTest, CheckNotNullEnablesNullCheckElimination) {
       (return v1)
     )
   )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+namespace {
+
+// Applies branch forwarding to `code` as the body of the static method
+// `LFoo;.bar` with prototype `proto`.
+void forward_targets_in_static_method(IRCode* code, std::string_view proto) {
+  auto* foo = DexType::make_type("LFoo;");
+  ClassCreator creator(foo);
+  creator.set_super(type::java_lang_Object());
+  DexStore store("store");
+  store.add_classes({creator.create()});
+  DexStoresVector stores{store};
+  XStoreRefs xstores(stores, /* normal_primary_dex */ false);
+
+  code->build_cfg();
+  cp::NullCheckMethods state;
+  cp::intraprocedural::FixpointIterator intra_cp(
+      code->cfg(), cp::ConstantPrimitiveAnalyzer(),
+      cp::intraprocedural::make_default_no_throw_analyzer(&state));
+  intra_cp.run(ConstantEnvironment());
+  cp::Transform tf(cp::Transform::Config(), state);
+  tf.legacy_apply_forward_targets(intra_cp, code->cfg(), /* is_static */ true,
+                                  foo, DexProto::make_proto(proto), &xstores);
+  code->clear_cfg();
+}
+
+} // namespace
+
+// Branch forwarding skips a method with a catch block that returns a value of
+// an unavailable type, to avoid an Android bug. That includes a value returned
+// by a method handle call.
+TEST_F(ConstantPropagationTest, NoForwardingWithUnavailableMethodHandleResult) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (load-param v1)
+      (.try_start a)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()LUnavailable;")
+      (move-result-object v2)
+      (.try_end a)
+      (if-eqz v1 :L1)
+      (const v3 1)
+      (goto :L2)
+      (:L1)
+      (const v3 0)
+      (:L2)
+      (if-eqz v3 :L3)
+      (const v4 0)
+      (:L3)
+      (return-object v2)
+      (.catch (a))
+      (const v2 0)
+      (return-object v2)
+    )
+  )");
+  auto expected_code = std::make_unique<IRCode>(*code);
+  // Only the round trip through the CFG.
+  expected_code->build_cfg();
+  expected_code->clear_cfg();
+
+  forward_targets_in_static_method(
+      code.get(), "(Ljava/lang/invoke/MethodHandle;I)LUnavailable;");
+
   EXPECT_CODE_EQ(code.get(), expected_code.get());
 }

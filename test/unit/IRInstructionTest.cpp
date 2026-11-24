@@ -14,6 +14,7 @@
 #include "IRInstruction.h"
 #include "InstructionLowering.h"
 #include "OpcodeList.h"
+#include "RedexException.h"
 #include "RedexTest.h"
 #include "Show.h"
 #include "TypeUtil.h"
@@ -526,4 +527,65 @@ TEST_F(IRInstructionTest, DynamicInvokesAreExactlyPolymorphicAndCustom) {
               op == OPCODE_INVOKE_POLYMORPHIC || op == OPCODE_INVOKE_CUSTOM)
         << SHOW(op);
   }
+}
+
+// `invoke-polymorphic` and its range form are four code units long, and both
+// keep the method, the registers and the call-site prototype through
+// ballooning and lowering.
+TEST_F(IRInstructionTest, InvokePolymorphicRoundTrip) {
+  auto* callee = DexMethod::make_method(
+      "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)"
+      "Ljava/lang/Object;");
+  auto* proto = DexProto::make_proto("(IIII)V");
+  auto* method = DexMethod::make_method("LFoo;.bar:()V")
+                     ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  for (auto op :
+       {DOPCODE_INVOKE_POLYMORPHIC, DOPCODE_INVOKE_POLYMORPHIC_RANGE}) {
+    auto* insn = new DexOpcodeSignaturePolymorphic(op, callee, proto);
+    if (op == DOPCODE_INVOKE_POLYMORPHIC) {
+      insn->set_arg_word_count(5);
+      for (size_t i = 0; i < 5; ++i) {
+        insn->set_src(i, i + 1);
+      }
+    } else {
+      insn->set_range_base(0xf);
+      insn->set_range_size(5);
+    }
+    method->set_dex_code(std::make_unique<DexCode>());
+    method->get_dex_code()->get_instructions().push_back(insn);
+    method->get_dex_code()->set_registers_size(0xff);
+    std::unique_ptr<DexInstruction> copy(insn->clone());
+
+    method->balloon();
+    for (const auto& mie : InstructionIterable(method->get_code())) {
+      EXPECT_EQ(mie.insn->size(), 4) << show(op);
+    }
+    instruction_lowering::lower(method);
+    method->sync();
+    const auto* out = method->get_dex_code()->get_instructions().at(0);
+    EXPECT_EQ(*out, *copy) << show(op);
+    EXPECT_EQ(out->size(), 4u) << show(op);
+  }
+}
+
+TEST_F(IRInstructionTest, InvokePolymorphicWithoutReferenceIsChecked) {
+  IRInstruction insn(OPCODE_INVOKE_POLYMORPHIC);
+  EXPECT_THROW(insn.get_method(), RedexException);
+  EXPECT_THROW(insn.get_callsite_proto(), RedexException);
+}
+
+// `invoke-polymorphic` names `invokeExact`, but calls whatever its method
+// handle refers to, so it is not one of the instructions that have a method.
+// `gather_methods` still reports the method it names.
+TEST_F(IRInstructionTest, InvokePolymorphicNamesButDoesNotCallItsMethod) {
+  auto* invoke_exact = DexMethod::make_method(
+      "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)"
+      "Ljava/lang/Object;");
+  IRInstruction insn(OPCODE_INVOKE_POLYMORPHIC);
+  insn.set_signature_polymorphic(invoke_exact, DexProto::make_proto("(I)V"));
+  EXPECT_FALSE(insn.has_method());
+  EXPECT_EQ(insn.get_signature_polymorphic()->method(), invoke_exact);
+  std::vector<DexMethodRef*> methods;
+  insn.gather_methods(methods);
+  EXPECT_EQ(methods, std::vector<DexMethodRef*>{invoke_exact});
 }

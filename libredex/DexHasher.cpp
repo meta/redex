@@ -232,6 +232,9 @@ void Impl::hash(const IRInstruction* insn) {
     hash(insn->get_field());
   } else if (insn->has_method()) {
     hash(insn->get_method());
+  } else if (insn->has_signature_polymorphic()) {
+    hash(insn->get_signature_polymorphic()->method());
+    hash(insn->get_callsite_proto());
   } else if (insn->has_callsite()) {
     hash(insn->get_callsite());
   } else if (insn->has_methodhandle()) {

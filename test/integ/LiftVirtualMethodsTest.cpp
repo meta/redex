@@ -401,8 +401,8 @@ TEST_F(LiftVirtualMethodsTest, rejects_references_illegal_in_primary_dex) {
   EXPECT_EQ(stats.lifted_methods, 0);
 }
 
-// `MethodHandle.invoke(this)` in Java: the call site's prototype, which the
-// instruction does not carry, decides what type the receiver must have.
+// `MethodHandle.invoke(this)` in Java: the call site's prototype decides what
+// type the receiver must have, and that demand is not modeled.
 TEST_F(LiftVirtualMethodsTest, rejects_receiver_passed_to_invoke_polymorphic) {
   prepare();
   for (const auto* cls :
@@ -413,7 +413,7 @@ TEST_F(LiftVirtualMethodsTest, rejects_receiver_passed_to_invoke_polymorphic) {
         (load-param-object v0)
         (load-param v1)
         (const v2 0)
-        (invoke-polymorphic (v2 v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;")
+        (invoke-polymorphic (v2 v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;" "(Ljava/lang/Object;)V")
         (return v1)
       )
     )"));

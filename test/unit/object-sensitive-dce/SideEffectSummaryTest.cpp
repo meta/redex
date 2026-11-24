@@ -109,7 +109,7 @@ TEST_F(SideEffectSummaryTest, InvokePolymorphicHasUnknownEffects) {
   handles.create();
   auto code = assembler::ircode_from_string(R"(
     ((load-param-object v0)
-     (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;")
+     (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;" "()Ljava/lang/Object;")
      (move-result-object v1)
      (return-void))
   )");

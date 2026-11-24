@@ -1220,7 +1220,7 @@ TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsMethodHandleCall) {
   auto store = create_enum_store();
   auto* cls = create_two_constant_enum("LHandleCall;", 1, R"(
     (const v3 0)
-    (invoke-polymorphic (v3) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;")
+    (invoke-polymorphic (v3) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
   )");
   auto attributes =
       optimize_enums::analyze_enum_clinit(cls, /*support_kt_19_enum_entries*/
@@ -1264,7 +1264,7 @@ TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsConstructorMethodHandleCall) {
       (invoke-direct (v0 v1 v2) "Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V")
       (sget-object "LHandles;.NOW:Ljava/lang/invoke/MethodHandle;")
       (move-result-pseudo-object v3)
-      (invoke-polymorphic (v3) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;")
+      (invoke-polymorphic (v3) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
       (return-void)
     )
   )"));

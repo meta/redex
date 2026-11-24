@@ -84,6 +84,11 @@ uint64_t stable_hash_value(const IRInstruction* insn) {
     stable_hash =
         stable_hash * 41 + stable_hash_value(show(insn->get_method()));
     break;
+  case opcode::Ref::SignaturePolymorphic:
+    stable_hash =
+        stable_hash * 41 +
+        stable_hash_value(show(insn->get_signature_polymorphic()->method()));
+    break;
   case opcode::Ref::Field:
     stable_hash = stable_hash * 43 + stable_hash_value(show(insn->get_field()));
     break;

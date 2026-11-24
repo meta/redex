@@ -18,6 +18,7 @@
 #include "DexClass.h"
 #include "DexMethodHandle.h"
 #include "DexPosition.h"
+#include "DexSignaturePolymorphicRef.h"
 #include "DuplicateClasses.h"
 #include "KeepReason.h"
 #include "ProguardConfiguration.h"
@@ -90,6 +91,15 @@ RedexContext::~RedexContext() {
                     delete proto;
                   }
                   s_proto_set.clear();
+                },
+                [&] {
+                  Timer timer("Delete DexSignaturePolymorphicRefs",
+                              /* indent */ false);
+                  for (auto* ref :
+                       UnorderedIterable(s_signature_polymorphic_ref_set)) {
+                    delete ref;
+                  }
+                  s_signature_polymorphic_ref_set.clear();
                 },
                 [&] {
                   Timer timer("Delete DexClasses", /* indent */ false);
@@ -716,6 +726,31 @@ DexProto* RedexContext::get_proto(const DexType* rtype,
   return rv_ptr == nullptr ? nullptr : const_cast<DexProto*>(*rv_ptr);
 }
 
+size_t RedexContext::DexSignaturePolymorphicRefKeyHash::operator()(
+    DexSignaturePolymorphicRef* k) const {
+  return reinterpret_cast<size_t>(k->method()) ^
+         reinterpret_cast<size_t>(k->callsite_proto());
+}
+bool RedexContext::DexSignaturePolymorphicRefKeyEqual::operator()(
+    DexSignaturePolymorphicRef* a, DexSignaturePolymorphicRef* b) const {
+  return a->method() == b->method() &&
+         a->callsite_proto() == b->callsite_proto();
+}
+
+DexSignaturePolymorphicRef* RedexContext::make_signature_polymorphic_ref(
+    DexMethodRef* method, DexProto* callsite_proto) {
+  always_assert(method != nullptr && callsite_proto != nullptr);
+  DexSignaturePolymorphicRef key(method, callsite_proto);
+  const auto* rv_ptr = s_signature_polymorphic_ref_set.get(&key);
+  if (rv_ptr != nullptr) {
+    return const_cast<DexSignaturePolymorphicRef*>(*rv_ptr);
+  }
+  std::unique_ptr<DexSignaturePolymorphicRef> ref(
+      new DexSignaturePolymorphicRef(method, callsite_proto));
+  return const_cast<DexSignaturePolymorphicRef*>(
+      *try_insert(std::move(ref), &s_signature_polymorphic_ref_set));
+}
+
 DexMethodRef* RedexContext::make_method(const DexType* type_,
                                         const DexString* name_,
                                         const DexProto* proto_) {
@@ -1054,6 +1089,7 @@ void RedexContext::compact() {
       [&] { s_field_map.compact(); },
       [&] { s_typelist_map.compact(); },
       [&] { s_proto_set.compact(); },
+      [&] { s_signature_polymorphic_ref_set.compact(); },
       [&] { s_method_map.compact(); },
       [&] { s_location_map.compact(); },
       [&] { field_values.compact(); },

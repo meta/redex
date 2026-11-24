@@ -1275,3 +1275,14 @@ TEST_F(IRAssemblerTest, arrayDataRoundTrip) {
       "(fill-array-data v1 #4 (63 64 65)) (return-void))");
   EXPECT_EQ(expected, assembler::to_string(code.get()));
 }
+
+TEST_F(IRAssemblerTest, invokePolymorphicCarriesCallSiteProto) {
+  const std::string s =
+      R"(((load-param-object v0) (load-param v1) (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(I)J") (move-result-wide v2) (return-void)))";
+  auto code = assembler::ircode_from_string(s);
+  EXPECT_EQ(assembler::to_string(code.get()), s);
+
+  // The call-site prototype is required.
+  EXPECT_ANY_THROW(assembler::ircode_from_string(
+      R"(((load-param-object v0) (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;") (return-void)))"));
+}

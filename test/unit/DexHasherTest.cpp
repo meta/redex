@@ -274,8 +274,9 @@ std::vector<std::unique_ptr<DexEncodedValue>> method_type_and_handle_args(
 
 } // namespace
 
-// The hash covers what `const-method-type`, `const-method-handle` and
-// `invoke-custom` refer to, not only that they refer to something.
+// The hash covers what `const-method-type`, `const-method-handle`,
+// `invoke-polymorphic` and `invoke-custom` refer to, not only that they refer
+// to something.
 TEST_F(DexHasherTest,
        MethodHashDiffersForDifferentMethodTypesHandlesAndCallSites) {
   EXPECT_NE(code_hash_of(R"(
@@ -297,6 +298,17 @@ TEST_F(DexHasherTest,
             code_hash_of(R"(
     (const-method-handle invoke-static "LFoo;.b:()V")
     (move-result-pseudo-object v0)
+    (return-void)
+  )"));
+
+  EXPECT_NE(code_hash_of(R"(
+    (const v0 0)
+    (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
+    (return-void)
+  )"),
+            code_hash_of(R"(
+    (const v0 0)
+    (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()I")
     (return-void)
   )"));
 

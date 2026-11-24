@@ -13,6 +13,9 @@
 
 package com.facebook.redextest;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.util.function.Supplier;
 
 public class Dex038 {
@@ -57,6 +60,25 @@ public class Dex038 {
     print(() -> {
       return instanceStringField;
     });
+  }
+
+  public static long addOne(long x) {
+    return x + 1;
+  }
+
+  // invoke-polymorphic with the call-site prototype (J)J
+  public static long addOneThroughMethodHandle(long x) throws Throwable {
+    MethodHandle addOne =
+        MethodHandles.lookup()
+            .findStatic(
+                Dex038.class, "addOne", MethodType.methodType(long.class, long.class));
+    return (long) addOne.invokeExact(x);
+  }
+
+  // invoke-polymorphic/range with the call-site prototype (IIIII)J
+  public static long sumThroughMethodHandle(
+      MethodHandle sum, int a, int b, int c, int d, int e) throws Throwable {
+    return (long) sum.invokeExact(a, b, c, d, e);
   }
 
   public static void main(String[] args) {

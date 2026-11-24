@@ -21,6 +21,7 @@
 #include "DexMemberRefs.h"
 #include "DexOutput.h"
 #include "DexPosition.h"
+#include "DexSignaturePolymorphicRef.h"
 #include "DexUtil.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
@@ -2039,6 +2040,11 @@ void DexProto::gather_strings(UnorderedSet<const DexString*>& lstring) const {
   if (m_shorty != nullptr) {
     c_append(lstring, m_shorty);
   }
+}
+
+DexSignaturePolymorphicRef* DexSignaturePolymorphicRef::make(
+    DexMethodRef* method, DexProto* callsite_proto) {
+  return g_redex->make_signature_polymorphic_ref(method, callsite_proto);
 }
 
 namespace {

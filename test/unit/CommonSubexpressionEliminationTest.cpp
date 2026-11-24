@@ -2586,7 +2586,7 @@ TEST_F(CommonSubexpressionEliminationTest, invoke_polymorphic_is_barrier) {
       (const v0 0)
       (sget "LFoo;.s:I")
       (move-result-pseudo v1)
-      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:()V")
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
       (sget "LFoo;.s:I")
       (move-result-pseudo v2)
     )

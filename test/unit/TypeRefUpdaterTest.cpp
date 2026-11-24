@@ -8,9 +8,11 @@
 #include "TypeReference.h"
 
 #include "Creators.h"
+#include "DexCallSite.h"
 #include "DexMethodHandle.h"
 #include "IRAssembler.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 
 using namespace type_reference;
 
@@ -113,6 +115,141 @@ TEST_F(TypeRefUpdaterTest, init_collision) {
     )
   )");
   EXPECT_CODE_EQ(baz->get_code(), expected_baz_code.get());
+}
+
+TEST_F(TypeRefUpdaterTest, method_constant_and_method_handle_call_prototypes) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.run:(Ljava/lang/invoke/MethodHandle;Ljava/lang/Object;)V"
+     (
+      (load-param-object v0)
+      (load-param-object v1)
+      (const-method-type "(LFoo;)[LFoo;")
+      (move-result-pseudo-object v2)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LFoo;)V")
+      (return-void)
+     )
+    )
+  )");
+  update_foo_to_bar(method);
+
+  auto expected = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (load-param-object v1)
+      (const-method-type "(LBar;)[LBar;")
+      (move-result-pseudo-object v2)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LBar;)V")
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(method->get_code(), expected.get());
+}
+
+TEST_F(TypeRefUpdaterTest, call_site) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.run:(Ljava/lang/Object;)V"
+     (
+      (load-param-object v0)
+      (invoke-static (v0) "LUser;.placeholder:(Ljava/lang/Object;)V")
+      (return-void)
+     )
+    )
+  )");
+  // A tool-generated call site with an app-defined bootstrap method, whose
+  // bootstrap arguments name `Foo` in a method type and a method handle.
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.push_back(std::make_unique<DexEncodedValueMethodType>(
+      DexProto::make_proto("(LFoo;)V")));
+  args.push_back(
+      std::make_unique<DexEncodedValueMethodHandle>(redex::make_method_handle(
+          METHOD_HANDLE_TYPE_INVOKE_STATIC, "LUser;.take:(LFoo;)V")));
+  auto* callsite =
+      redex::make_invoke_custom(method->get_code(), "accept",
+                                "(Ljava/lang/Object;)LFoo;", std::move(args));
+  update_foo_to_bar(method);
+
+  auto* new_callsite =
+      std::next(InstructionIterable(method->get_code()).begin())
+          ->insn->get_callsite();
+  EXPECT_EQ(new_callsite->method_type(),
+            DexProto::make_proto("(Ljava/lang/Object;)LBar;"));
+  const auto& updated_args = new_callsite->args();
+  ASSERT_EQ(updated_args.size(), 2);
+  EXPECT_EQ(
+      redex::encoded_value_as<DexEncodedValueMethodType>(updated_args[0].get())
+          ->proto(),
+      DexProto::make_proto("(LBar;)V"));
+  EXPECT_EQ(redex::encoded_value_as<DexEncodedValueMethodHandle>(
+                updated_args[1].get())
+                ->methodhandle()
+                ->methodref()
+                ->get_proto(),
+            DexProto::make_proto("(LBar;)V"));
+  EXPECT_EQ(callsite->method_type(),
+            DexProto::make_proto("(Ljava/lang/Object;)LFoo;"));
+}
+
+namespace {
+
+// The call sites that the invoke-custom instructions of `method` hold.
+std::vector<DexCallSite*> held_call_sites(DexMethod* method) {
+  std::vector<DexCallSite*> callsites;
+  for (const auto& mie : InstructionIterable(method->get_code())) {
+    if (mie.insn->has_callsite()) {
+      callsites.push_back(mie.insn->get_callsite());
+    }
+  }
+  return callsites;
+}
+
+} // namespace
+
+// Call sites are shared, also by code outside the updated scope, so a call
+// site is replaced, not changed; ART links each call site once, so the
+// instructions that shared it share its replacement.
+TEST_F(TypeRefUpdaterTest, call_site_is_replaced) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.run:()V"
+     (
+      (invoke-static () "LUser;.placeholder:()V")
+      (invoke-static () "LUser;.placeholder:()V")
+      (return-void)
+     )
+    )
+  )");
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.push_back(std::make_unique<DexEncodedValueMethodType>(
+      DexProto::make_proto("(LFoo;)V")));
+  auto* callsite = redex::make_invoke_custom(method->get_code(), "get",
+                                             "()LFoo;", std::move(args));
+  auto* outside = assembler::method_from_string(R"(
+    (method (public static) "LOutside;.run:()V"
+     (
+      (invoke-static () "LOutside;.placeholder:()V")
+      (return-void)
+     )
+    )
+  )");
+  InstructionIterable(outside->get_code())
+      .begin()
+      ->insn->set_opcode(OPCODE_INVOKE_CUSTOM)
+      ->set_callsite(callsite);
+  update_foo_to_bar(method);
+
+  auto callsites = held_call_sites(method);
+  ASSERT_EQ(callsites.size(), 2);
+  EXPECT_EQ(callsites[0], callsites[1]);
+  EXPECT_EQ(callsites[0]->method_type(), DexProto::make_proto("()LBar;"));
+  EXPECT_EQ(redex::encoded_value_as<DexEncodedValueMethodType>(
+                callsites[0]->args().at(0).get())
+                ->proto(),
+            DexProto::make_proto("(LBar;)V"));
+  EXPECT_EQ(held_call_sites(outside), std::vector<DexCallSite*>{callsite});
+  EXPECT_EQ(callsite->method_type(), DexProto::make_proto("()LFoo;"));
+  EXPECT_EQ(redex::encoded_value_as<DexEncodedValueMethodType>(
+                callsite->args().at(0).get())
+                ->proto(),
+            DexProto::make_proto("(LFoo;)V"));
 }
 
 TEST_F(TypeRefUpdaterTest, method_handle_members) {

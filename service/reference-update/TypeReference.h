@@ -21,7 +21,8 @@ namespace type_reference {
 
 /**
  * Update old type reference to new type reference in all the fields and methods
- * in the scope, but is not responsible for updating opcodes. The users should
+ * in the scope, and in the method prototypes that instructions name, but is not
+ * responsible for updating the types that instructions name. The users should
  * take care of other part of analysis and transformations to make sure the
  * updating being valid. This supports updating virtual methods through name
  * mangling instead of walking through virtual scopes.
@@ -89,7 +90,9 @@ DexProto* get_new_proto(
 
 /**
  * Update all method signature type references in-place using the old_to_new
- * map. We update all references to an old type to the provided new type.
+ * map. We update all references to an old type to the provided new type. This
+ * includes the method prototypes that instructions name, such as that of
+ * const-method-type.
  *
  * The optional `method_debug_map` stores the map from the updated DexMethod to
  * the string representation of the original method signature.

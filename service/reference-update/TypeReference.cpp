@@ -9,6 +9,7 @@
 
 #include "ControlFlow.h"
 #include "Debug.h"
+#include "MethodHandleRewriter.h"
 #include "MethodReference.h"
 #include "Resolver.h"
 #include "Show.h"
@@ -227,6 +228,30 @@ DexProto* get_new_proto_impl(const DexProto* proto, const MapT& old_to_new) {
                               DexTypeList::make_type_list(std::move(args)));
 }
 
+/**
+ * Replaces by `new_proto(proto)` each prototype that the code in `scope` names
+ * other than through a method reference: that of const-method-type, the
+ * call-site prototype of invoke-polymorphic, and the method type and
+ * method-type arguments of a call site. They describe the methods being called
+ * or looked up, so they must change together with those methods' prototypes.
+ */
+template <typename NewProtoFn>
+void update_named_protos(const Scope& scope, const NewProtoFn& new_proto) {
+  MethodHandleRewriter callsite_rewriter(
+      {.method_type = [&](DexProto* proto) { return new_proto(proto); }});
+  walk::parallel::opcodes(scope, [&](DexMethod* method, IRInstruction* insn) {
+    if (insn->has_proto()) {
+      insn->set_proto(new_proto(insn->get_proto()));
+    } else if (insn->has_signature_polymorphic()) {
+      insn->set_signature_polymorphic(
+          insn->get_signature_polymorphic()->method(),
+          new_proto(insn->get_callsite_proto()));
+    } else {
+      callsite_rewriter.rewrite(insn, method);
+    }
+  });
+}
+
 template <typename MapT>
 class TypeRefUpdaterImpl {
  public:
@@ -276,6 +301,9 @@ class TypeRefUpdaterImpl {
                                 fields);
     workqueue_run<DexMethodRef*>(
         [this](DexMethodRef* method) { mangling(method); }, methods);
+    update_named_protos(scope, [this](const DexProto* proto) {
+      return get_new_proto_impl(proto, m_old_to_new);
+    });
 
     std::map<DexMethod*, DexProto*, dexmethods_comparator> inits;
     insert_unordered_iterable(inits, m_inits);
@@ -553,6 +581,10 @@ void update_method_signature_type_references(
     auto& group = key_and_group.second;
     update_vmethods_group_one_type_ref(group, subtype_maps);
   }
+
+  update_named_protos(scope, [&old_to_new](const DexProto* proto) {
+    return get_new_proto(proto, old_to_new);
+  });
 
   // Ensure that no method references left that still refer old types.
   walk::parallel::code(scope, [&old_types](DexMethod*, IRCode& code) {

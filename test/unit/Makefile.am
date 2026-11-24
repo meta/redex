@@ -732,9 +732,9 @@ type_analysis_transform_test_SOURCES = type-analysis/TypeAnalysisTransformTest.c
 type_inference_test_SOURCES = TypeInferenceTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 type_inference_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
-type_ref_updater_test_SOURCES = TypeRefUpdaterTest.cpp
+type_ref_updater_test_SOURCES = TypeRefUpdaterTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
-type_reference_test_SOURCES = TypeReferenceTest.cpp
+type_reference_test_SOURCES = TypeReferenceTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 type_string_rewriter_test_SOURCES = TypeStringRewriterTest.cpp
 

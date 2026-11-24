@@ -10,10 +10,12 @@
 #include "TypeReference.h"
 
 #include "Creators.h"
+#include "DexCallSite.h"
 #include "DexClass.h"
 #include "IRAssembler.h"
 #include "RedexException.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 
 using namespace type_reference;
 
@@ -179,6 +181,64 @@ void update_a_to_b(DexMethod* method) {
   update_method_signature_type_references(scope, old_to_new,
                                           build_subtype_maps(scope));
   update_field_type_references(scope, old_to_new);
+}
+
+TEST_F(TypeReferenceTest, updates_method_constant_and_method_handle_calls) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.run:(Ljava/lang/invoke/MethodHandle;Ljava/lang/Object;)V"
+     (
+      (load-param-object v0)
+      (load-param-object v1)
+      (const-method-type "(LA;)[LA;")
+      (move-result-pseudo-object v2)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LA;)V")
+      (return-void)
+     )
+    )
+  )");
+  update_a_to_b(method);
+
+  auto expected = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (load-param-object v1)
+      (const-method-type "(LB;)[LB;")
+      (move-result-pseudo-object v2)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LB;)V")
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(method->get_code(), expected.get());
+}
+
+TEST_F(TypeReferenceTest, updates_call_site) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.run:(Ljava/lang/Object;)V"
+     (
+      (load-param-object v0)
+      (invoke-static (v0) "LUser;.placeholder:(Ljava/lang/Object;)V")
+      (return-void)
+     )
+    )
+  )");
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.push_back(std::make_unique<DexEncodedValueMethodType>(
+      DexProto::make_proto("(LA;)V")));
+  auto* callsite = redex::make_invoke_custom(
+      method->get_code(), "accept", "(Ljava/lang/Object;)LA;", std::move(args));
+  update_a_to_b(method);
+
+  auto* new_callsite =
+      std::next(InstructionIterable(method->get_code()).begin())
+          ->insn->get_callsite();
+  EXPECT_EQ(new_callsite->method_type(),
+            DexProto::make_proto("(Ljava/lang/Object;)LB;"));
+  EXPECT_EQ(redex::encoded_value_as<DexEncodedValueMethodType>(
+                new_callsite->args()[0].get())
+                ->proto(),
+            DexProto::make_proto("(LB;)V"));
+  EXPECT_EQ(callsite->method_type(),
+            DexProto::make_proto("(Ljava/lang/Object;)LA;"));
 }
 
 // Like an ordinary invoke, a method handle must not name a method or field

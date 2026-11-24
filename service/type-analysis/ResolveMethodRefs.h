@@ -28,8 +28,12 @@ class ResolveMethodRefs final {
   void report(PassManager& mgr) const;
 
  private:
-  void analyze_method(DexMethod* method,
-                      const type_analyzer::local::LocalTypeAnalyzer& lta,
-                      const XStoreRefs& xstores);
+  // Rewrites the method's resolvable callsites and returns how many it
+  // rewrote. Runs concurrently for different methods, so it must not touch
+  // member state.
+  static size_t analyze_method(
+      DexMethod* method,
+      const type_analyzer::local::LocalTypeAnalyzer& lta,
+      const XStoreRefs& xstores);
   size_t m_num_resolved_kt_non_capturing_lambda_calls = 0;
 };

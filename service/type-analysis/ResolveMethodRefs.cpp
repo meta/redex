@@ -19,26 +19,28 @@ ResolveMethodRefs::ResolveMethodRefs(
     const type_analyzer::global::GlobalTypeAnalyzer& gta,
     const XStoreRefs& xstores) {
   Timer t("ResolveMethodRefs");
-  walk::parallel::methods(scope, [&](DexMethod* method) {
-    auto* code = method->get_code();
-    if (code == nullptr) {
-      return;
-    }
-    cfg::ScopedCFG cfg(code);
-    auto lta = gta.get_replayable_local_analysis(method);
-    // Using the result of GTA, check if an interface can be resolved to its
-    // implementor at certain callsite.
-    analyze_method(method, *lta, xstores);
-  });
+  m_num_resolved_kt_non_capturing_lambda_calls =
+      walk::parallel::methods<size_t>(scope, [&](DexMethod* method) -> size_t {
+        auto* code = method->get_code();
+        if (code == nullptr) {
+          return 0;
+        }
+        cfg::ScopedCFG cfg(code);
+        auto lta = gta.get_replayable_local_analysis(method);
+        // Using the result of GTA, check if an interface can be resolved to
+        // its implementor at certain callsite.
+        return analyze_method(method, *lta, xstores);
+      });
 }
 
-void ResolveMethodRefs::analyze_method(
+size_t ResolveMethodRefs::analyze_method(
     DexMethod* method,
     const type_analyzer::local::LocalTypeAnalyzer& lta,
     const XStoreRefs& xstores) {
   IRCode* code = method->get_code();
   auto& cfg = code->cfg();
 
+  size_t num_resolved = 0;
   cfg::CFGMutation mutation(cfg);
   for (const auto& block : cfg.blocks()) {
     auto env = lta.get_entry_state_at(block);
@@ -99,11 +101,12 @@ void ResolveMethodRefs::analyze_method(
       insn->set_method(impl);
       insn->set_opcode(OPCODE_INVOKE_VIRTUAL);
 
-      m_num_resolved_kt_non_capturing_lambda_calls++;
+      num_resolved++;
     }
   }
   mutation.flush();
   cfg.recompute_registers_size();
+  return num_resolved;
 }
 
 void ResolveMethodRefs::report(PassManager& mgr) const {

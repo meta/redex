@@ -280,6 +280,12 @@ class MethodReferencesGatherer {
   };
   std::optional<ReturningDependency> get_returning_dependency(
       const IRInstruction* insn, const References* refs) const;
+  // Gathers what a call `op` of `method_ref` may run besides `method_ref`
+  // itself: its overrides for invoke-virtual and invoke-interface, and the
+  // resolved super method for invoke-super.
+  void gather_invoke_targets(IROpcode op,
+                             DexMethodRef* method_ref,
+                             References* refs) const;
 
   const TransitiveClosureMarkerSharedState* m_shared_state;
   const DexMethod* m_method;

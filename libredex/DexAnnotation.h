@@ -266,6 +266,7 @@ class DexEncodedValueMethodType : public DexEncodedValuePtr {
 
   void gather_strings(std::vector<const DexString*>& lstring) const override;
   void gather_types(std::vector<const DexType*>& ltype) const override;
+  void gather_protos(std::vector<DexProto*>& lproto) const override;
   void encode(DexOutputIdx* dodx, std::vector<uint8_t>& encdata) override;
 
   DexProto* proto() const { return static_cast<DexProto*>(m_val.m_value_ptr); }
@@ -353,6 +354,9 @@ class DexEncodedValueArray : public DexEncodedValue {
   void gather_fields(std::vector<DexFieldRef*>& lfield) const override;
   void gather_methods(std::vector<DexMethodRef*>& lmethod) const override;
   void gather_strings(std::vector<const DexString*>& lstring) const override;
+  void gather_methodhandles(
+      std::vector<DexMethodHandle*>& lmethodhandle) const override;
+  void gather_protos(std::vector<DexProto*>& lproto) const override;
   void encode(DexOutputIdx* dodx, std::vector<uint8_t>& encdata) override;
 
   std::string show() const override;
@@ -461,6 +465,9 @@ class DexEncodedValueAnnotation : public DexEncodedValue {
   void gather_fields(std::vector<DexFieldRef*>& lfield) const override;
   void gather_methods(std::vector<DexMethodRef*>& lmethod) const override;
   void gather_strings(std::vector<const DexString*>& lstring) const override;
+  void gather_methodhandles(
+      std::vector<DexMethodHandle*>& lmethodhandle) const override;
+  void gather_protos(std::vector<DexProto*>& lproto) const override;
   void encode(DexOutputIdx* dodx, std::vector<uint8_t>& encdata) override;
 
   std::string show() const override;
@@ -494,6 +501,9 @@ class DexAnnotation : public Gatherable {
   void gather_fields(std::vector<DexFieldRef*>& lfield) const override;
   void gather_methods(std::vector<DexMethodRef*>& lmethod) const override;
   void gather_strings(std::vector<const DexString*>& lstring) const override;
+  void gather_methodhandles(
+      std::vector<DexMethodHandle*>& lmethodhandle) const override;
+  void gather_protos(std::vector<DexProto*>& lproto) const override;
 
   const EncodedAnnotations& anno_elems() const { return m_anno_elems; }
   void set_type(DexType* type) { m_type = type; }
@@ -538,6 +548,9 @@ class DexAnnotationSet : public Gatherable {
   void gather_fields(std::vector<DexFieldRef*>& lfield) const override;
   void gather_methods(std::vector<DexMethodRef*>& lmethod) const override;
   void gather_strings(std::vector<const DexString*>& lstring) const override;
+  void gather_methodhandles(
+      std::vector<DexMethodHandle*>& lmethodhandle) const override;
+  void gather_protos(std::vector<DexProto*>& lproto) const override;
 
   static std::unique_ptr<DexAnnotationSet> get_annotation_set(
       DexIdx* idx, uint32_t aset_off);

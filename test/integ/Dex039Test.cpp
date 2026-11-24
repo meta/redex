@@ -8,8 +8,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include "Creators.h"
+#include "DexAnnotation.h"
 #include "DexCallSite.h"
 #include "DexClass.h"
 #include "DexFileTestHelper.h"
@@ -113,6 +117,87 @@ TEST(Dex039Test, ReadWriteConstMethodHandleAndType) {
   g_redex = new RedexContext();
   EXPECT_EQ(redex::show_instructions_by_method(load_dex_file(output, 39)),
             before);
+  delete g_redex;
+  g_redex = nullptr;
+}
+
+namespace {
+
+// What `classes` hold outside code: static field values and annotations.
+std::vector<std::string> show_values_and_annotations(
+    const DexClasses& classes) {
+  std::vector<std::string> result;
+  for (const auto* cls : classes) {
+    if (cls->get_anno_set() != nullptr) {
+      result.push_back(show(cls) + ": " + show(cls->get_anno_set()));
+    }
+    for (const auto* field : cls->get_sfields()) {
+      result.push_back(show(field) + " = " + show(field->get_static_value()));
+    }
+    for (const auto* method : cls->get_all_methods()) {
+      if (method->get_anno_set() != nullptr) {
+        result.push_back(show(method) + ": " + show(method->get_anno_set()));
+      }
+    }
+  }
+  return result;
+}
+
+std::unique_ptr<DexAnnotationSet> make_annotation_set(
+    const char* name, std::unique_ptr<DexEncodedValue> value) {
+  auto anno = std::make_unique<DexAnnotation>(DexType::make_type("LAnno;"),
+                                              DAV_RUNTIME);
+  anno->add_element(name, std::move(value));
+  auto set = std::make_unique<DexAnnotationSet>();
+  set->add_annotation(std::move(anno));
+  return set;
+}
+
+} // namespace
+
+// A tool-generated dex file can hold method handles and method types outside
+// code, as static field values and in annotations, here none of which code
+// uses. They read back unchanged after they are written.
+TEST(Dex039Test, ReadWriteMethodHandlesAndTypesOutsideCode) {
+  g_redex = new RedexContext();
+  ClassCreator creator(DexType::make_type("LConstants;"));
+  creator.set_super(type::java_lang_Object());
+  creator.set_access(ACC_PUBLIC | ACC_ABSTRACT);
+  creator.add_field(
+      DexField::make_field("LConstants;.HANDLE:Ljava/lang/invoke/MethodHandle;")
+          ->make_concrete(
+              ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+              std::make_unique<DexEncodedValueMethodHandle>(
+                  redex::make_method_handle(METHOD_HANDLE_TYPE_INVOKE_STATIC,
+                                            "LTarget;.run:(LArg;)V"))));
+  creator.add_field(
+      DexField::make_field("LConstants;.TYPE:Ljava/lang/invoke/MethodType;")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+                          std::make_unique<DexEncodedValueMethodType>(
+                              DexProto::make_proto("(CSJ)Z"))));
+  auto* method = DexMethod::make_method("LConstants;.annotated:()V")
+                     ->make_concrete(ACC_PUBLIC | ACC_ABSTRACT | ACC_SYNTHETIC,
+                                     /* is_virtual */ true);
+  auto* types = new DexEncodedValueArray::Storage();
+  types->push_back(std::make_unique<DexEncodedValueMethodType>(
+      DexProto::make_proto("(JJ)V")));
+  ASSERT_TRUE(method->attach_annotation_set(make_annotation_set(
+      "types", std::make_unique<DexEncodedValueArray>(types))));
+  creator.add_method(method);
+  auto* cls = creator.create();
+  ASSERT_TRUE(cls->attach_annotation_set(make_annotation_set(
+      "handle",
+      std::make_unique<DexEncodedValueMethodHandle>(redex::make_method_handle(
+          METHOD_HANDLE_TYPE_INSTANCE_GET, "LTarget;.f:LField;")))));
+  DexClasses classes{cls};
+  const auto before = show_values_and_annotations(classes);
+
+  auto tmpdir = redex::make_tmp_dir("dex039_test_%%%%%%%%");
+  auto output = write_dex_file(std::move(classes), tmpdir.path, 39);
+
+  delete g_redex;
+  g_redex = new RedexContext();
+  EXPECT_EQ(show_values_and_annotations(load_dex_file(output, 39)), before);
   delete g_redex;
   g_redex = nullptr;
 }

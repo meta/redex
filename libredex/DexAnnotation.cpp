@@ -27,6 +27,11 @@ void DexEncodedValueMethodType::gather_types(
   proto()->gather_types(ltype);
 }
 
+void DexEncodedValueMethodType::gather_protos(
+    std::vector<DexProto*>& lproto) const {
+  lproto.push_back(proto());
+}
+
 void DexEncodedValueString::gather_strings(
     std::vector<const DexString*>& lstring) const {
   lstring.push_back(string());
@@ -90,6 +95,19 @@ void DexEncodedValueArray::gather_methods(
   }
 }
 
+void DexEncodedValueArray::gather_methodhandles(
+    std::vector<DexMethodHandle*>& lmethodhandle) const {
+  for (auto& ev : *evalues()) {
+    ev->gather_methodhandles(lmethodhandle);
+  }
+}
+
+void DexEncodedValueArray::gather_protos(std::vector<DexProto*>& lproto) const {
+  for (auto& ev : *evalues()) {
+    ev->gather_protos(lproto);
+  }
+}
+
 void DexEncodedValueAnnotation::gather_strings(
     std::vector<const DexString*>& lstring) const {
   for (auto const& elem : m_annotations) {
@@ -120,6 +138,20 @@ void DexEncodedValueAnnotation::gather_methods(
   }
 }
 
+void DexEncodedValueAnnotation::gather_methodhandles(
+    std::vector<DexMethodHandle*>& lmethodhandle) const {
+  for (auto const& anno : m_annotations) {
+    anno.encoded_value->gather_methodhandles(lmethodhandle);
+  }
+}
+
+void DexEncodedValueAnnotation::gather_protos(
+    std::vector<DexProto*>& lproto) const {
+  for (auto const& anno : m_annotations) {
+    anno.encoded_value->gather_protos(lproto);
+  }
+}
+
 void DexAnnotation::gather_strings(
     std::vector<const DexString*>& lstring) const {
   for (auto const& anno : m_anno_elems) {
@@ -144,6 +176,19 @@ void DexAnnotation::gather_fields(std::vector<DexFieldRef*>& lfield) const {
 void DexAnnotation::gather_methods(std::vector<DexMethodRef*>& lmethod) const {
   for (auto const& anno : m_anno_elems) {
     anno.encoded_value->gather_methods(lmethod);
+  }
+}
+
+void DexAnnotation::gather_methodhandles(
+    std::vector<DexMethodHandle*>& lmethodhandle) const {
+  for (auto const& anno : m_anno_elems) {
+    anno.encoded_value->gather_methodhandles(lmethodhandle);
+  }
+}
+
+void DexAnnotation::gather_protos(std::vector<DexProto*>& lproto) const {
+  for (auto const& anno : m_anno_elems) {
+    anno.encoded_value->gather_protos(lproto);
   }
 }
 
@@ -183,6 +228,19 @@ void DexAnnotationSet::gather_methods(
 void DexAnnotationSet::gather_fields(std::vector<DexFieldRef*>& lfield) const {
   for (auto const& anno : m_annotations) {
     anno->gather_fields(lfield);
+  }
+}
+
+void DexAnnotationSet::gather_methodhandles(
+    std::vector<DexMethodHandle*>& lmethodhandle) const {
+  for (auto const& anno : m_annotations) {
+    anno->gather_methodhandles(lmethodhandle);
+  }
+}
+
+void DexAnnotationSet::gather_protos(std::vector<DexProto*>& lproto) const {
+  for (auto const& anno : m_annotations) {
+    anno->gather_protos(lproto);
   }
 }
 

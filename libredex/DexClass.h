@@ -442,6 +442,10 @@ class DexField : public DexFieldRef {
   void gather_fields(C& lfield) const;
   template <typename C>
   void gather_methods(C& lmethod) const;
+  template <typename C>
+  void gather_protos(C& lproto) const;
+  template <typename C>
+  void gather_methodhandles(C& lmethodhandle) const;
 
  private:
   template <typename C>

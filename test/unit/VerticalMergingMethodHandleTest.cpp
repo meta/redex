@@ -12,12 +12,15 @@
 
 #include "ConfigFiles.h"
 #include "Creators.h"
+#include "DexAnnotation.h"
+#include "DexCallSite.h"
 #include "DexClass.h"
 #include "DexMethodHandle.h"
 #include "IRAssembler.h"
 #include "IRCode.h"
 #include "PassManager.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "Resolver.h"
 #include "TypeUtil.h"
 #include "VerticalMerging.h"
@@ -343,6 +346,31 @@ TEST_F(VerticalMergingMethodHandleTest,
   ASSERT_EQ(method_handles.size(), 1);
   EXPECT_EQ(method_handles[0]->methodref(),
             DexMethod::get_method("LUser;.<init>:(LBase;)V"));
+}
+
+// A const-class keeps its class, even an abstract one, from being merged away:
+// code can compare the Class or key a map on it. A Class among the bootstrap
+// arguments of a call site, which ART loads like a const-class, must too.
+TEST_F(VerticalMergingMethodHandleTest, classArgumentKeepsItsClass) {
+  auto* base = make_base(ACC_PUBLIC | ACC_ABSTRACT);
+  auto* impl = make_impl();
+  make_user(R"((
+    (new-instance "LImpl;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0) "LImpl;.<init>:()V")
+    (invoke-static () "LUser;.placeholder:()V")
+    (return-void)
+  ))");
+  auto* use = DexMethod::get_method("LUser;.use:()V")->as_def();
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.push_back(
+      std::make_unique<DexEncodedValueType>(DexType::make_type("[LBase;")));
+  auto* callsite =
+      redex::make_invoke_custom(use->get_code(), "run", "()V", std::move(args));
+
+  EXPECT_EQ(run_pass(base, impl), 3);
+  EXPECT_EQ(impl->get_super_class(), base->get_type());
+  EXPECT_EQ(callsite->args().at(0)->show(), "[LBase;");
 }
 
 namespace {

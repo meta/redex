@@ -14,6 +14,7 @@
 #include "ControlFlow.h"
 #include "Debug.h"
 #include "DexAnnotation.h"
+#include "DexCallSite.h"
 #include "DexClass.h"
 #include "DexMethodHandle.h"
 #include "DexUtil.h"
@@ -520,6 +521,15 @@ size_t record_code_reference(const Scope& scope,
             record_dont_merge_state(type, kConditional, dont_merge_status);
             TRACE(VMERGE, 9, "dont_merge %s as mergeable for type usage: %s",
                   SHOW(type), SHOW(insn));
+          }
+        }
+      } else if (insn->has_callsite()) {
+        // A Class among the bootstrap arguments of a call site is loaded like
+        // a const-class when the call site is linked.
+        for (const auto& arg : insn->get_callsite()->args()) {
+          if (const auto* type_arg =
+                  dynamic_cast<const DexEncodedValueType*>(arg.get())) {
+            record_class_literal(type_arg->type(), dont_merge_status);
           }
         }
       } else if (opcode::is_const_string(insn->opcode())) {

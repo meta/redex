@@ -15,6 +15,7 @@
 #include "Debug.h"
 #include "DeterministicContainers.h"
 #include "DexAnnotation.h"
+#include "DexMethodHandle.h"
 #include "DexUtil.h"
 #include "MethodUtil.h"
 #include "PassManager.h"
@@ -909,6 +910,13 @@ void MethodReferencesGatherer::default_gather_mie(const MethodItemEntry& mie,
     } else if (opcode::is_a_return(op)) {
       refs->returns = true;
     }
+    // Unlike an invoke-direct of a constructor, which initializes an existing
+    // instance, an invoke-constructor handle allocates one.
+    for_each_method_handle(insn, [&](const DexMethodHandle* method_handle) {
+      if (method_handle->type() == METHOD_HANDLE_TYPE_INVOKE_CONSTRUCTOR) {
+        refs->new_instances.push_back(method_handle->methodref()->get_class());
+      }
+    });
     if (gather_methods) {
       for_each_invoke(insn, [&](IROpcode opcode, DexMethodRef* method_ref,
                                 const DexMethodHandle* method_handle) {

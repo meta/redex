@@ -337,6 +337,41 @@ TEST_F(ReachabilityMethodHandleTest, InvokeDirectHandleOfOwnMethodMarksBody) {
   EXPECT_EQ(is_live(scope, helper_h), std::make_pair(true, true));
 }
 
+// An invoke-constructor handle (tool-generated here) allocates an instance of
+// its class, like a new-instance, so the constructor it runs and the methods
+// called on the instance it returns are live.
+TEST_F(ReachabilityMethodHandleTest, InvokeConstructorHandleInstantiatesClass) {
+  auto* helper = make_class("LHelper;");
+  auto* touch = add_method(helper, "LHelper;.touch:()V",
+                           ACC_PUBLIC | ACC_STATIC, false, "((return-void))");
+  auto* act = add_method(helper, "LHelper;.act:()V", ACC_PUBLIC | ACC_STATIC,
+                         false, "((return-void))");
+  auto* foo = make_class("LFoo;");
+  add_method(foo, "LFoo;.<init>:()V", ACC_PUBLIC | ACC_CONSTRUCTOR, false, R"((
+    (load-param-object v0)
+    (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+    (invoke-static () "LHelper;.touch:()V")
+    (return-void)
+  ))");
+  add_method(foo, "LFoo;.run:()V", ACC_PUBLIC, true, R"((
+    (load-param-object v0)
+    (invoke-static () "LHelper;.act:()V")
+    (return-void)
+  ))");
+  Scope scope{helper, foo};
+  add_root_main(scope, std::string(R"((
+    (const-method-handle invoke-constructor "LFoo;.<init>:()V")
+    (move-result-pseudo-object v0)
+    (invoke-polymorphic (v0) )") +
+                           std::string(kInvokeExact) + R"( "()LFoo;")
+    (move-result-object v1)
+    (invoke-virtual (v1) "LFoo;.run:()V")
+    (return-void)
+  ))");
+  EXPECT_EQ(is_live(scope, touch), std::make_pair(true, true));
+  EXPECT_EQ(is_live(scope, act), std::make_pair(true, true));
+}
+
 // `Lp/B;.m` is package-private, so `Lq/C;.m` in another package cannot
 // override it and takes a slot of its own. An invoke-direct handle of
 // `Lp/B;.m` held by `Lp/D; extends Lq/C;` runs `Lp/B;.m`, so its body is live.

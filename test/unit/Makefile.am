@@ -38,6 +38,7 @@ endef
 ####
 
 check_PROGRAMS = \
+    access_marking_method_handle_test \
     aliased_registers_test \
     analysis_usage_test \
     anno_kill_test \
@@ -256,6 +257,8 @@ check_PROGRAMS = \
     work_queue_test \
     xstorerefs_test \
     string_tree_test
+
+access_marking_method_handle_test_SOURCES = AccessMarkingMethodHandleTest.cpp
 
 aliased_registers_test_SOURCES = AliasedRegistersTest.cpp
 

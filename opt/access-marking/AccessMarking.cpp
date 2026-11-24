@@ -131,15 +131,22 @@ ConcurrentSet<DexMethod*> find_private_methods(
       scope,
       [](DexMethod*) { return true; },
       [&](DexMethod* caller, IRInstruction* inst) {
-        if (!inst->has_method()) {
-          return;
-        }
-        auto* callee = resolve_method_deprecated(
-            inst->get_method(), opcode_to_search(inst), caller);
-        if (callee == nullptr || callee->get_class() == caller->get_class()) {
-          return;
-        }
-        candidates.erase(callee);
+        // A method handle is resolved, and checked for access, in the class of
+        // the code that holds it, like an invoke there.
+        for_each_invoke(inst, [&](IROpcode opcode, DexMethodRef* method_ref,
+                                  const DexMethodHandle* method_handle) {
+          auto* callee = method_handle == nullptr
+                             ? resolve_method_deprecated(
+                                   method_ref, opcode_to_search(opcode), caller)
+                             : resolve_method_handle(method_handle, caller);
+          // A same-class handle may still name a private method: from ART 8.0
+          // on, a private method behind an invoke-instance or invoke-interface
+          // handle is called directly, whatever the receiver's class.
+          if (callee == nullptr || callee->get_class() == caller->get_class()) {
+            return;
+          }
+          candidates.erase(callee);
+        });
       });
 
   return candidates;

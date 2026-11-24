@@ -316,6 +316,43 @@ inline bool can_access(const DexMethod* accessor, const DexClass* accessee) {
          same_package(accessor->get_class(), accessee->get_type());
 }
 
+/**
+ * Validate if the method may name a type, e.g. in a `check-cast` or
+ * `instance-of`: a class as above, an array by its element class, as the device
+ * checks it. A type Redex has no class for is assumed accessible, which suits
+ * judging code that already exists; code a pass adds uses `can_name_type`.
+ */
+inline bool can_access_type(const DexMethod* accessor, const DexType* type) {
+  return can_access(accessor, type_class(get_element_type_if_array(type)));
+}
+
+/**
+ * Validate if code a pass adds to the method may name a type, e.g. in a
+ * `check-cast`: a primitive type, or a class (for an array, its element class)
+ * that Redex has a definition of. A type whose class Redex cannot see is
+ * refused, because nothing shows that the device lets the method name it. A
+ * class qualifies when `can_access` accepts it, or, when
+ * `app_classes_made_public_later` is set, when it is defined in the app: the
+ * pass runs while the `NeedsEverythingPublic` property is established and a
+ * later pass destroys it (`MakePublicPass`, which makes every app class
+ * public), so nothing checks access in between. A class Redex knows only as
+ * external, such as one of the Android framework, must pass `can_access`.
+ */
+inline bool can_name_type(const DexMethod* accessor,
+                          const DexType* type,
+                          bool app_classes_made_public_later) {
+  const auto* element = get_element_type_if_array(type);
+  if (is_primitive(element)) {
+    return true;
+  }
+  const auto* cls = type_class(element);
+  if (cls == nullptr) {
+    return false;
+  }
+  return can_access(accessor, cls) ||
+         (app_classes_made_public_later && !cls->is_external());
+}
+
 bool is_kotlin_class(DexClass* cls);
 
 bool is_kotlin_function_interface(const DexType* type);

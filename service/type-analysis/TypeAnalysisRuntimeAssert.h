@@ -77,14 +77,14 @@ class RuntimeAssertTransform {
  private:
   // \returns true if any code is inserted.
   bool insert_field_assert(const WholeProgramState&,
-                           const DexType*,
+                           const DexMethod*,
                            cfg::ControlFlowGraph&,
                            bool,
                            cfg::InstructionIterator&,
                            Stats&);
   // \returns true if any code is inserted.
   bool insert_return_value_assert(const WholeProgramState&,
-                                  const DexType*,
+                                  const DexMethod*,
                                   cfg::ControlFlowGraph&,
                                   cfg::InstructionIterator&,
                                   Stats&);

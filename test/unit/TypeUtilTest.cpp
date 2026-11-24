@@ -374,3 +374,47 @@ TEST_F(TypeUtilTest, can_access_a_class) {
   EXPECT_TRUE(type::can_access(in_q, open));
   EXPECT_TRUE(type::can_access(in_q, static_cast<const DexClass*>(nullptr)));
 }
+
+// Code a pass adds may name any app class when a later pass makes every app
+// class public; a class outside the app keeps its access. An array is named by
+// its element class.
+TEST_F(TypeUtilTest, can_name_a_type) {
+  auto make_class = [](const char* name, bool external) {
+    ClassCreator creator(DexType::make_type(name));
+    creator.set_super(type::java_lang_Object());
+    creator.set_access(DexAccessFlags(0));
+    if (external) {
+      creator.set_external();
+    }
+    return creator.create()->get_type();
+  };
+  auto* app = make_class("Lp/AppHidden;", /* external */ false);
+  auto* framework = make_class("Lp/FrameworkHidden;", /* external */ true);
+  auto* app_array = DexType::make_type("[[Lp/AppHidden;");
+  auto* in_q = DexMethod::make_method("Lq/Adder;.run:()V")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+
+  EXPECT_FALSE(type::can_name_type(in_q, app, false));
+  EXPECT_FALSE(type::can_name_type(in_q, app_array, false));
+  EXPECT_FALSE(type::can_name_type(in_q, framework, false));
+  EXPECT_TRUE(type::can_name_type(in_q, app, true));
+  EXPECT_TRUE(type::can_name_type(in_q, app_array, true));
+  EXPECT_FALSE(type::can_name_type(in_q, framework, true));
+}
+
+// Code a pass adds may not name a class Redex has no definition of, while a
+// check of existing code assumes such a class accessible. Primitive types are
+// always nameable.
+TEST_F(TypeUtilTest, can_name_only_a_type_redex_can_see) {
+  auto* unknown = DexType::make_type("Lp/Unknown;");
+  auto* unknown_array = DexType::make_type("[Lp/Unknown;");
+  auto* in_q = DexMethod::make_method("Lq/Adder2;.run:()V")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+
+  EXPECT_TRUE(type::can_access_type(in_q, unknown));
+  EXPECT_FALSE(type::can_name_type(in_q, unknown, false));
+  EXPECT_FALSE(type::can_name_type(in_q, unknown, true));
+  EXPECT_FALSE(type::can_name_type(in_q, unknown_array, true));
+  EXPECT_TRUE(type::can_name_type(in_q, type::_int(), false));
+  EXPECT_TRUE(type::can_name_type(in_q, DexType::make_type("[I"), false));
+}

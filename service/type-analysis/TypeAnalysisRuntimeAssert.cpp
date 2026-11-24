@@ -14,6 +14,7 @@
 #include "MethodUtil.h"
 #include "ProguardMap.h"
 #include "Resolver.h"
+#include "TypeUtil.h"
 
 namespace type_analyzer {
 
@@ -146,21 +147,6 @@ static void insert_type_check_with_throw(cfg::ControlFlowGraph& cfg,
   cfg.add_edge(throw_block, B2, cfg::EDGE_GOTO);
 }
 
-// The logic here is designed for testing purpose. It is not designed for
-// production settings. So the rules are more relaxed.
-bool can_access(const DexType* from, const DexType* to) {
-  always_assert(from && to);
-  auto* to_cls = type_class(to);
-  if ((to_cls == nullptr) || is_public(to_cls) || from == to) {
-    return true;
-  }
-  if (is_private(to_cls)) {
-    return false;
-  }
-  auto is_same_package = type::same_package(from, to);
-  return is_package_private(to_cls) && is_same_package;
-}
-
 RuntimeAssertTransform::Stats RuntimeAssertTransform::apply(
     const local::LocalTypeAnalyzer& /* lta */,
     const WholeProgramState& wps,
@@ -191,14 +177,13 @@ RuntimeAssertTransform::Stats RuntimeAssertTransform::apply(
       always_assert(it->insn);
       auto next_it = std::next(it);
       bool changed;
-      changed = insert_field_assert(wps, method->get_class(), cfg,
-                                    in_clinit_or_init, it, stats);
+      changed =
+          insert_field_assert(wps, method, cfg, in_clinit_or_init, it, stats);
       if (changed) {
         // Some code has been inserted. Skip the those code.
         it = next_it;
       }
-      changed =
-          insert_return_value_assert(wps, method->get_class(), cfg, it, stats);
+      changed = insert_return_value_assert(wps, method, cfg, it, stats);
       if (changed) {
         // Some code has been inserted. Skip the those code.
         it = next_it;
@@ -209,7 +194,7 @@ RuntimeAssertTransform::Stats RuntimeAssertTransform::apply(
 }
 
 bool RuntimeAssertTransform::insert_field_assert(const WholeProgramState& wps,
-                                                 const DexType* from,
+                                                 const DexMethod* method,
                                                  cfg::ControlFlowGraph& cfg,
                                                  bool in_clinit_or_init,
                                                  cfg::InstructionIterator& it,
@@ -262,7 +247,8 @@ bool RuntimeAssertTransform::insert_field_assert(const WholeProgramState& wps,
   if (!dex_type) {
     return true;
   }
-  if (!can_access(from, *dex_type)) {
+  if (!type::can_name_type(method, *dex_type,
+                           /* app_classes_made_public_later */ false)) {
     return true;
   }
 
@@ -275,7 +261,7 @@ bool RuntimeAssertTransform::insert_field_assert(const WholeProgramState& wps,
 
 bool RuntimeAssertTransform::insert_return_value_assert(
     const WholeProgramState& wps,
-    const DexType* from,
+    const DexMethod* method,
     cfg::ControlFlowGraph& cfg,
     cfg::InstructionIterator& it,
     Stats& stats) {
@@ -338,7 +324,8 @@ bool RuntimeAssertTransform::insert_return_value_assert(
   if (!dex_type) {
     return true;
   }
-  if (!can_access(from, *dex_type)) {
+  if (!type::can_name_type(method, *dex_type,
+                           /* app_classes_made_public_later */ false)) {
     return true;
   }
 

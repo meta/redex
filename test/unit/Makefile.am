@@ -246,6 +246,7 @@ check_PROGRAMS = \
     timer_test \
     trace_multithreading_test \
     true_virtuals_test \
+    type_analysis_runtime_assert_test \
     type_analysis_transform_test \
     type_inference_test \
     type_ref_updater_test \
@@ -773,6 +774,8 @@ trace_multithreading_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 true_virtuals_test_SOURCES = TrueVirtualsTest.cpp ScopeHelper.cpp
 true_virtuals_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
+
+type_analysis_runtime_assert_test_SOURCES = type-analysis/TypeAnalysisRuntimeAssertTest.cpp
 
 type_analysis_transform_test_SOURCES = type-analysis/TypeAnalysisTransformTest.cpp
 

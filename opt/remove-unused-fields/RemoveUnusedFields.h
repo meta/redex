@@ -40,6 +40,14 @@ struct Config {
   UnorderedSet<const DexType*> allowlist_types;
 };
 
+// The fields of `scope` with a write that the pass, configured by `config`,
+// removes because nothing reads the field. The code of every method must have
+// its CFG built. A field is listed when the pass removes at least one of its
+// writes; it may also have writes the pass keeps, such as those in methods
+// marked `no_optimizations`.
+UnorderedSet<const DexField*> fields_with_removable_unread_writes(
+    const Config& config, const Scope& scope);
+
 class PassImpl : public Pass {
  public:
   PassImpl() : Pass("RemoveUnusedFieldsPass") {}
@@ -90,6 +98,8 @@ class PassImpl : public Pass {
   void run_pass(DexStoresVector& stores,
                 ConfigFiles& conf,
                 PassManager& mgr) override;
+
+  const Config& get_config() const { return m_config; }
 
  private:
   Config m_config;

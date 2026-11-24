@@ -42,26 +42,12 @@ bool has_non_zero_static_value(DexField* field) {
   return ev != nullptr && !ev->is_zero();
 }
 
-class RemoveUnusedFields final {
+// What the pass finds out about the fields of a scope before it changes any
+// code.
+class FieldAnalysis final {
  public:
-  RemoveUnusedFields(const Config& config,
-                     const ConfigFiles& config_files,
-                     const ShrinkerConfig& shrinker_config,
-                     int min_sdk,
-                     DexStoresVector& stores,
-                     const Scope& scope)
-      : m_config(config),
-        m_scope(scope),
-        m_init_classes_with_side_effects(
-            scope, config_files.create_init_class_insns()),
-        m_shrinker(stores,
-                   scope,
-                   m_init_classes_with_side_effects,
-                   config_files,
-                   shrinker_config,
-                   min_sdk) {
-    analyze();
-    transform();
+  FieldAnalysis(const Config& config, const Scope& scope) : m_config(config) {
+    analyze(scope);
   }
 
   const UnorderedSet<const DexField*>& unread_fields() const {
@@ -81,19 +67,7 @@ class RemoveUnusedFields final {
     return m_vestigial_objects_written_fields;
   }
 
-  size_t unremovable_unread_field_puts() const {
-    return m_unremovable_unread_field_puts;
-  }
-
-  size_t init_classes() const { return m_init_classes; }
-
- private:
-  bool is_blocklisted(const DexField* field) const {
-    return m_config.blocklist_types.count(field->get_type()) != 0 ||
-           m_config.blocklist_classes.count(field->get_class()) != 0;
-  }
-
-  bool can_remove_unread_field_put(DexField* field) const {
+  bool can_remove_unread_field_put(const DexField* field) const {
     auto* t = field->get_type();
     // When no non-null value is ever written to a field, then it can never hold
     // a non-null reference
@@ -119,16 +93,22 @@ class RemoveUnusedFields final {
     return false;
   }
 
-  void analyze() {
+ private:
+  bool is_blocklisted(const DexField* field) const {
+    return m_config.blocklist_types.count(field->get_type()) != 0 ||
+           m_config.blocklist_classes.count(field->get_class()) != 0;
+  }
+
+  void analyze(const Scope& scope) {
     field_op_tracker::FieldStatsMap field_stats =
-        field_op_tracker::analyze(m_scope);
+        field_op_tracker::analyze(scope);
 
     std::unique_ptr<field_op_tracker::FieldWrites> field_writes;
     if (m_config.remove_zero_written_fields ||
         m_config.remove_vestigial_objects_written_fields) {
       field_writes = std::make_unique<field_op_tracker::FieldWrites>();
       field_op_tracker::analyze_writes(
-          m_scope, field_stats,
+          scope, field_stats,
           m_config.remove_vestigial_objects_written_fields ? &m_type_lifetimes
                                                            : nullptr,
           field_writes.get());
@@ -172,6 +152,44 @@ class RemoveUnusedFields final {
           m_vestigial_objects_written_fields.size());
   }
 
+  const Config& m_config;
+  UnorderedSet<const DexField*> m_unread_fields;
+  UnorderedSet<const DexField*> m_unwritten_fields;
+  UnorderedSet<const DexField*> m_zero_written_fields;
+  UnorderedSet<const DexField*> m_vestigial_objects_written_fields;
+  field_op_tracker::TypeLifetimes m_type_lifetimes;
+};
+
+class RemoveUnusedFields final {
+ public:
+  RemoveUnusedFields(const Config& config,
+                     const ConfigFiles& config_files,
+                     const ShrinkerConfig& shrinker_config,
+                     int min_sdk,
+                     DexStoresVector& stores,
+                     const Scope& scope)
+      : m_scope(scope),
+        m_analysis(config, scope),
+        m_init_classes_with_side_effects(
+            scope, config_files.create_init_class_insns()),
+        m_shrinker(stores,
+                   scope,
+                   m_init_classes_with_side_effects,
+                   config_files,
+                   shrinker_config,
+                   min_sdk) {
+    transform();
+  }
+
+  const FieldAnalysis& analysis() const { return m_analysis; }
+
+  size_t unremovable_unread_field_puts() const {
+    return m_unremovable_unread_field_puts;
+  }
+
+  size_t init_classes() const { return m_init_classes; }
+
+ private:
   void transform() {
     // Replace reads to unwritten fields with appropriate const-0 instructions,
     // and remove the writes to unread fields.
@@ -193,8 +211,8 @@ class RemoveUnusedFields final {
         auto* field = resolve_field(insn->get_field());
         bool replace_insn = false;
         bool remove_insn = false;
-        if (m_unread_fields.count(field) != 0u) {
-          if (can_remove_unread_field_put(field)) {
+        if (m_analysis.unread_fields().count(field) != 0u) {
+          if (m_analysis.can_remove_unread_field_put(field)) {
             always_assert(opcode::is_an_iput(insn->opcode()) ||
                           opcode::is_an_sput(insn->opcode()));
             TRACE(RMUF, 5, "Removing %s", SHOW(insn));
@@ -202,12 +220,12 @@ class RemoveUnusedFields final {
           } else {
             m_unremovable_unread_field_puts++;
           }
-        } else if (m_unwritten_fields.count(field) != 0u) {
+        } else if (m_analysis.unwritten_fields().count(field) != 0u) {
           always_assert(opcode::is_an_iget(insn->opcode()) ||
                         opcode::is_an_sget(insn->opcode()));
           TRACE(RMUF, 5, "Replacing %s with const 0", SHOW(insn));
           replace_insn = true;
-        } else if (m_zero_written_fields.count(field) != 0u) {
+        } else if (m_analysis.zero_written_fields().count(field) != 0u) {
           if (opcode::is_an_iput(insn->opcode()) ||
               opcode::is_an_sput(insn->opcode())) {
             TRACE(RMUF, 5, "Removing %s", SHOW(insn));
@@ -255,17 +273,11 @@ class RemoveUnusedFields final {
     });
   }
 
-  const Config& m_config;
   const Scope& m_scope;
+  FieldAnalysis m_analysis;
   const init_classes::InitClassesWithSideEffects
       m_init_classes_with_side_effects;
   Shrinker m_shrinker;
-
-  UnorderedSet<const DexField*> m_unread_fields;
-  UnorderedSet<const DexField*> m_unwritten_fields;
-  UnorderedSet<const DexField*> m_zero_written_fields;
-  UnorderedSet<const DexField*> m_vestigial_objects_written_fields;
-  field_op_tracker::TypeLifetimes m_type_lifetimes;
   std::atomic<size_t> m_unremovable_unread_field_puts{0};
   std::atomic<size_t> m_init_classes{0};
 };
@@ -273,6 +285,33 @@ class RemoveUnusedFields final {
 } // namespace
 
 namespace remove_unused_fields {
+
+UnorderedSet<const DexField*> fields_with_removable_unread_writes(
+    const Config& config, const Scope& scope) {
+  FieldAnalysis analysis(config, scope);
+  InsertOnlyConcurrentSet<const DexField*> fields;
+  walk::parallel::code(scope, [&](const DexMethod* method, IRCode& code) {
+    // The pass keeps this method's writes, but a field written here is still
+    // listed if the pass removes one of its writes elsewhere.
+    if (method->rstate.no_optimizations()) {
+      return;
+    }
+    always_assert(code.cfg_built());
+    for (const auto& mie : cfg::InstructionIterable(code.cfg())) {
+      if (!mie.insn->has_field()) {
+        continue;
+      }
+      const auto* field = resolve_field(mie.insn->get_field());
+      if (analysis.unread_fields().count(field) != 0u &&
+          analysis.can_remove_unread_field_put(field)) {
+        fields.insert(field);
+      }
+    }
+  });
+  UnorderedSet<const DexField*> result;
+  insert_unordered_iterable(result, fields);
+  return result;
+}
 
 void PassImpl::run_pass(DexStoresVector& stores,
                         ConfigFiles& conf,
@@ -293,11 +332,12 @@ void PassImpl::run_pass(DexStoresVector& stores,
   int min_sdk = mgr.get_redex_options().min_sdk;
   RemoveUnusedFields rmuf(m_config, conf, shrinker_config, min_sdk, stores,
                           scope);
-  mgr.set_metric("unread_fields", rmuf.unread_fields().size());
-  mgr.set_metric("unwritten_fields", rmuf.unwritten_fields().size());
-  mgr.set_metric("zero_written_fields", rmuf.zero_written_fields().size());
+  mgr.set_metric("unread_fields", rmuf.analysis().unread_fields().size());
+  mgr.set_metric("unwritten_fields", rmuf.analysis().unwritten_fields().size());
+  mgr.set_metric("zero_written_fields",
+                 rmuf.analysis().zero_written_fields().size());
   mgr.set_metric("vestigial_objects_written_fields",
-                 rmuf.vestigial_objects_written_fields().size());
+                 rmuf.analysis().vestigial_objects_written_fields().size());
   mgr.set_metric("unremovable_unread_field_puts",
                  rmuf.unremovable_unread_field_puts());
   mgr.set_metric("init_classes", rmuf.init_classes());
@@ -305,9 +345,9 @@ void PassImpl::run_pass(DexStoresVector& stores,
   if (m_export_removed) {
     std::vector<const DexField*> removed_fields;
     insert_unordered_iterable(removed_fields, removed_fields.end(),
-                              rmuf.unread_fields());
+                              rmuf.analysis().unread_fields());
     insert_unordered_iterable(removed_fields, removed_fields.end(),
-                              rmuf.unwritten_fields());
+                              rmuf.analysis().unwritten_fields());
     sort_unique(removed_fields, compare_dexfields);
     auto path = conf.metafile(REMOVED_FIELDS_FILENAME);
     std::ofstream ofs(path, std::ofstream::out | std::ofstream::trunc);

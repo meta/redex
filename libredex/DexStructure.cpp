@@ -91,6 +91,47 @@ void MethodRefRoom::add(size_t count) {
   m_used += count;
 }
 
+TypeRefRoom TypeRefRoom::for_dex(const DexClasses& dex,
+                                 const init_classes::InitClassesWithSideEffects&
+                                     init_classes_with_side_effects,
+                                 int32_t min_sdk,
+                                 size_t reserved_trefs) {
+  UnorderedSet<const DexType*> type_refs;
+  std::vector<const DexType*> init_classes;
+  for (auto* cls : dex) {
+    cls->gather_types(type_refs);
+    cls->gather_init_classes(init_classes);
+  }
+  for (const auto* type : init_classes) {
+    const auto* refined_type = init_classes_with_side_effects.refine(type);
+    if (refined_type != nullptr) {
+      type_refs.insert(refined_type);
+    }
+  }
+  const auto max_type_refs = get_max_type_refs(min_sdk);
+  always_assert_log(reserved_trefs <= max_type_refs,
+                    "%zu type refs reserved, more than the %zu a dex can hold",
+                    reserved_trefs, max_type_refs);
+  return TypeRefRoom(std::move(type_refs), max_type_refs - reserved_trefs);
+}
+
+bool TypeRefRoom::can_add(const UnorderedSet<const DexType*>& types) const {
+  // `unordered_count_if` returns a signed difference_type; the sum below is
+  // compared against an unsigned size, so narrow it here rather than let the
+  // comparison do it.
+  auto inserted_count = static_cast<size_t>(unordered_count_if(
+      types, [this](const auto* t) { return !m_type_refs.contains(t); }));
+  // Yes, looks a bit quirky, but matching what happens in
+  // InterDex/DexStructure: The number of type refs must stay *below* the
+  // maximum, and must never reach it.
+  return m_type_refs.size() + inserted_count < m_max_type_refs;
+}
+
+void TypeRefRoom::add(const UnorderedSet<const DexType*>& types) {
+  always_assert(can_add(types));
+  insert_unordered_iterable(m_type_refs, types);
+}
+
 /**
  * Estimates the linear alloc space consumed by the class at runtime.
  */

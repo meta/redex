@@ -56,6 +56,30 @@ class MethodRefRoom {
   size_t m_used;
 };
 
+// The room a dex has for more type references: the types its classes refer
+// to plus the refined types of their init classes, which InterDex gathers too.
+// The count must stay below the type index limit for `min_sdk` minus the room
+// reserved for others.
+class TypeRefRoom {
+ public:
+  static TypeRefRoom for_dex(const DexClasses& dex,
+                             const init_classes::InitClassesWithSideEffects&
+                                 init_classes_with_side_effects,
+                             int32_t min_sdk,
+                             size_t reserved_trefs);
+
+  [[nodiscard]] bool can_add(const UnorderedSet<const DexType*>& types) const;
+
+  void add(const UnorderedSet<const DexType*>& types);
+
+ private:
+  TypeRefRoom(UnorderedSet<const DexType*> type_refs, size_t max_type_refs)
+      : m_type_refs(std::move(type_refs)), m_max_type_refs(max_type_refs) {}
+
+  UnorderedSet<const DexType*> m_type_refs;
+  size_t m_max_type_refs;
+};
+
 using MethodRefs = UnorderedSet<DexMethodRef*>;
 using FieldRefs = UnorderedSet<DexFieldRef*>;
 using TypeRefs = UnorderedSet<const DexType*>;

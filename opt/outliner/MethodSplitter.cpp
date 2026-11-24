@@ -11,7 +11,6 @@
 #include "ConfigFiles.h"
 #include "ControlFlow.h"
 #include "Debug.h"
-#include "DexLimits.h"
 #include "DexPosition.h"
 #include "DexStore.h"
 #include "DexStructure.h"
@@ -35,9 +34,8 @@ using namespace method_splitting_impl;
 
 class DexState {
  private:
-  UnorderedSet<const DexType*> m_type_refs;
+  TypeRefRoom m_type_ref_room;
   MethodRefRoom m_method_ref_room;
-  size_t max_type_refs;
 
  public:
   DexState() = delete;
@@ -49,33 +47,12 @@ class DexState {
            DexClasses& dex,
            size_t reserved_trefs,
            size_t reserved_mrefs)
-      : m_method_ref_room(MethodRefRoom::for_dex(dex, reserved_mrefs)) {
-    std::vector<const DexType*> init_classes;
-    for (auto* cls : dex) {
-      cls->gather_types(m_type_refs);
-      cls->gather_init_classes(init_classes);
-    }
-
-    UnorderedSet<DexType*> refined_types;
-    for (const auto* type : init_classes) {
-      const auto* refined_type = init_classes_with_side_effects.refine(type);
-      if (refined_type != nullptr) {
-        m_type_refs.insert(refined_type);
-      }
-    }
-    max_type_refs = get_max_type_refs(min_sdk) - reserved_trefs;
-  }
+      : m_type_ref_room(TypeRefRoom::for_dex(
+            dex, init_classes_with_side_effects, min_sdk, reserved_trefs)),
+        m_method_ref_room(MethodRefRoom::for_dex(dex, reserved_mrefs)) {}
 
   bool can_insert_type_refs(const UnorderedSet<const DexType*>& types) {
-    // `unordered_count_if` returns a signed difference_type; the sum below is
-    // compared against an unsigned size, so narrow it here rather than let the
-    // comparison do it.
-    auto inserted_count = static_cast<size_t>(unordered_count_if(
-        types, [this](const auto* t) { return !m_type_refs.contains(t); }));
-    // Yes, looks a bit quirky, but matching what happens in
-    // InterDex/DexStructure: The number of type refs must stay *below* the
-    // maximum, and must never reach it.
-    if ((m_type_refs.size() + inserted_count) >= max_type_refs) {
+    if (!m_type_ref_room.can_add(types)) {
       TRACE(MS, 2, "[invoke sequence outliner] hit kMaxTypeRefs");
       return false;
     }
@@ -83,9 +60,7 @@ class DexState {
   }
 
   void insert_type_refs(const UnorderedSet<const DexType*>& types) {
-    always_assert(can_insert_type_refs(types));
-    insert_unordered_iterable(m_type_refs, types);
-    always_assert(m_type_refs.size() < max_type_refs);
+    m_type_ref_room.add(types);
   }
 
   bool can_insert_method_ref() {

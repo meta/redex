@@ -82,7 +82,6 @@
 #include "DeterministicContainers.h"
 #include "DexClass.h"
 #include "DexInstruction.h"
-#include "DexLimits.h"
 #include "DexPosition.h"
 #include "DexStoreUtil.h"
 #include "DexStructure.h"
@@ -2145,10 +2144,9 @@ class DexState {
   PassManager& m_mgr;
   DexClasses& m_dex;
   size_t m_dex_id;
-  UnorderedSet<const DexType*> m_type_refs;
+  TypeRefRoom m_type_ref_room;
   MethodRefRoom m_method_ref_room;
   UnorderedMap<const DexType*, size_t> m_class_ids;
-  size_t max_type_refs;
 
  public:
   DexState() = delete;
@@ -2164,41 +2162,20 @@ class DexState {
       : m_mgr(mgr),
         m_dex(dex),
         m_dex_id(dex_id),
+        m_type_ref_room(TypeRefRoom::for_dex(dex,
+                                             init_classes_with_side_effects,
+                                             mgr.get_redex_options().min_sdk,
+                                             reserved_trefs)),
         m_method_ref_room(MethodRefRoom::for_dex(dex, reserved_mrefs)) {
-    std::vector<const DexType*> init_classes;
-    for (auto* cls : dex) {
-      cls->gather_types(m_type_refs);
-      cls->gather_init_classes(init_classes);
-    }
-
     walk::classes(dex, [&class_ids = m_class_ids](DexClass* cls) {
       class_ids.emplace(cls->get_type(), class_ids.size());
     });
-
-    UnorderedSet<DexType*> refined_types;
-    for (const auto* type : init_classes) {
-      const auto* refined_type = init_classes_with_side_effects.refine(type);
-      if (refined_type != nullptr) {
-        m_type_refs.insert(refined_type->to_mutable());
-      }
-    }
-    max_type_refs =
-        get_max_type_refs(m_mgr.get_redex_options().min_sdk) - reserved_trefs;
   }
 
   size_t get_dex_id() { return m_dex_id; }
 
   bool can_insert_type_refs(const UnorderedSet<const DexType*>& types) {
-    size_t inserted_count{0};
-    for (const auto* t : UnorderedIterable(types)) {
-      if (m_type_refs.count(t) == 0u) {
-        inserted_count++;
-      }
-    }
-    // Yes, looks a bit quirky, but matching what happens in
-    // InterDex/DexStructure: The number of type refs must stay *below* the
-    // maximum, and must never reach it.
-    if ((m_type_refs.size() + inserted_count) >= max_type_refs) {
+    if (!m_type_ref_room.can_add(types)) {
       m_mgr.incr_metric("kMaxTypeRefs", 1);
       TRACE(ISO, 2, "[invoke sequence outliner] hit kMaxTypeRefs");
       return false;
@@ -2207,9 +2184,7 @@ class DexState {
   }
 
   void insert_type_refs(const UnorderedSet<const DexType*>& types) {
-    always_assert(can_insert_type_refs(types));
-    insert_unordered_iterable(m_type_refs, types);
-    always_assert(m_type_refs.size() < max_type_refs);
+    m_type_ref_room.add(types);
   }
 
   bool can_insert_method_ref() {

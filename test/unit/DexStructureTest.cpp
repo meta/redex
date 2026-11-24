@@ -120,3 +120,31 @@ TEST_F(DexStructureTest, method_ref_room_for_dex) {
   EXPECT_EQ(MethodRefRoom::for_dex({foo_cls}, 5).left(),
             kMaxMethodRefs - 2 - 5);
 }
+
+TEST_F(DexStructureTest, type_ref_room_for_dex) {
+  // A dex's type refs must stay below the limit minus the reserved refs;
+  // types the dex already refers to cost nothing.
+  auto* foo_cls = create_a_class("Lfoo;");
+  UnorderedSet<const DexType*> held;
+  foo_cls->gather_types(held);
+  Scope scope{foo_cls};
+  init_classes::InitClassesWithSideEffects init_classes(
+      scope, /* create_init_class_insns */ false);
+  constexpr int32_t min_sdk = 26;
+  // Room for exactly one more type.
+  auto room =
+      TypeRefRoom::for_dex({foo_cls}, init_classes, min_sdk,
+                           get_max_type_refs(min_sdk) - held.size() - 2);
+  const auto* bar = DexType::make_type("Lbar;");
+  const auto* baz = DexType::make_type("Lbaz;");
+  EXPECT_TRUE(room.can_add(held));
+  EXPECT_TRUE(room.can_add({bar}));
+  EXPECT_FALSE(room.can_add({bar, baz}));
+  room.add({bar});
+  EXPECT_TRUE(room.can_add({bar}));
+  EXPECT_FALSE(room.can_add({baz}));
+  EXPECT_ANY_THROW(room.add({baz}));
+  // Reserving more than a dex can hold is a configuration error.
+  EXPECT_ANY_THROW(TypeRefRoom::for_dex({foo_cls}, init_classes, min_sdk,
+                                        get_max_type_refs(min_sdk) + 1));
+}

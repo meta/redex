@@ -20,8 +20,10 @@
 #include "KotlinLambdaAnalyzer.h"
 #include "MethodUtil.h"
 #include "PassManager.h"
+#include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
+#include "TypeUtil.h"
 #include "UniqueMethodTracker.h"
 #include "Walkers.h"
 
@@ -268,6 +270,22 @@ void KotlinLambdaDeduplicationPass::run_pass(DexStoresVector& stores,
   // Cache string lookups to avoid repeated hash table lookups.
   const auto* const instance_name = DexString::make_string("INSTANCE");
 
+  // Step 5 redirects the type, field and method operands of instructions. It
+  // cannot redirect what method handles, method types and call sites name: a
+  // handle's call or field access, its call-site prototype and the code around
+  // it would have to change together. Lambdas that those name stay out of
+  // deduplication.
+  ConcurrentSet<const DexType*> indirectly_named_types;
+  walk::parallel::opcodes(scope, [&](DexMethod*, IRInstruction* insn) {
+    for_each_indirectly_named_type(insn, [&](const DexType* type) {
+      // A type that is not an array is its own element type; null means an
+      // array whose element type does not exist, so no class has it.
+      if (const auto* element_type = type::get_element_type_if_array(type)) {
+        indirectly_named_types.insert(element_type);
+      }
+    });
+  });
+
   // Step 1: Collect all lambdas and insert their invoke methods.
   // We track singleton lambdas (with INSTANCE field) and non-singleton lambdas
   // (without INSTANCE field) separately.
@@ -275,7 +293,8 @@ void KotlinLambdaDeduplicationPass::run_pass(DexStoresVector& stores,
   UniqueMethodTracker non_singleton_tracker;
 
   walk::parallel::classes(scope, [&](DexClass* cls) {
-    if (!can_rename(cls) || !can_delete(cls)) {
+    if (!can_rename(cls) || !can_delete(cls) ||
+        indirectly_named_types.count(cls->get_type()) != 0u) {
       return;
     }
 

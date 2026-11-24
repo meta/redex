@@ -299,6 +299,12 @@ bool can_access(const DexMethod* accessor, const DexMember* accessee) {
   }
   return false;
 }
+/**
+ * Validate if the method may name a class, e.g. in a `check-cast`,
+ * `new-instance` or `const-class`. The table above is for members: a class is
+ * accessible when it is public or in the accessor's own package, whatever its
+ * other flags, as the device resolves it.
+ */
 template <>
 inline bool can_access(const DexMethod* accessor, const DexClass* accessee) {
   if (accessee == nullptr) {
@@ -306,15 +312,8 @@ inline bool can_access(const DexMethod* accessor, const DexClass* accessee) {
     // is not the intention of this check.
     return true;
   }
-  auto* accessor_class = accessor->get_class();
-  if (is_public(accessee) || accessor_class == accessee->get_type()) {
-    return true;
-  }
-  if (is_private(accessee)) {
-    // Cannot be same class
-    return false;
-  }
-  return true;
+  return is_public(accessee) ||
+         same_package(accessor->get_class(), accessee->get_type());
 }
 
 bool is_kotlin_class(DexClass* cls);

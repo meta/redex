@@ -346,3 +346,31 @@ TEST_F(TypeUtilTest, is_instance_of_if_known_shared_interface_ancestors) {
   EXPECT_FALSE(check_cast(c, unrelated));
   EXPECT_TRUE(check_cast(c, DexType::make_type("LB40;")));
 }
+
+// A method may name a class that is public or in its own package, as on the
+// device; the private flag of a class does not matter.
+TEST_F(TypeUtilTest, can_access_a_class) {
+  auto make_class = [](const char* name, DexAccessFlags access) {
+    ClassCreator creator(DexType::make_type(name));
+    creator.set_super(type::java_lang_Object());
+    creator.set_access(access);
+    return creator.create();
+  };
+  auto make_method = [](const char* name) {
+    return DexMethod::make_method(name)->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                                                       false);
+  };
+  auto* hidden = make_class("Lp/Hidden;", DexAccessFlags(0));
+  auto* nested = make_class("Lp/Outer$Nested;", ACC_PRIVATE);
+  auto* open = make_class("Lp/Open;", ACC_PUBLIC);
+  auto* in_p = make_method("Lp/User;.run:()V");
+  auto* in_q = make_method("Lq/User;.run:()V");
+
+  EXPECT_TRUE(type::can_access(in_p, hidden));
+  EXPECT_TRUE(type::can_access(in_p, nested));
+  EXPECT_TRUE(type::can_access(in_p, open));
+  EXPECT_FALSE(type::can_access(in_q, hidden));
+  EXPECT_FALSE(type::can_access(in_q, nested));
+  EXPECT_TRUE(type::can_access(in_q, open));
+  EXPECT_TRUE(type::can_access(in_q, static_cast<const DexClass*>(nullptr)));
+}

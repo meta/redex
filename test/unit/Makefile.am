@@ -617,7 +617,7 @@ ref_checker_test_SOURCES = RefCheckerTest.cpp
 reflection_analysis_test_SOURCES = ReflectionAnalysisTest.cpp
 reflection_analysis_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
-reg_alloc_test_SOURCES = RegAllocTest.cpp OpcodeList.cpp
+reg_alloc_test_SOURCES = RegAllocTest.cpp OpcodeList.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 reg_alloc_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 region_plan_test_SOURCES = RegionPlanTest.cpp

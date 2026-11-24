@@ -307,25 +307,7 @@ RegisterType dest_reg_type(const IRInstruction* insn) {
 }
 
 static RegisterType invoke_src_type(const IRInstruction* insn, vreg_t i) {
-  auto* method = insn->get_method();
-  // non-static invokes have an implicit `this` arg that is not reflected in
-  // the method proto.
-  //
-  // TODO(T59333250): WHAT ABOUT invoke-custom and invoke-polymorphic
-  if (insn->opcode() != OPCODE_INVOKE_CUSTOM &&
-      insn->opcode() != OPCODE_INVOKE_POLYMORPHIC &&
-      insn->opcode() != OPCODE_INVOKE_STATIC) {
-    if (i == 0) {
-      return RegisterType::OBJECT;
-    } else {
-      // decrement `i` by one so that we can use it as an index into the
-      // argument type list.
-      --i;
-    }
-  }
-  const auto* types = method->get_proto()->get_args();
-  always_assert_log(types->size() > i, "Invalid invoke insn %s\n", SHOW(insn));
-  auto* type = types->at(i);
+  const auto* type = insn->get_invoke_src_type(i);
   if (type::is_wide_type(type)) {
     return RegisterType::WIDE;
   } else if (type::is_primitive(type)) {

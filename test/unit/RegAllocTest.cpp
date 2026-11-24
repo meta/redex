@@ -22,6 +22,7 @@
 #include "Liveness.h"
 #include "OpcodeList.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "RegisterAllocation.h"
 #include "RegisterType.h"
 #include "Show.h"
@@ -164,6 +165,84 @@ TEST_F(RegAllocTest, RegTypeInvoke) {
 
   auto* static_insn = dasm(OPCODE_INVOKE_STATIC, method, {0_v});
   EXPECT_EQ(regalloc::src_reg_type(static_insn, 0), RegisterType::NORMAL);
+}
+
+/*
+ * A method handle call takes the handle and then the arguments of its call-site
+ * prototype; a call through a call site takes only the arguments of its method
+ * type.
+ */
+TEST_F(RegAllocTest, RegTypeDynamicInvokes) {
+  IRInstruction polymorphic(OPCODE_INVOKE_POLYMORPHIC);
+  polymorphic
+      .set_signature_polymorphic(
+          DexMethod::make_method("Ljava/lang/invoke/MethodHandle;.invokeExact:("
+                                 "[Ljava/lang/Object;)Ljava/lang/Object;"),
+          DexProto::make_proto("(J)V"))
+      ->set_srcs(std::vector<reg_t>{0, 1});
+  EXPECT_EQ(regalloc::src_reg_type(&polymorphic, 0), RegisterType::OBJECT);
+  EXPECT_EQ(regalloc::src_reg_type(&polymorphic, 1), RegisterType::WIDE);
+  // The wide argument is a register pair after denormalization, so its first
+  // register must leave room for the second.
+  EXPECT_EQ(interference::max_value_for_src(&polymorphic, 1,
+                                            /* src_is_wide */ true),
+            14u);
+
+  IRInstruction custom(OPCODE_INVOKE_CUSTOM);
+  custom.set_callsite(redex::make_callsite("run", "(JI)V"))
+      ->set_srcs(std::vector<reg_t>{0, 1});
+  EXPECT_EQ(regalloc::src_reg_type(&custom, 0), RegisterType::WIDE);
+  EXPECT_EQ(regalloc::src_reg_type(&custom, 1), RegisterType::NORMAL);
+  EXPECT_EQ(interference::max_value_for_src(&custom, 0, /* src_is_wide */ true),
+            14u);
+}
+
+/*
+ * A method handle call with more than five source registers must be encoded in
+ * range form, so the allocator must give it consecutive registers.
+ */
+TEST_F(RegAllocTest, MethodHandleCallNeedsRange) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+     (load-param-object v0)
+     (const v1 1)
+     (invoke-polymorphic (v0 v1 v1 v1 v1 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(IIIII)V")
+     (return-void)
+    )
+  )");
+  code->build_cfg();
+  EXPECT_EQ(init_range_set(code->cfg()).size(), 1);
+}
+
+/*
+ * After allocation, a method handle call in range form has consecutive
+ * registers, even when it passes one value several times.
+ */
+TEST_F(RegAllocTest, MethodHandleCallRangeIsEncodableAfterAllocation) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar:(Ljava/lang/invoke/MethodHandle;)V"
+     (
+      (load-param-object v0)
+      (const v1 1)
+      (invoke-polymorphic (v0 v1 v1 v1 v1 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(IIIII)V")
+      (return-void)
+     )
+    )
+  )");
+  auto* code = method->get_code();
+  code->build_cfg();
+  graph_coloring::allocate({}, method);
+  size_t calls{0};
+  for (auto& mie : cfg::InstructionIterable(code->cfg())) {
+    if (mie.insn->opcode() == OPCODE_INVOKE_POLYMORPHIC) {
+      ++calls;
+      IRInstruction denormalized(*mie.insn);
+      denormalized.denormalize_registers();
+      EXPECT_TRUE(denormalized.has_contiguous_range_srcs_denormalized())
+          << show(mie.insn);
+    }
+  }
+  EXPECT_EQ(calls, 1);
 }
 
 TEST_F(RegAllocTest, VirtualRegistersFile) {
@@ -1140,8 +1219,8 @@ TEST_F(RegAllocTest, FindSplit) {
   reg_transform.map = transform::RegMap{{0, 0}};
   graph_coloring::Allocator allocator;
   calc_split_costs(fixpoint_iter, cfg, &split_costs);
-  allocator.find_split(
-      ig, split_costs, &reg_transform, &spill_plan, &split_plan);
+  allocator.find_split(ig, split_costs, &reg_transform, &spill_plan,
+                       &split_plan);
   EXPECT_EQ(split_plan.split_around.at(1), UnorderedSet<vreg_t>{0});
 }
 

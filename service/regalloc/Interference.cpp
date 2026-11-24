@@ -190,7 +190,7 @@ vreg_t max_value_for_src(const IRInstruction* insn,
   if (opcode::has_range_form(op) && insn->srcs_size() == 1) {
     // An `invoke {v0}` opcode can always be rewritten as `invoke/range {v0}`
     return max_unsigned_value(16);
-  } else if (opcode::is_a_method_invoke(op) && src_is_wide) {
+  } else if (opcode::is_an_invoke(op) && src_is_wide) {
     // invoke instructions need to address both pairs of a wide register in
     // their denormalized form. We are dealing with the normalized form
     // here, so we need to reserve one register for denormalization. I.e.

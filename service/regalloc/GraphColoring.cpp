@@ -18,7 +18,6 @@
 #include "Show.h"
 #include "Trace.h"
 #include "Transform.h"
-#include "TypeUtil.h"
 #include "VirtualRegistersFile.h"
 
 namespace regalloc {
@@ -76,12 +75,8 @@ static std::vector<cfg::Block*> find_first_uses(reg_t reg, cfg::Block* entry) {
  */
 static size_t sum_src_sizes(const IRInstruction* insn) {
   size_t size{0};
-  if (insn->opcode() != OPCODE_INVOKE_STATIC) {
-    // Account for the implicit `this` parameter
-    ++size;
-  }
-  for (auto* type : *insn->get_method()->get_proto()->get_args()) {
-    size += type::is_wide_type(type) ? 2 : 1;
+  for (src_index_t i = 0; i < insn->srcs_size(); ++i) {
+    size += insn->src_is_wide(i) ? 2 : 1;
   }
   return size;
 }
@@ -97,7 +92,7 @@ RangeSet init_range_set(cfg::ControlFlowGraph& cfg) {
     bool is_range{false};
     if (op == OPCODE_FILLED_NEW_ARRAY) {
       is_range = insn->srcs_size() > dex_opcode::NON_RANGE_MAX;
-    } else if (opcode::is_a_method_invoke(op)) {
+    } else if (opcode::is_an_invoke(op)) {
       is_range = sum_src_sizes(insn) > dex_opcode::NON_RANGE_MAX;
     }
     if (is_range) {

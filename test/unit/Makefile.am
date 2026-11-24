@@ -434,7 +434,7 @@ fbjni_marker_test_SOURCES = FbjniMarkerTest.cpp
 EXTRA_fbjni_marker_test_DEPENDENCIES = fbjni_marker_test.env
 $(eval $(call make_env,fbjni_marker_test,test_fbjni_json=$(srcdir)/example_fbjni.json))
 
-final_inline_v2_test_SOURCES = FinalInlineV2Test.cpp
+final_inline_v2_test_SOURCES = FinalInlineV2Test.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 fp_ev_test_SOURCES = FpEvTest.cpp
 

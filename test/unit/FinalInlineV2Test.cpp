@@ -14,6 +14,7 @@
 #include "IRAssembler.h"
 #include "IRCode.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "Walkers.h"
 
 struct FinalInlineTest : public RedexTest {
@@ -940,6 +941,113 @@ TEST_F(FinalInlineTest, writeThroughRegisterThatMayBeThisBlocksInference) {
       assembler::ircode_from_string(assembler::to_string(reader->get_code()));
 
   run({cls}, nullptr);
+
+  EXPECT_CODE_EQ(reader->get_code(), expected.get());
+}
+
+// A method handle call that receives the object under construction can read
+// its fields before the constructor sets them, so they keep their stores.
+TEST_F(FinalInlineTest, instanceFieldReadThroughMethodHandleInConstructor) {
+  auto* field = dynamic_cast<DexField*>(DexField::make_field("LFoo;.x:I"));
+  field->make_concrete(ACC_PUBLIC | ACC_FINAL);
+  m_cc->add_field(field);
+  create_field_with_zero_value("LFoo;.LOG:Ljava/lang/invoke/MethodHandle;",
+                               m_cc.get());
+
+  // Foo() throws Throwable { LOG.invokeExact(this); x = 5; }
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (sget-object "LFoo;.LOG:Ljava/lang/invoke/MethodHandle;")
+      (move-result-pseudo-object v1)
+      (invoke-polymorphic (v1 v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LFoo;)V")
+      (const v2 5)
+      (iput v2 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )"));
+
+  // A read of x, as in what LOG calls.
+  auto* reader = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.getX:(LFoo;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.x:I")
+      (move-result-pseudo v0)
+      (return v0)
+     )
+    )
+  )");
+  m_cc->add_method(reader);
+  auto* cls = m_cc->create();
+  auto expected = std::make_unique<IRCode>(*reader->get_code());
+
+  auto store = DexStore("store");
+  store.add_classes({cls});
+  DexStoresVector stores{store};
+  auto scope = build_class_scope(stores);
+  XStoreRefs xstores(stores, true);
+  run(scope, &xstores);
+
+  EXPECT_CODE_EQ(reader->get_code(), expected.get());
+}
+
+// The same holds for a call site, here reached from a method the constructor
+// calls on the object.
+TEST_F(FinalInlineTest, instanceFieldReadThroughCallSiteInCallee) {
+  auto* field = dynamic_cast<DexField*>(DexField::make_field("LFoo;.x:I"));
+  field->make_concrete(ACC_PUBLIC | ACC_FINAL);
+  m_cc->add_field(field);
+
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (invoke-direct (v0) "LFoo;.log:()V")
+      (const v1 5)
+      (iput v1 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )"));
+
+  // Tool-generated: log() passes `this` to an invoke-custom.
+  auto* log = assembler::method_from_string(R"(
+    (method (private) "LFoo;.log:()V"
+     (
+      (load-param-object v0)
+      (invoke-static (v0) "LFoo;.placeholder:(LFoo;)V")
+      (return-void)
+     )
+    )
+  )");
+  redex::make_invoke_custom(log->get_code(), "log", "(LFoo;)V");
+  m_cc->add_method(log);
+
+  auto* reader = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.getX:(LFoo;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.x:I")
+      (move-result-pseudo v0)
+      (return v0)
+     )
+    )
+  )");
+  m_cc->add_method(reader);
+  auto* cls = m_cc->create();
+  auto expected = std::make_unique<IRCode>(*reader->get_code());
+
+  auto store = DexStore("store");
+  store.add_classes({cls});
+  DexStoresVector stores{store};
+  auto scope = build_class_scope(stores);
+  XStoreRefs xstores(stores, true);
+  run(scope, &xstores);
 
   EXPECT_CODE_EQ(reader->get_code(), expected.get());
 }

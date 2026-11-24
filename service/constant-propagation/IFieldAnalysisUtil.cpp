@@ -7,6 +7,7 @@
 
 #include "IFieldAnalysisUtil.h"
 
+#include <algorithm>
 #include <optional>
 
 #include "Debug.h"
@@ -57,7 +58,7 @@ class ThisObjectAnalysis final
       for (auto it = ii.begin(); it != ii.end(); it++) {
         IRInstruction* insn = it->insn;
         auto op = insn->opcode();
-        if (opcode::is_a_method_invoke(op)) {
+        if (opcode::is_an_invoke(op)) {
           bool use_this = false;
           for (auto src : insn->srcs()) {
             auto this_info = env.get(src).get_constant();
@@ -66,7 +67,10 @@ class ThisObjectAnalysis final
               break;
             }
           }
-          if (use_this) {
+          if (use_this && !insn->has_method()) {
+            // invoke-polymorphic and invoke-custom run unknown code.
+            return_set.emplace(nullptr);
+          } else if (use_this) {
             auto* insn_method = insn->get_method();
             auto* callee = resolve_method_deprecated(
                 insn_method, opcode_to_search(insn), m_method);
@@ -189,6 +193,22 @@ bool get_ifields_read(const UnorderedSet<std::string>& allowlist_method_names,
           if (field != nullptr &&
               field->get_class() == ifield_cls->get_type()) {
             blocklist_ifields->emplace(field);
+          }
+        } else if (opcode::is_an_invoke(insn->opcode()) &&
+                   !insn->has_method()) {
+          // invoke-polymorphic and invoke-custom run unknown code, which can
+          // read the fields of an object passed to it.
+          const auto* args = insn->get_callsite_proto()->get_args();
+          if (std::any_of(args->begin(), args->end(), [&](const DexType* t) {
+                return parent_intf_set.count(t) != 0u;
+              })) {
+            bool keep_going = get_ifields_read(
+                allowlist_method_names, parent_intf_set, ifield_cls,
+                /* method */ nullptr, blocklist_ifields, visited);
+            if (!keep_going) {
+              res = false;
+              return cfg_adapter::LOOP_BREAK;
+            }
           }
         } else if (opcode::is_a_method_invoke(insn->opcode())) {
           auto* insn_method = insn->get_method();

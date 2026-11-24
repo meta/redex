@@ -20,6 +20,29 @@
 
 struct SubtypeMaps;
 
+/*
+ * What the resolver returns (`resolve_method`, `resolve_virtual`,
+ * `resolve_super`, `resolve_direct`, `resolve_static`, `resolve_invoke_method`;
+ * the `*_deprecated` variants keep their older behavior until their callers
+ * move):
+ *
+ * - The method definition, internal or external, that the method reference
+ *   resolves to. For a virtual call, overrides may run instead.
+ * - nullptr when the resolver cannot determine that method from the input:
+ *   there is none, or an undefined type could change the answer. For example,
+ *   with `class C implements Known, Missing {}`, `Missing` could declare `m()`
+ *   itself, as a default method that conflicts with `Known.m()`, so `C.m()`
+ *   resolves to nullptr.
+ *
+ * Because nullptr also covers targets the input leaves open, callers must not
+ * read it as "no such method". Nor is such a call external unless the class the
+ * method reference names is not internal (see `is_external_call`).
+ *
+ * A class chain without java.lang.Object is incomplete: a search that reaches
+ * its end returns nullptr. App inputs have it; tests that build hierarchies by
+ * hand need `create_object_class()`.
+ */
+
 /**
  * Type of search to perform.
  * These flags direct the way lookup if performed up the hierarchy more than
@@ -391,8 +414,7 @@ inline DexMethod* resolve_interface_method(const DexClass* cls,
 }
 
 /**
- * Resolve a method to its definition. When searching for a definition of a
- * virtual callsite, we return one of the possible callees.
+ * Resolve a method to its definition, as described at the top of this file.
  *
  * - Handling searching of super class requires `caller` argument to be passed.
  *

@@ -6,6 +6,7 @@
  */
 
 #include <algorithm>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -1003,4 +1004,166 @@ TEST_F(ResolverTest, ForEachIndirectlyNamedType) {
   IRInstruction invoke(OPCODE_INVOKE_STATIC);
   invoke.set_method(DexMethod::make_method("LA;.s:(LB;)V"));
   EXPECT_TRUE(indirectly_named_types(&invoke).empty());
+}
+
+namespace {
+
+// Makes `type` with superclass `super` and interfaces `intfs`, an interface
+// when `access` says so. `method_access` gives it a virtual `m:()V`:
+// `ACC_PUBLIC` a concrete (for an interface, default) one, `kAbstract` an
+// abstract one, `std::nullopt` none.
+DexClass* make_class_with_intfs(
+    const char* type,
+    const DexType* super,
+    const std::vector<const char*>& intfs,
+    std::optional<DexAccessFlags> method_access = std::nullopt,
+    DexAccessFlags access = ACC_PUBLIC) {
+  ClassCreator creator(DexType::make_type(type));
+  creator.set_super(const_cast<DexType*>(super));
+  creator.set_access(access);
+  for (const auto* intf : intfs) {
+    creator.add_interface(DexType::make_type(intf));
+  }
+  if (method_access) {
+    creator.add_method(DexMethod::make_method(std::string(type) + ".m:()V")
+                           ->make_concrete(*method_access,
+                                           /* is_virtual */ true));
+  }
+  return creator.create();
+}
+
+const DexAccessFlags kInterface = ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT;
+const DexAccessFlags kAbstract = ACC_PUBLIC | ACC_ABSTRACT;
+
+DexClass* make_interface(const char* type,
+                         const std::vector<const char*>& intfs,
+                         std::optional<DexAccessFlags> method_access) {
+  return make_class_with_intfs(type, type::java_lang_Object(), intfs,
+                               method_access, kInterface);
+}
+
+DexMethod* resolve_m(const DexClass* cls) {
+  return resolve_virtual(cls, DexString::make_string("m"),
+                         DexProto::make_proto("()V"));
+}
+
+} // namespace
+
+TEST_F(ResolverTest, ResolveVirtualFindsDefaultMethod) {
+  create_object_class();
+  make_interface("LI;", {}, ACC_PUBLIC);
+  auto* c = make_class_with_intfs("LC;", type::java_lang_Object(), {"LI;"});
+
+  EXPECT_EQ(resolve_m(c), m_of("LI;"));
+}
+
+TEST_F(ResolverTest, ResolveVirtualFindsAbstractInterfaceMethod) {
+  create_object_class();
+  make_interface("LI;", {}, kAbstract);
+  auto* c = make_class_with_intfs("LC;", type::java_lang_Object(), {"LI;"});
+
+  EXPECT_EQ(resolve_m(c), m_of("LI;"));
+}
+
+// `Undefined` could declare `m()` itself: a default `m()` would conflict with
+// `I.m()`, so the target is unknown.
+TEST_F(ResolverTest, ResolveVirtualWithUndefinedInterface) {
+  create_object_class();
+  make_interface("LI;", {}, ACC_PUBLIC);
+  auto* c = make_class_with_intfs("LC;", type::java_lang_Object(),
+                                  {"LI;", "LUndefined;"});
+
+  EXPECT_EQ(resolve_m(c), nullptr);
+}
+
+// `J` extends `Undefined`, which could declare a default `m()` that conflicts
+// with `I.m()`.
+TEST_F(ResolverTest, ResolveVirtualWithUndefinedSuperInterface) {
+  create_object_class();
+  make_interface("LI;", {}, ACC_PUBLIC);
+  make_interface("LJ;", {"LUndefined;"}, std::nullopt);
+  auto* c =
+      make_class_with_intfs("LC;", type::java_lang_Object(), {"LJ;", "LI;"});
+
+  EXPECT_EQ(resolve_m(c), nullptr);
+}
+
+// `B` implements `Undefined`, which could declare a default `m()` that
+// conflicts with `I.m()`.
+TEST_F(ResolverTest, ResolveVirtualWithUndefinedInterfaceOfSuperclass) {
+  create_object_class();
+  make_interface("LI;", {}, ACC_PUBLIC);
+  auto* b =
+      make_class_with_intfs("LB;", type::java_lang_Object(), {"LUndefined;"});
+  auto* c = make_class_with_intfs("LC;", b->get_type(), {"LI;"});
+
+  EXPECT_EQ(resolve_m(c), nullptr);
+}
+
+// `J` extends `Undefined`. If `Undefined` extends `K`, the abstract `J.m()`
+// hides `K.m()` and is the target; otherwise `K.m()` is.
+TEST_F(ResolverTest, ResolveVirtualWithUndefinedInterfaceBetweenCandidates) {
+  create_object_class();
+  make_interface("LK;", {}, ACC_PUBLIC);
+  make_interface("LJ;", {"LUndefined;"}, kAbstract);
+  auto* c =
+      make_class_with_intfs("LC;", type::java_lang_Object(), {"LJ;", "LK;"});
+
+  EXPECT_EQ(resolve_m(c), nullptr);
+}
+
+// As above, with `J` extending a defined `U` that extends `K`.
+TEST_F(ResolverTest, ResolveVirtualFindsMoreSpecificCandidate) {
+  create_object_class();
+  make_interface("LK;", {}, ACC_PUBLIC);
+  make_interface("LU;", {"LK;"}, std::nullopt);
+  make_interface("LJ;", {"LU;"}, kAbstract);
+  auto* c =
+      make_class_with_intfs("LC;", type::java_lang_Object(), {"LJ;", "LK;"});
+
+  EXPECT_EQ(resolve_m(c), m_of("LJ;"));
+}
+
+// A method of `I` overrides whatever `I`'s superinterfaces declare.
+TEST_F(ResolverTest, ResolveVirtualWithUndefinedInterfaceAboveMatch) {
+  create_object_class();
+  make_interface("LI;", {"LUndefined;"}, ACC_PUBLIC);
+  auto* c = make_class_with_intfs("LC;", type::java_lang_Object(), {"LI;"});
+
+  EXPECT_EQ(resolve_m(c), m_of("LI;"));
+}
+
+// `Undefined` could declare `m()`, and a class method takes precedence over
+// interface methods.
+TEST_F(ResolverTest, ResolveVirtualWithUndefinedSuperclass) {
+  create_object_class();
+  make_interface("LI;", {}, ACC_PUBLIC);
+  auto* c =
+      make_class_with_intfs("LC;", DexType::make_type("LUndefined;"), {"LI;"});
+
+  EXPECT_EQ(resolve_m(c), nullptr);
+}
+
+TEST_F(ResolverTest, ResolveVirtualFindsClassMethodBeforeUndefinedTypes) {
+  create_object_class();
+  make_interface("LI;", {}, ACC_PUBLIC);
+  auto* b = make_class_with_intfs("LB;", DexType::make_type("LUndefined;"),
+                                  {"LUndefinedIntf;"}, ACC_PUBLIC);
+  auto* c = make_class_with_intfs("LC;", b->get_type(), {"LI;"});
+
+  EXPECT_EQ(resolve_m(c), m_of("LB;"));
+}
+
+// `I.super.m()` from `C.m()`: `I` extends `J` and `K`, and `J` extends
+// `Undefined`, which could declare a default `m()` that conflicts with
+// `K.m()`.
+TEST_F(ResolverTest, ResolveSuperOfInterfaceWithUndefinedSuperInterface) {
+  create_object_class();
+  make_interface("LK;", {}, ACC_PUBLIC);
+  make_interface("LJ;", {"LUndefined;"}, std::nullopt);
+  make_interface("LI;", {"LJ;", "LK;"}, std::nullopt);
+  make_class_with_intfs("LC;", type::java_lang_Object(), {"LI;"}, ACC_PUBLIC);
+  auto* ref = DexMethod::make_method("LI;.m:()V");
+
+  EXPECT_EQ(resolve_method(ref, MethodSearch::Super, m_of("LC;")), nullptr);
 }

@@ -24,17 +24,21 @@ inline bool match(const DexString* name,
   return name == cls_meth->get_name() && proto == cls_meth->get_proto();
 }
 
-void collect_all_intfs_in_hierarchy(
+// Adds all superinterfaces of `cls` to `intfs_in_hierarchy`. Returns false,
+// leaving the set incomplete, when one of them is undefined.
+[[nodiscard]] bool collect_all_intfs_in_hierarchy(
     DexClass* cls, UnorderedSet<const DexType*>* intfs_in_hierarchy) {
   for (const auto* intf : *(cls->get_interfaces())) {
     if (intfs_in_hierarchy->find(intf) == intfs_in_hierarchy->end()) {
       intfs_in_hierarchy->emplace(intf);
       auto* intf_cls = type_class(intf);
-      if (intf_cls != nullptr) {
-        collect_all_intfs_in_hierarchy(intf_cls, intfs_in_hierarchy);
+      if (intf_cls == nullptr ||
+          !collect_all_intfs_in_hierarchy(intf_cls, intfs_in_hierarchy)) {
+        return false;
       }
     }
   }
+  return true;
 }
 
 DexMethod* resolve_intf_method_ref(const DexClass* cls,
@@ -70,7 +74,11 @@ DexMethod* resolve_intf_method_ref(const DexClass* cls,
 
 // Helper method to find the most specific interface method matching
 // name and proto in the interface hierarchy of the class or interface `cls`
-// including `cls` itself
+// including `cls` itself. Returns nullptr when there is none, and also when
+// an undefined type could change the answer: a superclass (with
+// `walk_through_super`), or a superinterface on a path the search has not
+// matched yet, could declare the method itself, and a superinterface of one of
+// several candidates could make another candidate less specific.
 DexMethod* find_most_specific_interface_method(const DexClass* cls,
                                                const DexString* name,
                                                const DexProto* proto,
@@ -88,11 +96,10 @@ DexMethod* find_most_specific_interface_method(const DexClass* cls,
     std::vector<const DexClass*> intf_queue;
     if (cur_cls->get_interfaces() != nullptr) {
       for (const auto& parent_intf : *cur_cls->get_interfaces()) {
-        // Maybe incomplete input dependency will cause issue here
-        // double check later
         auto* parent_intf_cls = type_class(parent_intf);
-        always_assert_log(parent_intf_cls, "%s has no definition in dex",
-                          SHOW(parent_intf));
+        if (parent_intf_cls == nullptr) {
+          return nullptr;
+        }
         intf_queue.push_back(parent_intf_cls);
       }
     }
@@ -115,8 +122,9 @@ DexMethod* find_most_specific_interface_method(const DexClass* cls,
         if (current_intf->get_interfaces() != nullptr) {
           for (const auto& parent_intf : *current_intf->get_interfaces()) {
             auto* intf_cls = type_class(parent_intf);
-            always_assert_log(intf_cls, "%s has no definition in dex",
-                              SHOW(parent_intf));
+            if (intf_cls == nullptr) {
+              return nullptr;
+            }
             intf_queue.push_back(intf_cls);
           }
         }
@@ -126,7 +134,17 @@ DexMethod* find_most_specific_interface_method(const DexClass* cls,
       break;
     }
     // Keep walking up the class hierarchy to collect all interface methods
-    cur_cls = type_class(cur_cls->get_super_class());
+    const auto* super_type = cur_cls->get_super_class();
+    if (super_type == nullptr) {
+      // Only java.lang.Object has no superclass.
+      break;
+    }
+    cur_cls = type_class(super_type);
+    if (cur_cls == nullptr) {
+      // The undefined superclass could declare the method, and a class method
+      // takes precedence over interface methods.
+      return nullptr;
+    }
   }
 
   if (candidates.empty()) {
@@ -134,6 +152,8 @@ DexMethod* find_most_specific_interface_method(const DexClass* cls,
   }
 
   if (candidates.size() == 1) {
+    // No other candidate can be more specific, so undefined superinterfaces of
+    // this one do not matter.
     return *candidates.begin();
   }
 
@@ -144,7 +164,11 @@ DexMethod* find_most_specific_interface_method(const DexClass* cls,
     auto* candidate_cls = type_class(candidate->get_class());
     always_assert_log(candidate_cls != nullptr, "%s is not defined in dex",
                       SHOW(candidate));
-    collect_all_intfs_in_hierarchy(candidate_cls, &super_intfs);
+    if (!collect_all_intfs_in_hierarchy(candidate_cls, &super_intfs)) {
+      // The undefined superinterface could extend another candidate's
+      // interface, so which candidates are most specific is unknown.
+      return nullptr;
+    }
   }
 
   std::vector<DexMethod*> filtered_candidates;
@@ -266,7 +290,8 @@ DexMethod* resolve_method_impl(const DexClass* cls,
 
   // For Virtual search (including Super converted to Virtual), if not found in
   // class hierarchy, check interfaces for default methods when
-  // default_interface_switch is enabled
+  // default_interface_switch is enabled. This also runs when the class chain
+  // ends at an undefined superclass; the search then returns nullptr.
   if (default_interface_switch && search == MethodSearch::Virtual &&
       original_cls != nullptr) {
     // Search through all interfaces in the class hierarchy for default methods
@@ -797,9 +822,9 @@ bool has_signature_collision(const SubtypeMaps& subtype_maps,
     get_all_children(subtype_maps.subclasses, type, subtypes);
   }
   subtypes.insert(type);
-  // MethodSearch::Virtual would also find interface methods, but its search for
-  // default methods asserts on interfaces without a definition, which inputs
-  // can have.
+  // MethodSearch::Virtual would also find interface methods, but returns
+  // nullptr when it cannot determine the target, while a collision with any
+  // defined interface still counts; so look at the interfaces directly.
   const auto inherits = [&](const DexClass* cls) {
     if (resolve_method(cls, name, new_proto) != nullptr) {
       return true;

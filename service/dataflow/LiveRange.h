@@ -100,11 +100,19 @@ struct LazyLiveRanges {
   live_range::MoveAwareChains chains;
   Lazy<live_range::DefUseChains> def_use_chains;
   Lazy<live_range::UseDefChains> use_def_chains;
-  explicit LazyLiveRanges(cfg::ControlFlowGraph& cfg)
+  explicit LazyLiveRanges(const cfg::ControlFlowGraph& cfg)
       : chains(cfg),
         def_use_chains([this] { return chains.get_def_use_chains(); }),
         use_def_chains([this] { return chains.get_use_def_chains(); }) {}
 };
+
+/*
+ * The only definition that reaches source `src_index` of `insn`, or nullptr
+ * when none or several can.
+ */
+Def get_single_def(const UseDefChains& use_defs,
+                   const IRInstruction* insn,
+                   src_index_t src_index);
 
 /*
  * width_aware means that the renumbering process will allocate 2 slots per

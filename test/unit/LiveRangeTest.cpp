@@ -451,3 +451,38 @@ TEST_F(LiveRangeTest, ReceiverTypeDemandsIgnoreUnreachableCode) {
   ASSERT_TRUE(demands);
   EXPECT_TRUE(demands->empty());
 }
+
+TEST_F(LiveRangeTest, SingleDef) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param v0)
+      (const v1 1)
+      (if-eqz v0 :other)
+      (const v2 2)
+      (goto :join)
+      (:other)
+      (const v2 3)
+      (:join)
+      (add-int v3 v1 v2)
+      (return v3)
+    )
+  )");
+  code->build_cfg();
+  const auto& cfg = code->cfg();
+  live_range::LazyLiveRanges live_ranges(cfg);
+  IRInstruction* const_one = nullptr;
+  IRInstruction* add = nullptr;
+  for (const auto& mie : cfg::ConstInstructionIterable(cfg)) {
+    if (mie.insn->opcode() == OPCODE_CONST && mie.insn->get_literal() == 1) {
+      const_one = mie.insn;
+    } else if (mie.insn->opcode() == OPCODE_ADD_INT) {
+      add = mie.insn;
+    }
+  }
+  ASSERT_NE(add, nullptr);
+  EXPECT_EQ(live_range::get_single_def(*live_ranges.use_def_chains, add, 0),
+            const_one);
+  // `v2` is defined on both paths into the join.
+  EXPECT_EQ(live_range::get_single_def(*live_ranges.use_def_chains, add, 1),
+            nullptr);
+}

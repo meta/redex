@@ -221,6 +221,16 @@ void renumber_registers(IRCode* code, bool width_aware) {
   cfg->set_registers_size(sym_reg_mapper.regs_size());
 }
 
+Def get_single_def(const UseDefChains& use_defs,
+                   const IRInstruction* insn,
+                   src_index_t src_index) {
+  auto it = use_defs.find(Use{const_cast<IRInstruction*>(insn), src_index});
+  if (it == use_defs.end() || it->second.size() != 1) {
+    return nullptr;
+  }
+  return *it->second.begin();
+}
+
 const DexType* get_type_demand(DexType* method_rtype, const Use& use) {
   switch (use.insn->opcode()) {
   case OPCODE_RETURN_OBJECT:

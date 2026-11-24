@@ -886,7 +886,7 @@ bool IRList::structural_equals(
       }
 
       // Do these `catch`es have the same catch after them?
-      if (catch1->next != nullptr && may_match(catch1->next, catch2->next)) {
+      if (catch1->next != nullptr && !may_match(catch1->next, catch2->next)) {
         return false;
       }
     }

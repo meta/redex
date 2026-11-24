@@ -39,6 +39,7 @@ endef
 
 check_PROGRAMS = \
     access_marking_method_handle_test \
+    accessibility_checker_test \
     aliased_registers_test \
     analysis_usage_test \
     anno_kill_test \
@@ -270,6 +271,8 @@ check_PROGRAMS = \
     string_tree_test
 
 access_marking_method_handle_test_SOURCES = AccessMarkingMethodHandleTest.cpp
+
+accessibility_checker_test_SOURCES = AccessibilityCheckerTest.cpp
 
 aliased_registers_test_SOURCES = AliasedRegistersTest.cpp
 

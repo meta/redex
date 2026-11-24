@@ -416,6 +416,7 @@ endif
 # registration. Instead, share sources and create libopt for the tests.
 
 libopt_la_SOURCES = \
+	checkers/AccessibilityChecker.cpp \
 	checkers/HasSourceBlocksChecker.cpp \
 	checkers/InitialRenameClassCheker.cpp \
 	checkers/InjectionIdInstructionsChecker.cpp \

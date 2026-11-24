@@ -44,7 +44,8 @@ void AccessibilityChecker::run_checker(DexStoresVector& stores,
     }
 
     if (insn->has_type()) {
-      auto* t = type_class(insn->get_type());
+      // The device checks access to an array's element class.
+      auto* t = type_class(type::get_element_type_if_array(insn->get_type()));
       if (t != nullptr && !t->is_external() && !type::can_access(method, t)) {
         fail_str = vshow(method) + " -> " + vshow(t);
       }

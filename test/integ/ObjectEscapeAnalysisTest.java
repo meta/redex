@@ -265,6 +265,77 @@ public class ObjectEscapeAnalysisTest {
     }
   }
 
+  static class LoopFieldObject {
+    int x;
+
+    LoopFieldObject(int x) {
+      this.x = x;
+    }
+  }
+
+  public static int loopFieldAliasing() {
+    LoopFieldObject prev = null;
+    int sum = 0;
+    for (int i = 1; i <= 2; i++) {
+      LoopFieldObject cur = new LoopFieldObject(i);
+      if (i == 2) {
+        sum = prev.x;
+      }
+      prev = cur;
+    }
+    return sum;
+  }
+
+  static class LoopNullObject {
+    int x;
+
+    LoopNullObject(int x) {
+      this.x = x;
+    }
+  }
+
+  public static int loopNullTracking() {
+    LoopNullObject prev = null;
+    int sum = 0;
+    for (int i = 1; i <= 2; i++) {
+      LoopNullObject cur = new LoopNullObject(i);
+      if (prev != null) {
+        sum = prev.x * 10 + cur.x;
+      }
+      prev = cur;
+    }
+    return sum;
+  }
+
+  public static int independentObjects(int x) {
+    I a = new I(x);
+    I b = new I(x + 1);
+    I c = new I(x + 2);
+    I d = new I(x + 3);
+    return a.x + b.x + c.x + d.x;
+  }
+
+  public static int independentObjectWithMultipleReturns(boolean b, int x) {
+    I a = new I(x);
+    if (b) {
+      return a.x;
+    }
+    return a.x + 1;
+  }
+
+  public static int loopFieldAliasingWithCast() {
+    Object prev = null;
+    int sum = 0;
+    for (int i = 1; i <= 2; i++) {
+      LoopFieldObject cur = new LoopFieldObject(i);
+      if (i == 2) {
+        sum = ((LoopFieldObject) prev).x;
+      }
+      prev = cur;
+    }
+    return sum;
+  }
+
   public static boolean objectIsNotNull() {
     I i = I.allocator(42);
     return i == null;

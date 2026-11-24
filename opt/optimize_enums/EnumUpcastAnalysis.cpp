@@ -569,14 +569,11 @@ class EnumUpcastDetector {
     }
   }
 
-  const DexMethodRef* ENUM_EQUALS_METHOD =
-      DexMethod::make_method("Ljava/lang/Enum;.equals:(Ljava/lang/Object;)Z");
+  const DexMethodRef* ENUM_EQUALS_METHOD = method::java_lang_Enum_equals();
   const DexMethodRef* ENUM_COMPARETO_METHOD =
-      DexMethod::make_method("Ljava/lang/Enum;.compareTo:(Ljava/lang/Enum;)I");
-  const DexMethodRef* ENUM_TOSTRING_METHOD =
-      DexMethod::make_method("Ljava/lang/Enum;.toString:()Ljava/lang/String;");
-  const DexMethodRef* ENUM_HASHCODE_METHOD =
-      DexMethod::make_method("Ljava/lang/Enum;.hashCode:()I");
+      method::java_lang_Enum_compareTo();
+  const DexMethodRef* ENUM_TOSTRING_METHOD = method::java_lang_Enum_toString();
+  const DexMethodRef* ENUM_HASHCODE_METHOD = method::java_lang_Enum_hashCode();
   const DexMethodRef* ENUM_NAME_METHOD = method::java_lang_Enum_name();
   const DexMethodRef* ENUM_ORDINAL_METHOD = method::java_lang_Enum_ordinal();
   const DexMethodRef* STRING_VALUEOF_METHOD = DexMethod::make_method(

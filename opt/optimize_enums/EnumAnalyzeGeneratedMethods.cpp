@@ -26,13 +26,10 @@ namespace {
  */
 std::array<const DexMethodRef*, 7> make_allowlisted_methods() {
   return {
-      method::java_lang_Enum_ctor(),
-      DexMethod::make_method("Ljava/lang/Enum;.compareTo:(Ljava/lang/Enum;)I"),
-      method::java_lang_Enum_equals(),
-      DexMethod::make_method("Ljava/lang/Enum;.hashCode:()I"),
-      method::java_lang_Enum_name(),
-      method::java_lang_Enum_ordinal(),
-      DexMethod::make_method("Ljava/lang/Enum;.toString:()Ljava/lang/String;"),
+      method::java_lang_Enum_ctor(),     method::java_lang_Enum_compareTo(),
+      method::java_lang_Enum_equals(),   method::java_lang_Enum_hashCode(),
+      method::java_lang_Enum_name(),     method::java_lang_Enum_ordinal(),
+      method::java_lang_Enum_toString(),
   };
 }
 

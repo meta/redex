@@ -71,6 +71,11 @@
   FOR_EACH(java_lang_Enum_name, "Ljava/lang/Enum;.name:()Ljava/lang/String;") \
   FOR_EACH(java_lang_Enum_equals,                                             \
            "Ljava/lang/Enum;.equals:(Ljava/lang/Object;)Z")                   \
+  FOR_EACH(java_lang_Enum_compareTo,                                          \
+           "Ljava/lang/Enum;.compareTo:(Ljava/lang/Enum;)I")                  \
+  FOR_EACH(java_lang_Enum_hashCode, "Ljava/lang/Enum;.hashCode:()I")          \
+  FOR_EACH(java_lang_Enum_toString,                                           \
+           "Ljava/lang/Enum;.toString:()Ljava/lang/String;")                  \
   FOR_EACH(java_lang_Integer_valueOf,                                         \
            "Ljava/lang/Integer;.valueOf:(I)Ljava/lang/Integer;")              \
   FOR_EACH(java_lang_Integer_intValue, "Ljava/lang/Integer;.intValue:()I")    \

@@ -7,6 +7,9 @@
 
 #include "EnumUpcastAnalysis.h"
 
+#include <utility>
+#include <vector>
+
 #include "Debug.h"
 #include "EnumClinitAnalysis.h"
 #include "LiveRange.h"
@@ -122,6 +125,12 @@ class EnumUpcastDetector {
         m_candidate_enums(&config->candidate_enums),
         m_reject_fn(reject_fn) {}
 
+  // Pairs of candidates this method compares by identity with each other.
+  const std::vector<std::pair<const DexType*, const DexType*>>&
+  compared_candidates() const {
+    return m_compared_candidates;
+  }
+
   void run(const EnumFixpointIterator& engine,
            const cfg::ControlFlowGraph& cfg) {
     for (const auto& block : cfg.blocks()) {
@@ -233,6 +242,14 @@ class EnumUpcastDetector {
     }
   }
 
+  struct IdentityRisks {
+    // Candidates whose comparison may give another result once boxed.
+    UnorderedSet<const DexType*> unsafe;
+    // Candidates compared with another candidate, which may give another
+    // result only if both are boxed.
+    std::vector<std::pair<const DexType*, const DexType*>> compared_candidates;
+  };
+
   /**
    * Boxing replaces each constant with the shared `Integer` of its ordinal.
    * Within one enum that keeps identity: comparing two values of the same enum,
@@ -244,10 +261,11 @@ class EnumUpcastDetector {
    * `Integer` with its ordinal. So a comparison keeps its result unless the
    * other operand can be an Integer after boxing: a value of a type an Integer
    * may belong to (see `may_be_integer`), or a value of another candidate enum,
-   * which may be boxed too. Only a register whose types include the enum can
-   * hold one of its constants: a local upcast keeps the enum's type on the
-   * register, and an upcast that lets a constant leave the method rejects the
-   * enum, so a `String` or app-class operand keeps the result.
+   * if that enum is boxed too, which is decided once the other checks have run.
+   * Only a register whose types include the enum can hold one of its
+   * constants: a local upcast keeps the enum's type on the register, and an
+   * upcast that lets a constant leave the method rejects the enum, so a
+   * `String` or app-class operand keeps the result.
    *
    * The analysis joins the types that reach the comparison along different
    * paths. Where the joined types would reject, the comparison is judged again
@@ -260,14 +278,14 @@ class EnumUpcastDetector {
                                    const cfg::Block* block,
                                    const IRInstruction* insn,
                                    const EnumTypeEnvironment& env) {
-    UnorderedSet<const DexType*> joined;
+    IdentityRisks joined;
     collect_identity_risks(insn, env, &joined);
-    if (joined.empty()) {
+    if (joined.unsafe.empty() && joined.compared_candidates.empty()) {
       return;
     }
     // Every execution enters the block along one edge, or at the method entry;
     // joins in earlier blocks stay joined, which can only reject more.
-    UnorderedSet<const DexType*> on_paths;
+    IdentityRisks on_paths;
     auto judge_path = [&](EnumTypeEnvironment path_env) {
       if (path_env.is_bottom()) {
         return;
@@ -287,12 +305,15 @@ class EnumUpcastDetector {
       judge_path(
           engine.analyze_edge(edge, engine.get_exit_state_at(edge->src())));
     }
-    reject(insn, on_paths, UnsafeType::kUsageComparedByIdentity);
+    reject(insn, on_paths.unsafe, UnsafeType::kUsageComparedByIdentity);
+    m_compared_candidates.insert(m_compared_candidates.end(),
+                                 on_paths.compared_candidates.begin(),
+                                 on_paths.compared_candidates.end());
   }
 
   void collect_identity_risks(const IRInstruction* insn,
                               const EnumTypeEnvironment& env,
-                              UnorderedSet<const DexType*>* unsafe) const {
+                              IdentityRisks* risks) const {
     auto left = discard_primitives(env.get(insn->src(0)));
     auto right = discard_primitives(env.get(insn->src(1)));
     auto collect = [&](const UnorderedSet<const DexType*>& side,
@@ -306,8 +327,10 @@ class EnumUpcastDetector {
           if (other_type == type || type::is_array(other_type)) {
             continue;
           }
-          if (is_candidate(other_type) || may_be_integer(other_type)) {
-            unsafe->insert(type);
+          if (is_candidate(other_type)) {
+            risks->compared_candidates.emplace_back(type, other_type);
+          } else if (may_be_integer(other_type)) {
+            risks->unsafe.insert(type);
           }
         }
       }
@@ -720,6 +743,7 @@ class EnumUpcastDetector {
   Config* m_config;
   const ConcurrentSet<const DexType*>* m_candidate_enums;
   const RejectFn& m_reject_fn;
+  std::vector<std::pair<const DexType*, const DexType*>> m_compared_candidates;
 };
 
 bool is_static_method_on_enum_class(const DexMethodRef* ref) {
@@ -1006,6 +1030,8 @@ void reject_unsafe_enums(
     const std::function<void(const DexType*, UnsafeType u)>& reject_fn) {
   auto* candidate_enums = &config->candidate_enums;
   ConcurrentSet<const DexType*> rejected_enums;
+  ConcurrentMap<const DexType*, UnorderedSet<const DexType*>>
+      compared_candidates;
 
   walk::parallel::fields(
       classes, [candidate_enums, &rejected_enums, &reject_fn](DexField* field) {
@@ -1101,6 +1127,11 @@ void reject_unsafe_enums(
 
     EnumUpcastDetector detector(method, config, local_reject_fn);
     detector.run(engine, cfg);
+    for (const auto& pair : detector.compared_candidates()) {
+      compared_candidates.update(pair.first, [&](auto*, auto& others, bool) {
+        others.insert(pair.second);
+      });
+    }
   });
 
   for (const auto* type : UnorderedIterable(rejected_enums)) {
@@ -1109,6 +1140,26 @@ void reject_unsafe_enums(
 
   reject_enums_for_colliding_constructors(classes, candidate_enums);
   reject_enums_for_relaxed_inits(classes, candidate_enums);
+
+  // Comparing two candidates by identity may give another result only if both
+  // are boxed. Collect both ends of every pair against the candidates left now
+  // before erasing either, so that iteration order cannot decide which enum
+  // stays boxed: two enums that are compared only with each other both stay
+  // enums. Each pair is recorded in both orders, so rejecting each key rejects
+  // both ends.
+  std::vector<const DexType*> compared_with_candidate;
+  for (const auto& [type, others] : UnorderedIterable(compared_candidates)) {
+    if (candidate_enums->count(type) != 0u &&
+        unordered_any_of(others, [&](const DexType* other) {
+          return candidate_enums->count(other) != 0u;
+        })) {
+      compared_with_candidate.push_back(type);
+    }
+  }
+  for (const auto* type : compared_with_candidate) {
+    reject_fn(type, UnsafeType::kUsageComparedByIdentity);
+    candidate_enums->erase(type);
+  }
 }
 
 bool is_enum_valueof(const DexMethodRef* method) {

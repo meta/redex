@@ -4412,6 +4412,12 @@ INSTANTIATE_TEST_SUITE_P(
                                (if-eq v0 v6 :done)
                                (:done))",
                             true, true},
+        EnumObservationCase{"EqualEnumKeptForAnotherReason",
+                            R"((instance-of v2 "Ljava/lang/Number;")
+                               (move-result-pseudo v6)
+                               (if-eq v0 v2 :done)
+                               (:done))",
+                            true, false},
         EnumObservationCase{"MergedSameEnumComparisons",
                             R"((if-eqz v5 :baz)
                                (move-object v6 v0)

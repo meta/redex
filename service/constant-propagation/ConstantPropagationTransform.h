@@ -148,6 +148,11 @@ class Transform final {
                           const cfg::InstructionIterator& cfg_it,
                           const XStoreRefs*,
                           const DexType*);
+  bool replace_primary_with_const(
+      const ConstantValue& value,
+      const cfg::InstructionIterator& move_result_it,
+      const XStoreRefs*,
+      const DexType*);
   void generate_const_param(const ConstantEnvironment&,
                             const cfg::InstructionIterator& cfg_it,
                             const XStoreRefs*,

@@ -138,40 +138,62 @@ bool Transform::replace_with_const(const ConstantEnvironment& env,
                                    const DexType* declaring_type) {
   auto* insn = cfg_it->insn;
   auto value = env.get(insn->dest());
+  if (opcode::is_a_move_result_pseudo(insn->opcode())) {
+    return replace_primary_with_const(value, cfg_it, xstores, declaring_type);
+  }
   auto replacement = ConstantValue::apply_visitor(
       value_to_instruction_visitor(insn, xstores, declaring_type), value);
   if (replacement.empty()) {
     return false;
   }
-  if (opcode::is_a_move_result_pseudo(insn->opcode())) {
-    auto primary_it = cfg_it.cfg().primary_instruction_of_move_result(cfg_it);
-    // Materializing a constant into a move-result-pseudo's dest replaces -- and
-    // therefore deletes -- the primary instruction. Keep a check-cast that
-    // could throw, since deleting it would drop the exception.
-    if (is_possibly_throwing_check_cast(primary_it->insn, value)) {
-      return false;
-    }
-    always_assert(!replacement.empty());
-    if (replacement.size() == 1) {
-      IROpcode opcode = replacement.front()->opcode();
-      always_assert(opcode::is_a_literal_const(opcode) ||
-                    opcode == IOPCODE_R_CONST);
-      // The move-result-pseudo instruction might be in a different block. We
-      // cannot use the CFGMutator's replace functionality, as it would put the
-      // replacement into the wrong block --- the block of the primary
-      // instruction, not the following block. This is not generally a problem,
-      // except that we might later want to run forward_targets, which requires
-      // blocks, their recorded entry/state states and containing instructions
-      // to be consistent. So we work around that here by directly inserting in
-      // the right place...
-      cfg_it.cfg().insert_after(cfg_it, replacement);
-      m_mutation->remove(primary_it);
-    } else {
-      always_assert(opcode::may_throw(replacement.front()->opcode()));
-      m_mutation->replace(primary_it, replacement);
-    }
+  m_mutation->replace(cfg_it, replacement);
+  ++m_stats.materialized_consts;
+  return true;
+}
+
+/*
+ * Materializing a constant into the dest of a move-result(-pseudo) replaces --
+ * and therefore deletes -- the primary instruction.
+ */
+bool Transform::replace_primary_with_const(
+    const ConstantValue& value,
+    const cfg::InstructionIterator& move_result_it,
+    const XStoreRefs* xstores,
+    const DexType* declaring_type) {
+  auto replacement = ConstantValue::apply_visitor(
+      value_to_instruction_visitor(move_result_it->insn, xstores,
+                                   declaring_type),
+      value);
+  if (replacement.empty()) {
+    return false;
+  }
+  auto primary_it =
+      move_result_it.cfg().primary_instruction_of_move_result(move_result_it);
+  // Keep a check-cast that could throw, since deleting it would drop the
+  // exception.
+  if (is_possibly_throwing_check_cast(primary_it->insn, value)) {
+    return false;
+  }
+  always_assert(!replacement.empty());
+  if (replacement.size() == 1) {
+    IROpcode opcode = replacement.front()->opcode();
+    always_assert(opcode::is_a_literal_const(opcode) ||
+                  opcode == IOPCODE_R_CONST);
+    // The move-result(-pseudo) instruction might be in a different block. We
+    // cannot use the CFGMutator's replace functionality, as it would put the
+    // replacement into the wrong block --- the block of the primary
+    // instruction, not the following block. This is not generally a problem,
+    // except that we might later want to run forward_targets, which requires
+    // blocks, their recorded entry/state states and containing instructions
+    // to be consistent. So we work around that here by directly inserting in
+    // the right place...
+    move_result_it.cfg().insert_after(move_result_it, replacement);
+    m_mutation->remove(primary_it);
   } else {
-    m_mutation->replace(cfg_it, replacement);
+    // A constant that takes more than one instruction starts with a
+    // const-string or const-class, and both may throw.
+    always_assert(opcode::may_throw(replacement.front()->opcode()));
+    m_mutation->replace(primary_it, replacement);
   }
   ++m_stats.materialized_consts;
   return true;

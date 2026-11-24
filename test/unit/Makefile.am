@@ -356,7 +356,7 @@ constructor_analysis_test_SOURCES = ConstructorAnalysisTest.cpp
 control_flow_test_SOURCES = ControlFlowTest.cpp
 control_flow_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
-copy_propagation_test_SOURCES = CopyPropagationTest.cpp
+copy_propagation_test_SOURCES = CopyPropagationTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 cpp_util_test_SOURCES = CppUtilTest.cpp
 cpp_util_test_LDADD = $(COMMON_MOCK_TEST_LIBS) -lpthread
@@ -459,7 +459,7 @@ ir_assembler_test_SOURCES = IRAssemblerTest.cpp
 
 ir_code_test_SOURCES = IRCodeTest.cpp
 
-ir_instruction_test_SOURCES = IRInstructionTest.cpp OpcodeList.cpp
+ir_instruction_test_SOURCES = IRInstructionTest.cpp OpcodeList.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 ir_list_test_SOURCES = IRListTest.cpp
 ir_list_test_LDADD = $(COMMON_MOCK_TEST_LIBS)

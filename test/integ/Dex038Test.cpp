@@ -368,6 +368,9 @@ TEST(Dex038Test, InvokePolymorphicKeepsCallSiteProto) {
             "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/"
             "Object;)Ljava/lang/Object;");
   EXPECT_EQ(show(it->insn->get_callsite_proto()), "(J)J");
+  // The handle and `x`, whose register pair is one source in IR.
+  EXPECT_EQ(it->insn->srcs_size(), 2u);
+  EXPECT_TRUE(it->insn->src_is_wide(1));
   ++it;
   ASSERT_NE(it, ii.end());
   EXPECT_EQ(it->insn->opcode(), OPCODE_MOVE_RESULT_WIDE);

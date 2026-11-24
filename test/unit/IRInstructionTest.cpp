@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "DexAsm.h"
+#include "DexCallSite.h"
 #include "DexClass.h"
 #include "DexInstruction.h"
 #include "IRCode.h"
@@ -16,6 +17,7 @@
 #include "OpcodeList.h"
 #include "RedexException.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "Show.h"
 #include "TypeUtil.h"
 
@@ -111,6 +113,28 @@ TEST_F(IRInstructionTest, RoundTrip) {
 
     delete copy;
   }
+}
+
+// An `invoke-custom` reads into IR and lowers back to the same instruction,
+// its wide argument included.
+TEST_F(IRInstructionTest, InvokeCustomRoundTrip) {
+  auto* callsite = redex::make_callsite("run", "(IJ)V");
+  auto* method = DexMethod::make_method("LFoo;.roundTrip:()V")
+                     ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  auto* insn = new DexOpcodeCallSite(DOPCODE_INVOKE_CUSTOM, callsite);
+  insn->set_arg_word_count(3);
+  insn->set_src(0, 1);
+  insn->set_src(1, 2);
+  insn->set_src(2, 3);
+  method->set_dex_code(std::make_unique<DexCode>());
+  method->get_dex_code()->get_instructions().push_back(insn);
+  method->get_dex_code()->set_registers_size(0xff);
+  std::unique_ptr<DexInstruction> copy(insn->clone());
+
+  method->balloon();
+  instruction_lowering::lower(method);
+  method->sync();
+  EXPECT_EQ(*method->get_dex_code()->get_instructions().at(0), *copy);
 }
 
 TEST_F(IRInstructionTest, NormalizeInvoke) {
@@ -588,4 +612,51 @@ TEST_F(IRInstructionTest, InvokePolymorphicNamesButDoesNotCallItsMethod) {
   std::vector<DexMethodRef*> methods;
   insn.gather_methods(methods);
   EXPECT_EQ(methods, std::vector<DexMethodRef*>{invoke_exact});
+}
+
+// A wide argument of `invoke-polymorphic` or `invoke-custom` is a register
+// pair in dex code and one register in IR, as for the other invokes. Their
+// call-site prototypes say which arguments are wide.
+TEST_F(IRInstructionTest, NormalizeDynamicInvokes) {
+  // (long) handle.invokeExact(longValue, intValue)
+  IRInstruction polymorphic(OPCODE_INVOKE_POLYMORPHIC);
+  polymorphic.set_signature_polymorphic(
+      DexMethod::make_method(
+          "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/"
+          "lang/Object;)Ljava/lang/Object;"),
+      DexProto::make_proto("(JI)J"));
+  polymorphic.set_srcs({1, 2, 3, 4});
+  ASSERT_TRUE(polymorphic.normalize_registers());
+  EXPECT_EQ(polymorphic.srcs_copy(), (std::vector<reg_t>{1, 2, 4}));
+  EXPECT_FALSE(polymorphic.src_is_wide(0));
+  EXPECT_TRUE(polymorphic.src_is_wide(1));
+  EXPECT_FALSE(polymorphic.src_is_wide(2));
+  polymorphic.denormalize_registers();
+  EXPECT_EQ(polymorphic.srcs_copy(), (std::vector<reg_t>{1, 2, 3, 4}));
+
+  // A call site of type (JI)V has no receiver.
+  IRInstruction custom(OPCODE_INVOKE_CUSTOM);
+  custom.set_callsite(redex::make_callsite("run", "(JI)V"));
+  custom.set_srcs({2, 3, 4});
+  ASSERT_TRUE(custom.normalize_registers());
+  EXPECT_EQ(custom.srcs_copy(), (std::vector<reg_t>{2, 4}));
+  EXPECT_TRUE(custom.src_is_wide(0));
+  EXPECT_FALSE(custom.src_is_wide(1));
+  custom.denormalize_registers();
+  EXPECT_EQ(custom.srcs_copy(), (std::vector<reg_t>{2, 3, 4}));
+}
+
+TEST_F(IRInstructionTest, CallsiteProtoWithoutReferenceIsChecked) {
+  for (auto op : {OPCODE_INVOKE_CUSTOM, OPCODE_INVOKE_STATIC}) {
+    IRInstruction insn(op);
+    EXPECT_THROW(insn.get_callsite_proto(), RedexException) << show(op);
+  }
+  IRInstruction polymorphic(OPCODE_INVOKE_POLYMORPHIC);
+  polymorphic.set_signature_polymorphic(
+      DexMethod::make_method(
+          "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/"
+          "lang/Object;)Ljava/lang/Object;"),
+      DexProto::make_proto("()V"));
+  polymorphic.set_srcs_size(2);
+  EXPECT_THROW(polymorphic.src_is_wide(1), RedexException);
 }

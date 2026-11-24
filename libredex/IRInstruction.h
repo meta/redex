@@ -363,13 +363,25 @@ class IRInstruction final {
     return this;
   }
 
-  // The prototype of an `invoke-polymorphic` call site: the types of the
-  // arguments after the receiver, and of the result.
-  DexProto* get_callsite_proto() const {
-    always_assert(has_signature_polymorphic());
-    always_assert(m_signature_polymorphic != nullptr);
-    return m_signature_polymorphic->callsite_proto();
+  // The prototype of an invoke's call site: the types of the arguments after
+  // the receiver, if any, and of the result. It is the callee's prototype for
+  // the invokes that name the method they call, the recorded call-site
+  // prototype for `invoke-polymorphic`, and the call site's method type for
+  // `invoke-custom`.
+  DexProto* get_callsite_proto() const;
+
+  // Whether an invoke's first source is a receiver that its call-site
+  // prototype does not list: the object for an instance method, and the method
+  // handle or var handle for `invoke-polymorphic`.
+  bool invoke_has_receiver() const {
+    always_assert(opcode::is_an_invoke(m_opcode));
+    return !opcode::is_invoke_static(m_opcode) &&
+           !opcode::is_invoke_custom(m_opcode);
   }
+
+  // The type an invoke's source `i` must have: the class of the method for a
+  // receiver, otherwise the argument type from the call-site prototype.
+  const DexType* get_invoke_src_type(src_index_t i) const;
 
   // The method and call-site prototype of an `invoke-polymorphic`. It is
   // interned, so equal pairs are the same object.

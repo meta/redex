@@ -334,7 +334,7 @@ class AliasFixpointIterator final
       // Normally, RegAlloc handles this case, but CopyProp can run after
       // RegAlloc
       bool upper_is_addressable =
-          opcode::is_a_method_invoke(op) && insn->src_is_wide(src_index);
+          opcode::is_an_invoke(op) && insn->src_is_wide(src_index);
       return max_addressable_reg - (upper_is_addressable ? 1 : 0);
     }
     return max_addressable_reg;

@@ -146,6 +146,10 @@ OP(SPUT_BYTE         , sput_byte         , Ref::Field, "sput-byte")
 OP(SPUT_CHAR         , sput_char         , Ref::Field, "sput-char")
 OP(SPUT_SHORT        , sput_short        , Ref::Field, "sput-short")
 
+// All seven invokes. The five in a_method_invoke call the method that their
+// method reference names; invoke-polymorphic and invoke-custom call a target
+// that a method handle or a call site supplies.
+OPRANGE(an_invoke      , OPCODE_INVOKE_VIRTUAL, OPCODE_INVOKE_CUSTOM)
 OPRANGE(a_method_invoke, OPCODE_INVOKE_VIRTUAL, OPCODE_INVOKE_INTERFACE)
 OP(INVOKE_VIRTUAL    , invoke_virtual    , Ref::Method, "invoke-virtual")
 OP(INVOKE_SUPER      , invoke_super      , Ref::Method, "invoke-super")

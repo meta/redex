@@ -303,31 +303,46 @@ uint16_t IRInstruction::size() const {
   return args[dex_opcode::format(opcode::to_dex_opcode(op))];
 }
 
-// The instruction format doesn't tell us the width of registers for invoke
-// so we inspect the signature of the method we're calling
-bool IRInstruction::invoke_src_is_wide(src_index_t i) const {
-  // Only the five ordinary invokes get here: their callee's prototype is the
-  // one the call passes. The prototype of the method `invoke-polymorphic` names
-  // is not.
-  always_assert(opcode::is_a_method_invoke(m_opcode));
+DexProto* IRInstruction::get_callsite_proto() const {
+  always_assert(opcode::is_an_invoke(m_opcode));
+  if (has_callsite()) {
+    always_assert(m_callsite != nullptr);
+    return m_callsite->method_type();
+  }
+  if (has_signature_polymorphic()) {
+    always_assert(m_signature_polymorphic != nullptr);
+    return m_signature_polymorphic->callsite_proto();
+  }
+  always_assert(m_method != nullptr);
+  return m_method->get_proto();
+}
 
-  // virtual methods have `this` as the 0th register argument, but the
-  // arg list does NOT include `this`
-  if (!opcode::is_invoke_static(m_opcode)) {
+const DexType* IRInstruction::get_invoke_src_type(src_index_t i) const {
+  // The call-site prototype does not list the receiver.
+  if (invoke_has_receiver()) {
     if (i == 0) {
-      // reference to `this`. References are never wide
-      return false;
+      return has_signature_polymorphic()
+                 ? m_signature_polymorphic->method()->get_class()
+                 : get_method()->get_class();
     }
     --i;
   }
+  const auto* args = get_callsite_proto()->get_args();
+  always_assert_log(i < args->size(), "No argument %u in %s",
+                    static_cast<unsigned>(i), SHOW(this));
+  return args->at(i);
+}
 
-  return type::is_wide_type(m_method->get_proto()->get_args()->at(i));
+// The instruction format doesn't tell us the width of registers for invoke
+// so we inspect the prototype of the call site
+bool IRInstruction::invoke_src_is_wide(src_index_t i) const {
+  return type::is_wide_type(get_invoke_src_type(i));
 }
 
 bool IRInstruction::src_is_wide(src_index_t i) const {
   always_assert(i < srcs_size());
 
-  if (opcode::is_a_method_invoke(m_opcode)) {
+  if (opcode::is_an_invoke(m_opcode)) {
     return invoke_src_is_wide(i);
   }
 
@@ -383,11 +398,11 @@ bool IRInstruction::src_is_wide(src_index_t i) const {
 }
 
 bool IRInstruction::normalize_registers(std::string* error_msg) {
-  if (opcode::is_a_method_invoke(opcode())) {
-    auto* args = get_method()->get_proto()->get_args();
+  if (opcode::is_an_invoke(opcode())) {
+    auto* args = get_callsite_proto()->get_args();
     size_t old_srcs_idx{0};
     size_t srcs_idx{0};
-    if (m_opcode != OPCODE_INVOKE_STATIC) {
+    if (invoke_has_receiver()) {
       ++srcs_idx;
       ++old_srcs_idx;
     }
@@ -413,8 +428,8 @@ bool IRInstruction::normalize_registers(std::string* error_msg) {
 }
 
 void IRInstruction::denormalize_registers() {
-  if (opcode::is_a_method_invoke(m_opcode)) {
-    auto* args = get_method()->get_proto()->get_args();
+  if (opcode::is_an_invoke(m_opcode)) {
+    auto* args = get_callsite_proto()->get_args();
     bool has_wide = false;
     for (const auto& arg : *args) {
       if (type::is_wide_type(arg)) {
@@ -429,7 +444,7 @@ void IRInstruction::denormalize_registers() {
     std::vector<reg_t> srcs;
     size_t args_idx{0};
     size_t srcs_idx{0};
-    if (m_opcode != OPCODE_INVOKE_STATIC) {
+    if (invoke_has_receiver()) {
       srcs.push_back(src(srcs_idx++));
     }
     for (; args_idx < args->size(); ++args_idx, ++srcs_idx) {

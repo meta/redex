@@ -10,6 +10,7 @@
 #include "CopyPropagation.h"
 #include "IRAssembler.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 
 using namespace copy_propagation_impl;
 
@@ -651,6 +652,48 @@ TEST_F(CopyPropagationTest, wide) {
       (return-void)
     )
   )");
+  code->clear_cfg();
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+// After register allocation, a wide argument of an invoke cannot move to v15:
+// lowering expands it to the pair v15, v16, which the non-range form cannot
+// encode, and with v2 before it the registers are not a range either.
+TEST_F(CopyPropagationTest, wideMethodHandleCallArgumentNotInV15) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (move-wide v0 v15)
+      (invoke-polymorphic (v2 v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(J)V")
+      (return-void)
+    )
+  )");
+  auto expected_code = std::make_unique<IRCode>(*code);
+  code->set_registers_size(17);
+  code->build_cfg();
+  copy_propagation_impl::Config config;
+  config.wide_registers = true;
+  config.regalloc_has_run = true;
+  CopyPropagation(config).run(code.get());
+  code->clear_cfg();
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(CopyPropagationTest, wideCallSiteCallArgumentNotInV15) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (move-wide v0 v15)
+      (invoke-static (v2 v0) "LFoo;.placeholder:(IJ)V")
+      (return-void)
+    )
+  )");
+  redex::make_invoke_custom(code.get(), "run", "(IJ)V");
+  auto expected_code = std::make_unique<IRCode>(*code);
+  code->set_registers_size(17);
+  code->build_cfg();
+  copy_propagation_impl::Config config;
+  config.wide_registers = true;
+  config.regalloc_has_run = true;
+  CopyPropagation(config).run(code.get());
   code->clear_cfg();
   EXPECT_CODE_EQ(code.get(), expected_code.get());
 }

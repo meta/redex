@@ -1073,6 +1073,73 @@ TEST_F(OptimizeEnumsTest, rejectionReasonsAreComplete) {
   }
 }
 
+// `Outer` stays an enum, since code uses its class object, and its
+// constructor ignores a parameter of type `Enum`:
+//
+//   enum Outer {
+//     A(Bar.Y);
+//     Outer(Enum<?> tag) {}
+//   }
+//
+// `<clinit>` passes `Bar.Y` to that parameter, so `Bar` must stay an enum too:
+// boxed, it would pass an `Integer` where an `Enum` is expected.
+TEST_F(OptimizeEnumsTest, enumPassedToConstructorAsWiderTypeStaysEnum) {
+  auto store = create_enum_store();
+  ClassCreator cc(DexType::make_type("LOuter;"));
+  cc.set_super(type::java_lang_Enum());
+  cc.set_access(ACC_PUBLIC | ACC_FINAL | ACC_ENUM);
+  cc.add_field(DexField::make_field("LOuter;.$VALUES:[LOuter;")
+                   ->make_concrete(ACC_PRIVATE | ACC_STATIC | ACC_FINAL |
+                                   ACC_SYNTHETIC));
+  cc.add_field(
+      DexField::make_field("LOuter;.A:LOuter;")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL | ACC_ENUM));
+  cc.add_method(assembler::method_from_string(R"(
+    (method (private constructor) "LOuter;.<init>:(Ljava/lang/String;ILjava/lang/Enum;)V"
+      ((load-param-object v0)
+       (load-param-object v1)
+       (load-param v2)
+       (load-param-object v3)
+       (invoke-direct (v0 v1 v2) "Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V")
+       (return-void)))
+  )"));
+  cc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LOuter;.<clinit>:()V"
+      ((sget-object "LBar;.Y:LBar;")
+       (move-result-pseudo-object v0)
+       (const-string "A")
+       (move-result-pseudo-object v1)
+       (const v2 0)
+       (new-instance "LOuter;")
+       (move-result-pseudo-object v3)
+       (invoke-direct (v3 v1 v2 v0) "LOuter;.<init>:(Ljava/lang/String;ILjava/lang/Enum;)V")
+       (sput-object v3 "LOuter;.A:LOuter;")
+       (const v4 1)
+       (new-array v4 "[LOuter;")
+       (move-result-pseudo-object v4)
+       (aput-object v3 v4 v2)
+       (sput-object v4 "LOuter;.$VALUES:[LOuter;")
+       (return-void)))
+  )"));
+  auto* outer = cc.create();
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  uc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LUser;.use_as_class:()Ljava/lang/Class;"
+      ((const-class "LOuter;")
+       (move-result-pseudo-object v0)
+       (return-object v0)))
+  )"));
+  store.add_classes({outer, uc.create()});
+  DexStoresVector stores({std::move(store)});
+  run_optimize_enums_with_entries(stores);
+
+  EXPECT_EQ(outer->get_super_class(), type::java_lang_Enum());
+  EXPECT_EQ(type_class(DexType::get_type("LBar;"))->get_super_class(),
+            type::java_lang_Enum());
+}
+
 namespace {
 /* Run the pass on Bar and a class `LRows;` whose method `show` takes a
 `Bar[][] rows` and formats what `read` reads from it, like

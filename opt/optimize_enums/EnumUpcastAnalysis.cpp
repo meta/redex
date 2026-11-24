@@ -599,9 +599,9 @@ class EnumUpcastDetector {
   }
 
   /**
-   * No other direct invocation allowed on candidate enums except
-   * candidate enum constructor invocations in the enum classes'
-   * <clinit>.
+   * Direct calls are checked like any other call, including the constructor
+   * calls in a candidate's <clinit>: the candidate may stay an enum, and its
+   * constructor's parameters then keep their types.
    */
   void process_direct_invocation(const IRInstruction* insn,
                                  const EnumTypeEnvironment* env) const {
@@ -609,11 +609,6 @@ class EnumUpcastDetector {
     auto* invoked = insn->get_method();
     if (m_clinit_chains && is_kt_enum_entries_list_ctor(invoked)) {
       process_enum_entries_input(insn, 1, env, UnsafeType::kUsageCastParameter);
-      return;
-    }
-    auto* container = invoked->get_class();
-    if ((m_candidate_enums->count_unsafe(container) != 0u) &&
-        method::is_init(invoked) && method::is_clinit(m_method)) {
       return;
     }
     process_general_invocation(insn, env);

@@ -323,6 +323,11 @@ void collect_generated_switch_cases(
       // If the array being assigned to came from a new-array, look for the sput
       // it flowed into.
       insn_look = new_array_to_sput.at(insn_look);
+      if (insn_look == nullptr) {
+        // No switch reads an array stored in no field of the generated class,
+        // as when RemoveUnusedFieldsPass removed the field of an unread table.
+        continue;
+      }
     }
 
     auto switch_case = insn_kase->get_literal();

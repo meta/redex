@@ -31,6 +31,7 @@
 #include "RedexTest.h"
 #include "RedexTestUtils.h"
 #include "RemoveNullcheckStringArg.h"
+#include "ScopedCFG.h"
 #include "Show.h"
 #include "TypeUtil.h"
 #include "Walkers.h"
@@ -5133,4 +5134,105 @@ TEST_F(OptimizeEnumsTest, instanceParameterObservationUsesArgumentIndex) {
   )");
   EXPECT_TRUE(summary.safe_params.empty());
   EXPECT_EQ(summary.returned_param, std::nullopt);
+}
+
+// A switch-map class whose <clinit> fills a second table that it stores in no
+// field, as after RemoveUnusedFieldsPass removed the field of a table nothing
+// reads: no switch can read that table, so collecting the switch cases skips
+// it, and a switch over the table that is stored is still unmapped.
+TEST_F(OptimizeEnumsTest, switchMapArrayStoredInNoFieldIsSkipped) {
+  DexStoresVector stores({create_enum_store()});
+  // create_enum_store declares Enum.ordinal as a constructor; the switch-map
+  // matcher resolves it as a virtual method, so declare a virtual one.
+  auto* enum_cls = type_class(type::java_lang_Enum());
+  auto* ordinal = dynamic_cast<DexMethod*>(
+      DexMethod::get_method("Ljava/lang/Enum;.ordinal:()I"));
+  enum_cls->remove_method(ordinal);
+  ordinal->set_access(ACC_PUBLIC | ACC_FINAL);
+  ordinal->set_virtual(true);
+  enum_cls->add_method(ordinal);
+
+  auto* mode = make_kotlin_enum("LMode;", "(return-void)");
+  stores[0].add_classes({mode});
+
+  ClassCreator gc(DexType::make_type("LFoo$1;"));
+  gc.set_super(type::java_lang_Object());
+  gc.set_access(ACC_FINAL | ACC_SYNTHETIC);
+  auto* table = dynamic_cast<DexField*>(
+      DexField::make_field("LFoo$1;.$SwitchMap$Mode:[I"));
+  table->make_concrete(ACC_STATIC | ACC_FINAL | ACC_SYNTHETIC);
+  gc.add_field(table);
+  gc.add_method(assembler::method_from_string(R"(
+    (method (static constructor) "LFoo$1;.<clinit>:()V"
+     (
+      (const v0 2)
+      (new-array v0 "[I")
+      (move-result-pseudo-object v1)
+      (sput-object v1 "LFoo$1;.$SwitchMap$Mode:[I")
+      (sget-object "LMode;.A:LMode;")
+      (move-result-pseudo-object v2)
+      (invoke-virtual (v2) "Ljava/lang/Enum;.ordinal:()I")
+      (move-result v3)
+      (const v4 1)
+      (aput v4 v1 v3)
+      (const v0 2)
+      (new-array v0 "[I")
+      (move-result-pseudo-object v5)
+      (sget-object "LMode;.A:LMode;")
+      (move-result-pseudo-object v2)
+      (invoke-virtual (v2) "Ljava/lang/Enum;.ordinal:()I")
+      (move-result v3)
+      (const v4 1)
+      (aput v4 v5 v3)
+      (return-void)
+     )
+    )
+  )"));
+  auto* generated = gc.create();
+  generated->get_clinit()->get_code()->build_cfg();
+  stores[0].add_classes({generated});
+
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  auto* pick = assembler::method_from_string(R"(
+    (method (public static) "LUser;.pick:(LMode;)I"
+      (
+        (load-param-object v0)
+        (sget-object "LFoo$1;.$SwitchMap$Mode:[I")
+        (move-result-pseudo-object v1)
+        (invoke-virtual (v0) "Ljava/lang/Enum;.ordinal:()I")
+        (move-result v2)
+        (aget v1 v2)
+        (move-result-pseudo v3)
+        (switch v3 (:case1))
+        (const v4 30)
+        (return v4)
+        (:case1 1)
+        (const v4 10)
+        (return v4)
+      )
+    )
+  )");
+  uc.add_method(pick);
+  pick->get_code()->build_cfg();
+  stores[0].add_classes({uc.create()});
+
+  run_optimize_enums_with_entries(stores);
+
+  EXPECT_EQ(mode->get_super_class(), type::java_lang_Object());
+  // The switch map is unmapped: the case that was 1 is now A's ordinal, 0.
+  cfg::ScopedCFG cfg(pick->get_code());
+  std::set<int32_t> cases;
+  for (auto* block : cfg->blocks()) {
+    if (block->branchingness() != opcode::BRANCH_SWITCH) {
+      continue;
+    }
+    for (auto* edge : block->succs()) {
+      if (edge->case_key()) {
+        cases.insert(*edge->case_key());
+      }
+    }
+  }
+  EXPECT_EQ(cases, std::set<int32_t>{0});
 }

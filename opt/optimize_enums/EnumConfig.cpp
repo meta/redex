@@ -151,28 +151,32 @@ ParamSummary calculate_param_summary(DexMethod* method,
 
   auto* args = method->get_proto()->get_args();
   auto& escaping_params = escape_summary.escaping_parameters;
+  // The parameters the method may return. A returned null hands the caller
+  // no object it did not pass in; any other object does.
   auto& returned_elements = escape_summary.returned_parameters;
-  if (returned_elements.count(ptrs::ESCAPED_FRESH_RETURN) == 0u &&
-      returned_elements.count(ptrs::NULL_RETURN) == 0u) {
-    if (returned_elements.size() == 1) {
-      auto returned = *unordered_any(returned_elements);
-      if (returned != ptrs::FRESH_RETURN &&
-          (escaping_params.count(returned) == 0u)) {
-        const DexType* cmp = is_static(method) ? *(args->begin() + returned)
-                             : returned == 0
-                                 ? method->get_class() // Implicit `this`
-                                 : *(args->begin() + returned - 1);
-        if (method->get_proto()->get_rtype() == cmp) {
-          // Set returned_param to the only one returned parameter index.
-          summary.returned_param = returned;
-        } else {
-          escaping_params.insert(returned);
-        }
+  returned_elements.erase(ptrs::NULL_RETURN);
+  const bool returns_other_object =
+      returned_elements.erase(ptrs::FRESH_RETURN) +
+          returned_elements.erase(ptrs::ESCAPED_FRESH_RETURN) >
+      0;
+  if (returned_elements.size() == 1 && !returns_other_object) {
+    auto returned = only(returned_elements);
+    if (!escaping_params.contains(returned)) {
+      const DexType* cmp = is_static(method) ? *(args->begin() + returned)
+                           : returned == 0
+                               ? method->get_class() // Implicit `this`
+                               : *(args->begin() + returned - 1);
+      if (method->get_proto()->get_rtype() == cmp) {
+        // Set returned_param to the only one returned parameter index.
+        summary.returned_param = returned;
+      } else {
+        escaping_params.insert(returned);
       }
-    } else {
-      // Treat as escaping if there are multiple returns.
-      insert_unordered_iterable(escaping_params, returned_elements);
     }
+  } else {
+    // The caller cannot tell which value it got, so a parameter returned
+    // beside another parameter or beside some other object escapes.
+    insert_unordered_iterable(escaping_params, returned_elements);
   }
   // Non-escaping java.lang.Object params are stored in safe_params.
   auto arg_it = args->begin();

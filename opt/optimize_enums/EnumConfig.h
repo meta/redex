@@ -17,10 +17,9 @@ namespace optimize_enums {
  * A summary of how the parameters are used in a method.
  */
 struct ParamSummary {
-  // Indices of parameters that do not escape through other ways except escaping
-  // as return value.
+  // Indices of Object parameters that do not escape, except as returned_param.
   UnorderedSet<uint16_t> safe_params;
-  // Index of parameter if it's exactly the return value.
+  // Index of the only parameter the return value may be; it may also be null.
   std::optional<uint16_t> returned_param;
 
   ParamSummary() : returned_param(std::nullopt) {}

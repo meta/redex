@@ -113,6 +113,94 @@ TEST_F(OptimizeEnumsTest, test_param_summary_generating) {
   EXPECT_TRUE(summary4.safe_params.empty());
 }
 
+// A caller can follow an enum through `pick` only if `pick` returns nothing
+// but its parameter, or null.
+TEST_F(OptimizeEnumsTest, paramSummaryTracksParamReturnedAloneOrWithNull) {
+  auto alone = get_summary(R"(
+    (method (static) "LFoo;.identity:(Ljava/lang/Object;)Ljava/lang/Object;"
+      (
+        (load-param-object v0)
+        (return-object v0)
+      )
+    )
+  )");
+  EXPECT_EQ(alone.returned_param, 0);
+  EXPECT_THAT(unordered_unsafe_unwrap(alone.safe_params),
+              UnorderedElementsAre(0));
+
+  auto or_null = get_summary(R"(
+    (method (static) "LFoo;.pick:(Ljava/lang/Object;Z)Ljava/lang/Object;"
+      (
+        (load-param-object v0)
+        (load-param v1)
+        (if-eqz v1 :null)
+        (return-object v0)
+        (:null)
+        (const v2 0)
+        (return-object v2)
+      )
+    )
+  )");
+  EXPECT_EQ(or_null.returned_param, 0);
+  EXPECT_THAT(unordered_unsafe_unwrap(or_null.safe_params),
+              UnorderedElementsAre(0));
+}
+
+// When `pick` may return its parameter or some other object, a caller cannot
+// tell which one it gets, so the parameter escapes.
+TEST_F(OptimizeEnumsTest, paramSummaryEscapesParamReturnedWithOtherObject) {
+  auto or_escaped = get_summary(R"(
+    (method (static) "LFoo;.pick:(Ljava/lang/Object;Z)Ljava/lang/Object;"
+      (
+        (load-param-object v0)
+        (load-param v1)
+        (if-eqz v1 :cache)
+        (return-object v0)
+        (:cache)
+        (sget-object "LFoo;.CACHE:Ljava/lang/Object;")
+        (move-result-pseudo-object v2)
+        (return-object v2)
+      )
+    )
+  )");
+  EXPECT_EQ(or_escaped.returned_param, std::nullopt);
+  EXPECT_TRUE(or_escaped.safe_params.empty());
+
+  auto or_fresh = get_summary(R"(
+    (method (static) "LFoo;.pick:(Ljava/lang/Object;Z)Ljava/lang/Object;"
+      (
+        (load-param-object v0)
+        (load-param v1)
+        (if-eqz v1 :fresh)
+        (return-object v0)
+        (:fresh)
+        (new-instance "Ljava/lang/Object;")
+        (move-result-pseudo-object v2)
+        (invoke-direct (v2) "Ljava/lang/Object;.<init>:()V")
+        (return-object v2)
+      )
+    )
+  )");
+  EXPECT_EQ(or_fresh.returned_param, std::nullopt);
+  EXPECT_TRUE(or_fresh.safe_params.empty());
+
+  auto or_other_param = get_summary(R"(
+    (method (static) "LFoo;.pick:(Ljava/lang/Object;Ljava/lang/Object;Z)Ljava/lang/Object;"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (load-param v2)
+        (if-eqz v2 :other)
+        (return-object v0)
+        (:other)
+        (return-object v1)
+      )
+    )
+  )");
+  EXPECT_EQ(or_other_param.returned_param, std::nullopt);
+  EXPECT_TRUE(or_other_param.safe_params.empty());
+}
+
 /* Create a Bar enum class and a shell implementations of Enum, Integer, Object
 class enum Bar {
   Y(2132351567),
@@ -1300,6 +1388,82 @@ void build_cfgs_for_clinit_analysis(DexClass* cls) {
       }
     }
   }
+}
+
+// Run the rejection analysis on Bar and a `LUser;.pick` that returns its
+// parameter or the value that `other_return` computes into v2:
+//
+//   static Object pick(Object o, boolean b) { return b ? o : <other>; }
+//   pick(Bar.Y, true).toString();  // "Y", but "0" once Y is boxed
+//
+// Return whether Bar stays a candidate.
+bool is_candidate_after_pick(const std::string& other_return) {
+  auto store = create_enum_store();
+
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  uc.add_field(DexField::make_field("LUser;.CACHE:Ljava/lang/Object;")
+                   ->make_concrete(ACC_STATIC | ACC_FINAL));
+  std::string pick = R"(
+    (method (public static) "LUser;.pick:(Ljava/lang/Object;Z)Ljava/lang/Object;"
+      (
+        (load-param-object v0)
+        (load-param v1)
+        (if-eqz v1 :other)
+        (return-object v0)
+        (:other)
+        OTHER_RETURN
+        (return-object v2)
+      )
+    )
+  )";
+  boost::replace_all(pick, "OTHER_RETURN", other_return);
+  uc.add_method(assembler::method_from_string(pick));
+  uc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LUser;.print:()Ljava/lang/String;"
+      (
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v0)
+        (const v1 1)
+        (invoke-static (v0 v1) "LUser;.pick:(Ljava/lang/Object;Z)Ljava/lang/Object;")
+        (move-result-object v0)
+        (invoke-virtual (v0) "Ljava/lang/Object;.toString:()Ljava/lang/String;")
+        (move-result-object v0)
+        (return-object v0)
+      )
+    )
+  )"));
+  store.add_classes({uc.create()});
+
+  DexStoresVector stores({std::move(store)});
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  auto* bar_type = DexType::get_type("LBar;");
+  always_assert(bar_type != nullptr);
+  optimize_enums::Config config(100);
+  config.candidate_enums.insert(bar_type);
+  auto override_graph = method_override_graph::build_graph(scope);
+  optimize_enums::calculate_param_summaries(scope, *override_graph,
+                                            &config.param_summary_map);
+  optimize_enums::reject_unsafe_enums(
+      scope, &config, [](const DexType*, optimize_enums::UnsafeType) {});
+  return config.candidate_enums.count_unsafe(bar_type) != 0u;
+}
+
+// `pick` may return Y or an object that has already escaped, so the caller's
+// `toString()` may run on Y.
+TEST_F(OptimizeEnumsTest, rejectsEnumReturnedWithEscapedObject) {
+  EXPECT_FALSE(is_candidate_after_pick(R"(
+        (sget-object "LUser;.CACHE:Ljava/lang/Object;")
+        (move-result-pseudo-object v2)
+  )"));
+}
+
+// `pick` returns Y or null, so the caller's `toString()` is checked on Y.
+TEST_F(OptimizeEnumsTest, rejectsEnumReturnedWithNull) {
+  EXPECT_FALSE(is_candidate_after_pick("(const v2 0)"));
 }
 
 /* Create an enum with constants A and B whose <clinit> runs `clinit_prefix`

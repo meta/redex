@@ -579,6 +579,13 @@ class ControlFlowGraph {
   // Every other block ends in a throw or loops forever.
   UnorderedSet<Block*> blocks_reaching_return() const;
 
+  // The blocks from which one of `targets` is reachable along at least one
+  // edge. A target is included only when it reaches a target itself, as in a
+  // loop. When `within` is given, the walk enters only the blocks it holds.
+  static UnorderedSet<Block*> blocks_reaching(
+      const std::vector<Block*>& targets,
+      const UnorderedSet<Block*>* within = nullptr);
+
   /*
    * Determine where the exit block is. If there is more than one, create a
    * "ghost" block that is the successor to all of them.

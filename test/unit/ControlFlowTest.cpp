@@ -3349,6 +3349,70 @@ TEST_F(ControlFlowTest, blocksReachingReturnOfAMethodThatAlwaysThrows) {
   EXPECT_TRUE(code->cfg().blocks_reaching_return().empty());
 }
 
+TEST_F(ControlFlowTest, blocksReachingABlock) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param v0)
+      (if-eqz v0 :other)
+      (const v1 1)
+      (goto :join)
+      (:other)
+      (const v1 2)
+      (:join)
+      (const v2 3)
+      (return v1)
+    )
+  )");
+  code->build_cfg();
+  auto& cfg = code->cfg();
+  cfg::Block* join = nullptr;
+  for (auto* block : cfg.blocks()) {
+    if (block->branchingness() == opcode::BRANCH_RETURN) {
+      join = block;
+    }
+  }
+  ASSERT_NE(join, nullptr);
+  // Every block but the join reaches it.
+  const auto reaching = cfg::ControlFlowGraph::blocks_reaching({join});
+  EXPECT_EQ(reaching.count(join), 0u);
+  EXPECT_EQ(reaching.count(cfg.entry_block()), 1u);
+  EXPECT_EQ(reaching.size(), cfg.num_blocks() - 1);
+  // Walking only through the entry block, nothing reaches the join, whose
+  // predecessors are the two branches; the entry reaches the branches.
+  const UnorderedSet<cfg::Block*> within{cfg.entry_block()};
+  const auto entry_only =
+      cfg::ControlFlowGraph::blocks_reaching({join}, &within);
+  EXPECT_EQ(entry_only.size(), 0u);
+  std::vector<cfg::Block*> branches;
+  for (const auto* edge : join->preds()) {
+    branches.push_back(edge->src());
+  }
+  EXPECT_EQ(cfg::ControlFlowGraph::blocks_reaching(branches, &within).size(),
+            1u);
+}
+
+TEST_F(ControlFlowTest, blockInALoopReachesItself) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param v0)
+      (:loop)
+      (add-int/lit v0 v0 -1)
+      (if-nez v0 :loop)
+      (return v0)
+    )
+  )");
+  code->build_cfg();
+  auto& cfg = code->cfg();
+  cfg::Block* loop = nullptr;
+  for (auto* block : cfg.blocks()) {
+    if (block->branchingness() == opcode::BRANCH_IF) {
+      loop = block;
+    }
+  }
+  ASSERT_NE(loop, nullptr);
+  EXPECT_EQ(cfg::ControlFlowGraph::blocks_reaching({loop}).count(loop), 1u);
+}
+
 TEST_F(ControlFlowTest, write_mermaid_format) {
   auto code = code_with_every_edge_type();
   std::ostringstream out;

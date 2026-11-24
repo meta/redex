@@ -2404,21 +2404,35 @@ std::vector<Block*> ControlFlowGraph::real_exit_blocks(
 }
 
 UnorderedSet<Block*> ControlFlowGraph::blocks_reaching_return() const {
-  UnorderedSet<Block*> result;
-  std::queue<Block*> work_queue;
-  for (auto* block : return_blocks()) {
+  const auto returns = return_blocks();
+  for (auto* block : returns) {
     // `return_blocks()` is exactly the blocks whose branchingness is a return.
     always_assert(block->branchingness() == opcode::BRANCH_RETURN);
-    work_queue.push(block);
+  }
+  auto result = blocks_reaching(returns);
+  result.insert(returns.begin(), returns.end());
+  return result;
+}
+
+UnorderedSet<Block*> ControlFlowGraph::blocks_reaching(
+    const std::vector<Block*>& targets, const UnorderedSet<Block*>* within) {
+  UnorderedSet<Block*> result;
+  std::queue<Block*> work_queue;
+  const auto push_preds = [&](const Block* block) {
+    for (auto* edge : block->preds()) {
+      if (within == nullptr || within->count(edge->src()) != 0u) {
+        work_queue.push(edge->src());
+      }
+    }
+  };
+  for (auto* block : targets) {
+    push_preds(block);
   }
   while (!work_queue.empty()) {
     auto* block = work_queue.front();
     work_queue.pop();
-    if (!result.insert(block).second) {
-      continue;
-    }
-    for (auto* edge : block->preds()) {
-      work_queue.push(edge->src());
+    if (result.insert(block).second) {
+      push_preds(block);
     }
   }
   return result;

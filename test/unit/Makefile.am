@@ -464,7 +464,7 @@ ir_instruction_test_SOURCES = IRInstructionTest.cpp OpcodeList.cpp $(top_srcdir)
 ir_list_test_SOURCES = IRListTest.cpp
 ir_list_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
-ir_typechecker_test_SOURCES = IRTypeCheckerTest.cpp
+ir_typechecker_test_SOURCES = IRTypeCheckerTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 ir_typechecker_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 jar_loader_test_SOURCES = JarLoaderTest.cpp

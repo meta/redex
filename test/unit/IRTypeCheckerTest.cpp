@@ -21,6 +21,7 @@
 #include "IROpcode.h"
 #include "IRTypeChecker.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "Show.h"
 
 using namespace testing;
@@ -3358,6 +3359,95 @@ TEST_F(IRTypeCheckerTest, invokePolymorphicOutsideMethodHandleIsAnError) {
   checker.run();
   EXPECT_TRUE(checker.fail());
   EXPECT_THAT(checker.what(), HasSubstr("is not signature polymorphic"));
+}
+
+// The call-site prototype types the arguments and the result of a method
+// handle call: here an int and a long argument and a long result.
+//
+//   long next = (long) handle.invokeExact(7, 8L);
+TEST_F(IRTypeCheckerTest, invokePolymorphicUsesCallSiteProto) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar:(Ljava/lang/invoke/MethodHandle;)J"
+     (
+      (load-param-object v0)
+      (const v1 7)
+      (const-wide v2 8)
+      (invoke-polymorphic (v0 v1 v2) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(IJ)J")
+      (move-result-wide v4)
+      (return-wide v4)
+     )
+    )
+  )");
+  IRTypeChecker checker(method);
+  checker.run();
+  EXPECT_TRUE(checker.good()) << checker.what();
+}
+
+TEST_F(IRTypeCheckerTest, invokePolymorphicArgumentMismatchIsAnError) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar:(Ljava/lang/invoke/MethodHandle;)V"
+     (
+      (load-param-object v0)
+      (invoke-polymorphic (v0 v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(I)V")
+      (return-void)
+     )
+    )
+  )");
+  IRTypeChecker checker(method);
+  checker.run();
+  EXPECT_TRUE(checker.fail());
+  EXPECT_THAT(checker.what(), HasSubstr("expected type INT, but found REF"));
+}
+
+// The call site's method type types the arguments and the result of
+// `invoke-custom`, which has no receiver. Here tool-generated call sites with
+// an app-defined bootstrap method take a long and return a `LongSupplier`, or
+// a `Runnable` that goes unused.
+TEST_F(IRTypeCheckerTest, invokeCustomUsesCallSiteMethodType) {
+  auto check = [](std::string_view method_type, const char* move_result) {
+    // The placeholder takes the arguments of the call site.
+    auto placeholder =
+        "LFoo;.placeholder:" +
+        std::string(method_type.substr(0, method_type.find(')') + 1)) + "V";
+    auto* method = assembler::method_from_string(std::string(R"IR(
+      (method (public static) "LFoo;.bar:(J)V"
+       (
+        (load-param-wide v0)
+        (invoke-static (v0) ")IR") + placeholder +
+                                                 R"IR(")
+        )IR" + move_result + R"IR(
+        (return-void)
+       )
+      )
+    )IR");
+    redex::make_invoke_custom(method->get_code(), "get", method_type);
+    auto checker = std::make_unique<IRTypeChecker>(method);
+    checker->run();
+    return checker;
+  };
+  {
+    auto checker = check("(J)Ljava/util/function/LongSupplier;",
+                         "(move-result-object v2)");
+    EXPECT_TRUE(checker->good()) << checker->what();
+  }
+  {
+    auto checker = check("(J)Ljava/lang/Runnable;", "");
+    EXPECT_TRUE(checker->good()) << checker->what();
+  }
+  {
+    // The argument is a long, not a reference.
+    auto checker = check("(Ljava/lang/Object;)Ljava/lang/Object;",
+                         "(move-result-object v2)");
+    EXPECT_TRUE(checker->fail());
+    EXPECT_THAT(checker->what(), HasSubstr("expected type REF"));
+  }
+  {
+    // The result is a long, not a reference.
+    auto checker = check("(J)J", "(move-result-object v2)");
+    EXPECT_TRUE(checker->fail());
+    EXPECT_THAT(checker->what(),
+                HasSubstr("expected type REF, but found LONG1"));
+  }
 }
 
 TEST_F(IRTypeCheckerTest, invokeOnClassInitializer) {

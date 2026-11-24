@@ -1608,15 +1608,12 @@ void IRTypeChecker::check_instruction(IRInstruction* insn,
   case OPCODE_INVOKE_DIRECT:
   case OPCODE_INVOKE_STATIC:
   case OPCODE_INVOKE_INTERFACE: {
-    DexMethodRef* dex_method = insn->has_signature_polymorphic()
-                                   ? insn->get_signature_polymorphic()->method()
-                                   : insn->get_method();
-    const auto* arg_types = dex_method->get_proto()->get_args();
-    size_t expected_args =
-        (insn->opcode() != OPCODE_INVOKE_STATIC ? 1 : 0) + arg_types->size();
     if (insn->opcode() == OPCODE_INVOKE_POLYMORPHIC) {
-      validate_invoke_polymorphic(dex_method);
-    } else if (insn->srcs_size() != expected_args) {
+      validate_invoke_polymorphic(insn->get_signature_polymorphic()->method());
+    }
+    const auto* arg_types = insn->get_callsite_proto()->get_args();
+    size_t expected_args = insn->invoke_srcs_size();
+    if (insn->srcs_size() != expected_args) {
       std::ostringstream out;
       out << SHOW(insn) << ": argument count mismatch; " << "expected "
           << expected_args << ", " << "but found " << insn->srcs_size()
@@ -1624,53 +1621,42 @@ void IRTypeChecker::check_instruction(IRInstruction* insn,
       throw TypeCheckingException(out.str());
     }
     size_t src_idx{0};
-    if (insn->opcode() != OPCODE_INVOKE_STATIC) {
-      // The first argument is a reference to the object instance on which the
-      // method is invoked.
+    if (insn->invoke_has_receiver()) {
+      // The object an instance method is called on, or the method handle or
+      // var handle that `invoke-polymorphic` calls.
       auto src = insn->src(src_idx++);
       assume_reference(current_state, src);
       assume_assignable(current_state->get_dex_type(src),
-                        dex_method->get_class());
+                        insn->get_invoke_src_type(0));
     }
-    if (insn->opcode() == OPCODE_INVOKE_POLYMORPHIC) {
-      redex_assert(arg_types->size() == 1);
-      redex_assert(src_idx == 1);
-
-      // Starting from the second argument, every argument to invoke-polymorphic
-      // is an object. It is unclear whether invoke-polymorphic can be used to a
-      // function that accepts an array of other types. Therefore, here we only
-      // assume the argument is assignable to the element type of the array
-      // argument.
-      for (; src_idx < insn->srcs_size(); src_idx++) {
-        auto src = insn->src(src_idx);
+    for (const DexType* arg_type : *arg_types) {
+      if (type::is_object(arg_type)) {
+        auto src = insn->src(src_idx++);
         assume_reference(current_state, src);
-        assume_assignable(current_state->get_dex_type(src),
-                          type::make_array_element_type(arg_types->at(0)));
+        assume_assignable(current_state->get_dex_type(src), arg_type);
+        continue;
       }
-    } else {
-      for (const DexType* arg_type : *arg_types) {
-        if (type::is_object(arg_type)) {
-          auto src = insn->src(src_idx++);
-          assume_reference(current_state, src);
-          assume_assignable(current_state->get_dex_type(src), arg_type);
-          continue;
-        }
-        if (type::is_integral(arg_type)) {
-          assume_integer(current_state, insn->src(src_idx++));
-          continue;
-        }
-        if (type::is_long(arg_type)) {
-          assume_long(current_state, insn->src(src_idx++));
-          continue;
-        }
-        if (type::is_float(arg_type)) {
-          assume_float(current_state, insn->src(src_idx++));
-          continue;
-        }
-        always_assert(type::is_double(arg_type));
-        assume_double(current_state, insn->src(src_idx++));
+      if (type::is_integral(arg_type)) {
+        assume_integer(current_state, insn->src(src_idx++));
+        continue;
       }
+      if (type::is_long(arg_type)) {
+        assume_long(current_state, insn->src(src_idx++));
+        continue;
+      }
+      if (type::is_float(arg_type)) {
+        assume_float(current_state, insn->src(src_idx++));
+        continue;
+      }
+      always_assert(type::is_double(arg_type));
+      assume_double(current_state, insn->src(src_idx++));
     }
+    if (!opcode::is_a_method_invoke(insn->opcode())) {
+      // `invoke-custom` has no callee, and validate_invoke_polymorphic checks
+      // the callee of `invoke-polymorphic`.
+      break;
+    }
+    auto* dex_method = insn->get_method();
     if (m_validate_access) {
       auto* resolved = resolve_method_deprecated(
           dex_method, opcode_to_search(insn), m_dex_method);

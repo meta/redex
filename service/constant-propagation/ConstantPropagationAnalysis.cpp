@@ -1772,6 +1772,57 @@ bool ImmutableAttributeAnalyzer::analyze_iget(
   }
 }
 
+DexMethod* resolve_attribute_getter_call(
+    const ConcurrentSet<DexMethod*>& attribute_methods,
+    const IRInstruction* insn,
+    const ConstantEnvironment& env) {
+  if (insn->opcode() != OPCODE_INVOKE_VIRTUAL &&
+      insn->opcode() != OPCODE_INVOKE_INTERFACE) {
+    return nullptr;
+  }
+  const auto obj = env.get(insn->src(0)).maybe_get<ObjectWithImmutAttrDomain>();
+  if (!obj || !obj->is_value()) {
+    return nullptr;
+  }
+  // This also resolves an invoke-virtual of a method that only an interface of
+  // the class declares.
+  const auto* called = resolve_invoke_method_deprecated(insn);
+  if (called == nullptr || !(is_public(called) || is_protected(called))) {
+    return nullptr;
+  }
+  const auto* cls = type_class(obj->get_constant()->type);
+  if (cls == nullptr ||
+      !type::check_cast(cls->get_type(), called->get_class())) {
+    return nullptr;
+  }
+  const bool implements_interface_method =
+      is_interface(type_class(called->get_class()));
+  // An invoke-virtual resolves to an interface method only when no superclass
+  // of the referenced class declares the method. A superclass missing from the
+  // input could declare it, even package-private, and the call would then reach
+  // that method instead of the getter.
+  if (implements_interface_method && insn->opcode() == OPCODE_INVOKE_VIRTUAL &&
+      !type::is_subclass(type::java_lang_Object(),
+                         insn->get_method()->get_class())) {
+    return nullptr;
+  }
+  // Registered getters are class methods, so only superclasses are searched,
+  // not the default methods of interfaces.
+  auto* getter =
+      resolve_virtual_deprecated(cls, called->get_name(), called->get_proto());
+  if (getter == nullptr || attribute_methods.count_unsafe(getter) == 0u) {
+    return nullptr;
+  }
+  const bool known_to_override =
+      is_public(getter) ||
+      (is_protected(getter) && !implements_interface_method);
+  const bool overridable = !is_final(cls) && !is_final(getter);
+  if (!known_to_override || overridable) {
+    return nullptr;
+  }
+  return getter;
+}
+
 bool ImmutableAttributeAnalyzer::analyze_invoke(
     const ImmutableAttributeAnalyzerState* state,
     const IRInstruction* insn,
@@ -1791,6 +1842,10 @@ bool ImmutableAttributeAnalyzer::analyze_invoke(
     return analyze_method_initialization(state, insn, env, method);
   } else if (state->attribute_methods.count_unsafe(method) != 0u) {
     return analyze_method_attr(state, insn, env, method);
+  }
+  if (auto* getter =
+          resolve_attribute_getter_call(state->attribute_methods, insn, *env)) {
+    return analyze_method_attr(state, insn, env, getter);
   }
   return false;
 }

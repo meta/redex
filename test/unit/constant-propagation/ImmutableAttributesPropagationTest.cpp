@@ -331,6 +331,274 @@ TEST_F(ImmutableTest, integer) {
   EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
+namespace {
+
+// Creates the external class `type` declaring the virtual method `method`,
+// implementing `intf` when it is not null.
+void create_external_class_with_method(DexType* type,
+                                       DexType* super,
+                                       DexAccessFlags class_access,
+                                       const char* method,
+                                       DexAccessFlags method_access,
+                                       DexType* intf = nullptr) {
+  ClassCreator creator(type);
+  creator.set_super(super);
+  creator.set_access(class_access);
+  if (intf != nullptr) {
+    creator.add_interface(intf);
+  }
+  creator.set_external();
+  auto* m = dynamic_cast<DexMethod*>(DexMethod::make_method(method));
+  m->set_access(method_access);
+  m->set_virtual(true);
+  m->set_external();
+  creator.add_method(m);
+  creator.create();
+}
+
+void create_number_and_integer() {
+  create_external_class_with_method(
+      DexType::make_type("Ljava/lang/Number;"), type::java_lang_Object(),
+      ACC_PUBLIC | ACC_ABSTRACT, "Ljava/lang/Number;.intValue:()I", ACC_PUBLIC);
+  create_external_class_with_method(
+      type::java_lang_Integer(), DexType::make_type("Ljava/lang/Number;"),
+      ACC_PUBLIC | ACC_FINAL, "Ljava/lang/Integer;.intValue:()I", ACC_PUBLIC);
+}
+
+} // namespace
+
+// `Number.intValue()` on a boxed Integer dispatches to `Integer.intValue()`:
+// Integer is final, so no subclass can override it.
+TEST_F(ImmutableTest, integer_through_supertype) {
+  create_number_and_integer();
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v1 100)
+      (invoke-static (v1) "Ljava/lang/Integer;.valueOf:(I)Ljava/lang/Integer;")
+      (move-result-object v0)
+      (invoke-virtual (v0) "Ljava/lang/Number;.intValue:()I")
+      (move-result v0)
+      (return-void)
+    )
+  )");
+
+  do_const_prop(code.get(), m_analyzer, m_config);
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const v1 100)
+      (invoke-static (v1) "Ljava/lang/Integer;.valueOf:(I)Ljava/lang/Integer;")
+      (move-result-object v0)
+      (invoke-virtual (v0) "Ljava/lang/Number;.intValue:()I")
+      (const v0 100)
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+namespace {
+
+// Creates the abstract class `LSuper;` declaring `value()` with `access` and
+// returns its type.
+DexType* create_super(DexAccessFlags access = ACC_PUBLIC) {
+  auto* type = DexType::make_type("LSuper;");
+  create_external_class_with_method(type, type::java_lang_Object(),
+                                    ACC_PUBLIC | ACC_ABSTRACT,
+                                    "LSuper;.value:()I", access);
+  return type;
+}
+
+// Creates the interface `LNamed;` declaring `value()` with `access` and
+// returns its type.
+DexType* create_interface(DexAccessFlags access = ACC_PUBLIC | ACC_ABSTRACT) {
+  auto* type = DexType::make_type("LNamed;");
+  create_external_class_with_method(type, type::java_lang_Object(),
+                                    ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT,
+                                    "LNamed;.value:()I", access);
+  return type;
+}
+
+// Returns whether `call`, an invoke of a `value()` method on an object that
+// `LBase;.<init>(I)V` initialized with 7, folds to 7. `getter` is the attribute
+// getter `LBase;.<init>` initializes.
+bool call_on_base_folds(const char* getter, const std::string& call) {
+  cp::ImmutableAttributeAnalyzerState analyzer_state;
+  analyzer_state
+      .add_initializer(dynamic_cast<DexMethod*>(
+                           DexMethod::make_method("LBase;.<init>:(I)V")),
+                       dynamic_cast<DexMethod*>(DexMethod::get_method(getter)))
+      .set_src_id_of_attr(1)
+      .set_src_id_of_obj(0);
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const v1 7)
+      (new-instance "LBase;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0 v1) "LBase;.<init>:(I)V")
+      )" + call + R"(
+      (move-result v2)
+      (return v2)
+    )
+  )");
+  cp::Transform::Config config;
+  config.replace_move_result_with_consts = true;
+  ConstantPropagationTest::do_const_prop(
+      code.get(), ImmutableAnalyzer(nullptr, &analyzer_state, nullptr), config);
+  for (const auto& mie : InstructionIterable(code.get())) {
+    if (mie.insn->opcode() == OPCODE_CONST && mie.insn->get_literal() == 7 &&
+        mie.insn->dest() == 2) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// An object initialized by `Base.<init>` may be an instance of a subclass of
+// Base, which can override the getter `Base.value()`. Base extends
+// `called_class`, or implements it when it is an interface. Returns whether the
+// call `called_class.value()` on such an object folds to the value
+// `Base.<init>` recorded.
+bool getter_through_supertype_folds(DexAccessFlags base_access,
+                                    DexAccessFlags getter_access,
+                                    DexType* called_class) {
+  auto* called_cls = type_class(called_class);
+  const bool through_interface =
+      called_cls != nullptr && is_interface(called_cls);
+  create_external_class_with_method(
+      DexType::make_type("LBase;"),
+      through_interface ? type::java_lang_Object() : called_class, base_access,
+      "LBase;.value:()I", getter_access,
+      through_interface ? called_class : nullptr);
+  return call_on_base_folds(
+      "LBase;.value:()I",
+      std::string("(") +
+          (through_interface ? "invoke-interface" : "invoke-virtual") +
+          " (v0) \"" + called_class->str() + ".value:()I\")");
+}
+
+} // namespace
+
+TEST_F(ImmutableTest, getter_through_supertype_on_final_class) {
+  EXPECT_TRUE(getter_through_supertype_folds(ACC_PUBLIC | ACC_FINAL, ACC_PUBLIC,
+                                             create_super()));
+}
+
+TEST_F(ImmutableTest, final_getter_through_supertype) {
+  EXPECT_TRUE(getter_through_supertype_folds(ACC_PUBLIC, ACC_PUBLIC | ACC_FINAL,
+                                             create_super()));
+}
+
+TEST_F(ImmutableTest, protected_getter_through_supertype) {
+  EXPECT_TRUE(getter_through_supertype_folds(
+      ACC_PUBLIC | ACC_FINAL, ACC_PROTECTED, create_super(ACC_PROTECTED)));
+}
+
+TEST_F(ImmutableTest, getter_through_interface_on_final_class) {
+  EXPECT_TRUE(getter_through_supertype_folds(ACC_PUBLIC | ACC_FINAL, ACC_PUBLIC,
+                                             create_interface()));
+}
+
+TEST_F(ImmutableTest, overridable_getter_through_interface) {
+  EXPECT_FALSE(getter_through_supertype_folds(ACC_PUBLIC, ACC_PUBLIC,
+                                              create_interface()));
+}
+
+TEST_F(ImmutableTest, final_getter_through_interface) {
+  EXPECT_TRUE(getter_through_supertype_folds(ACC_PUBLIC, ACC_PUBLIC | ACC_FINAL,
+                                             create_interface()));
+}
+
+// An invoke-virtual of `Abstract.value()`, which only the interface Named
+// declares, dispatches to the getter `Base.value()` like the interface call.
+TEST_F(ImmutableTest, getter_through_method_declared_only_by_interface) {
+  auto* intf = create_interface();
+  auto* abstract_type = DexType::make_type("LAbstract;");
+  ClassCreator abstract_creator(abstract_type);
+  abstract_creator.set_super(type::java_lang_Object());
+  abstract_creator.set_access(ACC_PUBLIC | ACC_ABSTRACT);
+  abstract_creator.add_interface(intf);
+  abstract_creator.set_external();
+  abstract_creator.create();
+  create_external_class_with_method(DexType::make_type("LBase;"), abstract_type,
+                                    ACC_PUBLIC | ACC_FINAL, "LBase;.value:()I",
+                                    ACC_PUBLIC);
+  EXPECT_TRUE(call_on_base_folds(
+      "LBase;.value:()I", R"((invoke-virtual (v0) "LAbstract;.value:()I"))"));
+}
+
+// As above, but `Abstract` extends `Hidden`, which is missing from the input.
+// `Hidden` could declare a package-private `value()` that the invoke-virtual
+// reaches instead of the getter, so the call is left alone.
+TEST_F(ImmutableTest, getter_through_interface_method_with_missing_superclass) {
+  auto* intf = create_interface();
+  auto* abstract_type = DexType::make_type("LAbstract;");
+  ClassCreator abstract_creator(abstract_type);
+  abstract_creator.set_super(DexType::make_type("LHidden;"));
+  abstract_creator.set_access(ACC_PUBLIC | ACC_ABSTRACT);
+  abstract_creator.add_interface(intf);
+  abstract_creator.set_external();
+  abstract_creator.create();
+  create_external_class_with_method(DexType::make_type("LBase;"), abstract_type,
+                                    ACC_PUBLIC | ACC_FINAL, "LBase;.value:()I",
+                                    ACC_PUBLIC);
+  EXPECT_FALSE(call_on_base_folds(
+      "LBase;.value:()I", R"((invoke-virtual (v0) "LAbstract;.value:()I"))"));
+}
+
+// The getter search does not look at the default methods of interfaces, so an
+// interface missing from the input does not stop it.
+TEST_F(ImmutableTest, default_method_of_interface_not_searched) {
+  auto* intf = create_interface(ACC_PUBLIC);
+  ClassCreator creator(DexType::make_type("LBase;"));
+  creator.set_super(type::java_lang_Object());
+  creator.set_access(ACC_PUBLIC | ACC_FINAL);
+  creator.add_interface(intf);
+  creator.add_interface(DexType::make_type("LMissing;"));
+  creator.set_external();
+  auto* other =
+      dynamic_cast<DexMethod*>(DexMethod::make_method("LBase;.other:()I"));
+  other->set_access(ACC_PUBLIC);
+  other->set_virtual(true);
+  other->set_external();
+  creator.add_method(other);
+  creator.create();
+  EXPECT_FALSE(call_on_base_folds(
+      "LBase;.other:()I", R"((invoke-interface (v0) "LNamed;.value:()I"))"));
+}
+
+// Only a public method implements an interface method.
+TEST_F(ImmutableTest, protected_getter_through_interface) {
+  EXPECT_FALSE(getter_through_supertype_folds(
+      ACC_PUBLIC | ACC_FINAL, ACC_PROTECTED, create_interface()));
+}
+
+TEST_F(ImmutableTest, overridable_getter_through_supertype) {
+  EXPECT_FALSE(
+      getter_through_supertype_folds(ACC_PUBLIC, ACC_PUBLIC, create_super()));
+}
+
+// A getter that is neither public nor protected is not known to override the
+// called method, so the call is left alone even though the getter is final.
+TEST_F(ImmutableTest, package_private_getter_through_supertype) {
+  EXPECT_FALSE(
+      getter_through_supertype_folds(ACC_PUBLIC, ACC_FINAL, create_super()));
+}
+
+// Whether a getter overrides a package-private called method depends on the
+// packages, so the call is left alone.
+TEST_F(ImmutableTest, getter_through_package_private_supertype_method) {
+  EXPECT_FALSE(getter_through_supertype_folds(
+      ACC_PUBLIC | ACC_FINAL, ACC_PUBLIC, create_super(DexAccessFlags(0))));
+}
+
+// A called method without a definition, such as one declared in a class
+// missing from the input, has no known access flags, so it is not known to be
+// overridden by the getter, and the call is left alone.
+TEST_F(ImmutableTest, getter_through_undefined_method) {
+  EXPECT_FALSE(getter_through_supertype_folds(
+      ACC_PUBLIC | ACC_FINAL, ACC_PUBLIC, DexType::make_type("LUndefined;")));
+}
+
 TEST_F(ImmutableTest, cached_identity) {
   auto code = assembler::ircode_from_string(R"(
     (

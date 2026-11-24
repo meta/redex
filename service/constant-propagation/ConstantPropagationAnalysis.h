@@ -448,6 +448,18 @@ class ImmutableAttributeAnalyzer final
                            ConstantEnvironment* env);
 };
 
+// Returns the registered attribute getter that the virtual or interface call
+// `insn` dispatches to on its receiver, or nullptr. The receiver's recorded
+// type can be a proper supertype of its runtime type (the class whose
+// constructor initialized it, or a factory's declared return type), so the
+// getter must be one no subclass can override. A getter is known to override a
+// class method only when both are public or protected, and to implement an
+// interface method only when it is public.
+DexMethod* resolve_attribute_getter_call(
+    const ConcurrentSet<DexMethod*>& attribute_methods,
+    const IRInstruction* insn,
+    const ConstantEnvironment& env);
+
 // Construction of this object is expensive because get_type/field/method
 // acquires a global lock. Make sure to cache it.
 struct BoxedBooleanAnalyzerState {

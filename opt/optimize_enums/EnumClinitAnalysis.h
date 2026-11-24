@@ -58,6 +58,9 @@ using EnumConstantsMap = UnorderedMap<const DexFieldRef*, EnumConstant>;
 struct EnumAttributes {
   EnumConstantsMap m_constants_map;
   EnumInstanceFieldMap m_field_map;
+  // The field of the constant that each `new-instance` in `<clinit>` creates.
+  // Valid while `<clinit>` is unchanged.
+  UnorderedMap<const IRInstruction*, const DexFieldRef*> m_constant_allocations;
 
   std::map<uint64_t, const DexString*> get_ordered_names() {
     std::map<uint64_t, const DexString*> names;

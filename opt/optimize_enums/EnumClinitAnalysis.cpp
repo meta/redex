@@ -615,7 +615,6 @@ EnumAttributes analyze_enum_clinit(const DexClass* cls,
   auto* ordinal_field = get_ordinal_field();
   auto* enum_name_field = get_enum_name_field();
   EnumAttributes attributes;
-  UnorderedSet<const IRInstruction*> constant_allocations;
   for (const auto& pair : return_env.get_field_environment().bindings()) {
     const auto* enum_sfield = pair.first;
     if (enum_sfield->get_class() != cls->get_type() ||
@@ -650,7 +649,7 @@ EnumAttributes analyze_enum_clinit(const DexClass* cls,
     // A constant ordinal is read from a known allocation.
     const auto allocation = heap_ptr->get_constant();
     always_assert(allocation);
-    constant_allocations.insert(*allocation);
+    attributes.m_constant_allocations.emplace(*allocation, enum_sfield);
 
     for (auto* enum_ifield : cls->get_ifields()) {
       auto env_value = ptr.get(enum_ifield);
@@ -721,7 +720,7 @@ EnumAttributes analyze_enum_clinit(const DexClass* cls,
           mie.insn->get_type() != cls->get_type()) {
         continue;
       }
-      if (!constant_allocations.contains(mie.insn) ||
+      if (attributes.m_constant_allocations.count(mie.insn) == 0 ||
           loops.get_loop_for(block) != nullptr) {
         TRACE(ENUM, 2, "\t%s creates an instance that is not a unique constant",
               SHOW(cls));

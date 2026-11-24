@@ -5203,6 +5203,188 @@ TEST_F(OptimizeEnumsTest, instanceParameterObservationUsesArgumentIndex) {
   EXPECT_EQ(summary.returned_param, std::nullopt);
 }
 
+// Runs OptimizeEnumsPass on `store` and returns the metrics it reports.
+UnorderedMap<std::string, int64_t> run_optimize_enums(DexStore store) {
+  DexStoresVector stores({std::move(store)});
+  optimize_enums::OptimizeEnumsPass pass;
+  Json::Value conf_obj = Json::nullValue;
+  ConfigFiles conf(conf_obj);
+  conf.parse_global_config();
+  PassManager manager({&pass});
+  manager.run_passes(stores, conf);
+  for (const auto& info : manager.get_pass_info()) {
+    if (info.pass == &pass) {
+      return info.metrics;
+    }
+  }
+  ADD_FAILURE() << "OptimizeEnumsPass did not run";
+  return {};
+}
+
+// The opcodes of the method of `LOuter;` whose name starts with `prefix`.
+std::vector<IROpcode> outer_method_opcodes(const std::string& prefix) {
+  for (auto* m : type_class(DexType::get_type("LOuter;"))->get_all_methods()) {
+    auto* code = m->get_code();
+    if (code == nullptr || !m->str().starts_with(prefix)) {
+      continue;
+    }
+    std::vector<IROpcode> opcodes;
+    for (const auto& mie : InstructionIterable(*code)) {
+      opcodes.push_back(mie.insn->opcode());
+    }
+    return opcodes;
+  }
+  return {};
+}
+
+void build_outer(DexStore& store,
+                 const std::string& field,
+                 const std::string& ctor,
+                 const std::string& clinit,
+                 const std::string& read) {
+  ClassCreator cc(DexType::make_type("LOuter;"));
+  cc.set_super(type::java_lang_Enum());
+  cc.set_access(ACC_PUBLIC | ACC_FINAL | ACC_ENUM);
+  cc.add_field(
+      DexField::make_field(field)->make_concrete(ACC_PUBLIC | ACC_FINAL));
+  cc.add_field(DexField::make_field("LOuter;.$VALUES:[LOuter;")
+                   ->make_concrete(ACC_PRIVATE | ACC_STATIC | ACC_FINAL |
+                                   ACC_SYNTHETIC));
+  cc.add_field(
+      DexField::make_field("LOuter;.A:LOuter;")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL | ACC_ENUM));
+  for (const auto& method : {ctor, clinit, read}) {
+    cc.add_method(assembler::method_from_string(method));
+  }
+  auto* outer = cc.create();
+  for (auto* m : outer->get_all_methods()) {
+    m->get_code()->build_cfg();
+  }
+  store.add_classes({outer});
+}
+
+// `<clinit>` reads a field of a constant before it assigns the constant, as in
+// this Java-like view of hand-written or transformed code:
+//
+//   enum Outer {
+//     A(5);
+//     final int i;
+//     Outer(int i) { this.i = i; }
+//     static {
+//       Outer a = new Outer("A", 0, 5);
+//       use(a.i);
+//       A = a;
+//     }
+//   }
+//
+// Once boxed, every use of the allocation reads the boxed constant, so no
+// instance of `Outer` remains.
+TEST_F(OptimizeEnumsTest, constantUsedBeforeItsAssignmentIsBoxed) {
+  auto store = create_enum_store();
+  build_outer(store, "LOuter;.i:I", R"(
+    (method (private constructor) "LOuter;.<init>:(Ljava/lang/String;II)V"
+      ((load-param-object v0)
+       (load-param-object v1)
+       (load-param v2)
+       (load-param v3)
+       (invoke-direct (v0 v1 v2) "Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V")
+       (iput v3 v0 "LOuter;.i:I")
+       (return-void)))
+  )",
+              R"(
+    (method (public static) "LOuter;.<clinit>:()V"
+      ((const-string "A")
+       (move-result-pseudo-object v1)
+       (const v2 0)
+       (const v6 5)
+       (new-instance "LOuter;")
+       (move-result-pseudo-object v3)
+       (invoke-direct (v3 v1 v2 v6) "LOuter;.<init>:(Ljava/lang/String;II)V")
+       (iget v3 "LOuter;.i:I")
+       (move-result-pseudo v7)
+       (invoke-static (v7) "LOuter;.use:(I)V")
+       (sput-object v3 "LOuter;.A:LOuter;")
+       (const v4 1)
+       (new-array v4 "[LOuter;")
+       (move-result-pseudo-object v4)
+       (aput-object v3 v4 v2)
+       (sput-object v4 "LOuter;.$VALUES:[LOuter;")
+       (return-void)))
+  )",
+              R"(
+    (method (public static) "LOuter;.use:(I)V"
+      ((load-param v0)
+       (return-void)))
+  )");
+  run_optimize_enums(std::move(store));
+
+  EXPECT_EQ(type_class(DexType::get_type("LOuter;"))->get_super_class(),
+            type::java_lang_Object());
+  EXPECT_THAT(outer_method_opcodes("<clinit>"),
+              ::testing::Not(::testing::Contains(OPCODE_NEW_INSTANCE)));
+}
+
+// `<clinit>` keeps a copy of a constant's allocation in a second register and
+// stores it in another static field, as a pass that reuses the register instead
+// of reading `A` again may leave this Java code:
+//
+//   enum Outer {
+//     A(5);
+//     static final Outer ALIAS = A;
+//     final int i;
+//     Outer(int i) { this.i = i; }
+//   }
+//
+// Once boxed, the copy holds the boxed constant too, so no instance of `Outer`
+// remains.
+TEST_F(OptimizeEnumsTest, constantCopiedToAnotherFieldIsBoxed) {
+  auto store = create_enum_store();
+  build_outer(store, "LOuter;.i:I", R"(
+    (method (private constructor) "LOuter;.<init>:(Ljava/lang/String;II)V"
+      ((load-param-object v0)
+       (load-param-object v1)
+       (load-param v2)
+       (load-param v3)
+       (invoke-direct (v0 v1 v2) "Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V")
+       (iput v3 v0 "LOuter;.i:I")
+       (return-void)))
+  )",
+              R"(
+    (method (public static) "LOuter;.<clinit>:()V"
+      ((const-string "A")
+       (move-result-pseudo-object v1)
+       (const v2 0)
+       (const v6 5)
+       (new-instance "LOuter;")
+       (move-result-pseudo-object v3)
+       (invoke-direct (v3 v1 v2 v6) "LOuter;.<init>:(Ljava/lang/String;II)V")
+       (move-object v7 v3)
+       (sput-object v3 "LOuter;.A:LOuter;")
+       (sput-object v7 "LOuter;.ALIAS:LOuter;")
+       (const v4 1)
+       (new-array v4 "[LOuter;")
+       (move-result-pseudo-object v4)
+       (aput-object v3 v4 v2)
+       (sput-object v4 "LOuter;.$VALUES:[LOuter;")
+       (return-void)))
+  )",
+              R"(
+    (method (public static) "LOuter;.alias:()LOuter;"
+      ((sget-object "LOuter;.ALIAS:LOuter;")
+       (move-result-pseudo-object v0)
+       (return-object v0)))
+  )");
+  type_class(DexType::get_type("LOuter;"))
+      ->add_field(DexField::make_field("LOuter;.ALIAS:LOuter;")
+                      ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL));
+  run_optimize_enums(std::move(store));
+
+  EXPECT_EQ(type_class(DexType::get_type("LOuter;"))->get_super_class(),
+            type::java_lang_Object());
+  EXPECT_THAT(outer_method_opcodes("<clinit>"),
+              ::testing::Not(::testing::Contains(OPCODE_NEW_INSTANCE)));
+}
+
 // A switch-map class whose <clinit> fills a second table that it stores in no
 // field, as after RemoveUnusedFieldsPass removed the field of a table nothing
 // reads: no switch can read that table, so collecting the switch cases skips

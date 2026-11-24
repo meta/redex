@@ -1828,8 +1828,8 @@ class EnumTransformer final {
    */
   void clean_generated_methods_fields(DexClass* enum_cls) {
     auto& sfields = enum_cls->get_sfields();
-    auto& enum_constants =
-        m_enum_attributes_map[enum_cls->get_type()].m_constants_map;
+    const auto& attributes = m_enum_attributes_map[enum_cls->get_type()];
+    const auto& enum_constants = attributes.m_constants_map;
     auto synth_field_access = synth_access();
     UnorderedSet<DexField*> synth_fields;
 
@@ -1855,7 +1855,7 @@ class EnumTransformer final {
     // Delete <init>, values() and valueOf(String) methods, and clean <clinit>.
     std::erase_if(dmethods, [&, this](auto* method) {
       if (method::is_clinit(method)) {
-        clean_clinit(enum_constants, enum_cls, method, synth_fields);
+        clean_clinit(attributes, enum_cls, method, synth_fields);
         return empty(method->get_code());
       }
       return this->is_generated_enum_method(method);
@@ -1863,13 +1863,17 @@ class EnumTransformer final {
   }
 
   /**
-   * Erase enum construction code. Erase the put instructions that write enum
-   * values and synthetic $VALUES array, then erase the dead instructions.
+   * Erase enum construction code. Replace each constant's allocation with a
+   * read of the constant's field, so that every use of the constant, before or
+   * after <clinit> assigns it, reads the boxed constant. Erase the put
+   * instructions that write enum values and synthetic $VALUES array, then
+   * erase the dead instructions.
    *
    * The code before the transformation:
    *
    * new-instance v0 LCandidateEnum;
    * invoke-direct v0 v1 v2 Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V
+   * ... // register v0 may be used.
    * sput-object v0 LCandidateEnum;.f:LCandidateEnum;
    * ... // maybe more objects construction.
    * sput-object v3 LCandidateEnum;.$VALUES:[LCandidateEnum;
@@ -1877,16 +1881,16 @@ class EnumTransformer final {
    *
    * The code after the transformation:
    *
-   * // Deleted. new-instance v0 LCandidateEnum;
+   * sget-object v0 LCandidateEnum;.f:LCandidateEnum;
    * // Deleted. invoke-direct v0 v1 v2
    * Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V
+   * ... // register v0 may be used.
    * // Deleted. sput-object v0 LCandidateEnum;.f:LCandidateEnum;
-   * sget-object v0 LCandidateEnum;.f:LCandidateEnum;
    * ... // maybe more objects construction.
    * // Deleted. sput-object v3 LCandidateEnum;.$VALUES:[LCandidateEnum;
    * ... // register v0 may be used.
    */
-  static void clean_clinit(const EnumConstantsMap& enum_constants,
+  static void clean_clinit(const EnumAttributes& attributes,
                            DexClass* enum_cls,
                            DexMethod* clinit,
                            const UnorderedSet<DexField*>& synth_fields) {
@@ -1899,24 +1903,31 @@ class EnumTransformer final {
     cfg::CFGMutation m(cfg);
     for (auto it = ii.begin(); it != ii.end(); ++it) {
       auto* insn = it->insn;
-      if (opcode::is_an_sput(insn->opcode())) {
-        auto* field = resolve_field(insn->get_field());
-        if ((field != nullptr) && (enum_constants.count(field) != 0u)) {
-          cfg.insert_before(it, dasm(OPCODE_SGET_OBJECT, field));
-          cfg.insert_before(
+      if (insn->opcode() == OPCODE_NEW_INSTANCE) {
+        auto allocation_it = attributes.m_constant_allocations.find(insn);
+        if (allocation_it != attributes.m_constant_allocations.end()) {
+          m.replace(
               it,
-              dasm(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT, {{VREG, insn->src(0)}}));
-          m.remove(it);
-        } else if (synth_fields.count(field) != 0u) {
+              {dasm(OPCODE_SGET_OBJECT, resolve_field(allocation_it->second)),
+               dasm(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT,
+                    {{VREG, cfg.move_result_of(it)->insn->dest()}})});
+        }
+      } else if (opcode::is_an_sput(insn->opcode())) {
+        auto* field = resolve_field(insn->get_field());
+        if ((field != nullptr) &&
+            (attributes.m_constants_map.count(field) != 0u ||
+             synth_fields.count(field) != 0u)) {
           m.remove(it);
         }
-      } else if ((opcode::is_invoke_direct(insn->opcode()) &&
-                  insn->get_method() == ctor) ||
-                 (opcode::is_invoke_static(insn->opcode()) &&
+      } else if (opcode::is_invoke_direct(insn->opcode()) &&
+                 insn->get_method() == ctor) {
+        // The enum constructor is side-effect free (see is_safe_enum). Its
+        // instance is the boxed constant now, which may have other uses.
+        m.remove(it);
+      } else if ((opcode::is_invoke_static(insn->opcode()) &&
                   is_kt_enum_entries_factory(insn->get_method())) ||
                  (opcode::is_invoke_direct(insn->opcode()) &&
                   is_kt_enum_entries_list_ctor(insn->get_method()))) {
-        // The enum constructor is side-effect free (see is_safe_enum), and
         // `enumEntries`, or its inlined body, only wraps an array for
         // `$ENTRIES`.
         summaries.emplace(insn, side_effects::Summary());

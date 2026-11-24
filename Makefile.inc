@@ -35,6 +35,7 @@ COMMON_INCLUDES = \
 	-I$(top_srcdir)/opt/delsuper \
 	-I$(top_srcdir)/opt/evaluate_type_checks \
 	-I$(top_srcdir)/opt/final_inline \
+	-I$(top_srcdir)/opt/hot-cold-method-specializing \
 	-I$(top_srcdir)/opt/init-classes \
 	-I$(top_srcdir)/opt/insert-source-blocks \
 	-I$(top_srcdir)/opt/instrument \
@@ -46,6 +47,7 @@ COMMON_INCLUDES = \
 	-I$(top_srcdir)/opt/make-public \
 	-I$(top_srcdir)/opt/merge_interface \
 	-I$(top_srcdir)/opt/methodinline \
+	-I$(top_srcdir)/opt/nopper \
 	-I$(top_srcdir)/opt/nullcheck_conversion \
 	-I$(top_srcdir)/opt/obfuscate \
 	-I$(top_srcdir)/opt/obfuscate_resources \

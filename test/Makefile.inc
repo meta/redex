@@ -31,3 +31,17 @@ COMMON_MOCK_TEST_LIBS = \
 
 # By default use PATH to find tools.
 JAVAC = javac
+
+# make_env: Simple helper to generate test-specific env.
+#
+# $1: test name
+# $2: space-separated list of env values
+#
+# Use: $(eval $(call make_env,test_name,a=b c=d))
+define make_env
+
+$(1).env:
+	rm -f $$@
+	$(foreach pair,$(2), echo "export $(pair)" >> $$@ ;)
+
+endef

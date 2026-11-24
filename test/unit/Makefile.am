@@ -19,20 +19,6 @@ LDADD = $(COMMON_TEST_LIBS)
 LOG_COMPILER = sh
 AM_LOG_FLAGS = -c 'if [ -f $$0.env ] ; then . ./$$0.env ; fi ; sdk_path=$(ANDROID_SDK) android_target=$(ANDROID_PLATFORM_VERSION) ./$$0'
 
-# make_env: Simple helper to generate test-specific env.
-#
-# $1: test name
-# $2: space-separated list of env values
-#
-# Use: $(eval $(call make_env,test_name,a=b c=d))
-define make_env
-
-$(1).env:
-	rm -f $$@
-	$(foreach pair,$(2), echo "export $(pair)" >> $$@ ;)
-
-endef
-
 ####
 # Actual test definitions
 ####
@@ -52,6 +38,7 @@ check_PROGRAMS = \
     assert_test \
     atomic_field_updater_lowering_test \
     atomic_map_test \
+    atomic_stat_counter_test \
     baseline_profile_test \
     blaming_escape_test \
     block_offset_sink_test \
@@ -122,6 +109,7 @@ check_PROGRAMS = \
     graph_util_test \
     hierarchy_util_test \
     hot_callsites_test \
+    hot_cold_method_specializing_test \
     init_class_test \
     init_class_pruner_test \
     init_class_lowering_pass_test \
@@ -170,6 +158,7 @@ check_PROGRAMS = \
     native_names_test \
     never_compile_selection_test \
     never_inline_eligibility_test \
+    nopper_test \
     null_propagation_test \
     obfuscate_method_handle_test \
     object_inliner_test \
@@ -238,10 +227,12 @@ check_PROGRAMS = \
     stringbuilder_append_chain_test \
     stringbuilder_outline_test \
     strip_debug_info_test \
+    string_propagation_test \
     string_switch_test \
     string_switch_transform_test \
     switch_dispatch_test \
     switch_equiv_test \
+    tail_duplication_test \
     throw_propagation_test \
     rare_suffix_selection_test \
     rare_suffix_method_splitting_test \
@@ -260,6 +251,7 @@ check_PROGRAMS = \
     uninitialized_objects_test \
     unique_method_tracker_test \
     unknown_virtuals_test \
+    unreachable_lowering_pass_test \
     up_code_motion_test \
     used_vars_test \
     vertical_merging_method_handle_test \

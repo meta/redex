@@ -378,6 +378,11 @@ void RtypeSpecialization::specialize_rtypes(const Scope& scope,
   Timer t("specialize_rtype");
   const auto& override_graph = method_override_graph::build_graph(scope);
   InsertOnlyConcurrentMap<DexMethod*, const DexType*> virtual_roots;
+  const auto methods_named_by_method_handles =
+      method::gather_methods_named_by_method_handles(scope);
+  auto is_named_by_method_handle = [&](const DexMethod* meth) {
+    return methods_named_by_method_handles.count(meth) != 0;
+  };
 
   // Preprocess the candidates to cut down the size of candidates.
   // The main logic is filtering out complex virtual scopes that we choose not
@@ -408,7 +413,7 @@ void RtypeSpecialization::specialize_rtypes(const Scope& scope,
   // Update direct targets.
   for (const auto& pair : m_candidates) {
     auto* meth = pair.first;
-    if (meth->is_virtual()) {
+    if (meth->is_virtual() || is_named_by_method_handle(meth)) {
       continue;
     }
     const auto* better_rtype = pair.second;
@@ -430,6 +435,10 @@ void RtypeSpecialization::specialize_rtypes(const Scope& scope,
     const auto* better_rtype = virtual_roots.at(root);
     const auto& overrides = method_override_graph::get_overriding_methods(
         *override_graph, root, true);
+    if (is_named_by_method_handle(root) ||
+        unordered_any_of(overrides, is_named_by_method_handle)) {
+      continue;
+    }
     auto* new_proto =
         DexProto::make_proto(better_rtype, root->get_proto()->get_args());
     // Check the root before changing its overrides, so that a group is

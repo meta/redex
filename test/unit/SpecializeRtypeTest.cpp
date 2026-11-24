@@ -382,3 +382,106 @@ TEST_F(SpecializeRtypeTest, keeps_interface_method_whose_implementor_has_it) {
   EXPECT_EQ(a_m->get_proto()->get_rtype(), type::java_lang_Object());
   EXPECT_EQ(t_m->get_proto()->get_rtype(), type::java_lang_Object());
 }
+
+namespace {
+
+// A class `U` whose `U.use()` holds `handle` (tool-generated here) and calls
+// it with `invokeExact`, passing a null receiver if `call_proto` takes one; the
+// caller fixes the prototype of the call.
+DexClass* make_handle_user(const std::string& handle,
+                           const std::string& call_proto) {
+  auto* proto = DexProto::make_proto(call_proto);
+  std::string srcs = proto->get_args()->empty() ? "v0" : "v0 v1";
+  ClassCreator creator(DexType::make_type("LU;"));
+  creator.set_super(type::java_lang_Object());
+  creator.add_method(assembler::method_from_string(
+      R"(
+    (method (public static) "LU;.use:()V"
+     (
+      (const v1 0)
+      (const-method-handle )" +
+      handle + R"()
+      (move-result-pseudo-object v0)
+      (invoke-polymorphic ()" +
+      srcs +
+      R"() "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" ")" +
+      call_proto + R"(")
+      (return-void)
+     )
+    )
+  )"));
+  return creator.create();
+}
+
+void specialize(const Scope& scope,
+                const resolve_refs::MethodToInferredReturnType& candidates) {
+  DexStore store("classes");
+  store.add_classes(scope);
+  DexStoresVector stores{store};
+  resolve_refs::RtypeSpecialization specialization(
+      candidates, XStoreRefs(stores, /* normal_primary_dex */ false));
+  specialization.specialize_rtypes(scope, build_subtype_maps(scope));
+}
+
+} // namespace
+
+TEST_F(SpecializeRtypeTest, keeps_static_method_named_by_method_handle) {
+  // The handle has the type `()Object`, which `invokeExact` expects.
+  create_object_class();
+  ClassCreator creator(DexType::make_type("LC;"));
+  creator.set_super(type::java_lang_Object());
+  auto* get = assembler::method_from_string(R"(
+    (method (public static) "LC;.get:()Ljava/lang/Object;"
+     (
+      (const-string "C")
+      (move-result-pseudo-object v0)
+      (return-object v0)
+     )
+    )
+  )");
+  creator.add_method(get);
+  auto* cls = creator.create();
+  auto* user =
+      make_handle_user(R"(invoke-static "LC;.get:()Ljava/lang/Object;")",
+                       "()Ljava/lang/Object;");
+
+  specialize({cls, user}, {{get, type::java_lang_String()}});
+
+  EXPECT_EQ(get->get_proto()->get_rtype(), type::java_lang_Object());
+}
+
+TEST_F(SpecializeRtypeTest, keeps_interface_method_named_by_method_handle) {
+  // The handle names `I.get()`, the root of the group of `C.get()`.
+  create_object_class();
+  ClassCreator intf_creator(DexType::make_type("LI;"));
+  intf_creator.set_super(type::java_lang_Object());
+  intf_creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  auto* intf_get = DexMethod::make_method("LI;.get:()Ljava/lang/Object;")
+                       ->make_concrete(ACC_PUBLIC | ACC_ABSTRACT, true);
+  intf_creator.add_method(intf_get);
+  auto* intf = intf_creator.create();
+
+  ClassCreator creator(DexType::make_type("LC;"));
+  creator.set_super(type::java_lang_Object());
+  creator.add_interface(intf->get_type());
+  auto* get = assembler::method_from_string(R"(
+    (method (public) "LC;.get:()Ljava/lang/Object;"
+     (
+      (load-param-object v1)
+      (const-string "C")
+      (move-result-pseudo-object v0)
+      (return-object v0)
+     )
+    )
+  )");
+  creator.add_method(get);
+  auto* cls = creator.create();
+  auto* user =
+      make_handle_user(R"(invoke-interface "LI;.get:()Ljava/lang/Object;")",
+                       "(LI;)Ljava/lang/Object;");
+
+  specialize({intf, cls, user}, {{get, type::java_lang_String()}});
+
+  EXPECT_EQ(intf_get->get_proto()->get_rtype(), type::java_lang_Object());
+  EXPECT_EQ(get->get_proto()->get_rtype(), type::java_lang_Object());
+}

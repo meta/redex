@@ -7,6 +7,9 @@
 
 #include "DefinitelyAssignedIFields.h"
 
+#include <algorithm>
+#include <limits>
+#include <optional>
 #include <vector>
 
 #include <sparta/AbstractDomain.h>
@@ -152,15 +155,20 @@ class ConstructorAnalysisEnvironment final
   }
 };
 
+// The result of a constructor that another one calls on `this`, or nothing
+// while that constructor is still being analyzed further up the chain of
+// calls.
+using GetCalleeResult =
+    std::function<std::optional<AnalysisResult>(DexMethod*)>;
+
 class Analyzer final : public BaseIRAnalyzer<ConstructorAnalysisEnvironment> {
  public:
   Analyzer(const cfg::ControlFlowGraph& cfg,
            const DexType* declaring_type,
-           const std::function<const AnalysisResult*(DexMethod*)>&
-               get_analysis_result)
+           GetCalleeResult get_callee_result)
       : BaseIRAnalyzer(cfg),
         m_declaring_type(declaring_type),
-        m_get_analysis_result(get_analysis_result),
+        m_get_callee_result(std::move(get_callee_result)),
         m_super_type(type_class(declaring_type)->get_super_class()),
         m_first_load_param(cfg.get_first_param_instruction()) {
     always_assert(m_first_load_param != nullptr &&
@@ -248,7 +256,7 @@ class Analyzer final : public BaseIRAnalyzer<ConstructorAnalysisEnvironment> {
     if (invoked_ctor_on_this != nullptr) {
       // Run this after the loop over the src registers, to make sure we abort
       // when the `this` parameter escapes
-      const auto* analysis_result = m_get_analysis_result(invoked_ctor_on_this);
+      const auto* analysis_result = get_callee_result(invoked_ctor_on_this);
       if (invoked_ctor_on_this->get_class() == m_declaring_type) {
         for (auto* field : type_class(m_declaring_type)->get_ifields()) {
           if (analysis_result->definitely_assigned_ifields.count(field) != 0u) {
@@ -282,8 +290,21 @@ class Analyzer final : public BaseIRAnalyzer<ConstructorAnalysisEnvironment> {
   }
 
  private:
+  // A call of a constructor that is still being analyzed assigns nothing and
+  // may let `this` escape.
+  const AnalysisResult* get_callee_result(DexMethod* callee) const {
+    static const AnalysisResult unknown{{}, /* may_this_have_escaped */ true};
+    auto [it, inserted] = m_callee_results.try_emplace(callee);
+    if (inserted) {
+      it->second = m_get_callee_result(callee);
+    }
+    return it->second ? &*it->second : &unknown;
+  }
+
   const DexType* m_declaring_type;
-  const std::function<const AnalysisResult*(DexMethod*)>& m_get_analysis_result;
+  GetCalleeResult m_get_callee_result;
+  mutable UnorderedMap<const DexMethod*, std::optional<AnalysisResult>>
+      m_callee_results;
   const DexType* m_super_type;
   const IRInstruction* m_first_load_param;
 };
@@ -295,37 +316,65 @@ UnorderedSet<const DexField*> get_definitely_assigned_ifields(
     const Scope& scope) {
   Timer t("get_definitely_assigned_ifields");
   InsertOnlyConcurrentMap<DexMethod*, AnalysisResult> analysis_results;
-  std::function<const AnalysisResult*(DexMethod*)> get_analysis_result;
-  get_analysis_result = [&](DexMethod* ctor) -> const AnalysisResult* {
-    return analysis_results
-        .get_or_create_and_assert_equal(
-            ctor,
-            [&](auto*) {
-              if (!ctor->is_external() && ctor->rstate.no_optimizations()) {
-                AnalysisResult res;
-                res.may_this_have_escaped = true;
-                return res;
-              }
-              if (!ctor->is_external() && ctor->get_code()) {
-                auto& cfg = ctor->get_code()->cfg();
-                Analyzer analyzer(cfg, ctor->get_class(), get_analysis_result);
-                const auto& env = analyzer.get_exit_state_at(cfg.exit_block());
-                auto* cls = type_class(ctor->get_class());
-                return env.get_analysis_result(cls);
-              }
-              AnalysisResult res;
-              // Conservative assumption: All external ctors (without
-              // code) except Object::<init> may directly or
-              // indirectly read and write own fields.
-              if (ctor->get_class() != type::java_lang_Object()) {
-                // TODO: Consider using the SummaryGenerator to
-                // analyze AOSP classes to find other external
-                // constructors where this does not escape.
-                res.may_this_have_escaped = true;
-              }
-              return res;
-            })
-        .first;
+  // A constructor can call itself on `this`, directly or through other
+  // constructors, so `analyze` passes down the chain of constructors being
+  // analyzed. A result that relied on a constructor further out in the chain
+  // still being analyzed depends on where the chain started, so it is not kept:
+  // `analyze` then lowers `outermost_relied` to that constructor's position.
+  std::function<AnalysisResult(DexMethod*, const std::vector<DexMethod*>&,
+                               size_t*)>
+      analyze;
+  analyze = [&](DexMethod* ctor, const std::vector<DexMethod*>& chain,
+                size_t* outermost_relied) -> AnalysisResult {
+    const auto* known = analysis_results.get(ctor);
+    if (known != nullptr) {
+      return *known;
+    }
+    size_t relied = chain.size();
+    AnalysisResult res;
+    if (!ctor->is_external() && !ctor->rstate.no_optimizations() &&
+        ctor->get_code()) {
+      auto inner = chain;
+      inner.push_back(ctor);
+      auto& cfg = ctor->get_code()->cfg();
+      Analyzer analyzer(
+          cfg, ctor->get_class(),
+          [&](DexMethod* callee) -> std::optional<AnalysisResult> {
+            auto it = std::find(inner.begin(), inner.end(), callee);
+            if (it != inner.end()) {
+              relied = std::min(relied, size_t(it - inner.begin()));
+              return std::nullopt;
+            }
+            return analyze(callee, inner, &relied);
+          });
+      const auto& env = analyzer.get_exit_state_at(cfg.exit_block());
+      auto* cls = type_class(ctor->get_class());
+      res = env.get_analysis_result(cls);
+    } else if ((!ctor->is_external() && ctor->rstate.no_optimizations()) ||
+               ctor->get_class() != type::java_lang_Object()) {
+      // Conservative assumption: Constructors marked no_optimizations and
+      // all external ctors (without code) except Object::<init> may directly
+      // or indirectly read and write own fields.
+      // TODO: Consider using the SummaryGenerator to
+      // analyze AOSP classes to find other external
+      // constructors where this does not escape.
+      res.may_this_have_escaped = true;
+    }
+    if (relied < chain.size()) {
+      *outermost_relied = std::min(*outermost_relied, relied);
+      return res;
+    }
+    return *analysis_results
+                .get_or_create_and_assert_equal(ctor,
+                                                [&](auto*) { return res; })
+                .first;
+  };
+  // A constructor analyzed at the start of a chain relies on nothing further
+  // out, so its result is kept.
+  const auto get_analysis_result = [&](DexMethod* ctor) {
+    size_t outermost_relied = std::numeric_limits<size_t>::max();
+    analyze(ctor, {}, &outermost_relied);
+    return analysis_results.get(ctor);
   };
   ConcurrentSet<const DexType*> classes_with_relaxed_invoke_init;
   walk::parallel::code(scope, [&](DexMethod*, IRCode& code) {

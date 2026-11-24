@@ -8,6 +8,7 @@
 #include "TypeReference.h"
 
 #include "Creators.h"
+#include "DexAnnotation.h"
 #include "DexCallSite.h"
 #include "DexMethodHandle.h"
 #include "IRAssembler.h"
@@ -272,4 +273,32 @@ TEST_F(TypeRefUpdaterTest, method_handle_members) {
 
   EXPECT_EQ(take->get_proto(), DexProto::make_proto("(LBar;)V"));
   EXPECT_EQ(field->get_type(), DexType::make_type("[LBar;"));
+}
+
+// A method type that a static field value holds describes methods like a
+// const-method-type does.
+TEST_F(TypeRefUpdaterTest, method_type_of_static_field_value) {
+  auto* foo = DexType::make_type("LFoo;");
+  ClassCreator foo_creator(foo);
+  foo_creator.set_super(type::java_lang_Object());
+  auto* foo_cls = foo_creator.create();
+
+  auto* field =
+      DexField::make_field("LUser;.TYPE:Ljava/lang/invoke/MethodType;")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+                          std::make_unique<DexEncodedValueMethodType>(
+                              DexProto::make_proto("(LFoo;)[LFoo;")));
+  ClassCreator user_creator(DexType::make_type("LUser;"));
+  user_creator.set_super(type::java_lang_Object());
+  user_creator.add_field(field);
+  auto* user_cls = user_creator.create();
+
+  Scope scope{foo_cls, user_cls};
+  UnorderedMap<DexType*, DexType*> mapping{{foo, DexType::make_type("LBar;")}};
+  TypeRefUpdater(mapping).update_methods_fields(scope);
+
+  EXPECT_EQ(redex::encoded_value_as<DexEncodedValueMethodType>(
+                field->get_static_value())
+                ->proto(),
+            DexProto::make_proto("(LBar;)[LBar;"));
 }

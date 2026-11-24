@@ -229,15 +229,16 @@ DexProto* get_new_proto_impl(const DexProto* proto, const MapT& old_to_new) {
 }
 
 /**
- * Replaces by `new_proto(proto)` each prototype that the code in `scope` names
- * other than through a method reference: that of const-method-type, the
- * call-site prototype of invoke-polymorphic, and the method type and
- * method-type arguments of a call site. They describe the methods being called
- * or looked up, so they must change together with those methods' prototypes.
+ * Replaces by `new_proto(proto)` each prototype that the classes in `scope`
+ * name other than through a method reference: that of const-method-type, the
+ * call-site prototype of invoke-polymorphic, the method type and method-type
+ * arguments of a call site, and the method types that static field values and
+ * annotations hold. They describe the methods being called or looked up, so
+ * they must change together with those methods' prototypes.
  */
 template <typename NewProtoFn>
 void update_named_protos(const Scope& scope, const NewProtoFn& new_proto) {
-  MethodHandleRewriter callsite_rewriter(
+  MethodHandleRewriter method_type_rewriter(
       {.method_type = [&](DexProto* proto) { return new_proto(proto); }});
   walk::parallel::opcodes(scope, [&](DexMethod* method, IRInstruction* insn) {
     if (insn->has_proto()) {
@@ -247,9 +248,10 @@ void update_named_protos(const Scope& scope, const NewProtoFn& new_proto) {
           insn->get_signature_polymorphic()->method(),
           new_proto(insn->get_callsite_proto()));
     } else {
-      callsite_rewriter.rewrite(insn, method);
+      method_type_rewriter.rewrite(insn, method);
     }
   });
+  method_type_rewriter.rewrite(scope);
 }
 
 template <typename MapT>

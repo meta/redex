@@ -9,9 +9,11 @@
 #include <gtest/gtest.h>
 
 #include "ControlFlow.h"
+#include "Creators.h"
 #include "IRAssembler.h"
 #include "IRCode.h"
 #include "InitClassesWithSideEffects.h"
+#include "PassManager.h"
 #include "RedexTest.h"
 #include "RemoveUnusedArgs.h"
 #include "ScopeHelper.h"
@@ -263,4 +265,100 @@ TEST_F(RemoveUnusedArgsTest, multipleBlocksMixedArgs) {
   auto dead_args = vector_from_map(
       remove_unused_args::compute_dead_insns(method, *(method->get_code())));
   EXPECT_THAT(dead_args, ::testing::ElementsAre());
+}
+
+namespace {
+
+DexClass* make_class(const char* name,
+                     DexType* super,
+                     const std::vector<const char*>& methods) {
+  ClassCreator creator(DexType::make_type(name));
+  creator.set_super(super);
+  for (const auto* method : methods) {
+    creator.add_method(assembler::method_from_string(method));
+  }
+  return creator.create();
+}
+
+void run_remove_unused_args(const std::vector<DexClass*>& classes) {
+  remove_unused_args::RemoveUnusedArgsPass pass;
+  PassManager manager({&pass});
+  ConfigFiles config(Json::nullValue);
+  config.parse_global_config();
+  DexStore store("classes");
+  store.add_classes(classes);
+  std::vector<DexStore> stores;
+  stores.emplace_back(std::move(store));
+  manager.run_passes(stores, config);
+}
+
+} // namespace
+
+// The method handle (tool-generated here) names `compute` with its unused
+// parameter, and `invokeExact` passes an int to it, so `compute` must keep its
+// prototype.
+TEST_F(RemoveUnusedArgsTest, staticMethodNamedByMethodHandleKeepsPrototype) {
+  auto* foo = make_class("LFoo;", type::java_lang_Object(),
+                         {R"(
+    (method (public static) "LFoo;.compute:(I)I"
+     (
+      (load-param v0)
+      (const v1 1)
+      (return v1)
+     )
+    )
+  )",
+                          R"(
+    (method (public static) "LFoo;.use:()I"
+     (
+      (const v0 0)
+      (invoke-static (v0) "LFoo;.compute:(I)I")
+      (const-method-handle invoke-static "LFoo;.compute:(I)I")
+      (move-result-pseudo-object v1)
+      (invoke-polymorphic (v1 v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(I)I")
+      (move-result v0)
+      (return v0)
+     )
+    )
+  )"});
+
+  run_remove_unused_args({foo});
+
+  auto* compute = DexMethod::get_method("LFoo;.compute:(I)I");
+  ASSERT_NE(compute, nullptr);
+  ASSERT_NE(compute->as_def(), nullptr);
+}
+
+// The method handle names `run` by the subclass `LSub;`, where it resolves to
+// `LBase;.run`, so the virtual scope of `LBase;.run` must keep its prototype.
+TEST_F(RemoveUnusedArgsTest, virtualMethodNamedByMethodHandleKeepsPrototype) {
+  auto* base = make_class("LBase;", type::java_lang_Object(), {R"(
+    (method (public) "LBase;.run:(I)V"
+     (
+      (load-param-object v0)
+      (load-param v1)
+      (return-void)
+     )
+    )
+  )"});
+  auto* sub = make_class("LSub;", base->get_type(), {});
+  auto* user = make_class("LUser;", type::java_lang_Object(), {R"(
+    (method (public static) "LUser;.use:(LSub;)V"
+     (
+      (load-param-object v0)
+      (const v1 0)
+      (invoke-virtual (v0 v1) "LBase;.run:(I)V")
+      (const-method-handle invoke-instance "LSub;.run:(I)V")
+      (move-result-pseudo-object v2)
+      (invoke-polymorphic (v2 v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LSub;I)V")
+      (return-void)
+     )
+    )
+  )"});
+
+  run_remove_unused_args({base, sub, user});
+
+  auto* run = DexMethod::get_method("LBase;.run:(I)V");
+  ASSERT_NE(run, nullptr);
+  ASSERT_NE(run->as_def(), nullptr);
 }

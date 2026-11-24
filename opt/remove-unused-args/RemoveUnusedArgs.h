@@ -12,6 +12,7 @@
 #include "InitClassesWithSideEffects.h"
 #include "LocalDce.h"
 #include "MethodOverrideGraph.h"
+#include "MethodUtil.h"
 #include "Pass.h"
 
 namespace remove_unused_args {
@@ -46,6 +47,8 @@ class RemoveArgs {
              const UnorderedSet<DexMethodRef*>& pure_methods,
              size_t iteration = 0)
       : m_scope(scope),
+        m_methods_named_by_method_handles(
+            method::gather_methods_named_by_method_handles(scope)),
         m_init_classes_with_side_effects(init_classes_with_side_effects),
         m_blocklist(blocklist),
         m_iteration(iteration),
@@ -54,6 +57,8 @@ class RemoveArgs {
 
  private:
   const Scope& m_scope;
+  const InsertOnlyConcurrentSet<const DexMethod*>
+      m_methods_named_by_method_handles;
   InsertOnlyConcurrentMap<const DexMethod*, const DexMethod*>
       m_method_representative_map;
   InsertOnlyConcurrentMap<const DexMethod*, UnorderedSet<const DexMethod*>>
@@ -94,6 +99,7 @@ class RemoveArgs {
       const mog::Graph& override_graph,
       const UnorderedSet<DexType*>& no_devirtualize_annos);
   bool compute_remove_result(const DexMethod* method);
+  bool can_change_signature(const DexMethod* method) const;
 
   struct Entry {
     std::vector<cfg::InstructionIterator> dead_insns;

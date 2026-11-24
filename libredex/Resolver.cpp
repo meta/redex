@@ -179,24 +179,24 @@ DexMethod* find_most_specific_interface_method(const DexClass* cls,
       filtered_candidates.emplace_back(candidate);
     }
   }
-  bool has_default_intf = false;
+  // As at runtime (JVMS 5.4.6), the target is the only non-abstract one of
+  // these most specific methods. If there are several, the call throws an
+  // IncompatibleClassChangeError and there is no target. If there is none, any
+  // abstract one is as good as another.
+  DexMethod* default_method = nullptr;
   for (auto* candidate : filtered_candidates) {
     if (!is_abstract(candidate)) {
-      has_default_intf = true;
-      break;
+      if (default_method != nullptr) {
+        return nullptr;
+      }
+      default_method = candidate;
     }
   }
-  if (!has_default_intf) {
-    // If all candidates are abstract, we will just pick the first one
-    always_assert_log(!filtered_candidates.empty(),
-                      "filtered_candidates is empty for %s", SHOW(cls));
-    return filtered_candidates[0];
+  if (default_method != nullptr) {
+    return default_method;
   }
-
-  always_assert_log(filtered_candidates.size() == 1,
-                    "Interface hierarchy of %s has more than one most specific "
-                    "interface method for %s.%s",
-                    SHOW(cls), SHOW(name), SHOW(proto));
+  always_assert_log(!filtered_candidates.empty(),
+                    "filtered_candidates is empty for %s", SHOW(cls));
   return filtered_candidates[0];
 }
 
@@ -230,14 +230,10 @@ DexMethod* resolve_method_impl(const DexClass* cls,
       // For super calls to interface default methods, resolve from the
       // interface
       if (is_interface(cls)) {
-        auto* mdef = find_most_specific_interface_method(
+        // The result can be abstract, as for a class: the call then throws an
+        // AbstractMethodError.
+        return find_most_specific_interface_method(
             cls, name, proto, false /* walk_through_super */);
-        if (mdef != nullptr) {
-          always_assert_log(!is_abstract(mdef),
-                            "invoke-super on a non-default interface method %s",
-                            SHOW(mdef));
-        }
-        return mdef;
       }
     }
     if (caller != nullptr) {

@@ -27,12 +27,15 @@ struct SubtypeMaps;
  * move):
  *
  * - The method definition, internal or external, that the method reference
- *   resolves to. For a virtual call, overrides may run instead.
+ *   resolves to; among interface methods, the one runtime selection picks
+ *   (JVMS 5.4.6). It can be abstract. For a virtual call, overrides may run
+ *   instead.
  * - nullptr when the resolver cannot determine that method from the input:
- *   there is none, or an undefined type could change the answer. For example,
- *   with `class C implements Known, Missing {}`, `Missing` could declare `m()`
- *   itself, as a default method that conflicts with `Known.m()`, so `C.m()`
- *   resolves to nullptr.
+ *   there is none, several default methods are equally specific (the call
+ *   throws an IncompatibleClassChangeError), or an undefined type could change
+ *   the answer. For example, with `class C implements Known, Missing {}`,
+ *   `Missing` could declare `m()` itself, as a default method that conflicts
+ *   with `Known.m()`, so `C.m()` resolves to nullptr.
  *
  * Because nullptr also covers targets the input leaves open, callers must not
  * read it as "no such method". Nor is such a call external unless the class the

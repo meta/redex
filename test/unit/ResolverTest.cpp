@@ -1167,3 +1167,37 @@ TEST_F(ResolverTest, ResolveSuperOfInterfaceWithUndefinedSuperInterface) {
 
   EXPECT_EQ(resolve_method(ref, MethodSearch::Super, m_of("LC;")), nullptr);
 }
+
+// The call throws an IncompatibleClassChangeError at runtime.
+TEST_F(ResolverTest, ResolveVirtualWithConflictingDefaultMethods) {
+  create_object_class();
+  make_interface("LI;", {}, ACC_PUBLIC);
+  make_interface("LJ;", {}, ACC_PUBLIC);
+  auto* c =
+      make_class_with_intfs("LC;", type::java_lang_Object(), {"LI;", "LJ;"});
+
+  EXPECT_EQ(resolve_m(c), nullptr);
+}
+
+// An abstract method of an unrelated interface does not hide a default method.
+TEST_F(ResolverTest, ResolveVirtualToDefaultBesideAbstractMethod) {
+  create_object_class();
+  make_interface("LI;", {}, ACC_PUBLIC);
+  make_interface("LJ;", {}, kAbstract);
+  auto* c =
+      make_class_with_intfs("LC;", type::java_lang_Object(), {"LJ;", "LI;"});
+
+  EXPECT_EQ(resolve_m(c), m_of("LI;"));
+}
+
+// `I.super.m()` from `C` with an abstract `I.m()` throws an AbstractMethodError
+// at runtime, like an invoke-super of an abstract class method.
+TEST_F(ResolverTest, ResolveSuperOfAbstractInterfaceMethod) {
+  create_object_class();
+  make_interface("LI;", {}, kAbstract);
+  make_class_with_intfs("LC;", type::java_lang_Object(), {"LI;"}, ACC_PUBLIC);
+
+  EXPECT_EQ(resolve_method(DexMethod::get_method("LI;.m:()V"),
+                           MethodSearch::Super, m_of("LC;")),
+            m_of("LI;"));
+}

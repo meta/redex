@@ -494,12 +494,19 @@ public class EnumTransformTest {
   }
 
   enum INTEGER_CHECKED_COLOR { RED };
+  enum DIFFERENCE_CHECKED_COLOR { RED };
 
   private static boolean isInteger(Object value) { return value instanceof Integer; }
+  private static boolean differ(Object left, Object right) { return left != right; }
 
   @Test
   public void enumObjectParameterIntegerTypeCheck() {
     assertThat(isInteger(INTEGER_CHECKED_COLOR.RED)).isFalse();
+  }
+
+  @Test
+  public void enumObjectParameterIdentityDifference() {
+    assertThat(differ(DIFFERENCE_CHECKED_COLOR.RED, Integer.valueOf(0))).isTrue();
   }
 
   private static boolean isComparable(Object value) { return value instanceof Comparable; }

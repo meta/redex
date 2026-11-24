@@ -54,6 +54,10 @@ TEST_F(LocalPointersTest, domainOperations) {
   EXPECT_FALSE(joined_env.may_have_escaped(insn3));
 }
 
+// Counts type and identity uses as escapes, every instance-of included.
+const ptrs::TypeAndIdentityUses ALL_TYPE_AND_IDENTITY_USES{
+    [](const DexType*) { return true; }};
+
 ptrs::InvokeToSummaryMap mark_all_invokes_as_non_escaping(const IRCode& code) {
   ptrs::InvokeToSummaryMap invoke_to_summary_map;
   for (const auto& mie : InstructionIterable(code.cfg())) {
@@ -395,6 +399,61 @@ TEST_F(LocalPointersTest, returnedNullIsTellableApart) {
       caller_fp_iter, *caller, /* result_may_be_pointer */ true);
   EXPECT_EQ(caller_summary.returned_parameters,
             ptrs::ParamSet({0, ptrs::ESCAPED_FRESH_RETURN}));
+}
+
+// A reference comparison lets both operands escape when type and identity uses
+// count as escapes, unless one operand holds only `const 0` values, or no
+// value. Without the rule, comparisons let nothing escape.
+TEST_F(LocalPointersTest, comparisonEscapesUnlessAnOperandHoldsOnlyNull) {
+  struct Case {
+    const char* name;
+    const char* compared;
+    bool escapes_with_rule;
+  };
+  for (const auto& test : std::vector<Case>{
+           {"null", "(const v1 0)", false},
+           {"no value",
+            R"((invoke-static () "LFoo;.fail:()Ljava/lang/Object;")
+               (move-result-object v1))",
+            false},
+           {"null or a new object",
+            R"((const v1 0)
+               (if-eqz v2 :compare)
+               (new-instance "LFoo;")
+               (move-result-pseudo-object v1)
+               (:compare))",
+            true},
+       }) {
+    for (const auto* rule :
+         {static_cast<const ptrs::TypeAndIdentityUses*>(nullptr),
+          &ALL_TYPE_AND_IDENTITY_USES}) {
+      auto code = assembler::ircode_from_string(std::string(R"((
+           (load-param-object v0)
+           (load-param v2)
+          )") + test.compared + R"(
+           (if-eq v0 v1 :same)
+           (:same)
+           (return-void)
+          ))");
+      code->build_cfg();
+      code->cfg().calculate_exit_block();
+      ptrs::InvokeToSummaryMap invoke_to_summary_map;
+      for (const auto& mie : InstructionIterable(code->cfg())) {
+        if (opcode::is_a_method_invoke(mie.insn->opcode())) {
+          // `fail()` never returns.
+          invoke_to_summary_map.emplace(mie.insn, ptrs::EscapeSummary({}, {}));
+        }
+      }
+      ptrs::FixpointIterator fp_iter(code->cfg(), invoke_to_summary_map, rule);
+      fp_iter.run(ptrs::Environment());
+      auto summary = ptrs::get_escape_summary(
+          fp_iter, *code, /* result_may_be_pointer */ false);
+      EXPECT_EQ(summary.escaping_parameters.contains(0),
+                rule != nullptr && test.escapes_with_rule)
+          << test.name << (rule == nullptr ? " without" : " with")
+          << " the rule";
+    }
+  }
 }
 
 TEST_F(LocalPointersTest, collectExitingPointersWithThrow) {

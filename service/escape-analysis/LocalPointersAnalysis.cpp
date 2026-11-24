@@ -7,6 +7,7 @@
 
 #include "LocalPointersAnalysis.h"
 
+#include <algorithm>
 #include <ostream>
 
 #include "Debug.h"
@@ -22,6 +23,16 @@ using namespace local_pointers;
 namespace {
 
 using namespace ir_analyzer;
+
+// Whether every value a register may hold comes from a `const 0`, i.e. is null.
+// A register that holds no value yet counts too: otherwise an escape found
+// while its set is empty would disappear once the `const 0` arrives, and an
+// analysis across calls requires each method's summary only to grow.
+bool has_no_non_null_origins(const PointerSet& pointers) {
+  return pointers.is_value() &&
+         std::all_of(pointers.elements().begin(), pointers.elements().end(),
+                     is_null_constant);
+}
 
 /*
  * Whether the dest of an instruction may be a pointer value. The only time
@@ -379,6 +390,11 @@ void FixpointIterator::analyze_instruction(const IRInstruction* insn,
            m_escape_type_and_identity_uses->instance_of_tells_apart(
                insn->get_type()))) {
         env->set_may_escape(insn->src(0), insn);
+      } else if ((op == OPCODE_IF_EQ || op == OPCODE_IF_NE) &&
+                 !has_no_non_null_origins(env->get_pointers(insn->src(0))) &&
+                 !has_no_non_null_origins(env->get_pointers(insn->src(1)))) {
+        env->set_may_escape(insn->src(0), insn);
+        env->set_may_escape(insn->src(1), insn);
       }
     }
   }

@@ -4198,6 +4198,17 @@ TEST_P(OptimizeEnumsObservationTest, preservesObservedObjects) {
         type + "\") (move-result-pseudo v1) (return v1)))"));
   }
   uc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LUser;.same:(Ljava/lang/Object;Ljava/lang/Object;)Z"
+      ((load-param-object v0)
+       (load-param-object v1)
+       (if-eq v0 v1 :equal)
+       (const v2 0)
+       (return v2)
+       (:equal)
+       (const v2 1)
+       (return v2)))
+  )"));
+  uc.add_method(assembler::method_from_string(R"(
     (method (public static) "LUser;.lock:(Ljava/lang/Object;)V"
       ((load-param-object v0)
        (monitor-enter v0)
@@ -4240,6 +4251,10 @@ INSTANTIATE_TEST_SUITE_P(
         EnumObservationCase{
             "ObjectParameterInstanceOfEnum",
             R"((invoke-static (v0) "LUser;.isEnum:(Ljava/lang/Object;)Z"))",
+            false, true},
+        EnumObservationCase{
+            "ObjectParameterIdentity",
+            R"((invoke-static (v0 v3) "LUser;.same:(Ljava/lang/Object;Ljava/lang/Object;)Z"))",
             false, true},
         EnumObservationCase{
             "ObjectParameterMonitor",
@@ -4317,6 +4332,8 @@ TEST_F(OptimizeEnumsTest, objectParameterObservationsAreUnsafe) {
       {R"((instance-of v0 "Ljava/lang/Number;") (move-result-pseudo v2))",
        true},
       {R"((instance-of v0 "Ljava/lang/Enum;") (move-result-pseudo v2))", true},
+      {"(if-eq v0 v1 :done) (:done)", false},
+      {"(if-ne v1 v0 :done) (:done)", false},
       {"(monitor-enter v0) (monitor-exit v0)", true},
       {R"((if-eqz v2 :other)
           (move-object v3 v0)
@@ -4341,17 +4358,58 @@ TEST_F(OptimizeEnumsTest, objectParameterObservationsAreUnsafe) {
   }
 }
 
+TEST_F(OptimizeEnumsTest, objectParameterNullChecksRemainSafe) {
+  auto summary = get_summary(R"(
+    (method (public static) "LFoo;.nullCheck:(Ljava/lang/Object;)Ljava/lang/Object;"
+      (
+        (load-param-object v0)
+        (move-object v1 v0)
+        (if-eqz v1 :done)
+        (const v2 0)
+        (if-ne v1 v2 :done)
+        (:done)
+        (return-object v0)
+      )
+    )
+  )");
+  EXPECT_TRUE(summary.safe_params.contains(0));
+  EXPECT_EQ(summary.returned_param, 0);
+}
+
 TEST_F(OptimizeEnumsTest, nullableParameterObservationsAreUnsafe) {
-  auto summary = get_summary(
-      "(method (public static) \"LFoo;.nullable:"
-      "(Ljava/lang/Object;Ljava/lang/Object;Z)Ljava/lang/Object;\" "
-      "((load-param-object v0) (load-param-object v1) (load-param v2) "
-      "(if-eqz v2 :null) (move-object v3 v0) (goto :observe) "
-      "(:null) (const v3 0) (:observe) "
-      "(monitor-enter v3) (monitor-exit v3) (return-object v0)))");
-  EXPECT_FALSE(summary.safe_params.contains(0));
-  EXPECT_TRUE(summary.safe_params.contains(1));
-  EXPECT_EQ(summary.returned_param, std::nullopt);
+  const std::vector<std::string> observations = {
+      "(if-eq v3 v1 :done) (:done)", "(monitor-enter v3) (monitor-exit v3)"};
+  for (size_t i = 0; i < observations.size(); ++i) {
+    auto summary = get_summary(
+        "(method (public static) \"LFoo;.nullable" + std::to_string(i) +
+        ":(Ljava/lang/Object;Ljava/lang/Object;Z)Ljava/lang/Object;\" "
+        "((load-param-object v0) (load-param-object v1) (load-param v2) "
+        "(if-eqz v2 :null) (move-object v3 v0) (goto :observe) "
+        "(:null) (const v3 0) (:observe) " +
+        observations[i] + " (return-object v0)))");
+    EXPECT_FALSE(summary.safe_params.contains(0));
+    EXPECT_EQ(summary.safe_params.contains(1), i != 0);
+    EXPECT_EQ(summary.returned_param, std::nullopt);
+  }
+}
+
+TEST_F(OptimizeEnumsTest, joinedNullChecksRemainSafe) {
+  auto summary = get_summary(R"(
+    (method (public static) "LFoo;.joinedNull:(Ljava/lang/Object;Z)Ljava/lang/Object;"
+      ((load-param-object v0)
+       (load-param v1)
+       (if-eqz v1 :other)
+       (const v2 0)
+       (goto :compare)
+       (:other)
+       (const v2 0)
+       (:compare)
+       (if-eq v0 v2 :done)
+       (:done)
+       (return-object v0)))
+  )");
+  EXPECT_TRUE(summary.safe_params.contains(0));
+  EXPECT_EQ(summary.returned_param, 0);
 }
 
 TEST_F(OptimizeEnumsTest, instanceParameterObservationUsesArgumentIndex) {

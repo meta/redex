@@ -993,3 +993,174 @@ TEST_F(GlobalTypeAnalysisTest, ConstructorReadAfterOwnConstructorCall) {
   )"});
   EXPECT_TRUE(args.get(0).is_top()) << args;
 }
+
+// Tool-generated: set() writes a P, a subclass of O, to A.f1 through a put
+// method handle, so A.f1 does not hold only the O that the program writes
+// with put instructions.
+class PutHandleFieldTypeTest : public GlobalTypeAnalysisTest,
+                               public ::testing::WithParamInterface<bool> {};
+
+TEST_P(PutHandleFieldTypeTest, fieldWrittenThroughPutHandle) {
+  const bool is_static_field = GetParam();
+  Scope scope;
+  prepare_scope(scope);
+
+  ClassCreator p_creator(DexType::make_type("LP;"));
+  p_creator.set_super(DexType::make_type("LO;"));
+  p_creator.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LP;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "LO;.<init>:()V")
+      (return-void)
+     )
+    )
+  )"));
+  scope.push_back(p_creator.create());
+
+  ClassCreator creator(DexType::make_type("LA;"));
+  creator.set_super(type::java_lang_Object());
+  auto* field_1 = DexField::make_field("LA;.f1:LO;")
+                      ->make_concrete(is_static_field ? ACC_PUBLIC | ACC_STATIC
+                                                      : ACC_PUBLIC);
+  creator.add_field(field_1);
+
+  // The constructor or, for the static field, init() writes an O to f1; set(a)
+  // writes a P to f1 through a handle.
+  auto* meth_init = assembler::method_from_string(is_static_field ? R"(
+    (method (public static) "LA;.init:()V"
+     (
+      (new-instance "LO;")
+      (move-result-pseudo-object v1)
+      (invoke-direct (v1) "LO;.<init>:()V")
+      (sput-object v1 "LA;.f1:LO;")
+      (return-void)
+     )
+    )
+  )"
+                                                                  : R"(
+    (method (public constructor) "LA;.<init>:()V"
+     (
+      (load-param-object v0)
+      (new-instance "LO;")
+      (move-result-pseudo-object v1)
+      (invoke-direct (v1) "LO;.<init>:()V")
+      (iput-object v1 v0 "LA;.f1:LO;")
+      (return-void)
+     )
+    )
+  )");
+  meth_init->rstate.set_root();
+  creator.add_method(meth_init);
+
+  const std::string handle =
+      is_static_field ? R"((const-method-handle static-put "LA;.f1:LO;")
+      (move-result-pseudo-object v2)
+      (invoke-polymorphic (v2 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LO;)V"))"
+                      : R"((const-method-handle instance-put "LA;.f1:LO;")
+      (move-result-pseudo-object v2)
+      (invoke-polymorphic (v2 v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LA;LO;)V"))";
+  auto* meth_set = assembler::method_from_string(R"(
+    (method (public static) "LA;.set:(LA;)V"
+     (
+      (load-param-object v0)
+      (new-instance "LP;")
+      (move-result-pseudo-object v1)
+      (invoke-direct (v1) "LP;.<init>:()V")
+      )" + handle + R"(
+      (return-void)
+     )
+    )
+  )");
+  meth_set->rstate.set_root();
+  creator.add_method(meth_set);
+  scope.push_back(creator.create());
+
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  GlobalTypeAnalysis analysis(/* max_global_analysis_iteration */ 10,
+                              /* use_multiple_callee_callgraph */ false,
+                              /* only_aggregate_safely_inferrable_fields */
+                              false);
+  auto gta = analysis.analyze(scope);
+  EXPECT_TRUE(gta->get_whole_program_state().get_field_type(field_1).is_top());
+}
+
+INSTANTIATE_TEST_SUITE_P(FieldKind,
+                         PutHandleFieldTypeTest,
+                         ::testing::Bool(),
+                         [](const ::testing::TestParamInfo<bool>& info) {
+                           return info.param ? "Static" : "Instance";
+                         });
+
+// Tool-generated: set() writes a P through a static-put method handle of
+// LB;.f1, which ART resolves to the static A.f1, past the instance field B.f1.
+// So A.f1 does not hold only the O that init() writes.
+TEST_F(GlobalTypeAnalysisTest, inheritedFieldWrittenThroughPutHandle) {
+  Scope scope;
+  prepare_scope(scope);
+
+  ClassCreator p_creator(DexType::make_type("LP;"));
+  p_creator.set_super(DexType::make_type("LO;"));
+  p_creator.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LP;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "LO;.<init>:()V")
+      (return-void)
+     )
+    )
+  )"));
+  scope.push_back(p_creator.create());
+
+  ClassCreator a_creator(DexType::make_type("LA;"));
+  a_creator.set_super(type::java_lang_Object());
+  auto* a_f1 = DexField::make_field("LA;.f1:LO;")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC);
+  a_creator.add_field(a_f1);
+  auto* meth_init = assembler::method_from_string(R"(
+    (method (public static) "LA;.init:()V"
+     (
+      (new-instance "LO;")
+      (move-result-pseudo-object v1)
+      (invoke-direct (v1) "LO;.<init>:()V")
+      (sput-object v1 "LA;.f1:LO;")
+      (return-void)
+     )
+    )
+  )");
+  meth_init->rstate.set_root();
+  a_creator.add_method(meth_init);
+  auto* a_cls = a_creator.create();
+  scope.push_back(a_cls);
+
+  ClassCreator b_creator(DexType::make_type("LB;"));
+  b_creator.set_super(a_cls->get_type());
+  b_creator.add_field(
+      DexField::make_field("LB;.f1:LO;")->make_concrete(ACC_PUBLIC));
+  auto* meth_set = assembler::method_from_string(R"(
+    (method (public static) "LB;.set:()V"
+     (
+      (new-instance "LP;")
+      (move-result-pseudo-object v1)
+      (invoke-direct (v1) "LP;.<init>:()V")
+      (const-method-handle static-put "LB;.f1:LO;")
+      (move-result-pseudo-object v2)
+      (invoke-polymorphic (v2 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LO;)V")
+      (return-void)
+     )
+    )
+  )");
+  meth_set->rstate.set_root();
+  b_creator.add_method(meth_set);
+  scope.push_back(b_creator.create());
+
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  GlobalTypeAnalysis analysis(/* max_global_analysis_iteration */ 10,
+                              /* use_multiple_callee_callgraph */ false,
+                              /* only_aggregate_safely_inferrable_fields */
+                              false);
+  auto gta = analysis.analyze(scope);
+  EXPECT_TRUE(gta->get_whole_program_state().get_field_type(a_f1).is_top());
+}

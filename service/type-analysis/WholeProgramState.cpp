@@ -332,35 +332,41 @@ void WholeProgramState::collect_field_types(
     const DexTypeEnvironment& env,
     const EligibleIfields& eligible_ifields,
     ConcurrentMap<const DexField*, DexTypeDomain>* field_tmp) {
-  if (!opcode::is_an_sput(insn->opcode()) &&
-      !opcode::is_an_iput(insn->opcode())) {
-    return;
-  }
-  auto* field = resolve_field(insn->get_field());
-  if ((field == nullptr) || !type::is_object(field->get_type())) {
-    return;
-  }
-  if (opcode::is_an_iput(insn->opcode()) &&
-      m_only_aggregate_safely_inferrable_fields &&
-      eligible_ifields.count(field) == 0) {
-    // Skip writes to non-eligible instance fields.
-    return;
-  }
-  auto type = env.get(insn->src(0));
-  if (traceEnabled(TYPE, 5)) {
-    std::ostringstream ss;
-    ss << type;
-    TRACE(TYPE, 5, "collecting field %s -> %s", SHOW(field), ss.str().c_str());
-  }
-  field_tmp->update(
-      field,
-      [&type](const DexField*, DexTypeDomain& current_type, bool exists) {
-        if (exists) {
-          current_type.join_with(type);
-        } else {
-          current_type = std::move(type);
-        }
-      });
+  for_each_field_access(insn, [&](IROpcode op, DexFieldRef* field_ref,
+                                  const DexMethodHandle* method_handle) {
+    if (!opcode::is_an_sput(op) && !opcode::is_an_iput(op)) {
+      return;
+    }
+    auto* field = method_handle == nullptr
+                      ? resolve_field(field_ref)
+                      : resolve_field_handle(method_handle);
+    if ((field == nullptr) || !type::is_object(field->get_type())) {
+      return;
+    }
+    if (opcode::is_an_iput(op) && m_only_aggregate_safely_inferrable_fields &&
+        eligible_ifields.count(field) == 0) {
+      // Skip writes to non-eligible instance fields.
+      return;
+    }
+    // A method handle that puts a field can be called anywhere, with any value.
+    auto type =
+        method_handle == nullptr ? env.get(insn->src(0)) : DexTypeDomain::top();
+    if (traceEnabled(TYPE, 5)) {
+      std::ostringstream ss;
+      ss << type;
+      TRACE(TYPE, 5, "collecting field %s -> %s", SHOW(field),
+            ss.str().c_str());
+    }
+    field_tmp->update(
+        field,
+        [&type](const DexField*, DexTypeDomain& current_type, bool exists) {
+          if (exists) {
+            current_type.join_with(type);
+          } else {
+            current_type = std::move(type);
+          }
+        });
+  });
 }
 
 void WholeProgramState::collect_return_types(

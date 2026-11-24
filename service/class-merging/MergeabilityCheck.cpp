@@ -10,6 +10,8 @@
 #include <array>
 
 #include "ClassUtil.h"
+#include "DexAnnotation.h"
+#include "DexCallSite.h"
 #include "DexMethodHandle.h"
 #include "DexUtil.h"
 #include "IRCode.h"
@@ -149,6 +151,35 @@ TypeSet MergeabilityChecker::exclude_unsupported_bytecode_refs_for(
         TRACE(CLMG, 5,
               "[non mergeable] type like const string unsafe: %s in %s",
               SHOW(insn), SHOW(method));
+      }
+      continue;
+    }
+
+    // With type tags, a Class among the bootstrap arguments of a call site is
+    // checked like a const-class whose only use passes it to the bootstrap
+    // method.
+    if (insn->has_callsite()) {
+      if (!has_type_tag) {
+        continue;
+      }
+      auto* callsite = insn->get_callsite();
+      auto* bootstrap = callsite->method_handle();
+      bool safe_bootstrap = DexMethodHandle::isInvokeType(bootstrap->type()) &&
+                            m_const_class_safe_types.count(
+                                bootstrap->methodref()->get_class()) != 0u;
+      for (const auto& arg : callsite->args()) {
+        const auto* type_arg =
+            dynamic_cast<const DexEncodedValueType*>(arg.get());
+        if (type_arg == nullptr) {
+          continue;
+        }
+        const auto* type = type::make_element_type_if_array(type_arg->type());
+        if (m_spec.merging_targets.count(type) > 0 && !safe_bootstrap) {
+          TRACE(CLMG, 5,
+                "[non mergeable] Class bootstrap argument unsafe @ %s in %s",
+                SHOW(insn), SHOW(method));
+          non_mergeables.insert(type);
+        }
       }
       continue;
     }

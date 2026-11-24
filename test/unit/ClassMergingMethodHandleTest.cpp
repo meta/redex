@@ -328,3 +328,31 @@ TEST_F(ClassMergingMethodHandleTest,
   EXPECT_NE(callsites[0], callsite);
   EXPECT_EQ(callsites[0], callsites[1]);
 }
+
+// With type tags, a const-class of `A` must only reach methods of classes in
+// `const_class_safe_types`, since the merged class stands for `B` too. A Class
+// of `A` among the bootstrap arguments of a call site reaches the bootstrap
+// method.
+TEST_F(ClassMergingMethodHandleTest, classArgumentKeepsItsClassWithTypeTags) {
+  make_class("LBoot;", type::java_lang_Object());
+  auto* user = make_class("Lcom/redextest/User;", type::java_lang_Object());
+  add_call_site_with_class_argument(user, "Lcom/redextest/A;");
+
+  EXPECT_FALSE(run_merging());
+  EXPECT_EQ(class_argument(), "Lcom/redextest/A;");
+}
+
+// As for a const-class passed to such a method, a bootstrap method of a class
+// in `const_class_safe_types` may receive the Class of the merged class.
+TEST_F(ClassMergingMethodHandleTest,
+       classArgumentToConstClassSafeBootstrapNamesTheMergedClass) {
+  make_class("LBoot;", type::java_lang_Object());
+  auto* user = make_class("Lcom/redextest/User;", type::java_lang_Object());
+  add_call_site_with_class_argument(user, "Lcom/redextest/A;");
+
+  EXPECT_TRUE(run_merging([](Json::Value& model) {
+    model["const_class_safe_types"].append("LBoot;");
+  }));
+  EXPECT_EQ(class_argument().rfind("Lcom/redextest/HandlesBaseShape", 0), 0)
+      << class_argument();
+}

@@ -949,3 +949,25 @@ TEST_F(LocalDceEnhanceTest, ReplaceAllThreeWithInitClassAndPrune) {
       /* declaring_type */ type::java_lang_Object());
   EXPECT_CODE_EQ(ircode, expected_code.get());
 }
+
+// A method handle call may do anything, so it is kept even though its result
+// is unused.
+TEST_F(LocalDceTryTest, invokePolymorphicIsRequired) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()I")
+      (move-result v1)
+      (return-void)
+    )
+  )");
+  auto expected = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()I")
+      (return-void)
+    )
+  )");
+  dce(code.get());
+  EXPECT_CODE_EQ(code.get(), expected.get());
+}

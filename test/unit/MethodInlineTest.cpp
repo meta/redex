@@ -18,6 +18,7 @@
 #include "InlinerConfig.h"
 #include "LegacyInliner.h"
 #include "MethodInlinePass.h"
+#include "PartialInliner.h"
 #include "PassManager.h"
 #include "RedexTest.h"
 #include "Walkers.h"
@@ -4786,4 +4787,29 @@ TEST_F(MethodInlineTest, identical_implementation_keeps_all_cluster_members) {
 TEST_F(MethodInlineTest, identical_implementation_still_inlines_shared_calls) {
   check_identical_implementation_callers(/* keep_shared_calls */ false,
                                          /* extra_implementation */ false);
+}
+
+// A block that calls a method handle may do anything, so it is not inlined
+// partially.
+TEST_F(MethodInlineTest, partial_inlining_rejects_invoke_polymorphic) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.p:(Ljava/lang/invoke/MethodHandle;I)V"
+     (
+      (load-param-object v0)
+      (load-param v1)
+      (.src_block "LFoo;.p:(Ljava/lang/invoke/MethodHandle;I)V" 1 (1.0 1.0))
+      (if-eqz v1 :cold)
+      (.src_block "LFoo;.p:(Ljava/lang/invoke/MethodHandle;I)V" 2 (1.0 1.0))
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
+      (return-void)
+     (:cold)
+      (.src_block "LFoo;.p:(Ljava/lang/invoke/MethodHandle;I)V" 3 (0 0))
+      (return-void)
+     )
+    )
+  )");
+  method->get_code()->build_cfg();
+  EXPECT_FALSE(inliner::get_partially_inlined_code(
+                   method, method->get_code()->cfg(), 100)
+                   .is_valid());
 }

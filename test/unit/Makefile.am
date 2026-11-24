@@ -523,7 +523,7 @@ method_splitter_suffix_net_gate_test_SOURCES = \
 	MethodSplitterTestFixture.cpp \
 	MethodSplitterSuffixNetGateTest.cpp
 
-method_util_test_SOURCES = MethodUtilTest.cpp
+method_util_test_SOURCES = MethodUtilTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 metrics_sink_test_SOURCES = MetricsSinkTest.cpp
 

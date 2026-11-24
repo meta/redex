@@ -60,7 +60,7 @@ PartialCode get_partially_inlined_code(const DexMethod* method,
       auto op = insn->opcode();
       if (opcode::is_an_aput(op) || opcode::is_an_sput(op) ||
           opcode::is_an_iput(op) || opcode::is_fill_array_data(op) ||
-          opcode::is_a_method_invoke(op)) {
+          opcode::is_an_invoke(op)) {
         // TODO: It's okay to mutate newly created objects, and to invoke
         // pure methods. (Then again, we don't want the code to grow too large.)
         return false;

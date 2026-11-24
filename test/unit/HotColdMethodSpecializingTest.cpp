@@ -310,3 +310,33 @@ TEST_F(HotColdMethodSpecializingTest, MutableHeapReadingHotColdSpecialization) {
   auto res = test("(I)I", before, config, after, cold_after);
   ASSERT_TRUE(res);
 }
+
+// A method handle call in the hot prefix may do anything, so the prefix is not
+// pure and must not be run again by a cold copy.
+TEST_F(HotColdMethodSpecializingTest, InvokePolymorphicInHotPrefixIsImpure) {
+  const auto* before = R"(
+    (
+      (load-param-object v0)
+      (load-param v1)
+      (.src_block "LFoo;.bar:(Ljava/lang/invoke/MethodHandle;I)I" 1 (0.5 0.5))
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
+      (if-eqz v1 :cold)
+
+      (.src_block "LFoo;.bar:(Ljava/lang/invoke/MethodHandle;I)I" 2 (0.5 0.5))
+      (return v1)
+    (:cold)
+      (.src_block "LFoo;.bar:(Ljava/lang/invoke/MethodHandle;I)I" 3 (0 0))
+      (add-int v1 v1 v1)
+      (add-int v1 v1 v1)
+      (add-int v1 v1 v1)
+      (add-int v1 v1 v1)
+      (add-int v1 v1 v1)
+      (add-int v1 v1 v1)
+      (add-int v1 v1 v1)
+      (add-int v1 v1 v1)
+      (return v1)
+    ))";
+  auto res =
+      test("(Ljava/lang/invoke/MethodHandle;I)I", before, defaultConfig(), "");
+  ASSERT_TRUE(res);
+}

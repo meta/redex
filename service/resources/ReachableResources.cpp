@@ -14,6 +14,7 @@
 #include "DexUtil.h"
 #include "IRInstruction.h"
 #include "RedexResources.h"
+#include "Resolver.h"
 #include "Trace.h"
 #include "TypeUtil.h"
 #include "Walkers.h"
@@ -66,15 +67,22 @@ UnorderedSet<uint32_t> find_code_resource_references(
   boost::regex find_ints("(\\d+)");
 
   walk::parallel::opcodes(scope, [&](DexMethod* m, IRInstruction* insn) {
-    // Collect all accessed fields that could be R fields, or values that got
-    // inlined elsewhere.
-    if (insn->opcode() == IOPCODE_R_CONST) {
-      potential_ids_from_code.emplace(insn->get_literal());
-    } else if (insn->has_field() && opcode::is_an_sfield_op(insn->opcode())) {
-      auto* field = resolve_field(insn->get_field(), FieldSearch::Static);
+    // Collect all accessed fields that could be R fields, including those that
+    // method handles get or put, or values that got inlined elsewhere.
+    for_each_field_access(insn, [&](IROpcode op, DexFieldRef* field_ref,
+                                    const DexMethodHandle* handle) {
+      if (!opcode::is_an_sfield_op(op)) {
+        return;
+      }
+      auto* field = handle == nullptr
+                        ? resolve_field(field_ref, FieldSearch::Static)
+                        : resolve_field_handle(handle);
       if ((field != nullptr) && field->is_concrete()) {
         accessed_sfields.emplace(field);
       }
+    });
+    if (insn->opcode() == IOPCODE_R_CONST) {
+      potential_ids_from_code.emplace(insn->get_literal());
     } else if (insn->has_literal()) {
       auto lit = insn->get_literal();
       if (assume_id_inlined && resources::is_potential_resid(lit)) {

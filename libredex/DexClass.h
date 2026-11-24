@@ -1526,7 +1526,9 @@ inline DexClass* type_class_internal(const DexType* t) {
 /**
  * For a set of classes, compute all referenced strings, types, fields,
  * methods, call sites, method handles and protos (those referenced directly,
- * see Gatherable::gather_protos), such that components are sorted and unique.
+ * see Gatherable::gather_protos), such that components are unique. Call sites
+ * and method handles are in the order the classes first refer to them; the
+ * other components are sorted.
  */
 void gather_components(std::vector<const DexString*>& lstring,
                        std::vector<const DexType*>& ltype,

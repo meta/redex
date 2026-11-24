@@ -154,36 +154,6 @@ using cmp_dproto = bool (*)(const DexProto*, const DexProto*);
 using cmp_dfield = bool (*)(const DexFieldRef*, const DexFieldRef*);
 using cmp_dmethod = bool (*)(const DexMethodRef*, const DexMethodRef*);
 using cmp_dtypelist = bool (*)(const DexTypeList*, const DexTypeList*);
-using cmp_callsite = bool (*)(const DexCallSite*, const DexCallSite*);
-using cmp_methodhandle = bool (*)(const DexMethodHandle*,
-                                  const DexMethodHandle*);
-
-inline bool compare_dexcallsites(const DexCallSite* a, const DexCallSite* b) {
-  if (a == nullptr) {
-    return b != nullptr;
-  } else if (b == nullptr) {
-    return false;
-  }
-  // TODO(T59683693) -- need real ordering
-  return a < b;
-}
-
-inline bool compare_dexmethodhandles(const DexMethodHandle* a,
-                                     const DexMethodHandle* b) {
-  if (a == nullptr) {
-    return b != nullptr;
-  } else if (b == nullptr) {
-    return false;
-  }
-  if (a->type() != b->type()) {
-    return a->type() < b->type();
-  }
-  if (DexMethodHandle::isInvokeType(a->type())) {
-    return compare_dexmethods(a->methodref(), b->methodref());
-  } else {
-    return compare_dexfields(a->fieldref(), b->fieldref());
-  }
-}
 
 /*
  * This API gathers all of the data referred to by a set of DexClasses in
@@ -236,10 +206,11 @@ class GatheredTypes {
   dexmethod_to_idx get_method_index(cmp_dmethod cmp = compare_dexmethods);
   std::vector<DexTypeList*> get_typelist_list(
       dexproto_to_idx* protos, cmp_dtypelist cmp = compare_dextypelists);
-  dexcallsite_to_idx get_callsite_index(
-      cmp_callsite cmp = compare_dexcallsites);
-  dexmethodhandle_to_idx get_methodhandle_index(
-      cmp_methodhandle cmp = compare_dexmethodhandles);
+  // Numbered in the order gather_components lists them, the order of their
+  // first reference. The dex format does not sort call sites or method handles
+  // by content.
+  dexcallsite_to_idx get_callsite_index();
+  dexmethodhandle_to_idx get_methodhandle_index();
 
   void build_cls_load_map();
   void build_cls_map();

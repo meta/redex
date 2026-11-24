@@ -2688,6 +2688,23 @@ void DexMethod::add_load_params(size_t num_add_loads) {
   }
 }
 
+namespace {
+
+// Appends each element of `references` that `list` does not hold yet, in the
+// order of its first occurrence.
+template <typename T>
+void append_first_references(std::vector<T*>& list,
+                             const std::vector<T*>& references) {
+  UnorderedSet<T*> seen(list.begin(), list.end());
+  for (auto* ref : references) {
+    if (seen.insert(ref).second) {
+      list.push_back(ref);
+    }
+  }
+}
+
+} // namespace
+
 void gather_components(std::vector<const DexString*>& lstring,
                        std::vector<const DexType*>& ltype,
                        std::vector<DexFieldRef*>& lfield,
@@ -2702,8 +2719,11 @@ void gather_components(std::vector<const DexString*>& lstring,
   UnorderedSet<const DexType*> types;
   UnorderedSet<DexFieldRef*> fields;
   UnorderedSet<DexMethodRef*> methods;
-  UnorderedSet<DexCallSite*> callsites;
-  UnorderedSet<DexMethodHandle*> methodhandles;
+  // Call sites and method handles are not interned, so equal ones are distinct
+  // objects whose address order varies between runs. They are listed in the
+  // order the classes first refer to them instead.
+  std::vector<DexCallSite*> callsites;
+  std::vector<DexMethodHandle*> methodhandles;
   UnorderedSet<DexProto*> protos;
   // Inside a lambda to ensure only visibility of the sets.
   [&classes, &exclude_loads, &strings, &types, &fields, &methods, &callsites,
@@ -2746,8 +2766,8 @@ void gather_components(std::vector<const DexString*>& lstring,
   insert_unordered_iterable(ltype, ltype.end(), types);
   insert_unordered_iterable(lfield, lfield.end(), fields);
   insert_unordered_iterable(lmethod, lmethod.end(), methods);
-  insert_unordered_iterable(lcallsite, lcallsite.end(), callsites);
-  insert_unordered_iterable(lmethodhandle, lmethodhandle.end(), methodhandles);
+  append_first_references(lcallsite, callsites);
+  append_first_references(lmethodhandle, methodhandles);
   insert_unordered_iterable(lproto, lproto.end(), protos);
 
   // This retains pre-set computation behavior.
@@ -2755,8 +2775,6 @@ void gather_components(std::vector<const DexString*>& lstring,
   sort_unique(ltype);
   sort_unique(lfield);
   sort_unique(lmethod);
-  sort_unique(lcallsite);
-  sort_unique(lmethodhandle);
   sort_unique(lproto);
 }
 

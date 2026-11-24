@@ -7,6 +7,8 @@
 
 #include "DexOutput.h"
 #include "Creators.h"
+#include "DexAnnotation.h"
+#include "DexCallSite.h"
 #include "DexPosition.h"
 #include "IODIMetadata.h"
 #include "IODIPlan.h"
@@ -21,6 +23,7 @@
 #include <gtest/gtest.h>
 #include <json/reader.h>
 #include <json/value.h>
+#include <optional>
 
 class IODIMetadataTest : public RedexTest {};
 
@@ -496,4 +499,53 @@ TEST(IODIPlan, ExhaustedCandidatesFallBackToNormalDebugInfo) {
   EXPECT_TRUE(plan.programs.empty());
   EXPECT_EQ(plan.total_debug_size, 7);
   verify_plan(plan, method_sizes);
+}
+
+class CallSiteOrderTest : public RedexTest {};
+
+// Call sites and method handles are numbered in the order the code first refers
+// to them, wherever they lie in memory. Here the call sites are equal in
+// content, as are their bootstrap method handles, and they lie in memory in the
+// reverse of the order the code refers to them. The first one is referred to
+// again at the end.
+TEST_F(CallSiteOrderTest, NumbersCallSitesAndHandlesInReferenceOrder) {
+  auto* bootstrap = DexMethod::make_method(
+      "LBoot;.bootstrap:(Ljava/lang/invoke/MethodHandles$Lookup;"
+      "Ljava/lang/String;Ljava/lang/invoke/MethodType;)"
+      "Ljava/lang/invoke/CallSite;");
+  // The elements of a vector lie in memory in increasing address order.
+  constexpr size_t n = 3;
+  std::vector<std::optional<DexMethodHandle>> handles(n);
+  std::vector<std::optional<DexCallSite>> callsites(n);
+  std::vector<DexCallSite*> referenced;
+  for (size_t i = 0; i < n; ++i) {
+    const auto slot = n - 1 - i;
+    auto& handle =
+        handles[slot].emplace(METHOD_HANDLE_TYPE_INVOKE_STATIC, bootstrap);
+    referenced.push_back(&callsites[slot].emplace(
+        &handle, DexString::make_string("run"), DexProto::make_proto("()V"),
+        std::vector<std::unique_ptr<DexEncodedValue>>()));
+  }
+  referenced.push_back(referenced.front());
+  auto* method =
+      DexMethod::make_method("LCallSites;.run:()V")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC, std::make_unique<IRCode>(),
+                          /* is_virtual */ false);
+  auto* code = method->get_code();
+  for (auto* callsite : referenced) {
+    code->push_back(
+        (new IRInstruction(OPCODE_INVOKE_CUSTOM))->set_callsite(callsite));
+  }
+  code->push_back(new IRInstruction(OPCODE_RETURN_VOID));
+  ClassCreator creator(DexType::make_type("LCallSites;"));
+  creator.set_super(type::java_lang_Object());
+  creator.add_method(method);
+  DexClasses classes{creator.create()};
+
+  auto dodx = GatheredTypes(&classes).get_dodx();
+  EXPECT_EQ(dodx.callsitesize(), n);
+  for (size_t i = 0; i < n; ++i) {
+    EXPECT_EQ(dodx.callsiteidx(referenced[i]), i);
+    EXPECT_EQ(dodx.methodhandleidx(referenced[i]->method_handle()), i);
+  }
 }

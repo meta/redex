@@ -456,6 +456,18 @@ public class EnumTransformTest {
   }
 
   enum COUNT { ONE, TWO };
+  enum OBSERVED_COLOR { RED };
+
+  private static boolean locksInteger(Object value) {
+    synchronized (value) {
+      return Thread.holdsLock(Integer.valueOf(0));
+    }
+  }
+
+  @Test
+  public void enumMonitorIdentity() {
+    assertThat(locksInteger(OBSERVED_COLOR.RED)).isFalse();
+  }
 
   @Test
   public void test_hashCode() {

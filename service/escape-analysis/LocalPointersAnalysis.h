@@ -274,21 +274,23 @@ using Environment = EnvironmentWithStoreImpl<MayEscapeStore>;
  * not mark returned or thrown pointers as escaping here. This makes it easier
  * to use as part of an interprocedural analysis -- the analysis of the caller
  * can choose whether to track these pointers or treat them as having escaped.
- * Check-casts would not let source value escape in normal cases. But for
- * OptimizeEnumsPass which replaces enum object with boxed integer, check-casts
- * may result in cast error. So we add the option `escape_check_cast` to make
- * OptimizeEnumsPass able to treat check-cast as an escaping instruction.
+ * Check-casts and monitors would not let source value escape in normal cases.
+ * But OptimizeEnumsPass replaces enum objects with boxed integers, so these
+ * uses can change behavior: a check-cast may fail, and a monitor may lock an
+ * Integer shared with other code. So we add the option
+ * `escape_type_and_identity_uses` to make OptimizeEnumsPass able to treat them
+ * as escaping instructions.
  */
 class FixpointIterator final : public ir_analyzer::BaseIRAnalyzer<Environment> {
  public:
   explicit FixpointIterator(
       const cfg::ControlFlowGraph& cfg,
       InvokeToSummaryMap invoke_to_summary_map = InvokeToSummaryMap(),
-      bool escape_check_cast = false,
+      bool escape_type_and_identity_uses = false,
       const UnorderedSet<DexClass*>* excluded_classes = nullptr)
       : ir_analyzer::BaseIRAnalyzer<Environment>(cfg),
         m_invoke_to_summary_map(std::move(invoke_to_summary_map)),
-        m_escape_check_cast(escape_check_cast),
+        m_escape_type_and_identity_uses(escape_type_and_identity_uses),
         m_excluded_classes(excluded_classes) {}
 
   void analyze_instruction(const IRInstruction* insn,
@@ -304,7 +306,7 @@ class FixpointIterator final : public ir_analyzer::BaseIRAnalyzer<Environment> {
   // ourselves -- we are able to switch easily between different call graph
   // construction strategies.
   InvokeToSummaryMap m_invoke_to_summary_map;
-  const bool m_escape_check_cast;
+  const bool m_escape_type_and_identity_uses;
   const UnorderedSet<DexClass*>* m_excluded_classes;
 };
 

@@ -4103,3 +4103,125 @@ TEST_F(OptimizeEnumsTest, ctorDelegationCycleLeavesEnumUnoptimized) {
   EXPECT_EQ(get_metric(manager, pass, "num_ordinal_bail_ctor_delegation_cycle"),
             1);
 }
+
+namespace {
+
+struct EnumObservationCase {
+  const char* name;
+  const char* instructions;
+  bool bar_safe;
+  bool baz_safe;
+};
+
+class OptimizeEnumsObservationTest
+    : public OptimizeEnumsTest,
+      public WithParamInterface<EnumObservationCase> {};
+
+TEST_P(OptimizeEnumsObservationTest, preservesObservedObjects) {
+  const auto& test = GetParam();
+  auto store = create_enum_store();
+  auto* bar_type = DexType::get_type("LBar;");
+  auto* baz_type = DexType::make_type("LBaz;");
+  ClassCreator bc(baz_type);
+  bc.set_super(type::java_lang_Enum());
+  bc.set_access(ACC_PUBLIC | ACC_FINAL | ACC_ENUM);
+  store.add_classes({bc.create()});
+
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  uc.add_method(assembler::method_from_string(std::string(R"(
+        (method (public static) "LUser;.observe:(LBar;LBar;LBaz;Ljava/lang/Integer;Ljava/lang/Object;Z)V"
+          (
+            (load-param-object v0)
+            (load-param-object v1)
+            (load-param-object v2)
+            (load-param-object v3)
+            (load-param-object v4)
+            (load-param v5)
+      )") + test.instructions + R"(
+            (return-void)
+          )
+        )
+      )"));
+  uc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LUser;.lock:(Ljava/lang/Object;)V"
+      ((load-param-object v0)
+       (monitor-enter v0)
+       (monitor-exit v0)
+       (return-void)))
+  )"));
+  store.add_classes({uc.create()});
+  DexStoresVector stores({std::move(store)});
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  optimize_enums::Config config(100);
+  config.candidate_enums.insert(bar_type);
+  config.candidate_enums.insert(baz_type);
+  auto graph = method_override_graph::build_graph(scope);
+  optimize_enums::calculate_param_summaries(scope, *graph,
+                                            &config.param_summary_map);
+  optimize_enums::reject_unsafe_enums(
+      scope, &config, [](const DexType*, optimize_enums::UnsafeType) {});
+  EXPECT_EQ(config.candidate_enums.count(bar_type), test.bar_safe ? 1u : 0u);
+  EXPECT_EQ(config.candidate_enums.count(baz_type), test.baz_safe ? 1u : 0u);
+
+  optimize_enums::OptimizeEnumsPass pass;
+  PassManager manager({&pass});
+  ConfigFiles files(Json::nullValue);
+  files.parse_global_config();
+  manager.run_passes(stores, files);
+  EXPECT_EQ(type_class(bar_type)->get_super_class(),
+            test.bar_safe ? type::java_lang_Object() : type::java_lang_Enum());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ObjectObservations,
+    OptimizeEnumsObservationTest,
+    Values(
+        EnumObservationCase{
+            "ObjectParameterMonitor",
+            R"((invoke-static (v0) "LUser;.lock:(Ljava/lang/Object;)V"))",
+            false, true},
+        EnumObservationCase{"Monitor", "(monitor-enter v0) (monitor-exit v0)",
+                            false, true}),
+    [](const TestParamInfo<EnumObservationCase>& info) {
+      return info.param.name;
+    });
+
+} // namespace
+
+TEST_F(OptimizeEnumsTest, objectParameterObservationsAreUnsafe) {
+  struct ObservationCase {
+    std::string instructions;
+    bool second_param_safe;
+  };
+  const std::vector<ObservationCase> observations = {
+      {"(monitor-enter v0) (monitor-exit v0)", true}};
+  for (size_t i = 0; i < observations.size(); ++i) {
+    const auto& [instructions, second_param_safe] = observations[i];
+    SCOPED_TRACE(instructions);
+    auto summary = get_summary(
+        "(method (public static) \"LFoo;.observe" + std::to_string(i) +
+        ":(Ljava/lang/Object;Ljava/lang/Object;Z)Ljava/lang/Object;\" "
+        "((load-param-object v0) (load-param-object v1) (load-param v2) " +
+        instructions + " (return-object v0)))");
+    EXPECT_FALSE(summary.safe_params.contains(0));
+    EXPECT_EQ(summary.returned_param, std::nullopt);
+    EXPECT_EQ(summary.safe_params.contains(1), second_param_safe);
+  }
+}
+
+TEST_F(OptimizeEnumsTest, nullableParameterObservationsAreUnsafe) {
+  auto summary = get_summary(
+      "(method (public static) \"LFoo;.nullable:"
+      "(Ljava/lang/Object;Ljava/lang/Object;Z)Ljava/lang/Object;\" "
+      "((load-param-object v0) (load-param-object v1) (load-param v2) "
+      "(if-eqz v2 :null) (move-object v3 v0) (goto :observe) "
+      "(:null) (const v3 0) (:observe) "
+      "(monitor-enter v3) (monitor-exit v3) (return-object v0)))");
+  EXPECT_FALSE(summary.safe_params.contains(0));
+  EXPECT_TRUE(summary.safe_params.contains(1));
+  EXPECT_EQ(summary.returned_param, std::nullopt);
+}

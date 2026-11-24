@@ -138,6 +138,10 @@ class EnumUpcastDetector {
     case OPCODE_CONST_METHOD_TYPE:
       reject_linkage_types(insn);
       break;
+    case OPCODE_MONITOR_ENTER:
+    case OPCODE_MONITOR_EXIT:
+      reject(insn, env->get(insn->src(0)), UnsafeType::kUsageUsedInMonitor);
+      break;
     case OPCODE_INVOKE_INTERFACE:
     case OPCODE_INVOKE_SUPER:
       process_general_invocation(insn, env);

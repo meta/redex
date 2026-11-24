@@ -142,7 +142,7 @@ ParamSummary calculate_param_summary(DexMethod* method,
   ParamSummary summary;
 
   ptrs::FixpointIterator fp_iter(cfg, ptrs::InvokeToSummaryMap(),
-                                 /*escape_check_cast*/ true);
+                                 /*escape_type_and_identity_uses*/ true);
   fp_iter.run(ptrs::Environment());
   bool result_may_be_pointer =
       !type::is_primitive(method->get_proto()->get_rtype());

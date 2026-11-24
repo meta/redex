@@ -14,18 +14,17 @@
 
 #include <sparta/AbstractDomain.h>
 #include <sparta/ConstantAbstractDomain.h>
-#include <sparta/PatriciaTreeMapAbstractEnvironment.h>
 #include <sparta/PatriciaTreeSetAbstractDomain.h>
 #include <sparta/ReducedProductAbstractDomain.h>
 
 #include "BaseIRAnalyzer.h"
+#include "ConstructorAccesses.h"
 #include "Debug.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
 #include "LiveRange.h"
 #include "Resolver.h"
 #include "Timer.h"
-#include "TypeUtil.h"
 #include "Walkers.h"
 
 namespace {
@@ -35,16 +34,10 @@ using namespace ir_analyzer;
 using BoolDomain = sparta::ConstantAbstractDomain<bool>;
 
 /**
- * For each register, whether it represents the `this` parameter.
- **/
-using ParamDomainEnvironment =
-    sparta::PatriciaTreeMapAbstractEnvironment<reg_t, BoolDomain>;
-
-/**
  * Set of fields that have been read even through they were not written to.
  **/
 using ReadUnwrittenFieldDomainEnvironment =
-    sparta::PatriciaTreeSetAbstractDomain<DexField*>;
+    sparta::PatriciaTreeSetAbstractDomain<const DexField*>;
 
 /**
  * Set of fields that have been written to before ever having been read. This is
@@ -53,7 +46,7 @@ using ReadUnwrittenFieldDomainEnvironment =
  **/
 class WrittenUnreadFieldDomainEnvironment final
     : public sparta::AbstractDomainReverseAdaptor<
-          sparta::PatriciaTreeSetAbstractDomain<DexField*>,
+          sparta::PatriciaTreeSetAbstractDomain<const DexField*>,
           WrittenUnreadFieldDomainEnvironment> {
  public:
   using AbstractDomainReverseAdaptor::AbstractDomainReverseAdaptor;
@@ -65,21 +58,17 @@ class WrittenUnreadFieldDomainEnvironment final
   WrittenUnreadFieldDomainEnvironment() = default;
 };
 
-// The result of analyzing a constructor tells us...
-// - which fields of the constructor's declaring class were definitely assigned,
-//   i.e. not read before written to
-// - whether the 'this' parameter escaped
+// The result of analyzing a constructor tells us which fields of the
+// constructor's declaring class were definitely assigned, i.e. not read before
+// written to.
 struct AnalysisResult {
   UnorderedSet<const DexField*> definitely_assigned_ifields;
-  bool may_this_have_escaped{false};
   bool operator==(const AnalysisResult& other) const {
-    return definitely_assigned_ifields == other.definitely_assigned_ifields &&
-           may_this_have_escaped == other.may_this_have_escaped;
+    return definitely_assigned_ifields == other.definitely_assigned_ifields;
   }
 };
 
 // We track...
-// - for each register, whether it represents the `this` parameter
 // - which fields of the constructor's declaring class might have been read even
 //   though they were never written to
 // - which fields of the constructor's declaring class were written to before
@@ -88,7 +77,6 @@ struct AnalysisResult {
 class ConstructorAnalysisEnvironment final
     : public sparta::ReducedProductAbstractDomain<
           ConstructorAnalysisEnvironment,
-          ParamDomainEnvironment,
           ReadUnwrittenFieldDomainEnvironment,
           WrittenUnreadFieldDomainEnvironment,
           BoolDomain> {
@@ -96,55 +84,45 @@ class ConstructorAnalysisEnvironment final
   using ReducedProductAbstractDomain::ReducedProductAbstractDomain;
   ConstructorAnalysisEnvironment()
       : ReducedProductAbstractDomain(
-            std::make_tuple(ParamDomainEnvironment::top(),
-                            ReadUnwrittenFieldDomainEnvironment(),
+            std::make_tuple(ReadUnwrittenFieldDomainEnvironment(),
                             WrittenUnreadFieldDomainEnvironment(),
                             BoolDomain(false))) {}
 
-  static void reduce_product(std::tuple<ParamDomainEnvironment,
-                                        ReadUnwrittenFieldDomainEnvironment,
+  static void reduce_product(std::tuple<ReadUnwrittenFieldDomainEnvironment,
                                         WrittenUnreadFieldDomainEnvironment,
                                         BoolDomain>&) {}
 
-  const ParamDomainEnvironment& get_params() const {
+  const ReadUnwrittenFieldDomainEnvironment& get_read_unwritten_fields() const {
     return ReducedProductAbstractDomain::get<0>();
   }
 
-  const ReadUnwrittenFieldDomainEnvironment& get_read_unwritten_fields() const {
+  const WrittenUnreadFieldDomainEnvironment& get_written_unread_fields() const {
     return ReducedProductAbstractDomain::get<1>();
   }
 
-  const WrittenUnreadFieldDomainEnvironment& get_written_unread_fields() const {
-    return ReducedProductAbstractDomain::get<2>();
-  }
-
   bool may_this_have_escaped() const {
-    auto value = ReducedProductAbstractDomain::get<3>();
+    auto value = ReducedProductAbstractDomain::get<2>();
     return !value.get_constant() || *value.get_constant();
   }
 
-  void mutate_params(const std::function<void(ParamDomainEnvironment*)>& f) {
-    apply<0>(f);
-  }
-
-  void add_read_unwritten_field(DexField* f) {
-    apply<1>(
+  void add_read_unwritten_field(const DexField* f) {
+    apply<0>(
         [&](ReadUnwrittenFieldDomainEnvironment* domain) { domain->add(f); });
   }
 
-  void add_written_unread_field(DexField* f) {
-    apply<2>([&](WrittenUnreadFieldDomainEnvironment* domain) {
+  void add_written_unread_field(const DexField* f) {
+    apply<1>([&](WrittenUnreadFieldDomainEnvironment* domain) {
       domain->unwrap().add(f);
     });
   }
 
   void set_this_escaped() {
-    ReducedProductAbstractDomain::apply<3>(
+    ReducedProductAbstractDomain::apply<2>(
         [&](BoolDomain* domain) { *domain = BoolDomain(true); });
   }
 
   AnalysisResult get_analysis_result(DexClass* cls) const {
-    AnalysisResult res{{}, may_this_have_escaped()};
+    AnalysisResult res;
     for (auto* field : cls->get_ifields()) {
       if (get_written_unread_fields().unwrap().contains(field)) {
         always_assert(!get_read_unwritten_fields().contains(field));
@@ -159,20 +137,18 @@ class ConstructorAnalysisEnvironment final
 // while that constructor is still being analyzed further up the chain of
 // calls.
 using GetCalleeResult =
-    std::function<std::optional<AnalysisResult>(DexMethod*)>;
+    std::function<std::optional<AnalysisResult>(const DexMethod*)>;
 
 class Analyzer final : public BaseIRAnalyzer<ConstructorAnalysisEnvironment> {
  public:
   Analyzer(const cfg::ControlFlowGraph& cfg,
-           const DexType* declaring_type,
+           const DexClass* cls,
+           const UnorderedSet<const DexMethod*>& constructors_keeping_this,
            GetCalleeResult get_callee_result)
       : BaseIRAnalyzer(cfg),
-        m_declaring_type(declaring_type),
+        m_cls(cls),
         m_get_callee_result(std::move(get_callee_result)),
-        m_super_type(type_class(declaring_type)->get_super_class()),
-        m_first_load_param(cfg.get_first_param_instruction()) {
-    always_assert(m_first_load_param != nullptr &&
-                  m_first_load_param->opcode() == IOPCODE_LOAD_PARAM_OBJECT);
+        m_accesses(cfg, cls, constructors_keeping_this) {
     MonotonicFixpointIterator::run({});
   }
 
@@ -184,129 +160,75 @@ class Analyzer final : public BaseIRAnalyzer<ConstructorAnalysisEnvironment> {
       return;
     }
 
-    const auto set_current_state_at = [&](reg_t reg, bool wide,
-                                          BoolDomain value) {
-      current_state->mutate_params([&](ParamDomainEnvironment* env) {
-        env->set(reg, value);
-        if (wide) {
-          env->set(reg + 1, BoolDomain::top());
+    auto access = m_accesses.field_accesses().find(insn);
+    if (access != m_accesses.field_accesses().end() &&
+        access->second.receiver != local_pointers::Receiver::Other) {
+      const auto* field = access->second.field;
+      if (opcode::is_an_iget(insn->opcode())) {
+        if (!current_state->get_written_unread_fields().unwrap().contains(
+                field)) {
+          current_state->add_read_unwritten_field(field);
         }
-      });
-    };
-
-    auto opcode = insn->opcode();
-    if (opcode::is_a_move(opcode)) {
-      const auto value = current_state->get_params().get(insn->src(0));
-      set_current_state_at(insn->dest(), insn->dest_is_wide(), value);
-      return;
+      } else if (access->second.receiver == local_pointers::Receiver::This &&
+                 !current_state->get_read_unwritten_fields().contains(field)) {
+        // A store that may target another object assigns nothing for sure.
+        current_state->add_written_unread_field(field);
+      }
     }
 
-    DexMethod* invoked_ctor_on_this{nullptr};
-    for (src_index_t src_idx = 0; src_idx < insn->srcs_size(); src_idx++) {
-      auto src = insn->src(src_idx);
-      auto param_value = current_state->get_params().get(src);
-      auto may_be_first_param =
-          !param_value.get_constant() || *param_value.get_constant();
-      auto is_first_param = param_value.get_constant().value_or(false);
-      if (!may_be_first_param) {
-        continue;
-      }
-      if (opcode::is_an_iput(opcode) && src_idx == 1) {
-        auto* field_ref = insn->get_field();
-        DexField* field = resolve_field(field_ref, FieldSearch::Instance);
-        if (field != nullptr && field->get_class() == m_declaring_type &&
-            is_first_param) {
+    // A call of another constructor of the class assigns what that
+    // constructor assigns. One that may run on another object credits
+    // nothing; what it reads still counts in its own result, which joins the
+    // intersection over all constructors.
+    const auto* call = m_accesses.get_delegating_call(insn);
+    if (call != nullptr && call->receiver == local_pointers::Receiver::This) {
+      // A call of a constructor that the class does not define, which fails
+      // verification, assigns nothing.
+      const auto* callee = call->callee->as_def();
+      const auto* analysis_result =
+          callee != nullptr ? get_callee_result(callee) : nullptr;
+      for (auto* field : m_cls->get_ifields()) {
+        if (analysis_result != nullptr &&
+            analysis_result->definitely_assigned_ifields.count(field) != 0u) {
+          // If we haven't read the field yet, then we can also mark the field
+          // as written.
           if (!current_state->get_read_unwritten_fields().contains(field)) {
             current_state->add_written_unread_field(field);
           }
+          continue;
         }
-        continue;
-      } else if (opcode::is_an_iget(opcode) && src_idx == 0) {
-        auto* field_ref = insn->get_field();
-        DexField* field = resolve_field(field_ref, FieldSearch::Instance);
-        if (field != nullptr && field->get_class() == m_declaring_type) {
-          if (!current_state->get_written_unread_fields().unwrap().contains(
-                  field)) {
-            current_state->add_read_unwritten_field(field);
-          }
-        }
-        continue;
-      } else if (opcode == OPCODE_INVOKE_DIRECT && src_idx == 0) {
-        auto* method_ref = insn->get_method();
-        if (method::is_init(method_ref)) {
-          DexMethod* method =
-              resolve_method_deprecated(method_ref, MethodSearch::Direct);
-          if (method != nullptr) {
-            auto* method_class = method->get_class();
-            if (method_class == m_declaring_type ||
-                method_class == m_super_type ||
-                (is_first_param &&
-                 type::is_subclass(method_class, m_declaring_type))) {
-              invoked_ctor_on_this = method;
-              continue;
-            }
-          }
+        // If not definitely assigned by that ctor, then we can just give up
+        // here and mark all unwritten fields as read. Later, the intersection
+        // is computed across all ctors anyway.
+        if (!current_state->get_written_unread_fields().unwrap().contains(
+                field)) {
+          current_state->add_read_unwritten_field(field);
         }
       }
-      // 'this' may have escaped
+    }
+
+    if (m_accesses.is_escape(insn)) {
       current_state->set_this_escaped();
-      return;
-    }
-
-    if (invoked_ctor_on_this != nullptr) {
-      // Run this after the loop over the src registers, to make sure we abort
-      // when the `this` parameter escapes
-      const auto* analysis_result = get_callee_result(invoked_ctor_on_this);
-      if (invoked_ctor_on_this->get_class() == m_declaring_type) {
-        for (auto* field : type_class(m_declaring_type)->get_ifields()) {
-          if (analysis_result->definitely_assigned_ifields.count(field) != 0u) {
-            // If we haven't read the field yet, then we can also mark the field
-            // as written.
-            if (!current_state->get_read_unwritten_fields().contains(field)) {
-              current_state->add_written_unread_field(field);
-            }
-            continue;
-          }
-          // If not definitely assigned by that ctor, then we can just give up
-          // here and mark all unwritten fields as read. Later, the intersection
-          // is computed across all ctors anyway.
-          if (!current_state->get_written_unread_fields().unwrap().contains(
-                  field)) {
-            current_state->add_read_unwritten_field(field);
-          }
-        }
-      }
-      if (analysis_result->may_this_have_escaped) {
-        current_state->set_this_escaped();
-        return;
-      }
-    }
-
-    if (insn->has_dest()) {
-      bool is_first_parameter = insn == m_first_load_param;
-      const auto value = BoolDomain(is_first_parameter);
-      set_current_state_at(insn->dest(), insn->dest_is_wide(), value);
     }
   }
 
  private:
-  // A call of a constructor that is still being analyzed assigns nothing and
-  // may let `this` escape.
-  const AnalysisResult* get_callee_result(DexMethod* callee) const {
-    static const AnalysisResult unknown{{}, /* may_this_have_escaped */ true};
+  // A call of a constructor that is still being analyzed assigns nothing.
+  // Such a constructor never keeps `this`, so the call also lets `this`
+  // escape.
+  const AnalysisResult* get_callee_result(const DexMethod* callee) const {
     auto [it, inserted] = m_callee_results.try_emplace(callee);
     if (inserted) {
       it->second = m_get_callee_result(callee);
     }
-    return it->second ? &*it->second : &unknown;
+    return it->second ? &*it->second : nullptr;
   }
 
-  const DexType* m_declaring_type;
+  const DexClass* m_cls;
   GetCalleeResult m_get_callee_result;
   mutable UnorderedMap<const DexMethod*, std::optional<AnalysisResult>>
       m_callee_results;
-  const DexType* m_super_type;
-  const IRInstruction* m_first_load_param;
+  local_pointers::ConstructorAccesses m_accesses;
 };
 } // namespace
 
@@ -315,31 +237,38 @@ namespace definitely_assigned_ifields {
 UnorderedSet<const DexField*> get_definitely_assigned_ifields(
     const Scope& scope) {
   Timer t("get_definitely_assigned_ifields");
-  InsertOnlyConcurrentMap<DexMethod*, AnalysisResult> analysis_results;
+  const auto keeping_this =
+      local_pointers::get_constructors_keeping_this(scope);
+  InsertOnlyConcurrentMap<const DexMethod*, AnalysisResult> analysis_results;
   // A constructor can call itself on `this`, directly or through other
   // constructors, so `analyze` passes down the chain of constructors being
   // analyzed. A result that relied on a constructor further out in the chain
   // still being analyzed depends on where the chain started, so it is not kept:
   // `analyze` then lowers `outermost_relied` to that constructor's position.
-  std::function<AnalysisResult(DexMethod*, const std::vector<DexMethod*>&,
-                               size_t*)>
+  std::function<AnalysisResult(const DexMethod*,
+                               const std::vector<const DexMethod*>&, size_t*)>
       analyze;
-  analyze = [&](DexMethod* ctor, const std::vector<DexMethod*>& chain,
+  analyze = [&](const DexMethod* ctor,
+                const std::vector<const DexMethod*>& chain,
                 size_t* outermost_relied) -> AnalysisResult {
     const auto* known = analysis_results.get(ctor);
     if (known != nullptr) {
       return *known;
     }
     size_t relied = chain.size();
+    // The code of a constructor excluded from optimization may differ at
+    // runtime, so it assigns nothing for sure. External constructors assign
+    // none of the class's own fields.
     AnalysisResult res;
-    if (!ctor->is_external() && !ctor->rstate.no_optimizations() &&
-        ctor->get_code()) {
+    if (!ctor->is_external() && ctor->get_code() &&
+        !ctor->rstate.no_optimizations()) {
       auto inner = chain;
       inner.push_back(ctor);
-      auto& cfg = ctor->get_code()->cfg();
+      const auto& cfg = ctor->get_code()->cfg();
+      auto* cls = type_class(ctor->get_class());
       Analyzer analyzer(
-          cfg, ctor->get_class(),
-          [&](DexMethod* callee) -> std::optional<AnalysisResult> {
+          cfg, cls, keeping_this,
+          [&](const DexMethod* callee) -> std::optional<AnalysisResult> {
             auto it = std::find(inner.begin(), inner.end(), callee);
             if (it != inner.end()) {
               relied = std::min(relied, size_t(it - inner.begin()));
@@ -348,17 +277,7 @@ UnorderedSet<const DexField*> get_definitely_assigned_ifields(
             return analyze(callee, inner, &relied);
           });
       const auto& env = analyzer.get_exit_state_at(cfg.exit_block());
-      auto* cls = type_class(ctor->get_class());
       res = env.get_analysis_result(cls);
-    } else if ((!ctor->is_external() && ctor->rstate.no_optimizations()) ||
-               ctor->get_class() != type::java_lang_Object()) {
-      // Conservative assumption: Constructors marked no_optimizations and
-      // all external ctors (without code) except Object::<init> may directly
-      // or indirectly read and write own fields.
-      // TODO: Consider using the SummaryGenerator to
-      // analyze AOSP classes to find other external
-      // constructors where this does not escape.
-      res.may_this_have_escaped = true;
     }
     if (relied < chain.size()) {
       *outermost_relied = std::min(*outermost_relied, relied);
@@ -371,7 +290,7 @@ UnorderedSet<const DexField*> get_definitely_assigned_ifields(
   };
   // A constructor analyzed at the start of a chain relies on nothing further
   // out, so its result is kept.
-  const auto get_analysis_result = [&](DexMethod* ctor) {
+  const auto get_analysis_result = [&](const DexMethod* ctor) {
     size_t outermost_relied = std::numeric_limits<size_t>::max();
     analyze(ctor, {}, &outermost_relied);
     return analysis_results.get(ctor);

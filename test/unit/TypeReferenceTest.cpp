@@ -12,6 +12,7 @@
 #include "Creators.h"
 #include "DexClass.h"
 #include "IRAssembler.h"
+#include "RedexException.h"
 #include "RedexTest.h"
 
 using namespace type_reference;
@@ -164,6 +165,48 @@ TEST_F(TypeReferenceTest, keeps_default_method_apart_from_overload) {
   EXPECT_EQ(default_method->get_proto()->get_args()->at(0),
             DexType::make_type("LN;"));
   EXPECT_NE(default_method->get_name(), overload->get_name());
+}
+
+// Updates `LA;` to `LB;` in the signatures of a class `LUser;` that has only
+// the static method `method`, and then in its fields.
+void update_a_to_b(DexMethod* method) {
+  ClassCreator creator(DexType::make_type("LUser;"));
+  creator.set_super(type::java_lang_Object());
+  creator.add_method(method);
+  Scope scope{creator.create()};
+  UnorderedMap<const DexType*, DexType*> old_to_new{
+      {DexType::make_type("LA;"), DexType::make_type("LB;")}};
+  update_method_signature_type_references(scope, old_to_new,
+                                          build_subtype_maps(scope));
+  update_field_type_references(scope, old_to_new);
+}
+
+// Like an ordinary invoke, a method handle must not name a method or field
+// that has no definition and still names an old type.
+TEST_F(TypeReferenceTest, rejects_stale_method_handle_method) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.run:()V"
+     (
+      (const-method-handle invoke-static "LOther;.take:(LA;)V")
+      (move-result-pseudo-object v0)
+      (return-void)
+     )
+    )
+  )");
+  EXPECT_THROW(update_a_to_b(method), RedexException);
+}
+
+TEST_F(TypeReferenceTest, rejects_stale_method_handle_field) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.run:()V"
+     (
+      (const-method-handle static-get "LOther;.f:LA;")
+      (move-result-pseudo-object v0)
+      (return-void)
+     )
+    )
+  )");
+  EXPECT_THROW(update_a_to_b(method), RedexException);
 }
 
 TEST_F(TypeReferenceTest, get_new_type) {

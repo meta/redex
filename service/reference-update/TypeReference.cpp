@@ -252,24 +252,24 @@ class TypeRefUpdaterImpl {
     ConcurrentSet<DexMethodRef*> methods;
     ConcurrentSet<DexFieldRef*> fields;
     walk::parallel::code(scope, [&](DexMethod* /*method*/, IRCode& code) {
+      std::vector<DexFieldRef*> code_fields;
+      std::vector<DexMethodRef*> code_methods;
       if (code.cfg_built()) {
         for (auto& mie : InstructionIterable(code.cfg())) {
-          auto* insn = mie.insn;
-          if (insn->has_field()) {
-            fields.insert(insn->get_field());
-          } else if (insn->has_method()) {
-            methods.insert(insn->get_method());
-          }
+          mie.insn->gather_fields(code_fields);
+          mie.insn->gather_methods(code_methods);
         }
       } else {
         for (auto& mie : InstructionIterable(code)) {
-          auto* insn = mie.insn;
-          if (insn->has_field()) {
-            fields.insert(insn->get_field());
-          } else if (insn->has_method()) {
-            methods.insert(insn->get_method());
-          }
+          mie.insn->gather_fields(code_fields);
+          mie.insn->gather_methods(code_methods);
         }
+      }
+      for (auto* field : code_fields) {
+        fields.insert(field);
+      }
+      for (auto* method : code_methods) {
+        methods.insert(method);
       }
     });
     workqueue_run<DexFieldRef*>([this](DexFieldRef* field) { mangling(field); },
@@ -556,30 +556,26 @@ void update_method_signature_type_references(
 
   // Ensure that no method references left that still refer old types.
   walk::parallel::code(scope, [&old_types](DexMethod*, IRCode& code) {
+    std::vector<DexMethodRef*> methods;
+    auto check = [&](const IRInstruction* insn) {
+      methods.clear();
+      insn->gather_methods(methods);
+      for (const auto* method : methods) {
+        always_assert_log(
+            !proto_has_reference_to(method->get_proto(), old_types),
+            "Find old type in method reference %s, please make sure that "
+            "ReBindRefsPass is enabled before the crashed pass.\n",
+            SHOW(insn));
+      }
+    };
     if (code.cfg_built()) {
       auto& cfg = code.cfg();
       for (auto& mie : InstructionIterable(cfg)) {
-        auto* insn = mie.insn;
-        if (insn->has_method()) {
-          auto* proto = insn->get_method()->get_proto();
-          always_assert_log(
-              !proto_has_reference_to(proto, old_types),
-              "Find old type in method reference %s, please make sure that "
-              "ReBindRefsPass is enabled before the crashed pass.\n",
-              SHOW(insn));
-        }
+        check(mie.insn);
       }
     } else {
       for (auto& mie : InstructionIterable(code)) {
-        auto* insn = mie.insn;
-        if (insn->has_method()) {
-          auto* proto = insn->get_method()->get_proto();
-          always_assert_log(
-              !proto_has_reference_to(proto, old_types),
-              "Find old type in method reference %s, please make sure that "
-              "ReBindRefsPass is enabled before the crashed pass.\n",
-              SHOW(insn));
-        }
+        check(mie.insn);
       }
     }
   });
@@ -606,32 +602,28 @@ void update_field_type_references(
   walk::parallel::fields(scope, update_field);
 
   walk::parallel::code(scope, [&old_to_new](DexMethod*, IRCode& code) {
+    std::vector<DexFieldRef*> fields;
+    auto check = [&](const IRInstruction* insn) {
+      fields.clear();
+      insn->gather_fields(fields);
+      for (const auto* field : fields) {
+        const auto* const type =
+            type::make_element_type_if_array(field->get_type());
+        always_assert_log(
+            old_to_new.count(type) == 0,
+            "Find old type in field reference %s, please make sure that "
+            "ReBindRefsPass is enabled before ClassMergingPass\n",
+            SHOW(insn));
+      }
+    };
     if (code.cfg_built()) {
       auto& cfg = code.cfg();
       for (auto& mie : InstructionIterable(cfg)) {
-        auto* insn = mie.insn;
-        if (insn->has_field()) {
-          auto* const ref_type = insn->get_field()->get_type();
-          const auto* const type = type::make_element_type_if_array(ref_type);
-          always_assert_log(
-              old_to_new.count(type) == 0,
-              "Find old type in field reference %s, please make sure that "
-              "ReBindRefsPass is enabled before ClassMergingPass\n",
-              SHOW(insn));
-        }
+        check(mie.insn);
       }
     } else {
       for (auto& mie : InstructionIterable(code)) {
-        auto* insn = mie.insn;
-        if (insn->has_field()) {
-          auto* const ref_type = insn->get_field()->get_type();
-          const auto* const type = type::make_element_type_if_array(ref_type);
-          always_assert_log(
-              old_to_new.count(type) == 0,
-              "Find old type in field reference %s, please make sure that "
-              "ReBindRefsPass is enabled before ClassMergingPass\n",
-              SHOW(insn));
-        }
+        check(mie.insn);
       }
     }
   });

@@ -8,12 +8,33 @@
 #include "TypeReference.h"
 
 #include "Creators.h"
+#include "DexMethodHandle.h"
 #include "IRAssembler.h"
 #include "RedexTest.h"
 
 using namespace type_reference;
 
-class TypeRefUpdaterTest : public RedexTest {};
+class TypeRefUpdaterTest : public RedexTest {
+ protected:
+  // Defines `LFoo;` and a class `LUser;` with the static method `method`, then
+  // updates `LFoo;` to `LBar;` everywhere.
+  void update_foo_to_bar(DexMethod* method) {
+    auto* foo = DexType::make_type("LFoo;");
+    ClassCreator foo_creator(foo);
+    foo_creator.set_super(type::java_lang_Object());
+    auto* foo_cls = foo_creator.create();
+
+    ClassCreator user_creator(DexType::make_type("LUser;"));
+    user_creator.set_super(type::java_lang_Object());
+    user_creator.add_method(method);
+    auto* user_cls = user_creator.create();
+
+    Scope scope{foo_cls, user_cls};
+    UnorderedMap<DexType*, DexType*> mapping{
+        {foo, DexType::make_type("LBar;")}};
+    TypeRefUpdater(mapping).update_methods_fields(scope);
+  }
+};
 
 TEST_F(TypeRefUpdaterTest, init_collision) {
   auto* foo = DexType::make_type("LFoo;");
@@ -92,4 +113,26 @@ TEST_F(TypeRefUpdaterTest, init_collision) {
     )
   )");
   EXPECT_CODE_EQ(baz->get_code(), expected_baz_code.get());
+}
+
+TEST_F(TypeRefUpdaterTest, method_handle_members) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.run:()V"
+     (
+      (const-method-handle invoke-static "LUser;.take:(LFoo;)V")
+      (move-result-pseudo-object v0)
+      (const-method-handle static-get "LUser;.f:[LFoo;")
+      (move-result-pseudo-object v1)
+      (return-void)
+     )
+    )
+  )");
+  auto* code = method->get_code();
+  auto ii = InstructionIterable(code);
+  auto* take = ii.begin()->insn->get_methodhandle()->methodref();
+  auto* field = std::next(ii.begin(), 2)->insn->get_methodhandle()->fieldref();
+  update_foo_to_bar(method);
+
+  EXPECT_EQ(take->get_proto(), DexProto::make_proto("(LBar;)V"));
+  EXPECT_EQ(field->get_type(), DexType::make_type("[LBar;"));
 }

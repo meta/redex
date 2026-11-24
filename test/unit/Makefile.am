@@ -218,6 +218,7 @@ check_PROGRAMS = \
     side_effects_summary_test \
     signed_constant_propagation_test \
     single_impl_escape_test \
+    single_impl_method_handle_test \
     compact_pointer_vector_test \
     source_blocks_test \
     source_debug_extension_test \
@@ -701,6 +702,8 @@ signed_constant_propagation_test_SOURCES = constant-propagation/SignedConstantPr
 signed_constant_propagation_test_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/sparta/test
 
 single_impl_escape_test_SOURCES = SingleImplEscapeTest.cpp
+
+single_impl_method_handle_test_SOURCES = SingleImplMethodHandleTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 compact_pointer_vector_test_SOURCES = CompactPointerVectorTest.cpp
 

@@ -23,6 +23,7 @@
 #include "SingleImpl.h"
 #include "SingleImplDefs.h"
 #include "Trace.h"
+#include "TypeUtil.h"
 #include "Walkers.h"
 
 namespace {
@@ -465,12 +466,24 @@ void AnalysisImpl::analyze_opcodes() {
     return const_class_types.find(implementor) != const_class_types.end();
   };
 
+  // The optimization rewrites the type, field or method that an instruction
+  // names, but not what a method handle, call site or method type names: the
+  // members of method handles, the prototypes of call sites and method types,
+  // and Class bootstrap arguments.
+  auto check_method_handles_and_types = [&](const IRInstruction* insn) {
+    for_each_indirectly_named_type(insn, [&](const DexType* type) {
+      escape_interface(type::get_element_type_if_array(type),
+                       METHOD_HANDLE_OR_TYPE);
+    });
+  };
+
   walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {
     redex_assert(code.cfg_built());
     auto ii = InstructionIterable(code.cfg());
     auto end = ii.end();
     for (auto it = ii.begin(); it != end; ++it) {
       auto* insn = it->insn;
+      check_method_handles_and_types(insn);
       auto op = insn->opcode();
       switch (op) {
       // type ref

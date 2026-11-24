@@ -76,6 +76,9 @@ enum EscapeReason : uint32_t {
   DO_NOT_STRIP = 0X400,
   // create a reference across stores that is illegal
   CROSS_STORES = 0x800,
+  // interface is named inside a method handle, a call site or a method type,
+  // which the optimization does not rewrite
+  METHOD_HANDLE_OR_TYPE = 0x1000,
   // optimization escape reason
   // interface substitution causes a collision with an existing method
   SIG_COLLISION = 0x10000,

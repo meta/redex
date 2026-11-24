@@ -750,6 +750,10 @@ void DexOpcodeCallSite::gather_strings(
   m_callsite->gather_strings(lstring);
 }
 
+void DexOpcodeCallSite::gather_types(std::vector<const DexType*>& ltype) const {
+  m_callsite->gather_types(ltype);
+}
+
 void DexOpcodeCallSite::gather_methodhandles(
     std::vector<DexMethodHandle*>& lmethodhandle) const {
   m_callsite->gather_methodhandles(lmethodhandle);

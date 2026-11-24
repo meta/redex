@@ -275,6 +275,7 @@ class DexOpcodeCallSite : public DexInstruction {
   void encode(DexOutputIdx* dodx, uint16_t*& insns) const override;
   void gather_callsites(std::vector<DexCallSite*>& lcallsite) const override;
   void gather_strings(std::vector<const DexString*>& lstring) const override;
+  void gather_types(std::vector<const DexType*>& ltype) const override;
   void gather_methodhandles(
       std::vector<DexMethodHandle*>& lmethodhandle) const override;
   void gather_methods(std::vector<DexMethodRef*>& lmethod) const override;

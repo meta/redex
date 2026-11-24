@@ -14,12 +14,14 @@
 
 #include <boost/filesystem.hpp>
 
+#include "Creators.h"
 #include "DexCallSite.h"
 #include "DexClass.h"
 #include "DexFileTestHelper.h"
 #include "DexIdx.h"
 #include "DexLoader.h"
 #include "DexMethodHandle.h"
+#include "IRAssembler.h"
 #include "IRCode.h"
 #include "RedexContext.h"
 #include "RedexTestUtils.h"
@@ -27,6 +29,7 @@
 // NOLINTNEXTLINE(facebook-unused-include-check)
 #include "SanitizersConfig.h"
 #include "Show.h"
+#include "TypeUtil.h"
 
 using CallSitePredicate = const std::function<bool(DexCallSite*)>&;
 int ensureCallSite(DexIdx* idx, CallSitePredicate predicate) {
@@ -403,6 +406,45 @@ TEST(Dex038Test, InvokePolymorphicRangeKeepsCallSiteProto) {
   EXPECT_EQ(it->insn->opcode(), OPCODE_MOVE_RESULT_WIDE);
 
   delete g_redex;
+}
+
+// A type or prototype that only a call site names is still written: here
+// `Llib/OnlyHere;` appears only in the call site's method type, `Llib/OnlyArg;`
+// only as a bootstrap argument, and `(Llib/OnlyInMethodType;)V` only as a
+// method type bootstrap argument.
+TEST(Dex038Test, ReadWriteTypesOnlyCallSitesName) {
+  g_redex = new RedexContext();
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.make:()Ljava/lang/Object;"
+     (
+      (invoke-static () "LUser;.placeholder:()Llib/OnlyHere;")
+      (move-result-object v0)
+      (return-object v0)
+     )
+    )
+  )");
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.push_back(std::make_unique<DexEncodedValueType>(
+      DexType::make_type("Llib/OnlyArg;")));
+  args.push_back(std::make_unique<DexEncodedValueMethodType>(
+      DexProto::make_proto("(Llib/OnlyInMethodType;)V")));
+  redex::make_invoke_custom(method->get_code(), "make", "()Llib/OnlyHere;",
+                            std::move(args));
+  ClassCreator creator(DexType::make_type("LUser;"));
+  creator.set_super(type::java_lang_Object());
+  creator.add_method(method);
+  DexClasses classes{creator.create()};
+  const auto before = redex::show_instructions_by_method(classes);
+
+  auto tmpdir = redex::make_tmp_dir("dex038_test_%%%%%%%%");
+  auto output = write_dex_file(std::move(classes), tmpdir.path, 38);
+
+  delete g_redex;
+  g_redex = new RedexContext();
+  EXPECT_EQ(redex::show_instructions_by_method(load_dex_file(output, 38)),
+            before);
+  delete g_redex;
+  g_redex = nullptr;
 }
 
 // IRTypeChecker accepts every method, including the method handle calls and

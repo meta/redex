@@ -27,6 +27,7 @@
 #include "Show.h"
 #include "SourceBlocks.h"
 #include "Trace.h"
+#include "TypeInference.h"
 #include "TypeReference.h"
 #include "UsedVarsAnalysis.h"
 #include "Walkers.h"
@@ -737,6 +738,10 @@ class CodeTransformer final {
     cfg::ControlFlowGraph& cfg = m_method->get_code()->cfg();
     optimize_enums::EnumFixpointIterator engine(cfg, m_enum_util->m_config);
     engine.run(start_env);
+    // What the verifier knows about each register, before any rewriting.
+    type_inference::TypeInference verifier_types(cfg);
+    verifier_types.run(m_method);
+    m_verifier_envs = &verifier_types.get_type_environments();
     for (auto& block : cfg.blocks()) {
       optimize_enums::EnumTypeEnvironment env =
           engine.get_entry_state_at(block);
@@ -752,6 +757,8 @@ class CodeTransformer final {
         }
       }
     }
+    m_verifier_envs = nullptr;
+    auto casts = find_integer_cast_positions();
 
     // We could not insert invoke-kind instructions to cfg when we
     // iterate the cfg. If we're inside a try region, inserting invoke-kind will
@@ -761,9 +768,97 @@ class CodeTransformer final {
     for (const auto& info : m_replacements) {
       cfg.replace_insns(info.original_insn, info.replacements);
     }
+    insert_integer_casts(cfg, casts);
   }
 
  private:
+  /**
+   * Record that the rewritten form of `insn` takes the value of its source
+   * `src_index` as an Integer. The verifier knows that value as an Integer if
+   * it knew it as a candidate enum, which becomes Integer, as an Integer or as
+   * null. Any other reference needs a cast. The analysis may know more about a
+   * value than the verifier does: given `static Object identity(Object x)`,
+   * whose parameter summary says it returns its argument, the analysis types
+   * `identity(E.A)` as E, while the verifier types it as Object.
+   */
+  void require_integer(IRInstruction* insn, src_index_t src_index) {
+    const auto reg = insn->src(src_index);
+    const auto& verifier_env = m_verifier_envs->at(insn);
+    // A `const 0` stays null to the verifier even after a use as a reference
+    // makes TypeInference call it one.
+    if (!verifier_env.get_type(reg).equals(
+            type_inference::TypeDomain(IRType::REFERENCE)) ||
+        verifier_env.get_type_domain(reg).is_null()) {
+      return;
+    }
+    const auto verifier_type = verifier_env.get_dex_type(reg);
+    if (verifier_type && (*verifier_type == type::java_lang_Integer() ||
+                          m_enum_attributes_map.count(*verifier_type) != 0u)) {
+      return;
+    }
+    m_integer_casts.emplace_back(insn, reg);
+  }
+
+  /**
+   * The registers to cast to Integer, by the instruction to cast them before:
+   * each use recorded by require_integer, or the first instruction of its
+   * replacement. Must run before the replacements, whose original
+   * instructions the uses refer to.
+   */
+  UnorderedMap<const IRInstruction*, std::vector<reg_t>>
+  find_integer_cast_positions() const {
+    UnorderedMap<const IRInstruction*, std::vector<reg_t>> casts;
+    if (m_integer_casts.empty()) {
+      return casts;
+    }
+    UnorderedMap<const IRInstruction*, const IRInstruction*> replaced_by;
+    for (const auto& info : m_replacements) {
+      if (!info.replacements.empty()) {
+        replaced_by.emplace(info.original_insn->insn,
+                            info.replacements.front());
+      }
+    }
+    for (const auto& [use, reg] : m_integer_casts) {
+      auto it = replaced_by.find(use);
+      auto& regs = casts[it == replaced_by.end() ? use : it->second];
+      if (std::find(regs.begin(), regs.end(), reg) == regs.end()) {
+        regs.push_back(reg);
+      }
+    }
+    return casts;
+  }
+
+  /**
+   * Cast each register in `casts` to Integer right before its instruction.
+   * The cast cannot fail: the analysis proved the value is a candidate enum
+   * or null, which the transformation turns into an Integer or null.
+   */
+  void insert_integer_casts(
+      cfg::ControlFlowGraph& cfg,
+      const UnorderedMap<const IRInstruction*, std::vector<reg_t>>& casts) {
+    if (casts.empty()) {
+      return;
+    }
+    cfg::CFGMutation mutation(cfg);
+    size_t found = 0;
+    auto ii = cfg::InstructionIterable(cfg);
+    for (auto it = ii.begin(); it != ii.end(); ++it) {
+      auto casts_it = casts.find(it->insn);
+      if (casts_it == casts.end()) {
+        continue;
+      }
+      ++found;
+      for (auto reg : casts_it->second) {
+        mutation.insert_before(it,
+                               make_check_cast(type::java_lang_Integer(), reg));
+      }
+    }
+    always_assert_log(found == casts.size(),
+                      "%zu of %zu instructions to cast before are gone in %s",
+                      found, casts.size(), SHOW(m_method));
+    mutation.flush();
+  }
+
   void update_instructions(const optimize_enums::EnumTypeEnvironment& env,
                            cfg::ControlFlowGraph& cfg,
                            cfg::Block* block,
@@ -922,6 +1017,7 @@ class CodeTransformer final {
     auto vObj = insn->src(0);
     auto* get_ifield_method =
         m_enum_util->add_get_ifield_method(enum_type, ifield);
+    require_integer(insn, 0);
     m_replacements.emplace_back(
         cfg, block, mie,
         dasm(OPCODE_INVOKE_STATIC, get_ifield_method, {{VREG, vObj}}));
@@ -999,6 +1095,7 @@ class CodeTransformer final {
     }
     auto* helper_method =
         m_enum_util->add_substitute_of_name(candidate_type, prev_sb);
+    require_integer(insn, 0);
     m_replacements.emplace_back(
         cfg, block, mie,
         dasm(OPCODE_INVOKE_STATIC, helper_method, {{VREG, reg}}));
@@ -1024,6 +1121,7 @@ class CodeTransformer final {
     }
     auto* helper_method =
         m_enum_util->add_substitute_of_hashcode(candidate_type, prev_sb);
+    require_integer(insn, 0);
     m_replacements.emplace_back(
         cfg, block, mie,
         dasm(OPCODE_INVOKE_STATIC, helper_method, {{VREG, src_reg}}));
@@ -1049,6 +1147,7 @@ class CodeTransformer final {
     }
     DexMethodRef* string_valueof_meth =
         m_enum_util->add_substitute_of_stringvalueof(candidate_type, prev_sb);
+    require_integer(insn, 0);
     m_replacements.emplace_back(cfg, block, mie,
                                 dasm(OPCODE_INVOKE_STATIC, string_valueof_meth,
                                      {{VREG, insn->src(0)}}));
@@ -1076,6 +1175,7 @@ class CodeTransformer final {
     }
     DexMethodRef* string_valueof_meth =
         m_enum_util->add_substitute_of_stringvalueof(candidate_type, prev_sb);
+    require_integer(insn, 1);
     auto reg0 = insn->src(0);
     auto reg1 = insn->src(1);
     auto str_reg = allocate_temp();
@@ -1112,6 +1212,7 @@ class CodeTransformer final {
     if (candidate_type == nullptr) {
       return;
     }
+    require_integer(insn, 0);
     auto* new_insn = new IRInstruction(OPCODE_INVOKE_VIRTUAL);
     new_insn->set_method(integer_meth)->set_srcs(insn->srcs());
     m_replacements.emplace_back(cfg, block, mie, new_insn);
@@ -1157,6 +1258,7 @@ class CodeTransformer final {
         !method->is_external() || is_static(method),
         "[%s] with candidate type %s resolved to external non-static method %s",
         SHOW(insn), SHOW(candidate_type), SHOW(method));
+    require_integer(insn, 0);
     auto* new_insn = (new IRInstruction(*insn))
                          ->set_opcode(OPCODE_INVOKE_STATIC)
                          ->set_method(method);
@@ -1224,6 +1326,12 @@ class CodeTransformer final {
   EnumUtil* m_enum_util;
   DexMethod* m_method;
   std::vector<InsnReplacement> m_replacements;
+  // The verifier's types before each instruction, while run() rewrites them.
+  const UnorderedMap<const IRInstruction*, type_inference::TypeEnvironment>*
+      m_verifier_envs{nullptr};
+  // Uses that rewritten instructions take as an Integer and the registers
+  // they read, where the verifier does not know the value as one.
+  std::vector<std::pair<const IRInstruction*, reg_t>> m_integer_casts;
 };
 
 /**

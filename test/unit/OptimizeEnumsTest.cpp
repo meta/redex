@@ -23,6 +23,7 @@
 #include "EnumConfig.h"
 #include "EnumUpcastAnalysis.h"
 #include "IRAssembler.h"
+#include "IRTypeChecker.h"
 #include "InlineEnumValues.h"
 #include "MethodOverrideGraph.h"
 #include "OptimizeEnums.h"
@@ -3393,4 +3394,257 @@ TEST_F(OptimizeEnumsTest, classOfEnumReturnedByMethodHandleCallKeepsBoth) {
   )");
   EXPECT_EQ(generated_methods_kept(caller),
             (std::set<std::string>{"valueOf", "values"}));
+}
+
+/* Run OptimizeEnumsPass over Bar and a user of Bar that passes a constant
+through an Object-typed identity method, like this Java code:
+
+class User {
+  static Object identity(Object x) { return x; }
+  static String show() { return String.valueOf(identity(Bar.Y)); }
+  ...
+}
+
+javac emits no check-cast on the result of identity(), so the verifier types it
+as Object, while the parameter summary of identity() tells the analysis that it
+is a Bar.
+*/
+DexClass* run_pass_with_user(const std::vector<std::string>& user_methods) {
+  auto store = create_enum_store();
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  uc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LUser;.identity:(Ljava/lang/Object;)Ljava/lang/Object;"
+      (
+        (load-param-object v0)
+        (return-object v0)
+      )
+    )
+  )"));
+  for (const auto& method : user_methods) {
+    uc.add_method(assembler::method_from_string(method));
+  }
+  auto* user = uc.create();
+  for (auto* m : user->get_all_methods()) {
+    m->get_code()->build_cfg();
+  }
+  store.add_classes({user});
+  DexStoresVector stores({std::move(store)});
+
+  optimize_enums::OptimizeEnumsPass pass;
+  PassManager manager({&pass});
+  Json::Value conf_obj = Json::nullValue;
+  ConfigFiles dummy_config(conf_obj);
+  dummy_config.parse_global_config();
+  manager.run_passes(stores, dummy_config);
+  for (auto* m : user->get_all_methods()) {
+    m->get_code()->build_cfg();
+  }
+  return user;
+}
+
+size_t count_integer_casts(DexMethod* method) {
+  size_t count = 0;
+  for (const auto& mie : cfg::InstructionIterable(method->get_code()->cfg())) {
+    if (mie.insn->opcode() == OPCODE_CHECK_CAST &&
+        mie.insn->get_type() == type::java_lang_Integer()) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+// String.valueOf(Object) and StringBuilder.append(Object) on such a value are
+// rewritten into helpers that take an Integer, so the value needs a cast to
+// Integer for the method to verify.
+TEST_F(OptimizeEnumsTest, objectReturningCallResultIsCastToInteger) {
+  auto* user = run_pass_with_user({R"(
+      (method (public static) "LUser;.show:()Ljava/lang/String;"
+        (
+          (sget-object "LBar;.Y:LBar;")
+          (move-result-pseudo-object v0)
+          (invoke-static (v0) "LUser;.identity:(Ljava/lang/Object;)Ljava/lang/Object;")
+          (move-result-object v1)
+          (invoke-static (v1) "Ljava/lang/String;.valueOf:(Ljava/lang/Object;)Ljava/lang/String;")
+          (move-result-object v2)
+          (return-object v2)
+        )
+      )
+    )",
+                                   R"(
+      (method (public static) "LUser;.append:(Ljava/lang/StringBuilder;)Ljava/lang/String;"
+        (
+          (load-param-object v0)
+          (sget-object "LBar;.Z:LBar;")
+          (move-result-pseudo-object v1)
+          (invoke-static (v1) "LUser;.identity:(Ljava/lang/Object;)Ljava/lang/Object;")
+          (move-result-object v2)
+          (move-object v3 v2)
+          (invoke-virtual (v0 v3) "Ljava/lang/StringBuilder;.append:(Ljava/lang/Object;)Ljava/lang/StringBuilder;")
+          (move-result-object v0)
+          (invoke-virtual (v0) "Ljava/lang/StringBuilder;.toString:()Ljava/lang/String;")
+          (move-result-object v0)
+          (return-object v0)
+        )
+      )
+    )"});
+  ASSERT_FALSE(is_enum(type_class(DexType::get_type("LBar;"))))
+      << "Bar must be transformed for this test to be meaningful";
+  for (const char* name : {"show", "append"}) {
+    auto* method = user->find_method_from_simple_deobfuscated_name(name);
+    ASSERT_NE(method, nullptr) << name;
+    EXPECT_EQ(count_integer_casts(method), 1) << show(method);
+    IRTypeChecker checker(method);
+    checker.run();
+    EXPECT_TRUE(checker.good()) << name << ": " << checker.what();
+  }
+}
+
+// Inside a try region the inserted cast can throw like any check-cast, so it
+// gets the same exception edge as the call that takes the value.
+TEST_F(OptimizeEnumsTest, castInsideTryKeepsExceptionEdge) {
+  auto* user = run_pass_with_user({R"(
+      (method (public static) "LUser;.show:()Ljava/lang/String;"
+        (
+          (.try_start a)
+          (sget-object "LBar;.Y:LBar;")
+          (move-result-pseudo-object v0)
+          (invoke-static (v0) "LUser;.identity:(Ljava/lang/Object;)Ljava/lang/Object;")
+          (move-result-object v1)
+          (invoke-static (v1) "Ljava/lang/String;.valueOf:(Ljava/lang/Object;)Ljava/lang/String;")
+          (move-result-object v2)
+          (.try_end a)
+          (return-object v2)
+          (.catch (a) "Ljava/lang/RuntimeException;")
+          (const-string "")
+          (move-result-pseudo-object v2)
+          (return-object v2)
+        )
+      )
+    )"});
+  ASSERT_FALSE(is_enum(type_class(DexType::get_type("LBar;"))));
+  auto* method = user->find_method_from_simple_deobfuscated_name("show");
+  ASSERT_NE(method, nullptr);
+  auto& cfg = method->get_code()->cfg();
+  size_t casts = 0;
+  for (auto* block : cfg.blocks()) {
+    for (const auto& mie : InstructionIterable(block)) {
+      if (mie.insn->opcode() == OPCODE_CHECK_CAST &&
+          mie.insn->get_type() == type::java_lang_Integer()) {
+        ++casts;
+        EXPECT_FALSE(cfg.get_succ_edges_of_type(block, cfg::EDGE_THROW).empty())
+            << show(cfg);
+      }
+    }
+  }
+  EXPECT_EQ(casts, 1) << show(cfg);
+  IRTypeChecker checker(method);
+  checker.run();
+  EXPECT_TRUE(checker.good()) << checker.what();
+}
+
+// Bar b = null; int x = b.x; int y = b.x; takesEnum(b);
+// `b` is the constant null, which the verifier accepts as an Integer, so its
+// field reads get no cast, and it can still be passed as an `Enum`.
+TEST_F(OptimizeEnumsTest, nullConstantGetsNoIntegerCast) {
+  auto* user = run_pass_with_user({R"(
+      (method (public static) "LUser;.takesEnum:(Ljava/lang/Enum;)V"
+        (
+          (load-param-object v0)
+          (return-void)
+        )
+      )
+    )",
+                                   R"(
+      (method (public static) "LUser;.readTwice:()I"
+        (
+          (const v0 0)
+          (iget v0 "LBar;.x:I")
+          (move-result-pseudo v1)
+          (iget v0 "LBar;.x:I")
+          (move-result-pseudo v2)
+          (invoke-static (v0) "LUser;.takesEnum:(Ljava/lang/Enum;)V")
+          (return v1)
+        )
+      )
+    )"});
+  ASSERT_FALSE(is_enum(type_class(DexType::get_type("LBar;"))));
+  auto* method = user->find_method_from_simple_deobfuscated_name("readTwice");
+  ASSERT_NE(method, nullptr);
+  EXPECT_EQ(count_integer_casts(method), 0) << show(method);
+  IRTypeChecker checker(method);
+  checker.run();
+  EXPECT_TRUE(checker.good()) << checker.what();
+}
+
+// A value that no rewritten instruction needs as an Integer gets no cast.
+TEST_F(OptimizeEnumsTest, noCastWithoutIntegerUse) {
+  auto* user = run_pass_with_user({R"(
+      (method (public static) "LUser;.isNull:()Z"
+        (
+          (sget-object "LBar;.Y:LBar;")
+          (move-result-pseudo-object v0)
+          (invoke-static (v0) "LUser;.identity:(Ljava/lang/Object;)Ljava/lang/Object;")
+          (move-result-object v1)
+          (const v2 0)
+          (if-nez v1 :nonnull)
+          (const v2 1)
+          (:nonnull)
+          (return v2)
+        )
+      )
+    )"});
+  ASSERT_FALSE(is_enum(type_class(DexType::get_type("LBar;"))));
+  auto* method = user->find_method_from_simple_deobfuscated_name("isNull");
+  ASSERT_NE(method, nullptr);
+  EXPECT_EQ(count_integer_casts(method), 0) << show(method);
+}
+
+// javac emits the enum cast in String.valueOf((Bar) identity(Bar.Y)).
+// Rewriting that cast already gives the verifier an Integer.
+TEST_F(OptimizeEnumsTest, explicitEnumCastNeedsNoAdditionalIntegerCast) {
+  auto* user = run_pass_with_user({R"(
+    (method (public static) "LUser;.show:()Ljava/lang/String;"
+      (
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v0)
+        (invoke-static (v0) "LUser;.identity:(Ljava/lang/Object;)Ljava/lang/Object;")
+        (move-result-object v1)
+        (check-cast v1 "LBar;")
+        (move-result-pseudo-object v1)
+        (invoke-static (v1) "Ljava/lang/String;.valueOf:(Ljava/lang/Object;)Ljava/lang/String;")
+        (move-result-object v2)
+        (return-object v2)
+      )
+    )
+  )"});
+  ASSERT_FALSE(is_enum(type_class(DexType::get_type("LBar;"))));
+  auto* method = user->find_method_from_simple_deobfuscated_name("show");
+  ASSERT_NE(method, nullptr);
+  EXPECT_EQ(count_integer_casts(method), 1) << show(method->get_code()->cfg());
+}
+
+// Defensive bytecode: a redundant Object cast erases the verifier's type.
+TEST_F(OptimizeEnumsTest, objectCastResultGetsIntegerCast) {
+  auto* user = run_pass_with_user({R"(
+    (method (public static) "LUser;.show:()Ljava/lang/String;"
+      (
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v0)
+        (check-cast v0 "Ljava/lang/Object;")
+        (move-result-pseudo-object v1)
+        (invoke-static (v1) "Ljava/lang/String;.valueOf:(Ljava/lang/Object;)Ljava/lang/String;")
+        (move-result-object v2)
+        (return-object v2)
+      )
+    )
+  )"});
+  ASSERT_FALSE(is_enum(type_class(DexType::get_type("LBar;"))));
+  auto* method = user->find_method_from_simple_deobfuscated_name("show");
+  ASSERT_NE(method, nullptr);
+  EXPECT_EQ(count_integer_casts(method), 1) << show(method->get_code()->cfg());
+  IRTypeChecker checker(method);
+  checker.run();
+  EXPECT_TRUE(checker.good()) << checker.what();
 }

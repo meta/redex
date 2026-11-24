@@ -152,7 +152,8 @@ ParamSummary calculate_param_summary(DexMethod* method,
   auto* args = method->get_proto()->get_args();
   auto& escaping_params = escape_summary.escaping_parameters;
   auto& returned_elements = escape_summary.returned_parameters;
-  if (returned_elements.count(ptrs::ESCAPED_FRESH_RETURN) == 0u) {
+  if (returned_elements.count(ptrs::ESCAPED_FRESH_RETURN) == 0u &&
+      returned_elements.count(ptrs::NULL_RETURN) == 0u) {
     if (returned_elements.size() == 1) {
       auto returned = *unordered_any(returned_elements);
       if (returned != ptrs::FRESH_RETURN &&

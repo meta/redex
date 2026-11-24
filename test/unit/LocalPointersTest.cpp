@@ -348,6 +348,55 @@ TEST_F(LocalPointersTest, generateEscapeSummary2) {
               UnorderedElementsAre());
 }
 
+TEST_F(LocalPointersTest, returnedNullIsTellableApart) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+     (load-param-object v0)
+     (load-param v1)
+     (if-eqz v1 :null)
+     (return-object v0)
+     (:null)
+     (const v0 0)
+     (return-object v0)
+    )
+  )");
+  code->build_cfg();
+  code->cfg().calculate_exit_block();
+  ptrs::FixpointIterator fp_iter(code->cfg());
+  fp_iter.run(ptrs::Environment());
+  auto summary = ptrs::get_escape_summary(fp_iter, *code,
+                                          /* result_may_be_pointer */ true);
+  EXPECT_EQ(summary.returned_parameters,
+            ptrs::ParamSet({0, ptrs::NULL_RETURN}));
+  EXPECT_THAT(unordered_unsafe_unwrap(summary.escaping_parameters),
+              UnorderedElementsAre());
+
+  // A caller treats the returned null like an escaped object.
+  auto caller = assembler::ircode_from_string(R"(
+    (
+     (load-param-object v0)
+     (const v1 1)
+     (invoke-static (v0 v1) "LFoo;.bar:(Ljava/lang/Object;I)Ljava/lang/Object;")
+     (move-result-object v2)
+     (return-object v2)
+    )
+  )");
+  caller->build_cfg();
+  caller->cfg().calculate_exit_block();
+  ptrs::InvokeToSummaryMap invoke_to_summary_map;
+  for (const auto& mie : InstructionIterable(caller->cfg())) {
+    if (opcode::is_a_method_invoke(mie.insn->opcode())) {
+      invoke_to_summary_map.emplace(mie.insn, summary);
+    }
+  }
+  ptrs::FixpointIterator caller_fp_iter(caller->cfg(), invoke_to_summary_map);
+  caller_fp_iter.run(ptrs::Environment());
+  auto caller_summary = ptrs::get_escape_summary(
+      caller_fp_iter, *caller, /* result_may_be_pointer */ true);
+  EXPECT_EQ(caller_summary.returned_parameters,
+            ptrs::ParamSet({0, ptrs::ESCAPED_FRESH_RETURN}));
+}
+
 TEST_F(LocalPointersTest, collectExitingPointersWithThrow) {
   auto code = assembler::ircode_from_string(R"(
     (

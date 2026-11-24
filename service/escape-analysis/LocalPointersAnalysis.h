@@ -45,6 +45,12 @@ inline bool may_alloc(IROpcode op) {
          op == OPCODE_FILLED_NEW_ARRAY || opcode::is_a_method_invoke(op);
 }
 
+// Whether `insn` is a `const 0`, the only instruction that puts null in a
+// register.
+inline bool is_null_constant(const IRInstruction* insn) {
+  return insn->opcode() == OPCODE_CONST && insn->get_literal() == 0;
+}
+
 /*
  * A model of pointer values on the stack and the heap values they point to in
  * the store. This acts as an interface over EnvironmentWithStoreImpl<Store>,
@@ -193,6 +199,11 @@ constexpr uint16_t FRESH_RETURN = std::numeric_limits<uint16_t>::max();
 // For denoting a returned value that escaped.
 constexpr uint16_t ESCAPED_FRESH_RETURN = FRESH_RETURN - 1;
 
+// For denoting a returned null. A caller treats it like ESCAPED_FRESH_RETURN;
+// it is kept apart for readers of a summary that ask whether a method may
+// return an object other than its parameters.
+constexpr uint16_t NULL_RETURN = FRESH_RETURN - 2;
+
 struct EscapeSummary {
   // The elements of this set represent the indexes of the src registers that
   // escape.
@@ -205,7 +216,8 @@ struct EscapeSummary {
   // We only track returned parameters that may pass "pointers". Other returned
   // values are not tracked. We do not model whether a method returns at all,
   // and thus the empty set is not special. See UsedVarsTest_noReturn for more
-  // background on that.
+  // background on that. A returned value that is not a parameter is denoted
+  // by FRESH_RETURN, ESCAPED_FRESH_RETURN or NULL_RETURN.
   ParamSet returned_parameters;
 
   EscapeSummary() = default;

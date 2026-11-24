@@ -159,7 +159,7 @@ bool dest_may_be_pointer(const IRInstruction* insn) {
   case OPCODE_USHR_INT_LIT:
     return false;
   case OPCODE_CONST:
-    return insn->get_literal() == 0;
+    return is_null_constant(insn);
   case OPCODE_FILL_ARRAY_DATA:
   case OPCODE_SWITCH:
     not_reached_log("No dest");
@@ -252,7 +252,7 @@ void analyze_invoke_with_summary(const EscapeSummary& summary,
   for (auto src_idx : UnorderedIterable(summary.returned_parameters)) {
     if (src_idx == FRESH_RETURN) {
       returned_ptrs.add(insn);
-    } else if (src_idx == ESCAPED_FRESH_RETURN) {
+    } else if (src_idx == ESCAPED_FRESH_RETURN || src_idx == NULL_RETURN) {
       returned_ptrs.add(insn);
       // escape just insn right here; we are going to override
       // RESULT_REGISTER in a moment with a more precise pointer set.
@@ -664,6 +664,8 @@ EscapeSummary get_escape_summary(const FixpointIterator& fp_iter,
     for (const auto* insn : returned_ptrs.elements()) {
       if (insn->opcode() == IOPCODE_LOAD_PARAM_OBJECT) {
         summary.returned_parameters.insert(param_indexes.at(insn));
+      } else if (is_null_constant(insn)) {
+        summary.returned_parameters.insert(NULL_RETURN);
       } else if (!exit_state.may_have_escaped(insn)) {
         summary.returned_parameters.insert(FRESH_RETURN);
       } else {

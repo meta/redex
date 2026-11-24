@@ -2510,27 +2510,11 @@ MultiMethodInliner::get_callee_type_refs(
   always_assert(callee->get_code()->cfg_built());
   const auto& callee_cfg =
       reduced_cfg != nullptr ? *reduced_cfg : callee->get_code()->cfg();
+  std::vector<const DexType*> named_types;
   for (const auto& mie : InstructionIterable(callee_cfg)) {
-    auto* insn = mie.insn;
-    if (insn->has_type()) {
-      type_refs_set.insert(insn->get_type());
-    } else if (insn->has_method()) {
-      auto* meth = insn->get_method();
-      type_refs_set.insert(meth->get_class());
-      auto* proto = meth->get_proto();
-      type_refs_set.insert(proto->get_rtype());
-      auto* args = proto->get_args();
-      if (args != nullptr) {
-        for (const auto& arg : *args) {
-          type_refs_set.insert(arg);
-        }
-      }
-    } else if (insn->has_field()) {
-      auto* field = insn->get_field();
-      type_refs_set.insert(field->get_class());
-      type_refs_set.insert(field->get_type());
-    }
+    mie.insn->gather_types(named_types);
   }
+  insert_unordered_iterable(type_refs_set, named_types);
 
   auto type_refs = std::make_shared<UnorderedBag<const DexType*>>();
   for (const auto* type : UnorderedIterable(type_refs_set)) {

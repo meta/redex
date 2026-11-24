@@ -504,7 +504,7 @@ match_flow_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 materialize_null_checks_test_SOURCES = MaterializeNullChecksTest.cpp
 
-method_inline_test_SOURCES = MethodInlineTest.cpp
+method_inline_test_SOURCES = MethodInlineTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 method_profiles_test_SOURCES = MethodProfilesTest.cpp
 

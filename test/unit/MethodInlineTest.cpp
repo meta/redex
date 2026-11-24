@@ -10,8 +10,10 @@
 #include "ApiLevelChecker.h"
 #include "Creators.h"
 #include "Debug.h"
+#include "DexAnnotation.h"
 #include "DexAsm.h"
 #include "DexUtil.h"
+#include "FrameworkApi.h"
 #include "IRAssembler.h"
 #include "IRCode.h"
 #include "Inliner.h"
@@ -21,6 +23,7 @@
 #include "PartialInliner.h"
 #include "PassManager.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "Walkers.h"
 
 struct MethodInlineTest : public RedexTest {
@@ -4812,4 +4815,174 @@ TEST_F(MethodInlineTest, partial_inlining_rejects_invoke_polymorphic) {
   EXPECT_FALSE(inliner::get_partially_inlined_code(
                    method, method->get_code()->cfg(), 100)
                    .is_valid());
+}
+
+namespace {
+
+struct CrossStoreCallee {
+  // The body of the static method `LCallee;.callee:()V`.
+  std::string code;
+  // Runs before the CFGs are built.
+  std::function<void(DexMethod*)> edit = nullptr;
+  // Whether `LBoot;`, the bootstrap class of the call sites that
+  // `redex::make_invoke_custom` makes, is in the callee's store rather than
+  // in the root store.
+  bool bootstrap_in_callee_store{false};
+  // Marks the callee force-inline and gives the inliner a minimum SDK, which
+  // enables its later reference check for other callees.
+  bool force_inline_with_min_sdk_api{false};
+};
+
+// Returns whether `callee` is inlined into a caller of the root store.
+// `LCallee;` and `LOther;` are in a second store, which the root store cannot
+// reference.
+bool inlines_across_stores(const ConfigFiles& conf,
+                           const CrossStoreCallee& callee_spec) {
+  auto* caller_cls = create_a_class("LCaller;");
+  auto* callee_cls = create_a_class("LCallee;");
+  auto* other_cls = create_a_class("LOther;");
+  auto* boot_cls = create_a_class("LBoot;");
+  other_cls->add_method(
+      DexMethod::make_method("LOther;.m:()V")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                          assembler::ircode_from_string("((return-void))"),
+                          /* is_virtual */ false));
+  auto* callee =
+      DexMethod::make_method("LCallee;.callee:()V")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                          assembler::ircode_from_string(callee_spec.code),
+                          /* is_virtual */ false);
+  callee_cls->add_method(callee);
+  caller_cls->add_method(DexMethod::make_method("LCaller;.caller:()V")
+                             ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                                             assembler::ircode_from_string(R"((
+                            (invoke-static () "LCallee;.callee:()V")
+                            (return-void)
+                          ))"),
+                                             /* is_virtual */ false));
+  if (callee_spec.edit) {
+    callee_spec.edit(callee);
+  }
+  if (callee_spec.force_inline_with_min_sdk_api) {
+    callee->rstate.set_force_inline();
+  }
+
+  DexStoresVector stores;
+  DexStore root_store("classes");
+  root_store.add_classes({caller_cls});
+  DexStore callee_store("callee");
+  callee_store.add_classes({callee_cls, other_cls});
+  (callee_spec.bootstrap_in_callee_store ? callee_store : root_store)
+      .add_classes({boot_cls});
+  stores.push_back(std::move(root_store));
+  stores.push_back(std::move(callee_store));
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](auto*, IRCode& code) { code.build_cfg(); });
+  api::LevelChecker::init(0, scope);
+
+  inliner::InlinerConfig inliner_config;
+  inliner_config.populate(scope);
+  init_classes::InitClassesWithSideEffects init_classes_with_side_effects(
+      scope, /* create_init_class_insns */ false);
+  UnorderedSet<DexMethod*> candidates{callee};
+  ConcurrentMethodResolverDeprecated concurrent_method_resolver;
+  api::AndroidSDK min_sdk_api(std::nullopt);
+  MultiMethodInliner inliner(
+      scope, init_classes_with_side_effects, stores, conf, candidates,
+      std::ref(concurrent_method_resolver), inliner_config, /* min_sdk */ 0,
+      InterDex, /* true_virtual_callers */ {}, /* inline_for_speed */ nullptr,
+      /* analyze_and_prune_inits */ false, /* configured_pure_methods */ {},
+      callee_spec.force_inline_with_min_sdk_api ? &min_sdk_api : nullptr);
+  inliner.inline_methods();
+  return inliner.get_inlined().count(callee) != 0;
+}
+
+} // namespace
+
+TEST_F(MethodInlineTest, cross_store_const_class_is_not_inlined) {
+  EXPECT_FALSE(inlines_across_stores(conf, {.code = R"((
+    (const-class "LOther;")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))"}));
+}
+
+TEST_F(MethodInlineTest, cross_store_const_method_type_is_not_inlined) {
+  EXPECT_FALSE(inlines_across_stores(conf, {.code = R"((
+    (const-method-type "(LOther;)V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))"}));
+}
+
+TEST_F(MethodInlineTest, cross_store_const_method_handle_is_not_inlined) {
+  EXPECT_FALSE(inlines_across_stores(conf, {.code = R"((
+    (const-method-handle invoke-static "LOther;.m:()V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))"}));
+}
+
+TEST_F(MethodInlineTest, cross_store_invoke_polymorphic_proto_is_not_inlined) {
+  EXPECT_FALSE(inlines_across_stores(conf, {.code = R"((
+    (const v0 0)
+    (invoke-polymorphic (v0 v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LOther;)V")
+    (return-void)
+  ))"}));
+}
+
+TEST_F(MethodInlineTest, cross_store_invoke_custom_method_type_is_not_inlined) {
+  EXPECT_FALSE(inlines_across_stores(conf, {.code = R"((
+    (const v0 0)
+    (invoke-static (v0) "LCallee;.placeholder:(LOther;)V")
+    (return-void)
+  ))",
+                                            .edit = [](DexMethod* callee) {
+                                              redex::make_invoke_custom(
+                                                  callee->get_code(), "run",
+                                                  "(LOther;)V");
+                                            }}));
+}
+
+TEST_F(MethodInlineTest,
+       cross_store_invoke_custom_bootstrap_method_is_not_inlined) {
+  EXPECT_FALSE(inlines_across_stores(
+      conf, {.code = R"((
+    (invoke-static () "LCallee;.placeholder:()V")
+    (return-void)
+  ))",
+             .edit =
+                 [](DexMethod* callee) {
+                   redex::make_invoke_custom(callee->get_code(), "run", "()V");
+                 },
+             .bootstrap_in_callee_store = true}));
+}
+
+TEST_F(MethodInlineTest,
+       cross_store_invoke_custom_bootstrap_argument_is_not_inlined) {
+  EXPECT_FALSE(inlines_across_stores(
+      conf, {.code = R"((
+    (invoke-static () "LCallee;.placeholder:()V")
+    (return-void)
+  ))",
+             .edit = [](DexMethod* callee) {
+               std::vector<std::unique_ptr<DexEncodedValue>> args;
+               args.push_back(std::make_unique<DexEncodedValueMethodHandle>(
+                   redex::make_method_handle(METHOD_HANDLE_TYPE_INVOKE_STATIC,
+                                             "LOther;.m:()V")));
+               redex::make_invoke_custom(callee->get_code(), "run", "()V",
+                                         std::move(args));
+             }}));
+}
+
+// A force-inline callee skips the inliner's later reference check, so the
+// cross-store check alone must refuse it.
+TEST_F(MethodInlineTest, cross_store_force_inline_method_type_is_not_inlined) {
+  EXPECT_FALSE(
+      inlines_across_stores(conf, {.code = R"((
+    (const-method-type "(LOther;)V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))",
+                                   .force_inline_with_min_sdk_api = true}));
 }

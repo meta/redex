@@ -127,8 +127,8 @@ TEST_F(PassManagerFeatureTest, method_type_constants_still_reject) {
                                             DexTypeList::make_type_list({}))),
        (new IRInstruction(IOPCODE_MOVE_RESULT_PSEUDO_OBJECT))->set_dest(0)});
   run_rejecting(method, 39,
-                "TypeInference::analyze_instruction does not support "
-                "const-method-type yet");
+                "Input APK has dex39 features that this pass FeatureCheckPass "
+                "doesn't support");
 }
 
 } // namespace

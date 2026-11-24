@@ -9,7 +9,9 @@
 
 #include "IRAssembler.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "TypeInference.h"
+#include "TypeUtil.h"
 
 using namespace testing;
 
@@ -92,6 +94,109 @@ TEST_F(TypeInferenceTest, constStringAndConstClassAreNotNullAndExact) {
       EXPECT_TRUE(domain.get_type_set().contains(expected));
     }
     checked = true;
+  }
+  EXPECT_TRUE(checked);
+}
+
+// `invoke-polymorphic` passes and returns the types of its call-site
+// prototype, here an int and a long.
+TEST_F(TypeInferenceTest, invokePolymorphicUsesCallSiteProto) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar:(Ljava/lang/invoke/MethodHandle;)V"
+     (
+      (load-param-object v0)
+      (const v1 7)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(I)J")
+      (move-result-wide v2)
+      (return-void)
+     )
+    )
+  )");
+  auto* code = method->get_code();
+  code->build_cfg();
+  type_inference::TypeInference inference(code->cfg());
+  inference.run(method);
+  bool checked = false;
+  for (auto& mie : InstructionIterable(code->cfg())) {
+    if (mie.insn->opcode() == OPCODE_RETURN_VOID) {
+      checked = true;
+      const auto& env = inference.get_type_environments().at(mie.insn);
+      EXPECT_EQ(env.get_type(2), type_inference::TypeDomain(IRType::LONG1));
+      EXPECT_EQ(env.get_type(3), type_inference::TypeDomain(IRType::LONG2));
+    }
+  }
+  EXPECT_TRUE(checked);
+}
+
+// `invoke-custom` passes and returns the types of its call site's method
+// type, and has no receiver.
+TEST_F(TypeInferenceTest, invokeCustomUsesCallSiteMethodType) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar:(J)V"
+     (
+      (load-param-wide v0)
+      (invoke-static (v0) "LFoo;.placeholder:(J)V")
+      (move-result-object v2)
+      (return-void)
+     )
+    )
+  )");
+  auto* code = method->get_code();
+  redex::make_invoke_custom(code, "get", "(J)Ljava/util/function/Supplier;");
+  code->build_cfg();
+  type_inference::TypeInference inference(code->cfg());
+  inference.run(method);
+  bool checked = false;
+  for (auto& mie : InstructionIterable(code->cfg())) {
+    if (mie.insn->opcode() == OPCODE_RETURN_VOID) {
+      checked = true;
+      const auto& env = inference.get_type_environments().at(mie.insn);
+      EXPECT_EQ(env.get_type(0), type_inference::TypeDomain(IRType::LONG1));
+      EXPECT_EQ(env.get_type(2), type_inference::TypeDomain(IRType::REFERENCE));
+      ASSERT_TRUE(env.get_dex_type(2));
+      EXPECT_EQ(*env.get_dex_type(2),
+                DexType::get_type("Ljava/util/function/Supplier;"));
+    }
+  }
+  EXPECT_TRUE(checked);
+}
+
+// `const-method-handle` loads some subclass of MethodHandle, and
+// `const-method-type` loads a MethodType, which is final, so it is that exact
+// class and never null.
+TEST_F(TypeInferenceTest, constMethodHandleAndType) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar:()V"
+     (
+      (const-method-handle invoke-instance "Ljava/lang/Object;.hashCode:()I")
+      (move-result-pseudo-object v0)
+      (const-method-type "(CSJ)Z")
+      (move-result-pseudo-object v1)
+      (return-void)
+     )
+    )
+  )");
+  auto* code = method->get_code();
+  code->build_cfg();
+  type_inference::TypeInference inference(code->cfg());
+  inference.run(method);
+  bool checked = false;
+  for (auto& mie : InstructionIterable(code->cfg())) {
+    if (mie.insn->opcode() == OPCODE_RETURN_VOID) {
+      checked = true;
+      const auto& env = inference.get_type_environments().at(mie.insn);
+      ASSERT_TRUE(env.get_dex_type(0));
+      ASSERT_TRUE(env.get_dex_type(1));
+      EXPECT_EQ(*env.get_dex_type(0),
+                DexType::get_type("Ljava/lang/invoke/MethodHandle;"));
+      // Not the exact class.
+      EXPECT_TRUE(env.get_type_domain(0).get_set_domain().is_top());
+      const auto* method_type =
+          DexType::get_type("Ljava/lang/invoke/MethodType;");
+      EXPECT_EQ(*env.get_dex_type(1), method_type);
+      EXPECT_TRUE(env.get_type_domain(1).is_not_null());
+      EXPECT_TRUE(env.get_type_domain(1).get_type_set().contains(method_type));
+    }
   }
   EXPECT_TRUE(checked);
 }

@@ -718,7 +718,7 @@ true_virtuals_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 type_analysis_transform_test_SOURCES = type-analysis/TypeAnalysisTransformTest.cpp
 
-type_inference_test_SOURCES = TypeInferenceTest.cpp
+type_inference_test_SOURCES = TypeInferenceTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 type_inference_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 type_ref_updater_test_SOURCES = TypeRefUpdaterTest.cpp

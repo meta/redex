@@ -449,6 +449,23 @@ TEST_F(IRTypeCheckerTest, move_result_after_void_invoke) {
   EXPECT_TRUE(checker.fail());
 }
 
+TEST_F(IRTypeCheckerTest, move_result_after_void_method_handle_call) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar:(Ljava/lang/invoke/MethodHandle;)I"
+     (
+      (load-param-object v0)
+      (invoke-static () "LFoo;.getInt:()I")
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
+      (move-result v1)
+      (return v1)
+     )
+    )
+  )");
+  IRTypeChecker checker(method);
+  checker.run();
+  EXPECT_TRUE(checker.fail());
+}
+
 TEST_F(IRTypeCheckerTest, move_result_at_start) {
   using namespace dex_asm;
   // Construct a new method because we don't want any load-param opcodes in
@@ -3250,6 +3267,43 @@ TEST_F(IRTypeCheckerTest, moveResultAfterInvokePolymorphic) {
   IRTypeChecker checker(method);
   checker.run();
   EXPECT_TRUE(checker.good()) << checker.what();
+}
+
+// A static initializer that calls a method handle:
+//
+//   static final long START = (long) NOW.invokeExact();
+TEST_F(IRTypeCheckerTest, invokePolymorphicWideResult) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static constructor) "LFoo;.<clinit>:()V"
+     (
+      (sget-object "LFoo;.NOW:Ljava/lang/invoke/MethodHandle;")
+      (move-result-pseudo-object v0)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()J")
+      (move-result-wide v1)
+      (sput-wide v1 "LFoo;.START:J")
+      (return-void)
+     )
+    )
+  )");
+  IRTypeChecker checker(method);
+  checker.run();
+  EXPECT_TRUE(checker.good()) << checker.what();
+}
+
+TEST_F(IRTypeCheckerTest, invokePolymorphicResultMismatchIsAnError) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar:(Ljava/lang/invoke/MethodHandle;)V"
+     (
+      (load-param-object v0)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()J")
+      (move-result-object v1)
+      (return-void)
+     )
+    )
+  )");
+  IRTypeChecker checker(method);
+  checker.run();
+  EXPECT_TRUE(checker.fail());
 }
 
 TEST_F(IRTypeCheckerTest, invokeOnClassInitializer) {

@@ -812,14 +812,20 @@ void TypeInference::analyze_instruction(const IRInstruction* insn,
     break;
   }
   case OPCODE_CONST_METHOD_HANDLE: {
-    always_assert_log(false,
-                      "TypeInference::analyze_instruction does not support "
-                      "const-method-handle yet");
+    // The instruction never yields null, but the handle's class is some
+    // subclass of the abstract MethodHandle, and a not-null reference here
+    // would claim MethodHandle as its exact class.
+    set_reference(current_state, RESULT_REGISTER,
+                  DexType::make_type("Ljava/lang/invoke/MethodHandle;"));
+    break;
   }
   case OPCODE_CONST_METHOD_TYPE: {
-    always_assert_log(false,
-                      "TypeInference::analyze_instruction does not support "
-                      "const-method-type yet");
+    // Either we get the method type or the instruction throws, and
+    // java.lang.invoke.MethodType is final.
+    set_reference(current_state, RESULT_REGISTER,
+                  DexType::make_type("Ljava/lang/invoke/MethodType;"),
+                  /* is_not_null */ true);
+    break;
   }
   case OPCODE_MONITOR_ENTER:
   case OPCODE_MONITOR_EXIT: {
@@ -1227,94 +1233,84 @@ void TypeInference::analyze_instruction(const IRInstruction* insn,
     refine_reference(current_state, insn->src(0));
     break;
   }
-  case OPCODE_INVOKE_CUSTOM: {
-    // TODO(T59277083)
-    not_reached_log(
-        "TypeInference::analyze_instruction does not support "
-        "invoke-custom yet");
-  }
+  case OPCODE_INVOKE_CUSTOM:
   case OPCODE_INVOKE_POLYMORPHIC:
   case OPCODE_INVOKE_VIRTUAL:
   case OPCODE_INVOKE_SUPER:
   case OPCODE_INVOKE_DIRECT:
   case OPCODE_INVOKE_STATIC:
   case OPCODE_INVOKE_INTERFACE: {
-    DexMethodRef* dex_method = insn->has_signature_polymorphic()
-                                   ? insn->get_signature_polymorphic()->method()
-                                   : insn->get_method();
-    const auto* arg_types = dex_method->get_proto()->get_args();
-    if (insn->opcode() == OPCODE_INVOKE_POLYMORPHIC) {
-      // invoke-polymorphic can only be used to invoke MethodHandle.invoke and
-      // MethodHandle.invokeExact. The first argument is a MethodHandle, and the
-      // rest are Objects.
-      for (auto src : insn->srcs()) {
-        refine_reference(current_state, src);
-      }
-    } else {
-      size_t expected_args =
-          (insn->opcode() != OPCODE_INVOKE_STATIC ? 1 : 0) + arg_types->size();
-      always_assert_log(insn->srcs_size() == expected_args,
-                        "instruction: %s\nexpected: %zu\nactual: %zu",
-                        SHOW(insn), expected_args, insn->srcs_size());
-      size_t src_idx{0};
-      if (insn->opcode() != OPCODE_INVOKE_STATIC) {
-        // The first argument is a reference to the object instance on which the
-        // method is invoked.
-        refine_reference(current_state, insn->src(src_idx++));
-      }
-      for (const DexType* arg_type : *arg_types) {
-        if (type::is_object(arg_type)) {
-          refine_reference(current_state, insn->src(src_idx++));
-          continue;
-        }
-        if (type::is_integral(arg_type)) {
-          if (type::is_int(arg_type)) {
-            refine_int(current_state, insn->src(src_idx++));
-            continue;
-          }
-          if (type::is_char(arg_type)) {
-            refine_char(current_state, insn->src(src_idx++));
-            continue;
-          }
-          if (type::is_boolean(arg_type)) {
-            refine_boolean(current_state, insn->src(src_idx++));
-            continue;
-          }
-          if (type::is_short(arg_type)) {
-            refine_short(current_state, insn->src(src_idx++));
-            continue;
-          }
-          if (type::is_byte(arg_type)) {
-            refine_byte(current_state, insn->src(src_idx++));
-            continue;
-          }
-        }
-        if (type::is_long(arg_type)) {
-          refine_long(current_state, insn->src(src_idx++));
-          continue;
-        }
-        if (type::is_float(arg_type)) {
-          refine_float(current_state, insn->src(src_idx++));
-          continue;
-        }
-        always_assert(type::is_double(arg_type));
-        refine_double(current_state, insn->src(src_idx++));
-      }
+    const auto* callsite_proto = insn->get_callsite_proto();
+    const auto* arg_types = callsite_proto->get_args();
+    size_t expected_args = insn->invoke_srcs_size();
+    always_assert_log(insn->srcs_size() == expected_args,
+                      "instruction: %s\nexpected: %zu\nactual: %zu", SHOW(insn),
+                      expected_args, insn->srcs_size());
+    size_t src_idx{0};
+    if (insn->invoke_has_receiver()) {
+      // The object an instance method is called on, or the method handle or
+      // var handle that `invoke-polymorphic` calls.
+      refine_reference(current_state, insn->src(src_idx++));
     }
-    DexType* return_type = dex_method->get_proto()->get_rtype();
+    for (const DexType* arg_type : *arg_types) {
+      if (type::is_object(arg_type)) {
+        refine_reference(current_state, insn->src(src_idx++));
+        continue;
+      }
+      if (type::is_integral(arg_type)) {
+        if (type::is_int(arg_type)) {
+          refine_int(current_state, insn->src(src_idx++));
+          continue;
+        }
+        if (type::is_char(arg_type)) {
+          refine_char(current_state, insn->src(src_idx++));
+          continue;
+        }
+        if (type::is_boolean(arg_type)) {
+          refine_boolean(current_state, insn->src(src_idx++));
+          continue;
+        }
+        if (type::is_short(arg_type)) {
+          refine_short(current_state, insn->src(src_idx++));
+          continue;
+        }
+        if (type::is_byte(arg_type)) {
+          refine_byte(current_state, insn->src(src_idx++));
+          continue;
+        }
+      }
+      if (type::is_long(arg_type)) {
+        refine_long(current_state, insn->src(src_idx++));
+        continue;
+      }
+      if (type::is_float(arg_type)) {
+        refine_float(current_state, insn->src(src_idx++));
+        continue;
+      }
+      always_assert(type::is_double(arg_type));
+      refine_double(current_state, insn->src(src_idx++));
+    }
+    DexType* return_type = callsite_proto->get_rtype();
+    // The callee's typedef annotation describes the result only when the
+    // callee's prototype types it, which is not so for invoke-polymorphic and
+    // invoke-custom.
+    auto return_typedef_anno = [&]() -> std::optional<const DexType*> {
+      return opcode::is_a_method_invoke(insn->opcode())
+                 ? get_return_typedef_anno(insn->get_method())
+                 : std::nullopt;
+    };
     if (type::is_void(return_type)) {
       clear_result(current_state);
       break;
     }
     if (type::is_object(return_type)) {
       set_reference_with_anno(current_state, RESULT_REGISTER, return_type,
-                              get_return_typedef_anno(dex_method));
+                              return_typedef_anno());
       break;
     }
     if (type::is_integral(return_type)) {
       if (type::is_int(return_type)) {
-        set_int(current_state, RESULT_REGISTER,
-                get_return_typedef_anno(dex_method));
+        set_int(current_state, RESULT_REGISTER, return_typedef_anno());
         break;
       }
       if (type::is_char(return_type)) {

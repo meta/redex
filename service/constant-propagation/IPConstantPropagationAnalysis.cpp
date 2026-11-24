@@ -139,12 +139,16 @@ FixpointIterator::compute_method_cache_entry(const DexMethod* method,
           result.emplace(insn, std::move(out_args));
         }
       }
-      if (m_record_field_writes && opcode::is_an_iput(insn->opcode())) {
-        if (auto write = WholeProgramState::get_field_write(insn, state)) {
-          field_writes.update(write->first, [&](auto* value) {
-            value->join_with(write->second);
-          });
-        }
+      if (m_record_field_writes) {
+        WholeProgramState::for_each_field_write(
+            insn, state,
+            [&](IROpcode op, const DexField* field, bool /* through_handle */,
+                const ConstantValue& value) {
+              if (opcode::is_an_iput(op)) {
+                field_writes.update(
+                    field, [&](auto* current) { current->join_with(value); });
+              }
+            });
       }
       intra_cp.analyze_instruction(insn, &state, insn == last_insn->insn);
     }
@@ -446,8 +450,8 @@ Domain FixpointIterator::analyze_edge(
 
 std::unique_ptr<IntraproceduralAnalysis>
 FixpointIterator::get_intraprocedural_analysis(const DexMethod* method) const {
-  return m_proc_analysis_factory(
-      method, this->get_whole_program_state(), get_entry_args(method));
+  return m_proc_analysis_factory(method, this->get_whole_program_state(),
+                                 get_entry_args(method));
 }
 
 IntraproceduralAnalysis::IntraproceduralAnalysis(

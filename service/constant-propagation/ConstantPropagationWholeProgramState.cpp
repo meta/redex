@@ -352,29 +352,35 @@ void WholeProgramState::collect(
  * in the body of Foo.<clinit>, don't do anything -- that value will only be
  * visible to other methods if it remains unchanged up until the end of the
  * <clinit>. In that case, analyze_clinits() will record it.
+ *
+ * A method handle that puts a field can be called anywhere, with any value, so
+ * the field may hold any value.
  */
 void WholeProgramState::collect_field_values(
     const IRInstruction* insn,
     const ConstantEnvironment& env,
     const DexType* clinit_cls,
     ConcurrentMap<const DexField*, ConstantValue>* fields_value_tmp) {
-  auto write = get_field_write(insn, env);
-  if (!write || m_known_fields.count(write->first) == 0u) {
-    return;
-  }
-  auto& [field, value] = *write;
-  if (opcode::is_an_sput(insn->opcode()) && field->get_class() == clinit_cls) {
-    return;
-  }
-  fields_value_tmp->update(
-      field,
-      [&value](const DexField*, ConstantValue& current_value, bool exists) {
-        if (exists) {
-          current_value.join_with(value);
-        } else {
-          current_value = std::move(value);
-        }
-      });
+  auto collect = [&](IROpcode op, const DexField* field, bool through_handle,
+                     ConstantValue value) {
+    if (m_known_fields.count(field) == 0u) {
+      return;
+    }
+    if (!through_handle && opcode::is_an_sput(op) &&
+        field->get_class() == clinit_cls) {
+      return;
+    }
+    fields_value_tmp->update(
+        field,
+        [&value](const DexField*, ConstantValue& current_value, bool exists) {
+          if (exists) {
+            current_value.join_with(value);
+          } else {
+            current_value = std::move(value);
+          }
+        });
+  };
+  for_each_field_write(insn, env, collect);
 }
 
 /*
@@ -482,21 +488,6 @@ WholeProgramState::FieldGrowth WholeProgramState::grow_field_values(
     m_field_partition.set(field, std::move(after));
   }
   return growth;
-}
-
-std::optional<std::pair<const DexField*, ConstantValue>>
-WholeProgramState::get_field_write(const IRInstruction* insn,
-                                   const ConstantEnvironment& env) {
-  if (!opcode::is_an_sput(insn->opcode()) &&
-      !opcode::is_an_iput(insn->opcode())) {
-    return std::nullopt;
-  }
-  auto* field = resolve_field(insn->get_field());
-  if (field == nullptr) {
-    return std::nullopt;
-  }
-  // Every iput and sput has its value in src(0).
-  return std::make_pair(field, env.get(insn->src(0)));
 }
 
 void WholeProgramState::collect_static_finals(const DexClass* cls,

@@ -5383,3 +5383,273 @@ TEST_F(InterproceduralConstantPropagationTest, methodHandleCallerIsUnknown) {
   helper->get_code()->clear_cfg();
   EXPECT_CODE_EQ(helper->get_code(), expected.get());
 }
+
+// Tool-generated: set() writes Foo.qux through a static-put method handle, so
+// Foo.qux does not keep the value that <clinit> gives it.
+TEST_F(InterproceduralConstantPropagationTest, nonConstantFieldDueToPutHandle) {
+  ClassCreator creator(DexType::make_type("LFoo;"));
+  creator.set_super(type::java_lang_Object());
+  auto* field_qux = DexField::make_field("LFoo;.qux:I")
+                        ->make_concrete(ACC_PUBLIC | ACC_STATIC);
+  creator.add_field(field_qux);
+
+  auto* clinit = assembler::method_from_string(R"(
+    (method (public static constructor) "LFoo;.<clinit>:()V"
+     (
+      (const v0 5)
+      (sput v0 "LFoo;.qux:I")
+      (return-void)
+     )
+    )
+  )");
+  clinit->rstate.set_root();
+  creator.add_method(clinit);
+
+  auto* set = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.set:()V"
+     (
+      (const-method-handle static-put "LFoo;.qux:I")
+      (move-result-pseudo-object v0)
+      (const v1 7)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(I)V")
+      (return-void)
+     )
+    )
+  )");
+  set->rstate.set_root();
+  creator.add_method(set);
+
+  auto* m = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.baz:()I"
+     (
+      (sget "LFoo;.qux:I")
+      (move-result-pseudo v0)
+      (return v0)
+     )
+    )
+  )");
+  m->rstate.set_root();
+  creator.add_method(m);
+  auto expected = assembler::to_s_expr(m->get_code());
+
+  Scope scope{creator.create()};
+  walk::code(scope, [](DexMethod*, IRCode& code) {
+    code.build_cfg();
+    code.cfg().calculate_exit_block();
+  });
+
+  InterproceduralConstantPropagationPass::Config config;
+  config.max_heap_analysis_iterations = 1;
+  auto fp_iter = InterproceduralConstantPropagationPass(config).analyze(
+      scope, &m_immut_analyzer_state, &m_api_level_analyzer_state,
+      &m_string_analyzer_state, &m_package_name_state, m_null_check_methods);
+  EXPECT_EQ(fp_iter->get_whole_program_state().get_field_value(field_qux),
+            ConstantValue::top());
+
+  InterproceduralConstantPropagationPass(config).run(make_simple_stores(scope),
+                                                     conf);
+  m->get_code()->clear_cfg();
+  EXPECT_EQ(assembler::to_s_expr(m->get_code()), expected);
+}
+
+// Tool-generated: set() writes Foo.x through an instance-put method handle, so
+// Foo.x is not always the 5 that the constructor writes.
+TEST_F(InterproceduralConstantPropagationTest,
+       nonConstantInstanceFieldDueToPutHandle) {
+  ClassCreator creator(DexType::make_type("LFoo;"));
+  creator.set_super(type::java_lang_Object());
+  auto* field_x = DexField::make_field("LFoo;.x:I")->make_concrete(ACC_PUBLIC);
+  creator.add_field(field_x);
+
+  auto* init = assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (const v1 5)
+      (iput v1 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )");
+  init->rstate.set_root();
+  creator.add_method(init);
+
+  auto* set = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.set:(LFoo;)V"
+     (
+      (load-param-object v2)
+      (const-method-handle instance-put "LFoo;.x:I")
+      (move-result-pseudo-object v0)
+      (const v1 7)
+      (invoke-polymorphic (v0 v2 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LFoo;I)V")
+      (return-void)
+     )
+    )
+  )");
+  set->rstate.set_root();
+  creator.add_method(set);
+
+  auto* m = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.get:(LFoo;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.x:I")
+      (move-result-pseudo v0)
+      (return v0)
+     )
+    )
+  )");
+  m->rstate.set_root();
+  creator.add_method(m);
+  auto expected = assembler::to_s_expr(m->get_code());
+
+  Scope scope{creator.create()};
+  walk::code(scope, [](DexMethod*, IRCode& code) {
+    code.build_cfg();
+    code.cfg().calculate_exit_block();
+  });
+
+  InterproceduralConstantPropagationPass::Config config;
+  config.max_heap_analysis_iterations = 1;
+  auto fp_iter = InterproceduralConstantPropagationPass(config).analyze(
+      scope, &m_immut_analyzer_state, &m_api_level_analyzer_state,
+      &m_string_analyzer_state, &m_package_name_state, m_null_check_methods);
+  EXPECT_EQ(fp_iter->get_whole_program_state().get_field_value(field_x),
+            ConstantValue::top());
+
+  InterproceduralConstantPropagationPass(config).run(make_simple_stores(scope),
+                                                     conf);
+  m->get_code()->clear_cfg();
+  EXPECT_EQ(assembler::to_s_expr(m->get_code()), expected);
+}
+
+// As above, under the field search: the search records the writes of each
+// analyzed method, and the handle in set() writes Foo.x, which the search
+// would otherwise prove is always 5. With no heap analysis iterations, the
+// search's result is the final one.
+TEST_F(InterproceduralConstantPropagationTest,
+       nonConstantInstanceFieldDueToPutHandleInFieldSearch) {
+  ClassCreator creator(DexType::make_type("LFoo;"));
+  creator.set_super(type::java_lang_Object());
+  auto* field_x = DexField::make_field("LFoo;.x:I")->make_concrete(ACC_PUBLIC);
+  creator.add_field(field_x);
+
+  auto* init = assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (const v1 5)
+      (iput v1 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )");
+  init->rstate.set_root();
+  creator.add_method(init);
+
+  auto* set = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.set:(LFoo;)V"
+     (
+      (load-param-object v2)
+      (const-method-handle instance-put "LFoo;.x:I")
+      (move-result-pseudo-object v0)
+      (const v1 7)
+      (invoke-polymorphic (v0 v2 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LFoo;I)V")
+      (return-void)
+     )
+    )
+  )");
+  set->rstate.set_root();
+  creator.add_method(set);
+
+  auto* m = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.get:(LFoo;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.x:I")
+      (move-result-pseudo v0)
+      (return v0)
+     )
+    )
+  )");
+  m->rstate.set_root();
+  creator.add_method(m);
+  auto expected = assembler::to_s_expr(m->get_code());
+
+  Scope scope{creator.create()};
+  walk::code(scope, [](DexMethod*, IRCode& code) {
+    code.build_cfg();
+    code.cfg().calculate_exit_block();
+  });
+
+  auto config = config_with_field_search(4);
+  config.max_heap_analysis_iterations = 0;
+  auto fp_iter = InterproceduralConstantPropagationPass(config).analyze(
+      scope, &m_immut_analyzer_state, &m_api_level_analyzer_state,
+      &m_string_analyzer_state, &m_package_name_state, m_null_check_methods);
+  EXPECT_EQ(fp_iter->get_whole_program_state().get_field_value(field_x),
+            ConstantValue::top());
+
+  InterproceduralConstantPropagationPass(config).run(make_simple_stores(scope),
+                                                     conf);
+  m->get_code()->clear_cfg();
+  EXPECT_EQ(assembler::to_s_expr(m->get_code()), expected);
+}
+
+// Tool-generated: set() writes through a static-put method handle of
+// LChild;.qux, which ART resolves to the static Base.qux, past the instance
+// field Child.qux. So Base.qux does not keep the value that <clinit> gives it.
+TEST_F(InterproceduralConstantPropagationTest,
+       nonConstantInheritedFieldDueToPutHandle) {
+  ClassCreator base_creator(DexType::make_type("LBase;"));
+  base_creator.set_super(type::java_lang_Object());
+  auto* base_qux = DexField::make_field("LBase;.qux:I")
+                       ->make_concrete(ACC_PUBLIC | ACC_STATIC);
+  base_creator.add_field(base_qux);
+  auto* clinit = assembler::method_from_string(R"(
+    (method (public static constructor) "LBase;.<clinit>:()V"
+     (
+      (const v0 5)
+      (sput v0 "LBase;.qux:I")
+      (return-void)
+     )
+    )
+  )");
+  clinit->rstate.set_root();
+  base_creator.add_method(clinit);
+  auto* base_cls = base_creator.create();
+
+  ClassCreator child_creator(DexType::make_type("LChild;"));
+  child_creator.set_super(base_cls->get_type());
+  child_creator.add_field(
+      DexField::make_field("LChild;.qux:I")->make_concrete(ACC_PUBLIC));
+  auto* set = assembler::method_from_string(R"(
+    (method (public static) "LChild;.set:()V"
+     (
+      (const-method-handle static-put "LChild;.qux:I")
+      (move-result-pseudo-object v0)
+      (const v1 7)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(I)V")
+      (return-void)
+     )
+    )
+  )");
+  set->rstate.set_root();
+  child_creator.add_method(set);
+
+  Scope scope{base_cls, child_creator.create()};
+  walk::code(scope, [](DexMethod*, IRCode& code) {
+    code.build_cfg();
+    code.cfg().calculate_exit_block();
+  });
+
+  InterproceduralConstantPropagationPass::Config config;
+  config.max_heap_analysis_iterations = 1;
+  auto fp_iter = InterproceduralConstantPropagationPass(config).analyze(
+      scope, &m_immut_analyzer_state, &m_api_level_analyzer_state,
+      &m_string_analyzer_state, &m_package_name_state, m_null_check_methods);
+  EXPECT_EQ(fp_iter->get_whole_program_state().get_field_value(base_qux),
+            ConstantValue::top());
+}

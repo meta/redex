@@ -19,6 +19,7 @@
 #include "DeterministicContainers.h"
 #include "IRInstruction.h"
 #include "InstructionAnalyzer.h"
+#include "Resolver.h"
 
 namespace constant_propagation {
 
@@ -137,11 +138,32 @@ class WholeProgramState {
                                 size_t widening_delay);
 
   /*
-   * If `insn` writes a field, returns the field and the value written; `env`
-   * is the environment at `insn`.
+   * Calls `f(op, field, through_handle, value)` for every field that `insn`
+   * writes, with the value written; `env` is the environment at `insn`. `op`
+   * is the put instruction whose rules the write follows. A method handle that
+   * puts a field can be called anywhere, with any value, so its write is Top.
    */
-  static std::optional<std::pair<const DexField*, ConstantValue>>
-  get_field_write(const IRInstruction* insn, const ConstantEnvironment& env);
+  template <typename Fn>
+  static void for_each_field_write(const IRInstruction* insn,
+                                   const ConstantEnvironment& env,
+                                   Fn&& f) {
+    for_each_field_access(insn, [&](IROpcode op, DexFieldRef* field_ref,
+                                    const DexMethodHandle* method_handle) {
+      if (!opcode::is_an_sput(op) && !opcode::is_an_iput(op)) {
+        return;
+      }
+      const bool through_handle = method_handle != nullptr;
+      const DexField* field = through_handle
+                                  ? resolve_field_handle(method_handle)
+                                  : resolve_field(field_ref);
+      if (field == nullptr) {
+        return;
+      }
+      // Every iput and sput has its value in src(0).
+      f(op, field, through_handle,
+        through_handle ? ConstantValue::top() : env.get(insn->src(0)));
+    });
+  }
 
   void set_methods_to_top() {
     m_method_partition.set_to_top();

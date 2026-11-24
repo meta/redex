@@ -51,7 +51,7 @@ DexClass* create_java_lang_object() {
   auto* void_int = DexProto::make_proto(type::_int(), void_args);
   auto* void_string = DexProto::make_proto(type::java_lang_String(), void_args);
   auto* long_void = DexProto::make_proto(
-      type::_void(), DexTypeList::make_type_list({type::_int()}));
+      type::_void(), DexTypeList::make_type_list({type::_long()}));
   auto* long_int_void = DexProto::make_proto(
       type::_void(),
       DexTypeList::make_type_list({type::_long(), type::_int()}));

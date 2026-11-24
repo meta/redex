@@ -10,6 +10,7 @@
 #include "DeterministicContainers.h"
 #include "DexClass.h"
 #include "RedexTest.h"
+#include "Resolver.h"
 #include "ScopeHelper.h"
 #include "TypeUtil.h"
 #include "VirtualScopes.h"
@@ -484,4 +485,30 @@ TEST_F(VirtualScopesTest, WalkInterfaceScopesGroupsSignatureAcrossInterfaces) {
         EXPECT_EQ(intfs.count(j->get_type()), 1u);
       });
   EXPECT_EQ(groups, 1u);
+}
+
+// class C { public void wait(int timeout) {} } is legal Java: it overloads, and
+// does not override, the final Object.wait(), wait(long) and wait(long, int).
+// So C.wait(int) roots its own effectively final scope.
+TEST_F(VirtualScopesTest, ObjectWaitIntOverloadRootsOwnScope) {
+  auto scope = create_empty_scope();
+  auto* c = make_class(scope, "LC;", type::java_lang_Object());
+  auto* cw = create_empty_method(c, "wait", void_int_proto());
+
+  const auto* wait_long = resolve_method(
+      type_class(type::java_lang_Object()), DexString::make_string("wait"),
+      DexProto::make_proto(type::_void(),
+                           DexTypeList::make_type_list({type::_long()})),
+      MethodSearch::Virtual);
+  ASSERT_NE(wait_long, nullptr);
+  EXPECT_TRUE(is_public(wait_long));
+  EXPECT_TRUE(is_final(wait_long));
+
+  virtual_scope::VirtualScopes vs(scope);
+
+  const auto& c_scopes = vs.at(c->get_type());
+  ASSERT_EQ(c_scopes.size(), 1u);
+  EXPECT_EQ(c_scopes[0]->top_def(), cw);
+  EXPECT_EQ(c_scopes[0]->methods().size(), 1u);
+  EXPECT_TRUE(c_scopes[0]->is_effectively_final());
 }

@@ -389,7 +389,7 @@ dex_class_test_SOURCES = DexClassTest.cpp
 
 dex_hasher_test_SOURCES = DexHasherTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
-dex_instruction_test_SOURCES = DexInstructionTest.cpp
+dex_instruction_test_SOURCES = DexInstructionTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 dex_loader_test_SOURCES = DexLoaderTest.cpp
 

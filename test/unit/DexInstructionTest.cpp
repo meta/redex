@@ -7,8 +7,11 @@
 
 #include <gtest/gtest.h>
 
+#include "DexCallSite.h"
 #include "DexInstruction.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
+#include "Show.h"
 
 class DexInstructionTest : public RedexTest {};
 
@@ -69,4 +72,16 @@ TEST_F(DexInstructionTest, test_encode_fill_array_data_payload_32) {
   EXPECT_EQ(result[2], 3);
   EXPECT_EQ(result[3], 4);
   EXPECT_EQ(result[4], 5);
+}
+
+// `invoke-custom` names a call site, not a method.
+TEST_F(DexInstructionTest, invoke_custom_names_a_call_site) {
+  for (auto op : {DOPCODE_INVOKE_CUSTOM, DOPCODE_INVOKE_CUSTOM_RANGE}) {
+    std::unique_ptr<DexInstruction> insn(DexInstruction::make_instruction(op));
+    EXPECT_NE(dynamic_cast<DexOpcodeCallSite*>(insn.get()), nullptr);
+  }
+
+  auto* callsite = redex::make_callsite("run", "()V");
+  DexOpcodeCallSite insn(DOPCODE_INVOKE_CUSTOM, callsite);
+  EXPECT_EQ(show(&insn), "invoke-custom " + show(callsite));
 }

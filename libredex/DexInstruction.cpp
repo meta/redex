@@ -1194,14 +1194,16 @@ DexInstruction* DexInstruction::make_instruction(DexOpcode op) {
   case DOPCODE_INVOKE_DIRECT:
   case DOPCODE_INVOKE_STATIC:
   case DOPCODE_INVOKE_INTERFACE:
-  case DOPCODE_INVOKE_CUSTOM:
   case DOPCODE_INVOKE_VIRTUAL_RANGE:
   case DOPCODE_INVOKE_SUPER_RANGE:
   case DOPCODE_INVOKE_DIRECT_RANGE:
   case DOPCODE_INVOKE_STATIC_RANGE:
   case DOPCODE_INVOKE_INTERFACE_RANGE:
-  case DOPCODE_INVOKE_CUSTOM_RANGE:
     return new DexOpcodeMethod(op, nullptr);
+  /* CallSite: */
+  case DOPCODE_INVOKE_CUSTOM:
+  case DOPCODE_INVOKE_CUSTOM_RANGE:
+    return new DexOpcodeCallSite(op, nullptr);
   case DOPCODE_INVOKE_POLYMORPHIC:
   case DOPCODE_INVOKE_POLYMORPHIC_RANGE:
     return new DexOpcodeSignaturePolymorphic(op, nullptr, nullptr);

@@ -905,15 +905,16 @@ std::string show_opcode(const DexInstruction* insn, bool deobfuscated = false) {
     return ss.str();
   }
   case DOPCODE_INVOKE_CUSTOM:
-    ss << "invoke-custom ";
-    ss << show_method(dynamic_cast<const DexOpcodeMethod*>(insn)->get_method(),
-                      deobfuscated);
+  case DOPCODE_INVOKE_CUSTOM_RANGE: {
+    // `DexInstruction::make_instruction` makes every invoke-custom a
+    // `DexOpcodeCallSite`.
+    const auto* callsite =
+        dynamic_cast<const DexOpcodeCallSite*>(insn)->get_callsite();
+    ss << (insn->opcode() == DOPCODE_INVOKE_CUSTOM ? "invoke-custom "
+                                                   : "invoke-custom/range ");
+    ss << (deobfuscated ? show_deobfuscated(callsite) : show(callsite));
     return ss.str();
-  case DOPCODE_INVOKE_CUSTOM_RANGE:
-    ss << "invoke-custom/range ";
-    ss << show_method(dynamic_cast<const DexOpcodeMethod*>(insn)->get_method(),
-                      deobfuscated);
-    return ss.str();
+  }
   case DOPCODE_CONST_METHOD_HANDLE:
     ss << "const-method-handle ";
     ss << show_methodhandle(

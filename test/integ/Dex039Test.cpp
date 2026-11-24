@@ -18,6 +18,7 @@
 #include "IRAssembler.h"
 #include "RedexContext.h"
 #include "RedexTestUtils.h"
+#include "RegAllocLoweringTestHelper.h"
 #include "Show.h"
 #include "TypeUtil.h"
 
@@ -165,6 +166,19 @@ TEST(Dex039Test, ReadWriteDex039) {
   g_redex = new RedexContext();
   EXPECT_EQ(redex::show_instructions_by_method(load_dex_file(output, 39)),
             before);
+  delete g_redex;
+  g_redex = nullptr;
+}
+
+// IRTypeChecker accepts every method, including the method constants and
+// method handle calls, before and after register allocation, and the allocated
+// code lowers to encodable instructions.
+TEST(Dex039Test, TypeCheckAllocateAndLowerEveryMethod) {
+  g_redex = new RedexContext();
+  const char* dexfile = std::getenv("dex");
+  ASSERT_NE(nullptr, dexfile);
+  expect_type_correct_through_register_allocation_and_lowering(
+      load_dex_file(dexfile, 39));
   delete g_redex;
   g_redex = nullptr;
 }

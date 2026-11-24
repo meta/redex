@@ -23,6 +23,7 @@
 #include "IRCode.h"
 #include "RedexContext.h"
 #include "RedexTestUtils.h"
+#include "RegAllocLoweringTestHelper.h"
 // NOLINTNEXTLINE(facebook-unused-include-check)
 #include "SanitizersConfig.h"
 #include "Show.h"
@@ -402,4 +403,17 @@ TEST(Dex038Test, InvokePolymorphicRangeKeepsCallSiteProto) {
   EXPECT_EQ(it->insn->opcode(), OPCODE_MOVE_RESULT_WIDE);
 
   delete g_redex;
+}
+
+// IRTypeChecker accepts every method, including the method handle calls and
+// lambdas, before and after register allocation, and the allocated code lowers
+// to encodable instructions.
+TEST(Dex038Test, TypeCheckAllocateAndLowerEveryMethod) {
+  g_redex = new RedexContext();
+  const char* dexfile = std::getenv("dexfile");
+  ASSERT_NE(nullptr, dexfile);
+  expect_type_correct_through_register_allocation_and_lowering(
+      load_dex_file(dexfile, 38));
+  delete g_redex;
+  g_redex = nullptr;
 }

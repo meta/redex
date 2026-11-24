@@ -12,6 +12,7 @@
 #include "DexAnnotation.h"
 #include "DexClass.h"
 #include "DexUtil.h"
+#include "EditableCfgAdapter.h"
 #include "PassManager.h"
 #include "Resolver.h"
 #include "Show.h"
@@ -291,85 +292,62 @@ AnnoKill::AnnoSet AnnoKill::get_referenced_annos() {
   };
   // mark an annotation as "unremovable" if any opcode references the annotation
   // type
-  walk::parallel::opcodes(
-      m_scope,
-      [](DexMethod*) { return true; },
-      [&add_concurrent_referenced_anno, &add_if_anno,
-       &all_annos](DexMethod* meth, IRInstruction* insn) {
-        // don't look at methods defined on the annotation itself
-        auto* const meth_cls_type = meth->get_class();
-        if (all_annos.count(meth_cls_type) > 0) {
-          return;
-        }
-        auto* const meth_cls = type_class(meth_cls_type);
-        if (meth_cls != nullptr && is_annotation(meth_cls)) {
-          return;
-        }
+  walk::parallel::code(m_scope, [&add_if_anno, &all_annos](DexMethod* meth,
+                                                           IRCode& code) {
+    // don't look at methods defined on the annotation itself
+    auto* const meth_cls_type = meth->get_class();
+    if (all_annos.count(meth_cls_type) > 0) {
+      return;
+    }
+    auto* const meth_cls = type_class(meth_cls_type);
+    if (meth_cls != nullptr && is_annotation(meth_cls)) {
+      return;
+    }
 
-        if (insn->has_type()) {
-          const auto* type = insn->get_type();
-          if (all_annos.count(type) > 0) {
-            add_concurrent_referenced_anno(type);
-            TRACE(ANNO,
-                  3,
-                  "Annotation referenced in type opcode\n\t%s.%s:%s - %s",
-                  SHOW(meth->get_class()),
-                  SHOW(meth->get_name()),
-                  SHOW(meth->get_proto()),
-                  SHOW(insn));
-          }
-        } else if (insn->has_field()) {
-          auto* field = insn->get_field();
-          // The reference can name a subtype of the class that declares the
-          // field; both count.
-          bool referenced = add_if_anno(field->get_class());
-          auto* fdef = resolve_field(field,
-                                     opcode::is_an_sfield_op(insn->opcode())
-                                         ? FieldSearch::Static
-                                         : FieldSearch::Instance);
-          if (fdef != nullptr) {
-            field = fdef;
-          }
-
-          referenced |= add_if_anno(field->get_class());
-          referenced |= add_if_anno(field->get_type());
-          if (referenced) {
-            TRACE(ANNO,
-                  3,
-                  "Annotation referenced in field opcode\n\t%s.%s:%s - %s",
-                  SHOW(meth->get_class()),
-                  SHOW(meth->get_name()),
-                  SHOW(meth->get_proto()),
-                  SHOW(insn));
-          }
-        } else if (insn->has_method()) {
-          auto* method = insn->get_method();
-          // The reference can name a subtype of the class that declares the
-          // method; both count.
-          bool referenced = add_if_anno(method->get_class());
-          DexMethod* methdef =
-              resolve_method_deprecated(method, opcode_to_search(insn), meth);
-          if (methdef != nullptr) {
-            method = methdef;
-          }
-
-          referenced |= add_if_anno(method->get_class());
-          auto* proto = method->get_proto();
-          referenced |= add_if_anno(proto->get_rtype());
-          for (const auto& arg : *proto->get_args()) {
-            referenced |= add_if_anno(arg);
-          }
-          if (referenced) {
-            TRACE(ANNO,
-                  3,
-                  "Annotation referenced in method opcode\n\t%s.%s:%s - %s",
-                  SHOW(meth->get_class()),
-                  SHOW(meth->get_name()),
-                  SHOW(meth->get_proto()),
-                  SHOW(insn));
-          }
+    // Every type an instruction names, inside method handles and call sites
+    // too, and the class that declares each member it accesses or calls,
+    // which can be a supertype of the class a reference names. One buffer
+    // serves all the instructions of the method.
+    std::vector<const DexType*> types;
+    cfg_adapter::iterate(&code, [&](MethodItemEntry& mie) {
+      auto* insn = mie.insn;
+      types.clear();
+      insn->gather_types(types);
+      for_each_field_access(insn, [&](IROpcode op, DexFieldRef* field,
+                                      const DexMethodHandle* handle) {
+        auto* fdef = handle != nullptr
+                         ? resolve_field_handle(handle)
+                         : resolve_field(field, opcode::is_an_sfield_op(op)
+                                                    ? FieldSearch::Static
+                                                    : FieldSearch::Instance);
+        if (fdef != nullptr) {
+          types.push_back(fdef->get_class());
         }
       });
+      for_each_invoke(insn, [&](IROpcode op, DexMethodRef* method,
+                                const DexMethodHandle* handle) {
+        auto* mdef = resolve_call(op, method, handle, meth);
+        if (mdef != nullptr) {
+          types.push_back(mdef->get_class());
+        }
+      });
+
+      bool referenced = false;
+      for (const auto* type : types) {
+        referenced |= add_if_anno(type);
+      }
+      if (referenced) {
+        TRACE(ANNO,
+              3,
+              "Annotation referenced in opcode\n\t%s.%s:%s - %s",
+              SHOW(meth->get_class()),
+              SHOW(meth->get_name()),
+              SHOW(meth->get_proto()),
+              SHOW(insn));
+      }
+      return cfg_adapter::LOOP_CONTINUE;
+    });
+  });
   insert_unordered_iterable(referenced_annos, concurrent_referenced_annos);
   // For each referenced annotation, make sure any annotations it references are
   // also tracked as referenced, so we don't end up with a dangling ref.

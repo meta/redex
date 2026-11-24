@@ -146,6 +146,25 @@ TEST_F(AnnoKillTest, KeepsForcedNativeAnnotationsWithoutDefinitions) {
   check_native_annotations(true, true, false);
 }
 
+// Code that names an annotation class only in a method type or a method handle
+// still refers to it, so the class stays. Both instructions are tool-generated
+// bytecode.
+TEST_F(AnnoKillTest, KeepsAnnotationNamedByMethodType) {
+  EXPECT_TRUE(keeps_annotation_named_by(R"((
+    (const-method-type "(LAnno;)V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))"));
+}
+
+TEST_F(AnnoKillTest, KeepsAnnotationNamedByMethodHandle) {
+  EXPECT_TRUE(keeps_annotation_named_by(R"((
+    (const-method-handle invoke-interface "LAnno;.value:()I")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))"));
+}
+
 // A call on an annotation-typed receiver names the annotation class even when
 // the method is declared in `Annotation`.
 TEST_F(AnnoKillTest, KeepsAnnotationNamedByCallOfInheritedMethod) {

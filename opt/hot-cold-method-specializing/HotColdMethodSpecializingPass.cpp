@@ -22,36 +22,6 @@
 #include "Walkers.h"
 
 namespace {
-// Computes all blocks backwards-reachable from a given set of success blocks,
-// excluding those successor blocks (unless they are also backwards reachable
-// otherwise).
-template <typename Collection>
-UnorderedSet<cfg::Block*> get_backwards_reachable_blocks_from(
-    const cfg::ControlFlowGraph& /*cfg*/,
-    const Collection& succ_blocks,
-    const UnorderedSet<cfg::Block*>* filter_blocks = nullptr) {
-  UnorderedSet<cfg::Block*> res;
-  std::queue<cfg::Block*> work_queue;
-  auto push_preds_srcs = [&](auto* block) {
-    for (auto* edge : block->preds()) {
-      if (filter_blocks == nullptr || filter_blocks->count(edge->src())) {
-        work_queue.push(edge->src());
-      }
-    }
-  };
-  for (auto* block : UnorderedIterable(succ_blocks)) {
-    push_preds_srcs(block);
-  }
-  while (!work_queue.empty()) {
-    auto* block = work_queue.front();
-    work_queue.pop();
-    if (res.insert(block).second) {
-      push_preds_srcs(block);
-    }
-  }
-  return res;
-}
-
 template <typename Collection>
 UnorderedSet<cfg::Block*> get_forward_reachable_blocks(
     const cfg::ControlFlowGraph& /*cfg*/,
@@ -185,9 +155,8 @@ void prune_cold_frontier(const cfg::ControlFlowGraph& cfg,
       if (it == cold_frontier->end()) {
         continue;
       }
-      auto closure = get_backwards_reachable_blocks_from(
-          cfg, std::initializer_list<cfg::Block*>{cold_frontier_block},
-          &residual_blocks);
+      auto closure = cfg::ControlFlowGraph::blocks_reaching(
+          {cold_frontier_block}, &residual_blocks);
       if (unordered_all_of(closure, is_pure)) {
         continue;
       }
@@ -396,8 +365,12 @@ HotColdMethodSpecializingPass::analyze_and_specialize(
   auto residual_blocks = get_forward_reachable_blocks(
       cfg, std::initializer_list<cfg::Block*>{cfg.entry_block()},
       cold_frontier);
-  auto hot_prefix_blocks =
-      get_backwards_reachable_blocks_from(cfg, cold_frontier, &residual_blocks);
+  auto hot_prefix_blocks = cfg::ControlFlowGraph::blocks_reaching(
+      unordered_to_ordered(cold_frontier,
+                           [](const cfg::Block* a, const cfg::Block* b) {
+                             return a->id() < b->id();
+                           }),
+      &residual_blocks);
   always_assert(unordered_all_of(hot_prefix_blocks, is_pure));
   auto cold_code =
       std::make_unique<IRCode>(std::make_unique<cfg::ControlFlowGraph>());

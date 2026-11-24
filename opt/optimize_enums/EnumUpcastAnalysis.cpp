@@ -82,6 +82,17 @@ bool boxing_may_change_instance_of(const DexType* type, const DexType* test) {
   return !as_enum || !as_integer || *as_enum != *as_integer;
 }
 
+// Whether a value of `type` may be an Integer, which boxing may make identical
+// to a boxed enum constant: for `Object` or `Number`, not for `String` or an
+// app class. Any interface may, since the verifier does not check interface
+// types, and so may a type Redex has not loaded, which may be an interface.
+bool may_be_integer(const DexType* type) {
+  const auto* cls = type_class(type);
+  return cls == nullptr || is_interface(cls) ||
+         type::is_instance_of_if_known(type::java_lang_Integer(), type)
+             .value_or(true);
+}
+
 bool is_static_field_on_enum_class(const DexFieldRef* fref) {
   const auto* field = fref->as_def();
   if ((field == nullptr) || !is_static(field)) {
@@ -171,6 +182,10 @@ class EnumUpcastDetector {
     case OPCODE_MONITOR_EXIT:
       reject(insn, env->get(insn->src(0)), UnsafeType::kUsageUsedInMonitor);
       break;
+    case OPCODE_IF_EQ:
+    case OPCODE_IF_NE:
+      process_identity_comparison(insn, *env);
+      break;
     case OPCODE_INVOKE_INTERFACE:
     case OPCODE_INVOKE_SUPER:
       process_general_invocation(insn, env);
@@ -216,6 +231,55 @@ class EnumUpcastDetector {
     default:
       break;
     }
+  }
+
+  /**
+   * Boxing replaces each constant with the shared `Integer` of its ordinal.
+   * Within one enum that keeps identity: comparing two values of the same enum,
+   * or a value with null, keeps its result. (The exception is an enum in
+   * `break_reference_equality_allowlist`, whose constants from `max_enum_size`
+   * on are boxed with `Integer.valueOf` at every use, so their identity is not
+   * guaranteed, as the option's name allows.) Across enums, constants with
+   * equal ordinals become identical, and so does a constant and any other
+   * `Integer` with its ordinal. So a comparison keeps its result unless the
+   * other operand can be an Integer after boxing: a value of a type an Integer
+   * may belong to (see `may_be_integer`), or a value of another candidate enum,
+   * which may be boxed too. Only a register whose types include the enum can
+   * hold one of its constants: a local upcast keeps the enum's type on the
+   * register, and an upcast that lets a constant leave the method rejects the
+   * enum, so a `String` or app-class operand keeps the result.
+   */
+  void process_identity_comparison(const IRInstruction* insn,
+                                   const EnumTypeEnvironment& env) {
+    UnorderedSet<const DexType*> unsafe;
+    collect_identity_risks(insn, env, &unsafe);
+    reject(insn, unsafe, UnsafeType::kUsageComparedByIdentity);
+  }
+
+  void collect_identity_risks(const IRInstruction* insn,
+                              const EnumTypeEnvironment& env,
+                              UnorderedSet<const DexType*>* unsafe) const {
+    auto left = discard_primitives(env.get(insn->src(0)));
+    auto right = discard_primitives(env.get(insn->src(1)));
+    auto collect = [&](const UnorderedSet<const DexType*>& side,
+                       const UnorderedSet<const DexType*>& other) {
+      for (const auto* type : UnorderedIterable(side)) {
+        if (type::is_array(type) || !is_candidate(type)) {
+          // Boxing keeps the identity of arrays and of non-candidate objects.
+          continue;
+        }
+        for (const auto* other_type : UnorderedIterable(other)) {
+          if (other_type == type || type::is_array(other_type)) {
+            continue;
+          }
+          if (is_candidate(other_type) || may_be_integer(other_type)) {
+            unsafe->insert(type);
+          }
+        }
+      }
+    };
+    collect(left, right);
+    collect(right, left);
   }
 
   /**

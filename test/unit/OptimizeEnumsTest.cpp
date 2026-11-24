@@ -4138,6 +4138,10 @@ struct EnumObservationCase {
   const char* instructions;
   bool bar_safe;
   bool baz_safe;
+  // Baz has no constants, so the pass itself keeps it an enum. Bar is boxed
+  // by the pass where its only problem was meeting a candidate Baz, since
+  // comparing with an enum that stays an enum keeps its result.
+  bool bar_boxed_beside_enum_baz{false};
 };
 
 class OptimizeEnumsObservationTest
@@ -4153,6 +4157,14 @@ TEST_P(OptimizeEnumsObservationTest, preservesObservedObjects) {
   bc.set_super(type::java_lang_Enum());
   bc.set_access(ACC_PUBLIC | ACC_FINAL | ACC_ENUM);
   store.add_classes({bc.create()});
+  ClassCreator mc(DexType::make_type("LMarker;"));
+  mc.set_super(type::java_lang_Object());
+  mc.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  store.add_classes({mc.create()});
+  ClassCreator sc(type::java_lang_String());
+  sc.set_super(type::java_lang_Object());
+  sc.set_access(ACC_PUBLIC | ACC_FINAL);
+  store.add_classes({sc.create()});
 
   ClassCreator gc(DexType::make_type("Lcom/google/common/base/Objects;"));
   gc.set_super(type::java_lang_Object());
@@ -4259,7 +4271,9 @@ TEST_P(OptimizeEnumsObservationTest, preservesObservedObjects) {
   files.parse_global_config();
   manager.run_passes(stores, files);
   EXPECT_EQ(type_class(bar_type)->get_super_class(),
-            test.bar_safe ? type::java_lang_Object() : type::java_lang_Enum());
+            test.bar_safe || test.bar_boxed_beside_enum_baz
+                ? type::java_lang_Object()
+                : type::java_lang_Enum());
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -4289,6 +4303,39 @@ INSTANTIATE_TEST_SUITE_P(
         EnumObservationCase{"InstanceOfEnum",
                             R"((instance-of v0 "Ljava/lang/Enum;")
                                (move-result-pseudo v6))",
+                            false, true},
+        EnumObservationCase{"EqualInteger", "(if-eq v0 v3 :done) (:done)",
+                            false, true},
+        EnumObservationCase{"EqualInterface",
+                            R"((sget-object "LUser;.marker:LMarker;")
+                               (move-result-pseudo-object v6)
+                               (if-eq v0 v6 :done)
+                               (:done))",
+                            false, true},
+        EnumObservationCase{"NotEqualObject", "(if-ne v4 v0 :done) (:done)",
+                            false, true},
+        EnumObservationCase{.name = "EqualDifferentEnums",
+                            .instructions = "(if-eq v0 v2 :done) (:done)",
+                            .bar_safe = false,
+                            .baz_safe = false,
+                            .bar_boxed_beside_enum_baz = true},
+        EnumObservationCase{.name = "EqualJoinedEnums",
+                            .instructions = R"((if-eqz v5 :baz)
+                               (move-object v6 v0)
+                               (goto :compare)
+                               (:baz)
+                               (move-object v6 v2)
+                               (:compare)
+                               (if-ne v6 v1 :done)
+                               (:done))",
+                            .bar_safe = false,
+                            .baz_safe = false,
+                            .bar_boxed_beside_enum_baz = true},
+        EnumObservationCase{"EqualUnloaded",
+                            R"((sget-object "LUser;.unknown:LUnknownType;")
+                               (move-result-pseudo-object v6)
+                               (if-eq v0 v6 :done)
+                               (:done))",
                             false, true},
         EnumObservationCase{"Monitor", "(monitor-enter v0) (monitor-exit v0)",
                             false, true},
@@ -4321,6 +4368,8 @@ INSTANTIATE_TEST_SUITE_P(
             "GuavaEqual",
             R"((invoke-static (v0 v2) "Lcom/google/common/base/Objects;.equal:(Ljava/lang/Object;Ljava/lang/Object;)Z"))",
             false, false},
+        EnumObservationCase{"EqualSameEnum", "(if-eq v0 v1 :done) (:done)",
+                            true, true},
         EnumObservationCase{
             "ObjectParameterInstanceOfComparable",
             R"((invoke-static (v0) "LUser;.isComparable:(Ljava/lang/Object;)Z"))",
@@ -4342,7 +4391,34 @@ INSTANTIATE_TEST_SUITE_P(
                                (new-array v6 "[LBar;")
                                (move-result-pseudo-object v7)
                                (invoke-static (v7) "LUser;.isObjectArray:(Ljava/lang/Object;)Z"))",
-                            true, true}),
+                            true, true},
+        EnumObservationCase{"EqualString",
+                            R"((const-string "RED")
+                               (move-result-pseudo-object v6)
+                               (if-eq v0 v6 :done)
+                               (:done))",
+                            true, true},
+        EnumObservationCase{"EnumArrayEqualObject",
+                            R"((const v7 1)
+                               (new-array v7 "[LBar;")
+                               (move-result-pseudo-object v6)
+                               (if-eq v6 v4 :done)
+                               (:done))",
+                            true, true},
+        EnumObservationCase{"EqualObjectArray",
+                            R"((const v7 1)
+                               (new-array v7 "[Ljava/lang/Object;")
+                               (move-result-pseudo-object v6)
+                               (if-eq v0 v6 :done)
+                               (:done))",
+                            true, true},
+        EnumObservationCase{"NotEqualSameEnum", "(if-ne v0 v1 :done) (:done)",
+                            true, true},
+        EnumObservationCase{"EqualNull",
+                            "(const v6 0) (if-eq v0 v6 :done) (:done)", true,
+                            true},
+        EnumObservationCase{"NullCheck", "(if-nez v0 :done) (:done)", true,
+                            true}),
     [](const TestParamInfo<EnumObservationCase>& info) {
       return info.param.name;
     });
@@ -4371,6 +4447,44 @@ TEST_F(OptimizeEnumsTest, methodHandleConstantsHaveObjectTypes) {
   IRInstruction method_type(OPCODE_CONST_METHOD_TYPE);
   check(method_type);
 }
+
+// Java: `Bar.Y == handle.invoke()`, where the handle may return any object,
+// like an unrelated Integer, so the comparison keeps Bar.
+TEST_F(OptimizeEnumsTest, comparisonWithMethodHandleResultKeepsEnum) {
+  auto store = create_enum_store();
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  uc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LUser;.same:(Ljava/lang/invoke/MethodHandle;)Z"
+      (
+        (load-param-object v0)
+        (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:()Ljava/lang/Object;" "()Ljava/lang/Object;")
+        (move-result-object v1)
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v2)
+        (if-eq v1 v2 :same)
+        (const v3 0)
+        (return v3)
+        (:same)
+        (const v3 1)
+        (return v3)
+      )
+    )
+  )"));
+  store.add_classes({uc.create()});
+  DexStoresVector stores({std::move(store)});
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+  auto* bar_type = DexType::get_type("LBar;");
+  optimize_enums::Config config(100);
+  config.candidate_enums.insert(bar_type);
+  EXPECT_EQ(rejection_reasons(scope, &config, bar_type),
+            std::set<optimize_enums::UnsafeType>{
+                optimize_enums::UnsafeType::kUsageComparedByIdentity});
+  EXPECT_EQ(config.candidate_enums.count(bar_type), 0u);
+}
+
 TEST_F(OptimizeEnumsTest, objectParameterObservationsAreUnsafe) {
   struct ObservationCase {
     std::string instructions;

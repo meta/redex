@@ -1690,3 +1690,350 @@ TEST_F(FinalInlineTest, superclassConstructorPassingThisOnBlocksInference) {
 
   EXPECT_CODE_EQ(observe->get_code(), expected.get());
 }
+
+namespace {
+
+// class Base { Base() { onCreate(); } void onCreate() {} }
+DexClass* create_base_calling_on_create() {
+  ClassCreator base_creator(DexType::make_type("LBase;"));
+  base_creator.set_super(type::java_lang_Object());
+  base_creator.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LBase;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (invoke-virtual (v0) "LBase;.onCreate:()V")
+      (return-void)
+     )
+    )
+  )"));
+  base_creator.add_method(assembler::method_from_string(R"(
+    (method (public) "LBase;.onCreate:()V"
+     (
+      (load-param-object v0)
+      (return-void)
+     )
+    )
+  )"));
+  return base_creator.create();
+}
+
+} // namespace
+
+TEST_F(FinalInlineTest, overrideCalledBySuperclassConstructorBlocksInference) {
+  // Java:
+  //   class Base { Base() { onCreate(); } void onCreate() {} }
+  //   class Foo extends Base {
+  //     int x;
+  //     Foo() { super(); x = 1; }
+  //     @Override void onCreate() { Log.v(x); }
+  //   }
+  // Base() runs Foo.onCreate() before x is written, which logs 0. The call
+  // was only followed to Base.onCreate(), so the read was folded to 1.
+  auto* base = create_base_calling_on_create();
+  m_cc->set_super(base->get_type());
+  add_instance_field("LFoo;.x:I");
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "LBase;.<init>:()V")
+      (const v1 1)
+      (iput v1 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* on_create = assembler::method_from_string(R"(
+    (method (public) "LFoo;.onCreate:()V"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.x:I")
+      (move-result-pseudo v1)
+      (invoke-static (v1) "LLog;.v:(I)V")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(on_create);
+  auto* cls = m_cc->create();
+  auto expected = assembler::ircode_from_string(
+      assembler::to_string(on_create->get_code()));
+
+  run({base, cls}, nullptr);
+
+  EXPECT_CODE_EQ(on_create->get_code(), expected.get());
+}
+
+TEST_F(FinalInlineTest, overrideInSubclassBlocksInference) {
+  // Java:
+  //   class Foo { int x; Foo() { init(); x = 1; } void init() {} }
+  //   class Sub extends Foo { @Override void init() { Log.v(x); } }
+  // `new Sub()` runs Sub.init() before x is written, which logs 0. The call
+  // was only followed to Foo.init(), so the read was folded to 1.
+  add_instance_field("LFoo;.x:I");
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (invoke-virtual (v0) "LFoo;.init:()V")
+      (const v1 1)
+      (iput v1 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )"));
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public) "LFoo;.init:()V"
+     (
+      (load-param-object v0)
+      (return-void)
+     )
+    )
+  )"));
+  auto* cls = m_cc->create();
+
+  ClassCreator sub_creator(DexType::make_type("LSub;"));
+  sub_creator.set_super(cls->get_type());
+  sub_creator.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LSub;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "LFoo;.<init>:()V")
+      (return-void)
+     )
+    )
+  )"));
+  auto* init = assembler::method_from_string(R"(
+    (method (public) "LSub;.init:()V"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.x:I")
+      (move-result-pseudo v1)
+      (invoke-static (v1) "LLog;.v:(I)V")
+      (return-void)
+     )
+    )
+  )");
+  sub_creator.add_method(init);
+  auto* sub = sub_creator.create();
+  auto expected =
+      assembler::ircode_from_string(assembler::to_string(init->get_code()));
+
+  run({cls, sub}, nullptr);
+
+  EXPECT_CODE_EQ(init->get_code(), expected.get());
+}
+
+TEST_F(FinalInlineTest, overrideInUnrelatedClassAllowsInference) {
+  // Java:
+  //   class Base { Base() { onCreate(); } void onCreate() {} }
+  //   class Foo extends Base { int x; Foo() { super(); x = 1; } }
+  //   class Other extends Base {
+  //     static Foo last;
+  //     @Override void onCreate() { Log.v(last.x); }
+  //   }
+  // Other.onCreate() cannot run for a Foo, so reads of x are still folded.
+  auto* base = create_base_calling_on_create();
+  m_cc->set_super(base->get_type());
+  add_instance_field("LFoo;.x:I");
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "LBase;.<init>:()V")
+      (const v1 1)
+      (iput v1 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* reader = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.getX:(LFoo;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.x:I")
+      (move-result-pseudo v0)
+      (return v0)
+     )
+    )
+  )");
+  m_cc->add_method(reader);
+  auto* cls = m_cc->create();
+
+  ClassCreator other_creator(DexType::make_type("LOther;"));
+  other_creator.set_super(base->get_type());
+  other_creator.add_field(DexField::make_field("LOther;.last:LFoo;")
+                              ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  other_creator.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LOther;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "LBase;.<init>:()V")
+      (return-void)
+     )
+    )
+  )"));
+  other_creator.add_method(assembler::method_from_string(R"(
+    (method (public) "LOther;.onCreate:()V"
+     (
+      (load-param-object v0)
+      (sget-object "LOther;.last:LFoo;")
+      (move-result-pseudo-object v1)
+      (iget v1 "LFoo;.x:I")
+      (move-result-pseudo v2)
+      (invoke-static (v2) "LLog;.v:(I)V")
+      (return-void)
+     )
+    )
+  )"));
+  auto* other = other_creator.create();
+
+  run({base, cls, other}, nullptr);
+
+  auto expected = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (const v0 1)
+      (return v0)
+    )
+  )");
+  EXPECT_CODE_EQ(reader->get_code(), expected.get());
+}
+
+TEST_F(FinalInlineTest, undefinedInterfaceMakesInheritedImplementationUnknown) {
+  // Java, where Missing has no definition in the input:
+  //   interface I { void m(); }
+  //   abstract class Foo implements I, Missing {
+  //     int x;
+  //     Foo() { super(); m(); x = 1; }
+  //   }
+  // Foo declares no m(), so the m() it inherits may be a default method of
+  // Missing, which cannot be inspected: x is treated as read and not inferred.
+  ClassCreator i_creator(DexType::make_type("LI;"));
+  i_creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  i_creator.set_super(type::java_lang_Object());
+  i_creator.add_method(
+      DexMethod::make_method("LI;.m:()V")
+          ->make_concrete(ACC_PUBLIC | ACC_ABSTRACT, /* is_virtual */ true));
+  auto* i_cls = i_creator.create();
+
+  m_cc->set_access(ACC_PUBLIC | ACC_ABSTRACT);
+  m_cc->add_interface(i_cls->get_type());
+  m_cc->add_interface(DexType::make_type("LMissing;"));
+  add_instance_field("LFoo;.x:I");
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (invoke-interface (v0) "LI;.m:()V")
+      (const v1 1)
+      (iput v1 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* reader = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.getX:(LFoo;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.x:I")
+      (move-result-pseudo v0)
+      (return v0)
+     )
+    )
+  )");
+  m_cc->add_method(reader);
+  auto* cls = m_cc->create();
+  auto expected =
+      assembler::ircode_from_string(assembler::to_string(reader->get_code()));
+
+  run({i_cls, cls}, nullptr);
+
+  EXPECT_CODE_EQ(reader->get_code(), expected.get());
+}
+
+TEST_F(FinalInlineTest, defaultMethodOfSubclassInterfaceBlocksInference) {
+  // Java:
+  //   interface I { default void m() {} }
+  //   interface J extends I {
+  //     @Override default void m() { Log.v(((Foo) this).x); }
+  //   }
+  //   class Foo implements I {
+  //     int x;
+  //     Foo() { I self = this; self.m(); x = 1; }
+  //   }
+  //   class Sub extends Foo implements J {}
+  // `new Sub()` runs J.m() before x is written, which logs 0. Only Sub
+  // implements J, so a check of the defaults Foo inherits misses J.m().
+  ClassCreator i_creator(DexType::make_type("LI;"));
+  i_creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  i_creator.set_super(type::java_lang_Object());
+  i_creator.add_method(assembler::method_from_string(R"(
+    (method (public) "LI;.m:()V"
+     (
+      (load-param-object v0)
+      (return-void)
+     )
+    )
+  )"));
+  auto* i_cls = i_creator.create();
+
+  ClassCreator j_creator(DexType::make_type("LJ;"));
+  j_creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  j_creator.set_super(type::java_lang_Object());
+  j_creator.add_interface(i_cls->get_type());
+  auto* j_m = assembler::method_from_string(R"(
+    (method (public) "LJ;.m:()V"
+     (
+      (load-param-object v0)
+      (check-cast v0 "LFoo;")
+      (move-result-pseudo-object v0)
+      (iget v0 "LFoo;.x:I")
+      (move-result-pseudo v1)
+      (invoke-static (v1) "LLog;.v:(I)V")
+      (return-void)
+     )
+    )
+  )");
+  j_creator.add_method(j_m);
+  auto* j_cls = j_creator.create();
+
+  m_cc->add_interface(i_cls->get_type());
+  add_instance_field("LFoo;.x:I");
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (invoke-interface (v0) "LI;.m:()V")
+      (const v1 1)
+      (iput v1 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* cls = m_cc->create();
+
+  ClassCreator sub_creator(DexType::make_type("LSub;"));
+  sub_creator.set_super(cls->get_type());
+  sub_creator.add_interface(j_cls->get_type());
+  sub_creator.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LSub;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "LFoo;.<init>:()V")
+      (return-void)
+     )
+    )
+  )"));
+  auto* sub = sub_creator.create();
+  auto expected =
+      assembler::ircode_from_string(assembler::to_string(j_m->get_code()));
+
+  run({i_cls, j_cls, cls, sub}, nullptr);
+
+  EXPECT_CODE_EQ(j_m->get_code(), expected.get());
+}

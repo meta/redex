@@ -10,12 +10,185 @@
 #include <algorithm>
 #include <optional>
 
+#include "ClassHierarchy.h"
 #include "Debug.h"
+#include "MethodOverrideGraph.h"
 #include "Resolver.h"
 #include "TypeSystem.h"
 #include "Walkers.h"
 
 namespace {
+
+/*
+ * A virtual or interface call runs the method its receiver's class implements,
+ * not necessarily the method it resolves to. When the receiver is an instance
+ * of a given class, which `this` is in that class's constructor, the call can
+ * also run the implementation the class inherits, or an override declared in
+ * the class, in one of its subclasses, or as a default method of an interface
+ * that one of them implements.
+ */
+class DispatchTargets {
+ public:
+  DispatchTargets(const method_override_graph::Graph& graph,
+                  const ClassHierarchy& hierarchy,
+                  const DexClass* cls)
+      : m_graph(graph), m_hierarchy(hierarchy), m_type(cls->get_type()) {
+    collect_inherited_candidates(cls);
+  }
+
+  // Calls `f` on each method other than `callee` that `insn`, which resolves to
+  // `callee`, may run on an instance of the class.
+  template <typename F>
+  void for_each_other_target(const IRInstruction* insn,
+                             const DexMethod* callee,
+                             const F& f) const {
+    auto op = insn->opcode();
+    if (callee == nullptr ||
+        (op != OPCODE_INVOKE_VIRTUAL && op != OPCODE_INVOKE_INTERFACE)) {
+      return;
+    }
+    for_each_inherited_implementation(callee, [&](const DexMethod* method) {
+      if (method != callee) {
+        f(method);
+      }
+    });
+    // Abstract methods never run.
+    method_override_graph::all_overriding_methods(
+        m_graph,
+        callee,
+        [&](const DexMethod* method) {
+          if (!is_abstract(method)) {
+            f(method);
+          }
+          return true;
+        },
+        /* include_interfaces */ true,
+        /* base_type */ m_type);
+    for_each_overriding_default_method(callee, f);
+  }
+
+ private:
+  // Calls `f` on each default method that overrides `callee` and may run on an
+  // instance of the class: one whose interface the class or a subclass
+  // implements. The `base_type` filter above keeps only methods whose class,
+  // or a class they implement an interface method for, is the class or a
+  // subclass, so it leaves these out. This ignores class methods that shadow
+  // the default method, which only adds methods to check.
+  template <typename F>
+  void for_each_overriding_default_method(const DexMethod* callee,
+                                          const F& f) const {
+    // Only interface methods have default methods overriding them.
+    if (!m_graph.get_node(callee).is_interface) {
+      return;
+    }
+    method_override_graph::all_overriding_methods(
+        m_graph,
+        callee,
+        [&](const DexMethod* method) {
+          if (!is_abstract(method) && m_graph.get_node(method).is_interface &&
+              is_implemented_in_hierarchy(method->get_class())) {
+            f(method);
+          }
+          return true;
+        },
+        /* include_interfaces */ true);
+  }
+
+  // Whether the class or a subclass implements `intf`.
+  bool is_implemented_in_hierarchy(const DexType* intf) const {
+    auto types = get_all_children(m_hierarchy, m_type);
+    types.insert(m_type);
+    return std::any_of(types.begin(), types.end(), [&](const DexType* type) {
+      return type::check_cast(type, intf);
+    });
+  }
+
+  static bool matches(const DexMethod* method, const DexMethod* callee) {
+    return method->get_name() == callee->get_name() &&
+           method->get_proto() == callee->get_proto();
+  }
+
+  // Collects the classes of the superclass chain and the default methods of
+  // all interfaces they implement. A superclass or interface without a
+  // definition makes the class's inherited implementations unknown.
+  void collect_inherited_candidates(const DexClass* cls) {
+    std::vector<const DexType*> interfaces;
+    while (cls != nullptr) {
+      m_superclass_chain.push_back(cls);
+      for (const auto* intf : *cls->get_interfaces()) {
+        interfaces.push_back(intf);
+      }
+      const auto* super_type = cls->get_super_class();
+      cls = super_type == nullptr ? nullptr : type_class(super_type);
+      if (super_type != nullptr && cls == nullptr) {
+        m_inherited_known = false;
+      }
+    }
+    UnorderedSet<const DexType*> visited;
+    while (!interfaces.empty()) {
+      const auto* intf = interfaces.back();
+      interfaces.pop_back();
+      if (!visited.insert(intf).second) {
+        continue;
+      }
+      const auto* intf_cls = type_class(intf);
+      if (intf_cls == nullptr) {
+        m_inherited_known = false;
+        continue;
+      }
+      for (const auto* method : intf_cls->get_vmethods()) {
+        if (!is_abstract(method)) {
+          m_default_methods.push_back(method);
+        }
+      }
+      for (const auto* super_intf : *intf_cls->get_interfaces()) {
+        interfaces.push_back(super_intf);
+      }
+    }
+  }
+
+  // Calls `f` on each implementation of `callee` that the class may inherit:
+  // the method declared by the nearest class of its superclass chain, or else
+  // a default method of an interface it implements. When a superclass or an
+  // interface has no definition, that implementation is unknown, and `f` gets
+  // nullptr, which callers treat as a method that may read every field.
+  //
+  // This does not use resolve_method: its search for default methods asserts
+  // that every interface in the hierarchy is defined, and input apps can
+  // implement interfaces whose definitions are absent.
+  template <typename F>
+  void for_each_inherited_implementation(const DexMethod* callee,
+                                         const F& f) const {
+    for (const auto* cls : m_superclass_chain) {
+      for (const auto* method : cls->get_vmethods()) {
+        if (matches(method, callee)) {
+          // A class's method takes precedence over default methods; an
+          // abstract one leaves the implementation to the subclasses.
+          if (!is_abstract(method)) {
+            f(method);
+          }
+          return;
+        }
+      }
+    }
+    if (!m_inherited_known) {
+      f(nullptr);
+      return;
+    }
+    for (const auto* method : m_default_methods) {
+      if (matches(method, callee)) {
+        f(method);
+      }
+    }
+  }
+
+  const method_override_graph::Graph& m_graph;
+  const ClassHierarchy& m_hierarchy;
+  const DexType* m_type;
+  std::vector<const DexClass*> m_superclass_chain;
+  std::vector<const DexMethod*> m_default_methods;
+  bool m_inherited_known{true};
+};
 
 namespace check_this {
 using ThisDomain = sparta::ConstantAbstractDomain<bool>;
@@ -48,8 +221,9 @@ class ThisObjectAnalysis final
     return exit_state_at_source;
   }
 
-  std::optional<UnorderedSet<DexMethod*>> collect_method_called_on_this() {
-    UnorderedSet<DexMethod*> return_set;
+  std::optional<UnorderedSet<const DexMethod*>> collect_method_called_on_this(
+      const DispatchTargets& dispatch_targets) {
+    UnorderedSet<const DexMethod*> return_set;
     const auto* code = m_method->get_code();
     const auto& cfg = code->cfg();
     for (cfg::Block* block : cfg.blocks()) {
@@ -82,6 +256,9 @@ class ThisObjectAnalysis final
               }
             } else {
               return_set.emplace(callee);
+              dispatch_targets.for_each_other_target(
+                  insn, callee,
+                  [&](const DexMethod* target) { return_set.emplace(target); });
             }
           }
         } else if (op == OPCODE_IPUT_OBJECT || op == OPCODE_SPUT_OBJECT ||
@@ -152,6 +329,7 @@ class ThisObjectAnalysis final
  */
 bool get_ifields_read(const UnorderedSet<std::string>& allowlist_method_names,
                       const UnorderedSet<const DexType*>& parent_intf_set,
+                      const DispatchTargets& dispatch_targets,
                       const DexClass* ifield_cls,
                       const DexMethod* method,
                       ConcurrentSet<DexField*>* blocklist_ifields,
@@ -199,8 +377,8 @@ bool get_ifields_read(const UnorderedSet<std::string>& allowlist_method_names,
                 return parent_intf_set.count(t) != 0u;
               })) {
             bool keep_going = get_ifields_read(
-                allowlist_method_names, parent_intf_set, ifield_cls,
-                /* method */ nullptr, blocklist_ifields, visited);
+                allowlist_method_names, parent_intf_set, dispatch_targets,
+                ifield_cls, /* method */ nullptr, blocklist_ifields, visited);
             if (!keep_going) {
               res = false;
               return cfg_adapter::LOOP_BREAK;
@@ -246,9 +424,17 @@ bool get_ifields_read(const UnorderedSet<std::string>& allowlist_method_names,
             }
           }
           // Recusive check every methods accessed from <init>.
-          bool keep_going =
-              get_ifields_read(allowlist_method_names, parent_intf_set,
-                               ifield_cls, callee, blocklist_ifields, visited);
+          bool keep_going = get_ifields_read(
+              allowlist_method_names, parent_intf_set, dispatch_targets,
+              ifield_cls, callee, blocklist_ifields, visited);
+          dispatch_targets.for_each_other_target(
+              insn, callee, [&](const DexMethod* target) {
+                keep_going =
+                    keep_going &&
+                    get_ifields_read(allowlist_method_names, parent_intf_set,
+                                     dispatch_targets, ifield_cls, target,
+                                     blocklist_ifields, visited);
+              });
           if (!keep_going) {
             res = false;
             return cfg_adapter::LOOP_BREAK;
@@ -279,6 +465,8 @@ ConcurrentSet<DexField*> get_ifields_read_in_callees(
     const UnorderedSet<std::string>& allowlist_method_names) {
   ConcurrentSet<DexField*> return_ifields;
   TypeSystem ts(scope);
+  auto override_graph = method_override_graph::build_graph(scope);
+  auto hierarchy = build_type_hierarchy(scope);
   std::vector<DexClass*> relevant_classes;
   for (auto* cls : scope) {
     if (cls->is_external()) {
@@ -304,7 +492,8 @@ ConcurrentSet<DexField*> get_ifields_read_in_callees(
   });
   walk::parallel::classes(
       relevant_classes,
-      [&return_ifields, &ts, &allowlist_method_names](DexClass* cls) {
+      [&return_ifields, &ts, &override_graph, &hierarchy,
+       &allowlist_method_names](DexClass* cls) {
         auto* ctor = cls->get_ctors().front();
         auto* code = ctor->get_code();
         always_assert(code != nullptr);
@@ -316,7 +505,9 @@ ConcurrentSet<DexField*> get_ifields_read_in_callees(
         // include the superclass constructor and any constructor that gets
         // this as an argument: each can run code that reads this object's
         // fields.
-        auto check_methods = fixpoint.collect_method_called_on_this();
+        DispatchTargets dispatch_targets(*override_graph, hierarchy, cls);
+        auto check_methods =
+            fixpoint.collect_method_called_on_this(dispatch_targets);
         if (!check_methods) {
           // This object escaped to heap, blocklist all.
           for (const auto& field : cls->get_ifields()) {
@@ -331,10 +522,10 @@ ConcurrentSet<DexField*> get_ifields_read_in_callees(
                                                        parent_chain.end()};
           const auto& intf_set = ts.get_implemented_interfaces(cls->get_type());
           parent_intf_set.insert(intf_set.begin(), intf_set.end());
-          for (auto* const method : UnorderedIterable(*check_methods)) {
-            bool keep_going =
-                get_ifields_read(allowlist_method_names, parent_intf_set, cls,
-                                 method, &return_ifields, &visited);
+          for (const auto* const method : UnorderedIterable(*check_methods)) {
+            bool keep_going = get_ifields_read(
+                allowlist_method_names, parent_intf_set, dispatch_targets, cls,
+                method, &return_ifields, &visited);
             if (!keep_going) {
               break;
             }

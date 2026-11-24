@@ -59,6 +59,29 @@ UnorderedSet<const DexType*> discard_primitives(const EnumTypes& types) {
   return res;
 }
 
+// Boxing replaces a value of the candidate enum, or array of them, `type` with
+// an Integer, or an Integer array. Whether `instance-of test` holds changes
+// only where the two disagree on it, e.g. for `Number` or `Enum` but not
+// `Object`, `Comparable` or `String`.
+bool boxing_may_change_instance_of(const DexType* type, const DexType* test) {
+  while (type::is_array(type)) {
+    if (!type::is_array(test)) {
+      // Both arrays are instances of `Object`, `Cloneable` and `Serializable`,
+      // and of nothing else that is not an array.
+      return false;
+    }
+    type = type::make_array_component_type(type);
+    test = type::make_array_component_type(test);
+  }
+  if (type::is_primitive(test)) {
+    return false;
+  }
+  auto as_enum = type::is_instance_of_if_known(type, test);
+  auto as_integer =
+      type::is_instance_of_if_known(type::java_lang_Integer(), test);
+  return !as_enum || !as_integer || *as_enum != *as_integer;
+}
+
 bool is_static_field_on_enum_class(const DexFieldRef* fref) {
   const auto* field = fref->as_def();
   if ((field == nullptr) || !is_static(field)) {
@@ -123,6 +146,12 @@ class EnumUpcastDetector {
       break;
     case OPCODE_INSTANCE_OF:
       reject(insn, insn->get_type(), UnsafeType::kUsageUsedInInstanceOf);
+      for (const auto* type : env->get(insn->src(0)).elements()) {
+        if (is_candidate(type) &&
+            boxing_may_change_instance_of(type, insn->get_type())) {
+          reject(insn, type, UnsafeType::kUsageUsedInInstanceOf);
+        }
+      }
       break;
     case OPCODE_INVOKE_CUSTOM:
     case OPCODE_INVOKE_POLYMORPHIC:

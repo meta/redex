@@ -373,8 +373,11 @@ void FixpointIterator::analyze_instruction(const IRInstruction* insn,
     env->set_fresh_pointer(insn->dest(), insn);
   } else {
     default_instruction_handler(insn, env);
-    if (m_escape_type_and_identity_uses) {
-      if (op == OPCODE_CHECK_CAST || opcode::is_a_monitor(op)) {
+    if (m_escape_type_and_identity_uses != nullptr) {
+      if (op == OPCODE_CHECK_CAST || opcode::is_a_monitor(op) ||
+          (op == OPCODE_INSTANCE_OF &&
+           m_escape_type_and_identity_uses->instance_of_tells_apart(
+               insn->get_type()))) {
         env->set_may_escape(insn->src(0), insn);
       }
     }
@@ -443,7 +446,7 @@ std::pair<std::unique_ptr<FixpointIterator>, EscapeSummary> analyze_method(
   auto fp_iter = std::make_unique<FixpointIterator>(
       cfg,
       std::move(invoke_to_summary_map),
-      /* escape_type_and_identity_uses */ false,
+      /* escape_type_and_identity_uses */ nullptr,
       excluded_classes);
   fp_iter->run(Environment());
 

@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <functional>
 #include <iosfwd>
 #include <utility>
 
@@ -270,28 +271,46 @@ class MayEscapeStore {
 using Environment = EnvironmentWithStoreImpl<MayEscapeStore>;
 
 /*
+ * The uses of an object that can tell it apart from a replacement that a client
+ * substitutes for it, as OptimizeEnumsPass substitutes a boxed Integer for an
+ * enum constant: a check-cast, a monitor, and an `instance-of` of a type for
+ * which `instance_of_tells_apart` holds. A FixpointIterator refers to the rule
+ * it is given, so the rule must outlive it. `instance_of_tells_apart` must be
+ * set, safe to call from several threads at once, and give the same answer for
+ * a type every time: methods are analyzed in parallel, and a summary computed
+ * across calls may only grow from one round to the next.
+ */
+struct TypeAndIdentityUses {
+  std::function<bool(const DexType*)> instance_of_tells_apart;
+};
+
+/*
  * Analyze the given method to determine which pointers escape. Note that we do
  * not mark returned or thrown pointers as escaping here. This makes it easier
  * to use as part of an interprocedural analysis -- the analysis of the caller
  * can choose whether to track these pointers or treat them as having escaped.
- * Check-casts and monitors would not let source value escape in normal cases.
- * But OptimizeEnumsPass replaces enum objects with boxed integers, so these
- * uses can change behavior: a check-cast may fail, and a monitor may lock an
- * Integer shared with other code. So we add the option
- * `escape_type_and_identity_uses` to make OptimizeEnumsPass able to treat them
- * as escaping instructions.
+ * Check-casts, instance-of and monitors would not let source value escape in
+ * normal cases. But OptimizeEnumsPass replaces enum objects with boxed
+ * integers, so these uses can change behavior: a check-cast may fail,
+ * instance-of a type that an enum and an Integer disagree on may give another
+ * result, and a monitor may lock an Integer shared with other code. So with
+ * `escape_type_and_identity_uses`, these uses count as escaping instructions;
+ * which instance-of tests count is up to the client.
  */
 class FixpointIterator final : public ir_analyzer::BaseIRAnalyzer<Environment> {
  public:
   explicit FixpointIterator(
       const cfg::ControlFlowGraph& cfg,
       InvokeToSummaryMap invoke_to_summary_map = InvokeToSummaryMap(),
-      bool escape_type_and_identity_uses = false,
+      const TypeAndIdentityUses* escape_type_and_identity_uses = nullptr,
       const UnorderedSet<DexClass*>* excluded_classes = nullptr)
       : ir_analyzer::BaseIRAnalyzer<Environment>(cfg),
         m_invoke_to_summary_map(std::move(invoke_to_summary_map)),
         m_escape_type_and_identity_uses(escape_type_and_identity_uses),
-        m_excluded_classes(excluded_classes) {}
+        m_excluded_classes(excluded_classes) {
+    always_assert(escape_type_and_identity_uses == nullptr ||
+                  escape_type_and_identity_uses->instance_of_tells_apart);
+  }
 
   void analyze_instruction(const IRInstruction* insn,
                            Environment* env) const override;
@@ -306,7 +325,7 @@ class FixpointIterator final : public ir_analyzer::BaseIRAnalyzer<Environment> {
   // ourselves -- we are able to switch easily between different call graph
   // construction strategies.
   InvokeToSummaryMap m_invoke_to_summary_map;
-  const bool m_escape_type_and_identity_uses;
+  const TypeAndIdentityUses* m_escape_type_and_identity_uses;
   const UnorderedSet<DexClass*>* m_excluded_classes;
 };
 

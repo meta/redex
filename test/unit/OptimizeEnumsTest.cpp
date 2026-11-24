@@ -249,9 +249,27 @@ DexStore create_enum_store() {
       )
     )
   )"));
+  // The JDK hierarchy that decides which type checks boxing can change.
+  auto* comparable = DexType::make_type("Ljava/lang/Comparable;");
+  auto* serializable = DexType::make_type("Ljava/io/Serializable;");
+  auto* number = DexType::make_type("Ljava/lang/Number;");
   ec.set_super(type::java_lang_Object());
+  ec.add_interface(comparable);
+  ec.add_interface(serializable);
   ec.set_access(ACC_PUBLIC);
   auto* enums = ec.create();
+  std::vector<DexClass*> jdk_classes;
+  for (auto* intf : {comparable, serializable}) {
+    ClassCreator creator(intf);
+    creator.set_super(type::java_lang_Object());
+    creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+    jdk_classes.push_back(creator.create());
+  }
+  ClassCreator nc(number);
+  nc.set_super(type::java_lang_Object());
+  nc.add_interface(serializable);
+  nc.set_access(ACC_PUBLIC | ACC_ABSTRACT);
+  jdk_classes.push_back(nc.create());
 
   ClassCreator ic(type::java_lang_Integer());
   ic.add_method(assembler::method_from_string(R"(
@@ -263,7 +281,8 @@ DexStore create_enum_store() {
       )
     )
   )"));
-  ic.set_super(type::java_lang_Object());
+  ic.set_super(number);
+  ic.add_interface(comparable);
   ic.set_access(ACC_PUBLIC);
   auto* ints = ic.create();
 
@@ -391,6 +410,7 @@ DexStore create_enum_store() {
 
   auto store = DexStore("classes");
   store.add_classes({bar, ints, enums, objs});
+  store.add_classes(jdk_classes);
   return store;
 }
 
@@ -4145,6 +4165,32 @@ TEST_P(OptimizeEnumsObservationTest, preservesObservedObjects) {
         )
       )"));
   uc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LUser;.isNumber:(Ljava/lang/Object;)Z"
+      ((load-param-object v0)
+       (instance-of v0 "Ljava/lang/Number;")
+       (move-result-pseudo v1)
+       (return v1)))
+  )"));
+  uc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LUser;.isEnum:(Ljava/lang/Object;)Z"
+      ((load-param-object v0)
+       (instance-of v0 "Ljava/lang/Enum;")
+       (move-result-pseudo v1)
+       (return v1)))
+  )"));
+  for (const auto& [name, type] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"Integer", "Ljava/lang/Integer;"},
+           {"Comparable", "Ljava/lang/Comparable;"},
+           {"User", "LUser;"},
+           {"IntegerArray", "[Ljava/lang/Integer;"},
+           {"ObjectArray", "[Ljava/lang/Object;"}}) {
+    uc.add_method(assembler::method_from_string(
+        "(method (public static) \"LUser;.is" + name +
+        ":(Ljava/lang/Object;)Z\" ((load-param-object v0) (instance-of v0 \"" +
+        type + "\") (move-result-pseudo v1) (return v1)))"));
+  }
+  uc.add_method(assembler::method_from_string(R"(
     (method (public static) "LUser;.lock:(Ljava/lang/Object;)V"
       ((load-param-object v0)
        (monitor-enter v0)
@@ -4181,11 +4227,74 @@ INSTANTIATE_TEST_SUITE_P(
     OptimizeEnumsObservationTest,
     Values(
         EnumObservationCase{
+            "ObjectParameterInstanceOfNumber",
+            R"((invoke-static (v0) "LUser;.isNumber:(Ljava/lang/Object;)Z"))",
+            false, true},
+        EnumObservationCase{
+            "ObjectParameterInstanceOfEnum",
+            R"((invoke-static (v0) "LUser;.isEnum:(Ljava/lang/Object;)Z"))",
+            false, true},
+        EnumObservationCase{
             "ObjectParameterMonitor",
             R"((invoke-static (v0) "LUser;.lock:(Ljava/lang/Object;)V"))",
             false, true},
+        EnumObservationCase{"InstanceOfNumber",
+                            R"((instance-of v0 "Ljava/lang/Number;")
+                               (move-result-pseudo v6))",
+                            false, true},
+        EnumObservationCase{"InstanceOfEnum",
+                            R"((instance-of v0 "Ljava/lang/Enum;")
+                               (move-result-pseudo v6))",
+                            false, true},
         EnumObservationCase{"Monitor", "(monitor-enter v0) (monitor-exit v0)",
-                            false, true}),
+                            false, true},
+        EnumObservationCase{
+            "ObjectParameterInstanceOfInteger",
+            R"((invoke-static (v0) "LUser;.isInteger:(Ljava/lang/Object;)Z"))",
+            false, true},
+        EnumObservationCase{"InstanceOfInteger",
+                            R"((instance-of v0 "Ljava/lang/Integer;")
+                               (move-result-pseudo v6))",
+                            false, true},
+        EnumObservationCase{"InstanceOfBar",
+                            R"((instance-of v4 "LBar;")
+                               (move-result-pseudo v6))",
+                            false, true},
+        EnumObservationCase{"ObjectParameterArrayInstanceOfIntegerArray",
+                            R"((const v6 1)
+                               (new-array v6 "[LBar;")
+                               (move-result-pseudo-object v7)
+                               (invoke-static (v7) "LUser;.isIntegerArray:(Ljava/lang/Object;)Z"))",
+                            false, true},
+        EnumObservationCase{"NestedArrayInstanceOfNestedNumberArray",
+                            R"((const v6 1)
+                               (new-array v6 "[[LBar;")
+                               (move-result-pseudo-object v7)
+                               (instance-of v7 "[[Ljava/lang/Number;")
+                               (move-result-pseudo v6))",
+                            false, true},
+        EnumObservationCase{
+            "ObjectParameterInstanceOfComparable",
+            R"((invoke-static (v0) "LUser;.isComparable:(Ljava/lang/Object;)Z"))",
+            true, true},
+        EnumObservationCase{
+            "ObjectParameterInstanceOfAppClass",
+            R"((invoke-static (v0) "LUser;.isUser:(Ljava/lang/Object;)Z"))",
+            true, true},
+        EnumObservationCase{"InstanceOfComparable",
+                            R"((instance-of v0 "Ljava/lang/Comparable;")
+                               (move-result-pseudo v6))",
+                            true, true},
+        EnumObservationCase{"InstanceOfString",
+                            R"((instance-of v0 "Ljava/lang/String;")
+                               (move-result-pseudo v6))",
+                            true, true},
+        EnumObservationCase{"ObjectParameterArrayInstanceOfObjectArray",
+                            R"((const v6 1)
+                               (new-array v6 "[LBar;")
+                               (move-result-pseudo-object v7)
+                               (invoke-static (v7) "LUser;.isObjectArray:(Ljava/lang/Object;)Z"))",
+                            true, true}),
     [](const TestParamInfo<EnumObservationCase>& info) {
       return info.param.name;
     });
@@ -4198,7 +4307,19 @@ TEST_F(OptimizeEnumsTest, objectParameterObservationsAreUnsafe) {
     bool second_param_safe;
   };
   const std::vector<ObservationCase> observations = {
-      {"(monitor-enter v0) (monitor-exit v0)", true}};
+      {R"((instance-of v0 "Ljava/lang/Number;") (move-result-pseudo v2))",
+       true},
+      {R"((instance-of v0 "Ljava/lang/Enum;") (move-result-pseudo v2))", true},
+      {"(monitor-enter v0) (monitor-exit v0)", true},
+      {R"((if-eqz v2 :other)
+          (move-object v3 v0)
+          (goto :observe)
+          (:other)
+          (move-object v3 v1)
+          (:observe)
+          (instance-of v3 "Ljava/lang/Number;")
+          (move-result-pseudo v4))",
+       false}};
   for (size_t i = 0; i < observations.size(); ++i) {
     const auto& [instructions, second_param_safe] = observations[i];
     SCOPED_TRACE(instructions);
@@ -4223,5 +4344,19 @@ TEST_F(OptimizeEnumsTest, nullableParameterObservationsAreUnsafe) {
       "(monitor-enter v3) (monitor-exit v3) (return-object v0)))");
   EXPECT_FALSE(summary.safe_params.contains(0));
   EXPECT_TRUE(summary.safe_params.contains(1));
+  EXPECT_EQ(summary.returned_param, std::nullopt);
+}
+
+TEST_F(OptimizeEnumsTest, instanceParameterObservationUsesArgumentIndex) {
+  auto summary = get_summary(R"(
+    (method (public) "LFoo;.observeInstance:(Ljava/lang/Object;)Ljava/lang/Object;"
+      ((load-param-object v4)
+       (load-param-object v0)
+       (move-object v1 v0)
+       (instance-of v1 "Ljava/lang/Number;")
+       (move-result-pseudo v2)
+       (return-object v0)))
+  )");
+  EXPECT_TRUE(summary.safe_params.empty());
   EXPECT_EQ(summary.returned_param, std::nullopt);
 }

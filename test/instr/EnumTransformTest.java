@@ -275,6 +275,14 @@ enum CAST_ENUM_ARRAY_TO_OBJECT {
   }
 }
 
+// An Integer and an enum agree on `instanceof Comparable` and
+// `instanceof String`, so these checks let the enum be boxed.
+// CHECK: class: redex.TYPE_CHECKED_SCORE
+// CHECK-NEXT: Access flags:
+// PRECHECK-NEXT: Superclass: java.lang.Enum
+// POSTCHECK-NEXT: Superclass: java.lang.Object
+enum TYPE_CHECKED_SCORE { ONE, TWO; }
+
 class EnumHelper {
   static void inlined_method(Enum e) { int a = e.hashCode(); }
 
@@ -457,7 +465,10 @@ public class EnumTransformTest {
 
   enum COUNT { ONE, TWO };
   enum OBSERVED_COLOR { RED };
+  enum TYPE_TESTED_COLOR { RED };
 
+  private static boolean isNumber(Object value) { return value instanceof Number; }
+  private static boolean isEnum(Object value) { return value instanceof Enum; }
   private static boolean locksInteger(Object value) {
     synchronized (value) {
       return Thread.holdsLock(Integer.valueOf(0));
@@ -465,8 +476,39 @@ public class EnumTransformTest {
   }
 
   @Test
+  public void enumObjectParameterTypeChecks() {
+    assertThat(isNumber(TYPE_TESTED_COLOR.RED)).isFalse();
+    assertThat(isEnum(TYPE_TESTED_COLOR.RED)).isTrue();
+  }
+
+  @Test
+  public void enumLocalTypeChecks() {
+    Object value = TYPE_TESTED_COLOR.RED;
+    assertThat(value instanceof Number).isFalse();
+    assertThat(value instanceof Enum).isTrue();
+  }
+
+  @Test
   public void enumMonitorIdentity() {
     assertThat(locksInteger(OBSERVED_COLOR.RED)).isFalse();
+  }
+
+  enum INTEGER_CHECKED_COLOR { RED };
+
+  private static boolean isInteger(Object value) { return value instanceof Integer; }
+
+  @Test
+  public void enumObjectParameterIntegerTypeCheck() {
+    assertThat(isInteger(INTEGER_CHECKED_COLOR.RED)).isFalse();
+  }
+
+  private static boolean isComparable(Object value) { return value instanceof Comparable; }
+  private static boolean isString(Object value) { return value instanceof String; }
+
+  @Test
+  public void enumTypeChecksThatBoxingKeeps() {
+    assertThat(isComparable(TYPE_CHECKED_SCORE.ONE)).isTrue();
+    assertThat(isString(TYPE_CHECKED_SCORE.TWO)).isFalse();
   }
 
   @Test

@@ -23,6 +23,33 @@
 namespace ptrs = local_pointers;
 
 namespace {
+
+// Whether `instance-of type` may tell a value of some enum, or an array of
+// them, apart from the Integer, or Integer array, that OptimizeEnumsPass boxes
+// it to. Both are instances of `Object`, `Comparable` and `Serializable`, and
+// neither of a class like `String`, but an enum may implement any interface.
+// For an array type, the same holds of its element type.
+bool may_tell_boxed_enum_apart(const DexType* type) {
+  type = type::make_element_type_if_array(type);
+  if (type::is_primitive(type)) {
+    return false;
+  }
+  auto integer = type::is_instance_of_if_known(type::java_lang_Integer(), type);
+  if (integer == std::optional<bool>(true) &&
+      type::is_instance_of_if_known(type::java_lang_Enum(), type) ==
+          std::optional<bool>(true)) {
+    return false;
+  }
+  const auto* cls = type_class(type);
+  return cls == nullptr || is_interface(cls) ||
+         integer != std::optional<bool>(false) ||
+         type::is_instance_of_if_known(type, type::java_lang_Enum()) !=
+             std::optional<bool>(false);
+}
+
+// The uses of a value that can tell an enum constant apart from its boxed
+// Integer.
+const ptrs::TypeAndIdentityUses BOXED_ENUM_USES{may_tell_boxed_enum_apart};
 // The structure is used for hardcoding external method param summaries.
 struct ExternalMethodData {
   std::string method_name;
@@ -142,7 +169,7 @@ ParamSummary calculate_param_summary(DexMethod* method,
   ParamSummary summary;
 
   ptrs::FixpointIterator fp_iter(cfg, ptrs::InvokeToSummaryMap(),
-                                 /*escape_type_and_identity_uses*/ true);
+                                 &BOXED_ENUM_USES);
   fp_iter.run(ptrs::Environment());
   bool result_may_be_pointer =
       !type::is_primitive(method->get_proto()->get_rtype());

@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "ControlFlow.h"
 #include "DeterministicContainers.h"
 #include "DexClass.h"
 #include "MethodUtil.h"
@@ -204,6 +205,52 @@ inline UnorderedSet<DexMethodRef*> get_kotlin_null_assertions() {
   get_kotlin_expr_null_assertions(methods);
   get_kotlin_notnull_assertions(methods);
   return methods;
+}
+
+/**
+ * Whether the code of `ref` may not be what runs, or may do more than check
+ * its first argument: a copy marked `no_optimizations`, an instance method
+ * (the summaries below take the checked value to be the first argument), or a
+ * wrapper that calls such a copy.
+ */
+inline bool is_untrusted_null_assertion(
+    const DexMethodRef* ref, const UnorderedSet<DexMethodRef*>& assertions) {
+  auto is_untrusted_copy = [](const DexMethodRef* method) {
+    const auto* def = method->as_def();
+    return def != nullptr &&
+           (def->rstate.no_optimizations() || !is_static(def));
+  };
+  if (is_untrusted_copy(ref)) {
+    return true;
+  }
+  const auto* def = ref->as_def();
+  const auto* code = def == nullptr ? nullptr : def->get_code();
+  if (code == nullptr) {
+    return false;
+  }
+  // A wrapper that RemoveNullcheckStringArg made does what the null check it
+  // calls does, so it is no more trusted than that one.
+  auto ii = cfg::ConstInstructionIterable(code->cfg());
+  return std::any_of(ii.begin(), ii.end(), [&](const auto& mie) {
+    return opcode::is_a_method_invoke(mie.insn->opcode()) &&
+           assertions.count(mie.insn->get_method()) != 0u &&
+           is_untrusted_copy(mie.insn->get_method());
+  });
+}
+
+/**
+ * The null assertions of `get_kotlin_null_assertions` whose code can be
+ * trusted to only check the nullity of their first argument.
+ */
+inline UnorderedSet<DexMethodRef*> get_trusted_kotlin_null_assertions() {
+  const auto assertions = get_kotlin_null_assertions();
+  UnorderedSet<DexMethodRef*> trusted;
+  for (auto* ref : UnorderedIterable(assertions)) {
+    if (!is_untrusted_null_assertion(ref, assertions)) {
+      trusted.insert(ref);
+    }
+  }
+  return trusted;
 }
 
 inline NullErrSrc get_wrapper_code(IROpcode opcode) {

@@ -8,6 +8,8 @@
 #include "EnumClinitAnalysis.h"
 
 #include <algorithm>
+#include <optional>
+#include <vector>
 
 #include "ConstantPropagationAnalysis.h"
 #include "Debug.h"
@@ -15,6 +17,10 @@
 #include "DexAccess.h"
 #include "EnumUpcastAnalysis.h"
 #include "IROpcode.h"
+#include "KotlinNullCheckMethods.h"
+#include "LocalPointersAnalysis.h"
+#include "MethodUtil.h"
+#include "Purity.h"
 #include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
@@ -294,27 +300,56 @@ UnorderedSet<const DexField*> unassigned_constants(
 }
 
 /**
- * Whether `insn` reads one of the constants in `unassigned`, or all of `cls`'s
- * constants at once through its values array, `values()` or
- * `valueOf(String)`, which see them only once every one is assigned.
+ * The constants of `cls` that `insn` reads: the constant itself for an
+ * `sget-object` of one, or all of them for a read of the values array or a call
+ * of `values()` or `valueOf(String)`, which see them only once every one is
+ * assigned.
  */
-bool reads_unassigned_constant(
-    const DexClass* cls,
-    const IRInstruction* insn,
-    const UnorderedSet<const DexField*>& unassigned) {
+void add_constants_read(const IRInstruction* insn,
+                        UnorderedSet<const DexField*>* reads) {
+  const DexClass* cls = nullptr;
   if (insn->opcode() == OPCODE_SGET_OBJECT) {
     const auto* field = resolve_field(insn->get_field(), FieldSearch::Static);
-    return field != nullptr && (unassigned.count(field) != 0u ||
-                                (field->get_class() == cls->get_type() &&
-                                 optimize_enums::is_enum_values_field(field)));
+    cls = field == nullptr ? nullptr : type_class(field->get_class());
+    if (cls == nullptr || !is_enum(cls)) {
+      return;
+    }
+    if (is_constant_of(cls, field)) {
+      reads->insert(field);
+      return;
+    }
+    if (!optimize_enums::is_enum_values_field(field)) {
+      return;
+    }
+  } else if (insn->has_method()) {
+    const auto* method = insn->get_method();
+    cls = type_class(method->get_class());
+    if (cls == nullptr || !is_enum(cls) ||
+        (!optimize_enums::is_enum_values(method) &&
+         !optimize_enums::is_enum_valueof(method))) {
+      return;
+    }
+  } else {
+    return;
   }
-  if (!insn->has_method()) {
-    return false;
+  // The values array and the methods that read it see every constant, so they
+  // run only once every one is assigned.
+  for (auto* constant : cls->get_sfields()) {
+    if (is_constant_of(cls, constant)) {
+      reads->insert(constant);
+    }
   }
-  const auto* method = insn->get_method();
-  return method->get_class() == cls->get_type() &&
-         (optimize_enums::is_enum_values(method) ||
-          optimize_enums::is_enum_valueof(method));
+}
+
+// Whether `insn` reads one of the constants in `unassigned`.
+bool reads_unassigned_constant(
+    const IRInstruction* insn,
+    const UnorderedSet<const DexField*>& unassigned) {
+  UnorderedSet<const DexField*> reads;
+  add_constants_read(insn, &reads);
+  return unordered_any_of(reads, [&](const DexField* field) {
+    return unassigned.count(field) != 0u;
+  });
 }
 
 /**
@@ -331,8 +366,7 @@ bool may_read_unassigned_constant(const DexClass* cls,
     return false;
   }
   const auto unassigned = unassigned_constants(cls, env);
-  return !unassigned.empty() &&
-         reads_unassigned_constant(cls, insn, unassigned);
+  return !unassigned.empty() && reads_unassigned_constant(insn, unassigned);
 }
 
 } // namespace
@@ -342,6 +376,194 @@ namespace optimize_enums {
 DexAccessFlags enum_field_access() { return ACC_STATIC | ACC_ENUM; }
 
 DexAccessFlags synth_access() { return ACC_STATIC | ACC_FINAL | ACC_SYNTHETIC; }
+
+namespace {
+
+// The methods that run no app code, so a call of one reads no constant.
+UnorderedSet<DexMethodRef*> methods_running_no_app_code() {
+  auto methods = get_pure_methods();
+  insert_unordered_iterable(
+      methods, kotlin_nullcheck_wrapper::get_trusted_kotlin_null_assertions());
+  methods.insert(method::java_lang_Object_ctor());
+  if (auto* enum_ctor = get_enum_ctor()) {
+    methods.insert(enum_ctor);
+  }
+  return methods;
+}
+
+} // namespace
+
+ConstantReadSummaries::ConstantReadSummaries(
+    const method_override_graph::Graph& override_graph)
+    : m_override_graph(override_graph),
+      m_runs_no_app_code(methods_running_no_app_code()) {}
+
+bool ConstantReadSummaries::add_callees(
+    const IRInstruction* call, std::vector<const DexMethod*>* callees) const {
+  auto* ref = call->has_method() ? call->get_method() : nullptr;
+  if (ref == nullptr) {
+    // An `invoke-custom` names a call site, not a method.
+    return false;
+  }
+  // An array's `clone()` has no definition and runs no app code.
+  if (local_pointers::is_array_clone(ref)) {
+    return true;
+  }
+  // A call that does not dispatch runs exactly the method its reference names,
+  // so a trusted one runs no app code even when Redex has no definition of it.
+  const bool dispatches = opcode::is_invoke_virtual(call->opcode()) ||
+                          opcode::is_invoke_interface(call->opcode());
+  if (!dispatches && m_runs_no_app_code.count(ref) != 0u) {
+    return true;
+  }
+  // Method refs name their definitions (ResolveRefsPass runs first), so no
+  // resolution here.
+  auto* def = ref->as_def();
+  if (def == nullptr) {
+    return false;
+  }
+  auto is_trusted = [&](const DexMethod* method) {
+    return m_runs_no_app_code.count(const_cast<DexMethodRef*>(
+               static_cast<const DexMethodRef*>(method))) != 0u;
+  };
+  // A method whose code may not be what runs can run anything.
+  auto add = [&](const DexMethod* callee) {
+    if (is_trusted(callee)) {
+      return true;
+    }
+    if (callee->rstate.no_optimizations() || callee->is_external() ||
+        callee->get_code() == nullptr) {
+      return false;
+    }
+    callees->push_back(callee);
+    return true;
+  };
+  if (!dispatches || !def->is_virtual()) {
+    return add(def);
+  }
+  // A virtual call runs the base method or any override, including a default
+  // method of a sub-interface, as Purity decides: an abstract one runs nothing
+  // itself, and an interface method that a runtime proxy may implement, like an
+  // external one, may run anything.
+  auto add_dispatched = [&](const DexMethod* method) {
+    if (is_trusted(method)) {
+      return true;
+    }
+    switch (get_base_or_overriding_method_action(
+        method, /* methods_to_ignore */ nullptr,
+        /* ignore_methods_with_assumenosideeffects */ false)) {
+    case MethodOverrideAction::UNKNOWN:
+      return false;
+    case MethodOverrideAction::EXCLUDE:
+      return true;
+    case MethodOverrideAction::INCLUDE:
+      return add(method);
+    }
+    not_reached();
+  };
+  return add_dispatched(def) && method_override_graph::all_overriding_methods(
+                                    m_override_graph, def, add_dispatched,
+                                    /* include_interfaces */ true);
+}
+
+ConstantReadSummaries::Body ConstantReadSummaries::scan(
+    const DexMethod* method) {
+  Body body;
+  body.own.emplace();
+  const auto* code = method->get_code();
+  always_assert(code != nullptr && code->cfg_built());
+  for (const auto& mie : cfg::ConstInstructionIterable(code->cfg())) {
+    auto* insn = mie.insn;
+    add_constants_read(insn, &*body.own);
+    const bool is_call = opcode::is_a_method_invoke(insn->opcode()) ||
+                         insn->opcode() == OPCODE_INVOKE_CUSTOM ||
+                         insn->opcode() == OPCODE_INVOKE_POLYMORPHIC;
+    if (is_call && !add_callees(insn, &body.callees)) {
+      body.own.reset();
+      body.callees.clear();
+      return body;
+    }
+  }
+  return body;
+}
+
+void ConstantReadSummaries::compute(const DexMethod* root) {
+  // Scan every method reached from `root` that has no summary yet. Methods
+  // that call each other need each other's summaries, so compute them
+  // together, by taking what each one reads and adding what its callees read
+  // until nothing changes.
+  UnorderedMap<const DexMethod*, Body> bodies;
+  std::vector<const DexMethod*> work{root};
+  while (!work.empty()) {
+    const auto* method = work.back();
+    work.pop_back();
+    if (m_summaries.get(method) != nullptr || bodies.count(method) != 0u) {
+      continue;
+    }
+    auto body = scan(method);
+    for (const auto* callee : body.callees) {
+      work.push_back(callee);
+    }
+    bodies.emplace(method, std::move(body));
+  }
+  UnorderedMap<const DexMethod*, Summary> computed;
+  for (auto& [method, body] : UnorderedIterable(bodies)) {
+    computed.emplace(method, body.own);
+  }
+  for (bool changed = true; changed;) {
+    changed = false;
+    for (auto& [method, body] : UnorderedIterable(bodies)) {
+      auto& summary = computed.at(method);
+      if (!summary) {
+        continue;
+      }
+      for (const auto* callee : body.callees) {
+        const auto* stored = m_summaries.get(callee);
+        const auto& callee_summary =
+            stored != nullptr ? *stored : computed.at(callee);
+        if (!callee_summary) {
+          summary.reset();
+          changed = true;
+          break;
+        }
+        for (const auto* field : UnorderedIterable(*callee_summary)) {
+          changed |= summary->insert(field).second;
+        }
+      }
+    }
+  }
+  for (auto& [method, summary] : UnorderedIterable(computed)) {
+    m_summaries.emplace(method, std::move(summary));
+  }
+}
+
+const ConstantReadSummaries::Summary& ConstantReadSummaries::of(
+    const DexMethod* method) {
+  if (const auto* summary = m_summaries.get(method)) {
+    return *summary;
+  }
+  compute(method);
+  const auto* summary = m_summaries.get(method);
+  always_assert(summary != nullptr);
+  return *summary;
+}
+
+bool ConstantReadSummaries::call_may_read(
+    const IRInstruction* call, const UnorderedSet<const DexField*>& constants) {
+  std::vector<const DexMethod*> callees;
+  if (!add_callees(call, &callees)) {
+    return true;
+  }
+  for (const auto* callee : callees) {
+    const auto& summary = of(callee);
+    if (!summary || unordered_any_of(*summary, [&](const DexField* field) {
+          return constants.count(field) != 0u;
+        })) {
+      return true;
+    }
+  }
+  return false;
+}
 
 EnumAttributes analyze_enum_clinit(const DexClass* cls,
                                    const bool support_kt_19_enum_entries) {

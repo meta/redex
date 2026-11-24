@@ -12,6 +12,7 @@
 #include <boost/algorithm/string/replace.hpp>
 #include <mutex>
 #include <set>
+#include <thread>
 
 #include "ControlFlow.h"
 #include "Creators.h"
@@ -22,6 +23,7 @@
 #include "EnumUpcastAnalysis.h"
 #include "IRAssembler.h"
 #include "InlineEnumValues.h"
+#include "MethodOverrideGraph.h"
 #include "OptimizeEnums.h"
 #include "OptimizeEnumsUnsafeType.h"
 #include "RedexTest.h"
@@ -300,6 +302,339 @@ DexStore create_enum_store() {
   auto store = DexStore("classes");
   store.add_classes({bar, ints, enums, objs});
   return store;
+}
+
+/* Direct tests of the read summaries, over the enum `LBar;` of
+`create_enum_store()` and the methods of a class `LReads;` the test adds. */
+class OptimizeEnumsReadSummaryTest : public OptimizeEnumsTest {
+ protected:
+  using Summary = optimize_enums::ConstantReadSummaries::Summary;
+
+  // Adds `LReads;` with `methods`, and its subclass `LSubReads;` with
+  // `sub_methods`, and returns the summaries of the methods named `names`,
+  // which `num_threads` threads all ask for at once from the same summaries;
+  // every thread must get the same ones.
+  std::vector<Summary> summaries_of(
+      const std::vector<std::string>& methods,
+      const std::vector<std::string>& names,
+      size_t num_threads = 1,
+      const std::vector<std::string>& sub_methods = {}) {
+    auto store = create_enum_store();
+    ClassCreator cc(DexType::make_type("LReads;"));
+    cc.set_super(type::java_lang_Object());
+    cc.set_access(ACC_PUBLIC);
+    for (const auto& method : methods) {
+      cc.add_method(assembler::method_from_string(method));
+    }
+    ClassCreator sc(DexType::make_type("LSubReads;"));
+    sc.set_super(DexType::get_type("LReads;"));
+    sc.set_access(ACC_PUBLIC);
+    for (const auto& method : sub_methods) {
+      sc.add_method(assembler::method_from_string(method));
+    }
+    store.add_classes({cc.create(), sc.create()});
+    DexStoresVector stores({std::move(store)});
+    auto scope = build_class_scope(stores);
+    walk::code(scope, [](DexMethod*, IRCode& code) {
+      if (!code.cfg_built()) {
+        code.build_cfg();
+      }
+    });
+    auto override_graph = method_override_graph::build_graph(scope);
+    optimize_enums::ConstantReadSummaries reads(*override_graph);
+    std::vector<std::vector<Summary>> per_thread(num_threads);
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads);
+    for (size_t t = 0; t < num_threads; ++t) {
+      threads.emplace_back([&, t] {
+        for (const auto& name : names) {
+          per_thread[t].push_back(
+              reads.of(DexMethod::get_method(name)->as_def()));
+        }
+      });
+    }
+    for (auto& thread : threads) {
+      thread.join();
+    }
+    for (size_t t = 1; t < num_threads; ++t) {
+      for (size_t i = 0; i < names.size(); ++i) {
+        const auto& a = per_thread[0][i];
+        const auto& b = per_thread[t][i];
+        EXPECT_EQ(a.has_value(), b.has_value()) << names[i];
+        if (a && b) {
+          EXPECT_EQ(a->size(), b->size()) << names[i];
+          EXPECT_TRUE(unordered_all_of(*b, [&](const DexField* f) {
+            return a->count(f) != 0u;
+          })) << names[i];
+        }
+      }
+    }
+    return per_thread[0];
+  }
+
+  // `ping()` calls `pong()`, which reads Bar.Y and calls `ping()`.
+  static std::vector<std::string> ping_pong_methods() {
+    return {R"(
+      (method (public static) "LReads;.ping:()V"
+        (
+          (invoke-static () "LReads;.pong:()V")
+          (return-void)
+        )
+      )
+    )",
+            R"(
+      (method (public static) "LReads;.pong:()V"
+        (
+          (sget-object "LBar;.Y:LBar;")
+          (move-result-pseudo-object v0)
+          (invoke-static () "LReads;.ping:()V")
+          (return-void)
+        )
+      )
+    )"};
+  }
+
+  Summary summary_of(const std::vector<std::string>& methods,
+                     const std::string& name) {
+    return summaries_of(methods, {name}).front();
+  }
+
+  // The summary of `LCaller;.call`, which calls `read()` on an `LReader;`, an
+  // interface with the abstract method `read()` that only `LReads;`
+  // implements, with `impl`. When `impl` is a method of `LSubReader;`
+  // instead, it is a default method of that sub-interface of `LReader;`, which
+  // `LReads;` implements without a `read()` of its own.
+  Summary interface_call_summary(const std::string& impl) {
+    auto store = create_enum_store();
+    ClassCreator ic(DexType::make_type("LReader;"));
+    ic.set_super(type::java_lang_Object());
+    ic.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+    auto* read = DexMethod::make_method("LReader;.read:()V")
+                     ->make_concrete(ACC_PUBLIC | ACC_ABSTRACT,
+                                     /* is_virtual */ true);
+    ic.add_method(read);
+    auto* impl_method = assembler::method_from_string(impl);
+    ClassCreator rc(DexType::make_type("LReads;"));
+    rc.set_super(type::java_lang_Object());
+    rc.set_access(ACC_PUBLIC);
+    if (impl_method->get_class() == DexType::get_type("LReads;")) {
+      rc.add_interface(DexType::get_type("LReader;"));
+      rc.add_method(impl_method);
+    } else {
+      ClassCreator sc(DexType::make_type("LSubReader;"));
+      sc.set_super(type::java_lang_Object());
+      sc.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+      sc.add_interface(DexType::get_type("LReader;"));
+      sc.add_method(impl_method);
+      store.add_classes({sc.create()});
+      rc.add_interface(DexType::get_type("LSubReader;"));
+    }
+    ClassCreator cc(DexType::make_type("LCaller;"));
+    cc.set_super(type::java_lang_Object());
+    cc.set_access(ACC_PUBLIC);
+    cc.add_method(assembler::method_from_string(R"(
+      (method (public static) "LCaller;.call:(LReader;)V"
+        (
+          (load-param-object v0)
+          (invoke-interface (v0) "LReader;.read:()V")
+          (return-void)
+        )
+      )
+    )"));
+    store.add_classes({ic.create(), rc.create(), cc.create()});
+    DexStoresVector stores({std::move(store)});
+    auto scope = build_class_scope(stores);
+    walk::code(scope, [](DexMethod*, IRCode& code) {
+      if (!code.cfg_built()) {
+        code.build_cfg();
+      }
+    });
+    auto override_graph = method_override_graph::build_graph(scope);
+    optimize_enums::ConstantReadSummaries reads(*override_graph);
+    return reads.of(
+        DexMethod::get_method("LCaller;.call:(LReader;)V")->as_def());
+  }
+
+  static const DexField* bar_y() {
+    return dynamic_cast<DexField*>(DexField::get_field("LBar;.Y:LBar;"));
+  }
+};
+
+// A method that reads no constant has an empty summary.
+TEST_F(OptimizeEnumsReadSummaryTest, readsNothing) {
+  auto summary = summary_of({R"(
+    (method (public static) "LReads;.nothing:()V"
+      ((return-void))
+    )
+  )"},
+                            "LReads;.nothing:()V");
+  ASSERT_TRUE(summary);
+  EXPECT_TRUE(summary->empty());
+}
+
+// A method that reads one constant has exactly that one in its summary.
+TEST_F(OptimizeEnumsReadSummaryTest, readsOneConstant) {
+  auto summary = summary_of({R"(
+    (method (public static) "LReads;.one:()Ljava/lang/Object;"
+      (
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v0)
+        (return-object v0)
+      )
+    )
+  )"},
+                            "LReads;.one:()Ljava/lang/Object;");
+  ASSERT_TRUE(summary);
+  EXPECT_EQ(summary->size(), 1);
+  EXPECT_EQ(summary->count(bar_y()), 1);
+}
+
+// An interface call runs one of the interface's implementations; the abstract
+// interface method itself runs nothing. The only implementation reads
+// nothing, so neither does the call.
+TEST_F(OptimizeEnumsReadSummaryTest, interfaceCallWithQuietImplementation) {
+  auto summary = interface_call_summary(R"(
+    (method (public) "LReads;.read:()V"
+      (
+        (load-param-object v0)
+        (return-void)
+      )
+    )
+  )");
+  ASSERT_TRUE(summary);
+  EXPECT_TRUE(summary->empty());
+}
+
+// The same call, whose only implementation reads a constant.
+TEST_F(OptimizeEnumsReadSummaryTest, interfaceCallReadsThroughImplementation) {
+  auto summary = interface_call_summary(R"(
+    (method (public) "LReads;.read:()V"
+      (
+        (load-param-object v0)
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v1)
+        (return-void)
+      )
+    )
+  )");
+  ASSERT_TRUE(summary);
+  EXPECT_EQ(summary->size(), 1);
+  EXPECT_EQ(summary->count(bar_y()), 1);
+}
+
+// The same call, where the only implementation is a default method of a
+// sub-interface, which reads a constant.
+TEST_F(OptimizeEnumsReadSummaryTest,
+       interfaceCallReadsThroughSubInterfaceDefaultMethod) {
+  auto summary = interface_call_summary(R"(
+    (method (public) "LSubReader;.read:()V"
+      (
+        (load-param-object v0)
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v1)
+        (return-void)
+      )
+    )
+  )");
+  ASSERT_TRUE(summary);
+  EXPECT_EQ(summary->size(), 1);
+  EXPECT_EQ(summary->count(bar_y()), 1);
+}
+
+// A static call of a trusted method that Redex has only a reference to, as a
+// Kotlin null check is when the Kotlin library is not in the input, runs
+// exactly that method, so the summary stays known.
+TEST_F(OptimizeEnumsReadSummaryTest, trustedReferenceOnlyCalleeIsKnown) {
+  auto summary = summary_of({R"(
+    (method (public static) "LReads;.check:(Ljava/lang/Object;)V"
+      (
+        (load-param-object v0)
+        (const-string "value")
+        (move-result-pseudo-object v1)
+        (invoke-static (v0 v1) "Lkotlin/jvm/internal/Intrinsics;.checkNotNullParameter:(Ljava/lang/Object;Ljava/lang/String;)V")
+        (return-void)
+      )
+    )
+  )"},
+                            "LReads;.check:(Ljava/lang/Object;)V");
+  ASSERT_TRUE(summary);
+  EXPECT_TRUE(summary->empty());
+}
+
+// A call of a method Redex has no code for may run anything, so the summary
+// is unknown.
+TEST_F(OptimizeEnumsReadSummaryTest, opaqueCallIsUnknown) {
+  auto summary = summary_of({R"(
+    (method (public static) "LReads;.opaque:()V"
+      (
+        (invoke-static () "LUnknown;.run:()V")
+        (return-void)
+      )
+    )
+  )"},
+                            "LReads;.opaque:()V");
+  EXPECT_FALSE(summary);
+}
+
+// A constant read in a method that two methods call each other through is in
+// the summary of both.
+TEST_F(OptimizeEnumsReadSummaryTest, readThroughCycle) {
+  auto summaries = summaries_of(ping_pong_methods(),
+                                {"LReads;.ping:()V", "LReads;.pong:()V"});
+  for (const auto& summary : summaries) {
+    ASSERT_TRUE(summary);
+    EXPECT_EQ(summary->count(bar_y()), 1);
+  }
+}
+
+// Threads that ask for the same summaries at once, as the analyses of several
+// enums do, get the same ones.
+TEST_F(OptimizeEnumsReadSummaryTest, concurrentQueriesAgree) {
+  auto summaries =
+      summaries_of(ping_pong_methods(),
+                   {"LReads;.ping:()V", "LReads;.pong:()V"}, /*num_threads=*/8);
+  for (const auto& summary : summaries) {
+    ASSERT_TRUE(summary);
+    EXPECT_EQ(summary->count(bar_y()), 1);
+  }
+}
+
+// A virtual call runs any override, so what an override reads is in the
+// caller's summary.
+TEST_F(OptimizeEnumsReadSummaryTest, overrideReadIsFollowed) {
+  const std::string base = R"(
+    (method (public) "LReads;.read:()V"
+      (
+        (load-param-object v0)
+        (return-void)
+      )
+    )
+  )";
+  const std::string caller = R"(
+    (method (public static) "LReads;.call:(LReads;)V"
+      (
+        (load-param-object v0)
+        (invoke-virtual (v0) "LReads;.read:()V")
+        (return-void)
+      )
+    )
+  )";
+  const std::string override = R"(
+    (method (public) "LSubReads;.read:()V"
+      (
+        (load-param-object v0)
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v1)
+        (return-void)
+      )
+    )
+  )";
+  auto summary = summaries_of({base, caller}, {"LReads;.call:(LReads;)V"},
+                              /*num_threads=*/1, {override})
+                     .front();
+  ASSERT_TRUE(summary);
+  EXPECT_EQ(summary->size(), 1);
+  EXPECT_EQ(summary->count(bar_y()), 1);
 }
 
 TEST_F(OptimizeEnumsTest, analyzeRConstMembers) {

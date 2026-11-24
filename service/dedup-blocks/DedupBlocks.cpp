@@ -1340,7 +1340,7 @@ class DedupBlocksImpl {
 
   bool is_eligible(cfg::Block* block, cfg::ControlFlowGraph& cfg) {
     // We can't split up move-result(-pseudo) instruction pairs
-    if (begins_with_move_result(block)) {
+    if (block->starts_with_move_result()) {
       return false;
     }
 
@@ -1364,15 +1364,6 @@ class DedupBlocksImpl {
     // the minimum?
 
     return true;
-  }
-
-  static bool begins_with_move_result(cfg::Block* block) {
-    const auto first_mie_it = block->get_first_insn();
-    if (first_mie_it == block->end()) {
-      return false;
-    }
-    auto first_op = first_mie_it->insn->opcode();
-    return opcode::is_move_result_any(first_op);
   }
 
   bool is_ineligible_because_of_fill_in_stack_trace(cfg::Block* block) {

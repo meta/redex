@@ -699,6 +699,22 @@ TEST_F(IRInstructionTest, NormalizeDynamicInvokes) {
   EXPECT_EQ(custom.srcs_copy(), (std::vector<reg_t>{2, 3, 4}));
 }
 
+// A normalized invoke has one source for its receiver, if any, and one for each
+// argument of its call-site prototype.
+TEST_F(IRInstructionTest, InvokeSrcsSize) {
+  IRInstruction polymorphic(OPCODE_INVOKE_POLYMORPHIC);
+  polymorphic.set_signature_polymorphic(
+      DexMethod::make_method(
+          "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/"
+          "lang/Object;)Ljava/lang/Object;"),
+      DexProto::make_proto("(JI)J"));
+  EXPECT_EQ(polymorphic.invoke_srcs_size(), 3u);
+
+  IRInstruction custom(OPCODE_INVOKE_CUSTOM);
+  custom.set_callsite(redex::make_callsite("run", "(JI)V"));
+  EXPECT_EQ(custom.invoke_srcs_size(), 2u);
+}
+
 TEST_F(IRInstructionTest, CallsiteProtoWithoutReferenceIsChecked) {
   for (auto op : {OPCODE_INVOKE_CUSTOM, OPCODE_INVOKE_STATIC}) {
     IRInstruction insn(op);

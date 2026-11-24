@@ -333,6 +333,11 @@ const DexType* IRInstruction::get_invoke_src_type(src_index_t i) const {
   return args->at(i);
 }
 
+size_t IRInstruction::invoke_srcs_size() const {
+  return (invoke_has_receiver() ? 1 : 0) +
+         get_callsite_proto()->get_args()->size();
+}
+
 // The instruction format doesn't tell us the width of registers for invoke
 // so we inspect the prototype of the call site
 bool IRInstruction::invoke_src_is_wide(src_index_t i) const {

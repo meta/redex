@@ -382,6 +382,10 @@ class IRInstruction final {
   // receiver, otherwise the argument type from the call-site prototype.
   const DexType* get_invoke_src_type(src_index_t i) const;
 
+  // The number of sources a normalized invoke has: the receiver, if any, and
+  // one for each argument of its call-site prototype.
+  size_t invoke_srcs_size() const;
+
   // The method and call-site prototype of an `invoke-polymorphic`. It is
   // interned, so equal pairs are the same object.
   const DexSignaturePolymorphicRef* get_signature_polymorphic() const {

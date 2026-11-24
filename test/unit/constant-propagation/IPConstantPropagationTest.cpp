@@ -20,11 +20,13 @@
 #include "Creators.h"
 #include "DebugUtils.h"
 #include "DefinitelyAssignedIFields.h"
+#include "DexAnnotation.h"
 #include "DexUtil.h"
 #include "IPConstantPropagationAnalysis.h"
 #include "IRAssembler.h"
 #include "MethodOverrideGraph.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "Walkers.h"
 
 using namespace constant_propagation;
@@ -5322,4 +5324,62 @@ TEST_F(InterproceduralConstantPropagationTest,
   type_class(DexType::get_type("LBar;"))->add_method(read_g);
   run_ipcp(scope, conf, config);
   EXPECT_FALSE(contains_const("LBar;.readG:(LBar;)I", 0));
+}
+
+TEST_F(InterproceduralConstantPropagationTest, methodHandleCallerIsUnknown) {
+  // Every ordinary call of helper(I)V passes 5, but a method handle also calls
+  // it, with an argument the analysis cannot see: run() holds a
+  // (tool-generated) call site whose bootstrap argument is a handle of
+  // helper(), and passes 0 to what the call site links to. helper() must not
+  // be optimized for the argument 5.
+  ClassCreator creator(DexType::make_type("LFoo;"));
+  creator.set_super(type::java_lang_Object());
+
+  auto* main = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.main:()V"
+     (
+      (const v0 5)
+      (invoke-static (v0) "LFoo;.helper:(I)V")
+      (return-void)
+     )
+    )
+  )");
+  main->rstate.set_root();
+  creator.add_method(main);
+  const std::string helper_body = R"(
+     (
+      (load-param v0)
+      (if-eqz v0 :zero)
+      (const v1 1)
+      (:zero)
+      (return-void)
+     )
+  )";
+  auto* helper = assembler::method_from_string(
+      R"((method (public static) "LFoo;.helper:(I)V")" + helper_body + ")");
+  creator.add_method(helper);
+  auto* run = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.run:()V"
+     (
+      (const v0 0)
+      (invoke-static (v0) "LFoo;.placeholder:(I)V")
+      (return-void)
+     )
+    )
+  )");
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.push_back(
+      std::make_unique<DexEncodedValueMethodHandle>(redex::make_method_handle(
+          METHOD_HANDLE_TYPE_INVOKE_STATIC, "LFoo;.helper:(I)V")));
+  redex::make_invoke_custom(run->get_code(), "run", "(I)V", std::move(args));
+  run->rstate.set_root();
+  creator.add_method(run);
+  Scope scope{creator.create()};
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  InterproceduralConstantPropagationPass().run(make_simple_stores(scope), conf);
+
+  auto expected = assembler::ircode_from_string(helper_body);
+  helper->get_code()->clear_cfg();
+  EXPECT_CODE_EQ(helper->get_code(), expected.get());
 }

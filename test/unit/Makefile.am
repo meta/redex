@@ -464,7 +464,7 @@ int_type_patcher_test_SOURCES = IntTypePatcherTest.cpp
 
 instruction_sequence_outliner_test_SOURCES = InstructionSequenceOutlinerTest.cpp ScopeHelper.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
-interprocedural_constant_propagation_test_SOURCES = constant-propagation/IPConstantPropagationTest.cpp
+interprocedural_constant_propagation_test_SOURCES = constant-propagation/IPConstantPropagationTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 ipcp_stringbuilder_append_chain_test_SOURCES = constant-propagation/IPCPStringBuilderAppendChainTest.cpp
 

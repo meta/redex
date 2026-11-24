@@ -42,7 +42,7 @@ class InitClassBackwardFixpointIterator final
     //    initializers,
     // then we need to overwrite the current state with the
     // current init class type demand.
-    if ((init_class != nullptr) || opcode::is_a_method_invoke(insn->opcode())) {
+    if ((init_class != nullptr) || opcode::is_an_invoke(insn->opcode())) {
       *current_state = init_class != nullptr ? LastInitClassDomain(init_class)
                                              : LastInitClassDomain::top();
     }

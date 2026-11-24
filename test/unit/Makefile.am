@@ -451,7 +451,7 @@ hot_cold_method_specializing_test_SOURCES = HotColdMethodSpecializingTest.cpp
 
 init_class_test_SOURCES = InitClassTest.cpp
 
-init_class_pruner_test_SOURCES = InitClassPrunerTest.cpp
+init_class_pruner_test_SOURCES = InitClassPrunerTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 init_class_lowering_pass_test_SOURCES = InitClassLoweringPassTest.cpp
 

@@ -14,6 +14,7 @@
 #include "IRCode.h"
 #include "InitClassPruner.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 
 struct InitClassPrunerTest : public RedexTest {
   DexType* a_type;
@@ -216,6 +217,42 @@ TEST_F(InitClassPrunerTest, invoke_clears_last_init_class_domain) {
       (return-void)
     )
   )");
+  auto expected_code = std::make_unique<IRCode>(*code);
+
+  run_init_class_pruner(code.get());
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+// invoke-polymorphic and invoke-custom run unknown code, which may observe
+// whether a static initializer ran.
+TEST_F(InitClassPrunerTest, method_handle_call_clears_last_init_class_domain) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (init-class "LC;")
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
+      (new-instance "LC;")
+      (move-result-pseudo-object v1)
+      (return-void)
+    )
+  )");
+  auto expected_code = std::make_unique<IRCode>(*code);
+
+  run_init_class_pruner(code.get());
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(InitClassPrunerTest, call_site_call_clears_last_init_class_domain) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (init-class "LC;")
+      (invoke-static () "LFoo;.placeholder:()V")
+      (new-instance "LC;")
+      (move-result-pseudo-object v0)
+      (return-void)
+    )
+  )");
+  redex::make_invoke_custom(code.get(), "run", "()V");
   auto expected_code = std::make_unique<IRCode>(*code);
 
   run_init_class_pruner(code.get());

@@ -2213,3 +2213,46 @@ TEST_F(ConstantPropagationTest, NoForwardingWithUnavailableCallSiteResult) {
 
   EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
+
+// A method handle or method type constant, like a string or class constant,
+// leaves its value in the result register for a move-result-pseudo. Its value
+// is not modeled, so the null test stays.
+TEST_F(ConstantPropagationTest, MethodHandleConstantIsUnknown) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const-method-handle invoke-static "LFoo;.bar:()V")
+      (move-result-pseudo-object v0)
+      (if-eqz v0 :null)
+      (const v1 1)
+      (return v1)
+      (:null)
+      (const v1 0)
+      (return v1)
+    )
+  )");
+  auto expected_code = std::make_unique<IRCode>(*code);
+
+  do_const_prop(code.get());
+
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantPropagationTest, MethodTypeConstantIsUnknown) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const-method-type "(I)V")
+      (move-result-pseudo-object v0)
+      (if-eqz v0 :null)
+      (const v1 1)
+      (return v1)
+      (:null)
+      (const v1 0)
+      (return v1)
+    )
+  )");
+  auto expected_code = std::make_unique<IRCode>(*code);
+
+  do_const_prop(code.get());
+
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}

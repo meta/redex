@@ -430,6 +430,46 @@ TEST_F(GlobalTypeAnalysisTest, ReturnTypeTest) {
   EXPECT_EQ(bar_exit_env.get_reg_environment().get(0), get_type_domain("LO;"));
 }
 
+// The value of a method handle or method type constant is not modeled, so its
+// move-result-pseudo gets an unknown type, not the type of an earlier result.
+TEST_F(GlobalTypeAnalysisTest, MethodConstantTypeTest) {
+  Scope scope;
+  prepare_scope(scope);
+
+  auto* cls_a = DexType::make_type("LA;");
+  ClassCreator creator(cls_a);
+  creator.set_super(type::java_lang_Object());
+
+  auto* meth_foo = assembler::method_from_string(R"(
+    (method (public static) "LA;.foo:()V"
+     (
+      (const-string "x")
+      (move-result-pseudo-object v0)
+      (const-method-handle invoke-static "LA;.foo:()V")
+      (move-result-pseudo-object v1)
+      (const-method-type "(I)V")
+      (move-result-pseudo-object v2)
+      (return-void)
+     )
+    )
+  )");
+  meth_foo->rstate.set_root();
+  creator.add_method(meth_foo);
+  scope.push_back(creator.create());
+
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+
+  GlobalTypeAnalysis analysis;
+  auto gta = analysis.analyze(scope);
+  auto lta = gta->get_replayable_local_analysis(meth_foo);
+  auto* code = meth_foo->get_code();
+  auto exit_env = lta->get_exit_state_at(code->cfg().exit_block());
+  EXPECT_EQ(exit_env.get_reg_environment().get(0),
+            get_type_domain("Ljava/lang/String;"));
+  EXPECT_TRUE(exit_env.get_reg_environment().get(1).is_top());
+  EXPECT_TRUE(exit_env.get_reg_environment().get(2).is_top());
+}
+
 TEST_F(GlobalTypeAnalysisTest, SimpleFieldTypeTest) {
   Scope scope;
   prepare_scope(scope);

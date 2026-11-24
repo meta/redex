@@ -15,6 +15,7 @@
 #include "Debug.h"
 #include "DexAnnotation.h"
 #include "DexClass.h"
+#include "DexMethodHandle.h"
 #include "DexUtil.h"
 #include "EditableCfgAdapter.h"
 #include "IROpcode.h"
@@ -379,6 +380,46 @@ ClassMap collect_can_merge(const Scope& scope,
   return mergeable_to_merger;
 }
 
+/**
+ * Vertical merging does not rewrite method handles, so the classes that a
+ * method handle `method_handle`, held by code of `holder` (nullptr outside
+ * code), names or can resolve to are not merged: the class of its member and
+ * the class of each definition it can resolve to. ART versions disagree on
+ * what an invoke-direct handle of a method that is not private runs, which
+ * depends on the class of the code that holds it and, from Android 10, on the
+ * superclass of the named class (see `resolve_method_handle`), so neither of
+ * these classes is merged either.
+ */
+void record_method_handle_value(const DexMethodHandle* method_handle,
+                                const DexMethod* holder,
+                                DontMergeStatus* dont_merge_status) {
+  if (!DexMethodHandle::isInvokeType(method_handle->type())) {
+    record_dont_merge_state(method_handle->fieldref()->get_class(), kStrict,
+                            dont_merge_status);
+    if (const auto* field = resolve_field_handle(method_handle)) {
+      record_dont_merge_state(field->get_class(), kStrict, dont_merge_status);
+    }
+    return;
+  }
+  const auto* method_ref = method_handle->methodref();
+  record_dont_merge_state(method_ref->get_class(), kStrict, dont_merge_status);
+  for (const auto* callee :
+       resolve_method_handle_callees(method_handle, holder)) {
+    record_dont_merge_state(callee->get_class(), kStrict, dont_merge_status);
+  }
+  if (method_handle_opcode(method_handle) != OPCODE_INVOKE_SUPER) {
+    return;
+  }
+  if (holder != nullptr) {
+    record_dont_merge_state(holder->get_class(), kStrict, dont_merge_status);
+  }
+  const auto* named_cls = type_class(method_ref->get_class());
+  if (named_cls != nullptr && named_cls->get_super_class() != nullptr) {
+    record_dont_merge_state(named_cls->get_super_class(), kStrict,
+                            dont_merge_status);
+  }
+}
+
 size_t record_annotation(const Scope& scope,
                          bool record_type_like_string_refs,
                          DontMergeStatus* dont_merge_status) {
@@ -435,7 +476,7 @@ size_t record_code_reference(const Scope& scope,
                              bool record_type_like_string_refs,
                              DontMergeStatus* dont_merge_status) {
   AtomicStatCounter<size_t> type_like_string_refs{0};
-  walk::parallel::code(scope, [&](DexMethod* /*method*/, IRCode& code) {
+  walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {
     auto& cfg = code.cfg();
     // Built only for methods with a class literal, which most methods lack.
     Lazy<live_range::DefUseChains> def_use_chains([&cfg] {
@@ -526,6 +567,15 @@ size_t record_code_reference(const Scope& scope,
                   SHOW(callee->get_class()), SHOW(callee_ref));
           }
         }
+      }
+      for_each_method_handle(insn, [&](const DexMethodHandle* method_handle) {
+        record_method_handle_value(method_handle, method, dont_merge_status);
+      });
+      // The bootstrap method of an invoke-custom receives a lookup in the
+      // class of the code that holds it, which merging must not move.
+      if (opcode::is_invoke_custom(insn->opcode())) {
+        record_dont_merge_state(method->get_class(), kStrict,
+                                dont_merge_status);
       }
     }
   });
@@ -819,6 +869,18 @@ void update_references(const Scope& scope,
                 SHOW(insn), SHOW(method));
           }
         }
+        // `record_method_handle_value` keeps the classes that method handles
+        // name from merging.
+        for_each_method_handle(insn, [&](const DexMethodHandle* method_handle) {
+          auto* named_class =
+              DexMethodHandle::isInvokeType(method_handle->type())
+                  ? method_handle->methodref()->get_class()
+                  : method_handle->fieldref()->get_class();
+          assert_log(!update_map.count(named_class),
+                     "Vertical Merging: a method handle names a merged class "
+                     "in %s",
+                     SHOW(method));
+        });
       });
   // Update type refs in all field or method specs.
   type_reference::TypeRefUpdater updater(update_map);

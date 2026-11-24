@@ -246,6 +246,7 @@ check_PROGRAMS = \
     unique_method_tracker_test \
     up_code_motion_test \
     used_vars_test \
+    vertical_merging_method_handle_test \
     vertical_merging_r_class_test \
     vertical_merging_test \
     vertical_merging_type_lookup_test \
@@ -763,6 +764,8 @@ up_code_motion_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 used_vars_test_SOURCES = object-sensitive-dce/UsedVarsTest.cpp
 used_vars_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
+
+vertical_merging_method_handle_test_SOURCES = VerticalMergingMethodHandleTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 vertical_merging_r_class_test_SOURCES = VerticalMergingRClassTest.cpp
 

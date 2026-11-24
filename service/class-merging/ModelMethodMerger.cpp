@@ -765,6 +765,7 @@ void ModelMethodMerger::merge_ctors() {
 }
 
 void ModelMethodMerger::dedup_non_ctor_non_virt_methods() {
+  ConstantLifting const_lift;
   for (const auto* merger : m_mergers) {
     auto* merger_type = const_cast<DexType*>(merger->type);
     std::vector<DexMethod*> to_dedup;
@@ -776,7 +777,6 @@ void ModelMethodMerger::dedup_non_ctor_non_virt_methods() {
 
     // Lift constants
     if (m_model_spec.process_method_meta) {
-      ConstantLifting const_lift;
       std::vector<DexMethod*> annotated;
       for (auto* const m : to_dedup) {
         if (const_lift.is_applicable_to_constant_lifting(m)) {
@@ -787,8 +787,6 @@ void ModelMethodMerger::dedup_non_ctor_non_virt_methods() {
       auto stub_methods = const_lift.lift_constants_from(
           m_scope, m_type_tags, annotated, CONST_LIFT_STUB_THRESHOLD);
       to_dedup.insert(to_dedup.end(), stub_methods.begin(), stub_methods.end());
-      m_stats.m_num_const_lifted_methods +=
-          const_lift.get_num_const_lifted_methods();
       for (auto* stub : stub_methods) {
         if (stub->is_virtual()) {
           non_vmethods.push_back(stub);
@@ -878,6 +876,8 @@ void ModelMethodMerger::dedup_non_ctor_non_virt_methods() {
           "dedup: clean up static|non_virt remainders %zu",
           before - non_ctors.size() - non_vmethods.size());
   }
+  m_stats.m_num_const_lifted_methods +=
+      const_lift.get_num_const_lifted_methods();
 }
 
 void ModelMethodMerger::merge_virt_itf_methods() {

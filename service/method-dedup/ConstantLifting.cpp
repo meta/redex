@@ -16,6 +16,7 @@
 #include "DexUtil.h"
 #include "IRCode.h"
 #include "MethodReference.h"
+#include "MethodUtil.h"
 #include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
@@ -88,10 +89,22 @@ std::vector<DexMethod*> ConstantLifting::lift_constants_from(
     const TypeTags* type_tags,
     const std::vector<DexMethod*>& methods,
     const size_t stud_method_threshold) {
+  if (methods.empty()) {
+    return {};
+  }
   UnorderedSet<DexMethod*> lifted;
   UnorderedMap<DexMethod*, ConstantValues> lifted_constants;
+  if (!m_methods_named_by_method_handles) {
+    m_methods_named_by_method_handles =
+        method::gather_methods_named_by_method_handles(scope);
+  }
   for (auto* method : methods) {
     always_assert(has_anno(method, s_method_meta_anno));
+    if (m_methods_named_by_method_handles->count(method) != 0) {
+      // Adding parameters would change the type of the method handle.
+      TRACE(METH_DEDUP, 5, "  named by a method handle: %s", SHOW(method));
+      continue;
+    }
     auto kinds_str = parse_str_anno_value(method, s_method_meta_anno,
                                           CONST_TYPE_ANNO_ATTR_NAME);
     auto vals_str = parse_str_anno_value(method, s_method_meta_anno,

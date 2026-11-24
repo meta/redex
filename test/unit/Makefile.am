@@ -153,6 +153,7 @@ check_PROGRAMS = \
     method_splitter_region_no_live_out_test \
     method_splitter_region_builder_test \
     method_splitter_suffix_net_gate_test \
+    method_dedup_method_handle_test \
     method_util_test \
     metrics_sink_test \
     monitor_count_test \
@@ -547,6 +548,8 @@ method_splitter_region_builder_test_SOURCES = \
 method_splitter_suffix_net_gate_test_SOURCES = \
 	MethodSplitterTestFixture.cpp \
 	MethodSplitterSuffixNetGateTest.cpp
+
+method_dedup_method_handle_test_SOURCES = MethodDedupMethodHandleTest.cpp
 
 method_util_test_SOURCES = MethodUtilTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 

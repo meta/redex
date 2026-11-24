@@ -7,12 +7,18 @@
 
 #pragma once
 
+#include <optional>
 #include <vector>
 
+#include "ConcurrentContainers.h"
 #include "DexClass.h"
 
 class TypeTags;
 
+// One object serves one operation on one scope: the methods that method
+// handles name, which keep their prototypes, are gathered at the first
+// `lift_constants_from` call that has methods to lift from, and reused by the
+// later calls.
 class ConstantLifting {
 
  public:
@@ -34,4 +40,6 @@ class ConstantLifting {
  private:
   const DexType* s_method_meta_anno;
   uint32_t m_num_const_lifted_methods;
+  std::optional<InsertOnlyConcurrentSet<const DexMethod*>>
+      m_methods_named_by_method_handles;
 };

@@ -216,6 +216,8 @@ class HeapEscapeAnalyzer final
   static bool analyze_aput(const IRInstruction* insn, ConstantEnvironment* env);
   static bool analyze_invoke(const IRInstruction* insn,
                              ConstantEnvironment* env);
+  static bool analyze_dynamic_invoke(const IRInstruction* insn,
+                                     ConstantEnvironment* env);
   static bool analyze_filled_new_array(const IRInstruction* insn,
                                        ConstantEnvironment* env);
 };
@@ -284,6 +286,10 @@ class ClinitFieldAnalyzer final
   static bool analyze_invoke(const ClinitFieldAnalyzerState& state,
                              const IRInstruction* insn,
                              ConstantEnvironment* env);
+
+  static bool analyze_dynamic_invoke(const ClinitFieldAnalyzerState& state,
+                                     const IRInstruction* insn,
+                                     ConstantEnvironment* env);
 };
 
 /*
@@ -315,6 +321,10 @@ class InitFieldAnalyzer final
   static bool analyze_invoke(const DexType* class_under_init,
                              const IRInstruction* insn,
                              ConstantEnvironment* env);
+
+  static bool analyze_dynamic_invoke(const DexType* class_under_init,
+                                     const IRInstruction* insn,
+                                     ConstantEnvironment* env);
 };
 
 // Construction of this object is expensive because get_method acquires a

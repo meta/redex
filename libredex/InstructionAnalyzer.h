@@ -55,6 +55,7 @@
   X(sget)             \
   X(sput)             \
   X(invoke)           \
+  X(dynamic_invoke)   \
   X(unop)             \
   X(binop)            \
   X(binop_lit)        \
@@ -375,10 +376,14 @@ class InstructionAnalyzerCombiner final {
     case OPCODE_INVOKE_SUPER:
     case OPCODE_INVOKE_DIRECT:
     case OPCODE_INVOKE_STATIC:
-    case OPCODE_INVOKE_POLYMORPHIC:
-    case OPCODE_INVOKE_CUSTOM:
     case OPCODE_INVOKE_INTERFACE:
       return analyze_invoke(std::index_sequence_for<Analyzers...>{}, insn, env);
+    // These call whatever their method handle or call site links to, so there
+    // is no callee to resolve.
+    case OPCODE_INVOKE_POLYMORPHIC:
+    case OPCODE_INVOKE_CUSTOM:
+      return analyze_dynamic_invoke(
+          std::index_sequence_for<Analyzers...>{}, insn, env);
     case OPCODE_CHECK_CAST:
       return analyze_check_cast(
           std::index_sequence_for<Analyzers...>{}, insn, env);

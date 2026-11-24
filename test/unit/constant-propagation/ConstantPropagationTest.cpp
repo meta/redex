@@ -65,6 +65,35 @@ TEST_F(ConstantPropagationTest, SourceBlockTargetMutating) {
   }
 }
 
+// A method handle call has no callee to resolve. The analyzers that model
+// particular callees must leave it alone, and its result is unknown.
+TEST_F(ConstantPropagationTest, MethodHandleCallWithBoxedAnalyzers) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (const v1 1)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(I)I")
+      (move-result v2)
+      (return v2)
+    )
+  )");
+  auto expected = assembler::to_s_expr(code.get());
+
+  cp::ImmutableAttributeAnalyzerState immut_state;
+  auto string_state = cp::StringAnalyzerState::make_default();
+  auto package_name_state = cp::PackageNameState::make(std::nullopt);
+  cp::EnumFieldAnalyzerState enum_state;
+  cp::BoxedBooleanAnalyzerState boxed_boolean_state;
+  cp::ApiLevelAnalyzerState api_level_state(21);
+  do_const_prop(code.get(),
+                cp::ConstantPrimitiveAndBoxedAnalyzer(
+                    &immut_state, &immut_state, enum_state, boxed_boolean_state,
+                    &string_state, api_level_state, &package_name_state,
+                    nullptr, &immut_state, nullptr, nullptr));
+
+  EXPECT_EQ(assembler::to_s_expr(code.get()), expected);
+}
+
 TEST_F(ConstantPropagationTest, ArrayLengthNonNegative) {
   auto code = assembler::ircode_from_string(R"(
     (

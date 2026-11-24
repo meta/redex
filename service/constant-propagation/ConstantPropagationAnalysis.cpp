@@ -307,6 +307,11 @@ bool HeapEscapeAnalyzer::analyze_invoke(const IRInstruction* insn,
   return false;
 }
 
+bool HeapEscapeAnalyzer::analyze_dynamic_invoke(const IRInstruction* insn,
+                                                ConstantEnvironment* env) {
+  return analyze_invoke(insn, env);
+}
+
 bool HeapEscapeAnalyzer::analyze_filled_new_array(const IRInstruction* insn,
                                                   ConstantEnvironment* env) {
   for (size_t i = 0; i < insn->srcs_size(); ++i) {
@@ -1146,12 +1151,6 @@ bool ClinitFieldAnalyzer::analyze_invoke(const ClinitFieldAnalyzerState& state,
   if (state.class_under_init == nullptr) {
     return false;
   }
-  if (insn->opcode() == OPCODE_INVOKE_CUSTOM ||
-      insn->opcode() == OPCODE_INVOKE_POLYMORPHIC) {
-    // The target of a dynamic invoke cannot be resolved here.
-    env->clear_field_environment();
-    return false;
-  }
   // As in StaticFieldReadAnalysis, external cross-class calls are assumed not
   // to modify the tracked fields. An unresolved call through an internal class
   // is not external: it can run internal code, e.g. the implementations of an
@@ -1174,6 +1173,17 @@ bool ClinitFieldAnalyzer::analyze_invoke(const ClinitFieldAnalyzerState& state,
       });
       *fields = std::move(retained);
     });
+  }
+  return false;
+}
+
+bool ClinitFieldAnalyzer::analyze_dynamic_invoke(
+    const ClinitFieldAnalyzerState& state,
+    const IRInstruction* /*insn*/,
+    ConstantEnvironment* env) {
+  if (state.class_under_init != nullptr) {
+    // The target of a dynamic invoke cannot be resolved here.
+    env->clear_field_environment();
   }
   return false;
 }
@@ -1242,6 +1252,15 @@ bool InitFieldAnalyzer::analyze_invoke(const DexType* class_under_init,
       class_under_init == insn->get_method()->get_class()) {
     env->clear_field_environment();
   }
+  return false;
+}
+
+bool InitFieldAnalyzer::analyze_dynamic_invoke(
+    const DexType* /*class_under_init*/,
+    const IRInstruction* /*insn*/,
+    ConstantEnvironment* env) {
+  // The call may reach a method of the class under initialization.
+  env->clear_field_environment();
   return false;
 }
 

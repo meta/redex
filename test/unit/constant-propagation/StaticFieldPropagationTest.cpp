@@ -116,6 +116,27 @@ TEST_F(StaticFieldTest, ClinitCallsInvalidateStaticValues) {
   }
 }
 
+// A constructor's method handle call or call site may reach another method of
+// the class under construction, which may write its fields.
+TEST_F(StaticFieldTest, InitDynamicCallsInvalidateInstanceValues) {
+  auto* cls_type = DexType::make_type("LFoo;");
+  auto* field =
+      DexField::make_field("LFoo;.value:I")->make_concrete(ACC_PUBLIC);
+  for (auto opcode : {OPCODE_INVOKE_CUSTOM, OPCODE_INVOKE_POLYMORPHIC}) {
+    SCOPED_TRACE(opcode);
+    IRInstruction insn(opcode);
+    ConstantEnvironment env;
+    env.set(field, SignedConstantDomain(0));
+    env.set(reg_t{0}, SignedConstantDomain(7));
+    InstructionAnalyzerCombiner<cp::InitFieldAnalyzer> analyzer(cls_type);
+
+    analyzer(&insn, &env);
+
+    EXPECT_TRUE(env.get(field).is_top());
+    EXPECT_EQ(env.get(reg_t{0}).get<SignedConstantDomain>().get_constant(), 7);
+  }
+}
+
 TEST_F(StaticFieldTest, ClinitCallsPreserveOnlyInitializerConfinedFields) {
   auto* cls = assembler::class_from_string(R"(
     (class (public) "LFoo;"

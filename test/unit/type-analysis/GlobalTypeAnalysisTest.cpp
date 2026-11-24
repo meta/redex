@@ -204,6 +204,54 @@ TEST_F(GlobalTypeAnalysisTest, SimpleArgumentPassingTest) {
             ArgumentTypeEnvironment({{0, get_type_domain("LO;")}}));
 }
 
+// A method handle call has no callee to resolve, so the type of what it
+// returns is unknown.
+TEST_F(GlobalTypeAnalysisTest, MethodHandleCallResultTest) {
+  Scope scope;
+  prepare_scope(scope);
+
+  auto* cls_a = DexType::make_type("LA;");
+  ClassCreator creator(cls_a);
+  creator.set_super(type::java_lang_Object());
+
+  auto* meth_bar = assembler::method_from_string(R"(
+    (method (public static) "LA;.bar:(LO;)V"
+     (
+      (load-param-object v0)
+      (return-void)
+     )
+    )
+  )");
+  creator.add_method(meth_bar);
+
+  auto* meth_foo = assembler::method_from_string(R"(
+    (method (public static) "LA;.foo:(Ljava/lang/invoke/MethodHandle;)V"
+     (
+      (load-param-object v0)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()LO;")
+      (move-result-object v1)
+      (invoke-static (v1) "LA;.bar:(LO;)V")
+      (return-void)
+     )
+    )
+  )");
+  meth_foo->rstate.set_root();
+  creator.add_method(meth_foo);
+  scope.push_back(creator.create());
+
+  auto cg = std::make_shared<call_graph::Graph>(call_graph::single_callee_graph(
+      *method_override_graph::build_graph(scope), scope));
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+  GlobalTypeAnalyzer gta(cg, {}, {});
+  gta.run(ArgumentTypePartition{
+      {CURRENT_PARTITION_LABEL, ArgumentTypeEnvironment()}});
+
+  const auto& graph = gta.get_call_graph();
+  auto bar_arg_env =
+      gta.get_entry_state_at(graph.node(meth_bar)).get(CURRENT_PARTITION_LABEL);
+  EXPECT_TRUE(bar_arg_env.get(0).is_top());
+}
+
 TEST_F(GlobalTypeAnalysisTest, ArgumentPassingJoinWithNullTest) {
   Scope scope;
   prepare_scope(scope);

@@ -621,6 +621,43 @@ void TypeInference::run(bool is_static,
   populate_type_environments();
 }
 
+const DexType* get_catch_type(const cfg::Edge* throw_edge) {
+  const auto* catch_type = throw_edge->throw_info()->catch_type;
+  return catch_type != nullptr ? catch_type : type::java_lang_Throwable();
+}
+
+std::vector<const DexType*> get_catch_types(const cfg::Block* catch_block) {
+  std::vector<const DexType*> types;
+  for (const auto* edge : catch_block->preds()) {
+    if (edge->type() == cfg::EDGE_THROW) {
+      types.push_back(get_catch_type(edge));
+    }
+  }
+  return types;
+}
+
+std::optional<const DexType*> caught_exception_type(
+    const cfg::Block* catch_block) {
+  const DexType* merged = nullptr;
+  for (const auto* actual : get_catch_types(catch_block)) {
+    if (merged == nullptr) {
+      merged = actual;
+      continue;
+    }
+    auto domain = DexTypeDomain::create_nullable(merged);
+    domain.join_with(DexTypeDomain::create_nullable(actual));
+    auto joined = domain.get_dex_type();
+    if (!joined) {
+      return std::nullopt;
+    }
+    merged = *joined;
+  }
+  if (merged == nullptr) {
+    return std::nullopt;
+  }
+  return merged;
+}
+
 // This method analyzes an instruction and updates the type environment
 // accordingly during the fixpoint iteration.
 //
@@ -706,55 +743,16 @@ void TypeInference::analyze_instruction(const IRInstruction* insn,
     break;
   }
   case OPCODE_MOVE_EXCEPTION: {
-    if (current_block == nullptr) {
-      // We bail just in case the current block is dangling.
-      TRACE(TYPE, 2,
-            "Warning: Can't infer exception type from unknown catch block.");
-      set_reference(current_state, insn->dest(), type::java_lang_Throwable());
-      break;
-    }
-
     // The block that contained this instruction must be a catch block.
-    const auto& preds = current_block->preds();
-
-    if (preds.empty()) {
-      // We bail just in case the current block is dangling.
-      TRACE(TYPE, 2,
-            "Warning: Catch block doesn't have at least one predecessor.");
+    auto caught = current_block == nullptr
+                      ? std::nullopt
+                      : caught_exception_type(current_block);
+    if (caught) {
+      set_reference(current_state, insn->dest(), caught);
+    } else {
+      TRACE(TYPE, 2, "Warning: Can't infer the type of a caught exception.");
       set_reference(current_state, insn->dest(), type::java_lang_Throwable());
-      break;
     }
-
-    auto* default_type = type::java_lang_Throwable();
-    const DexType* merged_catch_type = std::accumulate(
-        preds.begin(), preds.end(), (const DexType*)nullptr,
-        [default_type](const auto* acc, auto* edge) {
-          if (edge->type() != cfg::EDGE_THROW) {
-            return acc;
-          }
-
-          auto* catch_type = edge->throw_info()->catch_type;
-          const auto* actual_catch_type =
-              catch_type != nullptr ? catch_type : default_type;
-
-          if (acc == nullptr) {
-            return actual_catch_type;
-          }
-
-          DexTypeDomain d1 = DexTypeDomain::create_nullable(acc);
-          DexTypeDomain d2 = DexTypeDomain::create_nullable(actual_catch_type);
-          d1.join_with(d2);
-
-          auto maybe_dextype = d1.get_dex_type();
-
-          // In case of the join giving up, bail to a default type
-          return maybe_dextype ? *maybe_dextype : default_type;
-        });
-    if (merged_catch_type == nullptr) {
-      merged_catch_type = default_type;
-    }
-
-    set_reference(current_state, insn->dest(), merged_catch_type);
     break;
   }
   case OPCODE_RETURN_VOID: {

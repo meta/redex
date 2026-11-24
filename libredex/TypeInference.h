@@ -8,6 +8,7 @@
 #pragma once
 
 #include <ostream>
+#include <vector>
 
 #include <sparta/FiniteAbstractDomain.h>
 #include <sparta/PatriciaTreeMapAbstractEnvironment.h>
@@ -269,6 +270,20 @@ class TypeEnvironment final
     apply<1>([=](auto env) { env->set(reg, DexTypeDomain::top()); }, true);
   }
 };
+
+// The catch type of `throw_edge`, Throwable for a catch-all.
+const DexType* get_catch_type(const cfg::Edge* throw_edge);
+
+// The catch types of the throw edges into `catch_block`.
+std::vector<const DexType*> get_catch_types(const cfg::Block* catch_block);
+
+/*
+ * The type of the exceptions a catch block catches: the join of its catch
+ * types. Nothing where the block has no throw edge into it or the join gives
+ * up.
+ */
+std::optional<const DexType*> caught_exception_type(
+    const cfg::Block* catch_block);
 
 class TypeInference final
     : public ir_analyzer::BaseIRAnalyzer<TypeEnvironment> {

@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include "Creators.h"
 #include "IRAssembler.h"
 #include "RedexTest.h"
 #include "RedexTestUtils.h"
@@ -199,4 +200,68 @@ TEST_F(TypeInferenceTest, constMethodHandleAndType) {
     }
   }
   EXPECT_TRUE(checked);
+}
+
+/*
+ * A caught exception has the join of its handler's catch types, where a
+ * catch-all stands for Throwable. Where Redex cannot join them, as for two
+ * classes it does not see, it is a nullable Throwable.
+ */
+TEST_F(TypeInferenceTest, moveExceptionTypes) {
+  if (type_class(type::java_lang_Throwable()) == nullptr) {
+    ClassCreator creator(type::java_lang_Throwable());
+    creator.set_super(type::java_lang_Object());
+    creator.set_external();
+    creator.create();
+  }
+  ClassCreator my_exception(DexType::make_type("LMyException;"));
+  my_exception.set_super(type::java_lang_Throwable());
+  my_exception.create();
+  for (const auto* name : {"LKnown1;", "LKnown2;"}) {
+    ClassCreator creator(DexType::make_type(name));
+    creator.set_super(DexType::make_type("LMyException;"));
+    creator.create();
+  }
+  auto caught_type = [](const std::string& catches) {
+    auto* method = DexMethod::make_method("LFoo;.bar:()V")
+                       ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+    method->set_code(assembler::ircode_from_string(R"(
+      (
+        (.try_start a)
+        (invoke-static () "LFoo;.baz:()V")
+        (.try_end a)
+        (.try_start b)
+        (invoke-static () "LFoo;.qux:()V")
+        (.try_end b)
+        (return-void)
+        )" + catches + R"(
+        (move-exception v0)
+        (invoke-static (v0) "LFoo;.sink:(Ljava/lang/Throwable;)V")
+        (return-void)
+      )
+    )"));
+    auto* code = method->get_code();
+    code->build_cfg();
+    type_inference::TypeInference inference(code->cfg());
+    inference.run(method);
+    for (auto& mie : InstructionIterable(code->cfg())) {
+      if (mie.insn->opcode() == OPCODE_INVOKE_STATIC &&
+          mie.insn->get_method()->get_name()->str() == "sink") {
+        return inference.get_type_environments().at(mie.insn).get_type_domain(
+            mie.insn->src(0));
+      }
+    }
+    ADD_FAILURE() << "no sink call";
+    return DexTypeDomain::top();
+  };
+  const auto known =
+      caught_type(R"((.catch (a) "LKnown1;") (.catch (b) "LKnown2;"))");
+  EXPECT_EQ(known.get_dex_type(), DexType::get_type("LMyException;"));
+  EXPECT_TRUE(known.is_nullable());
+  const auto catch_all = caught_type("(.catch (a)) (.catch (b))");
+  EXPECT_EQ(catch_all.get_dex_type(), type::java_lang_Throwable());
+  EXPECT_TRUE(catch_all.is_nullable());
+  const auto unseen = caught_type(R"((.catch (a) "LE1;") (.catch (b) "LE2;"))");
+  EXPECT_EQ(unseen.get_dex_type(), type::java_lang_Throwable());
+  EXPECT_TRUE(unseen.is_nullable());
 }

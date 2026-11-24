@@ -226,6 +226,10 @@ class Analysis {
     }
     check_references();
     stats->rejected_methods = m_rejected.size();
+    // A method handle names its method by prototype, possibly through a class
+    // that inherits it, so the original signature stays for it.
+    auto methods_named_by_method_handles =
+        method::gather_methods_named_by_method_handles(m_scope);
 
     std::vector<Selection> selected;
     for (auto* method : candidates) {
@@ -234,7 +238,8 @@ class Analysis {
       }
       // Every candidate has references: the call sites it was found at are
       // instructions in methods without `no_optimizations`.
-      bool keep_original = !m_references.at(method).fixed_dexen.empty();
+      bool keep_original = !m_references.at(method).fixed_dexen.empty() ||
+                           methods_named_by_method_handles.count(method) != 0;
       switch (select(method, keep_original)) {
       case Outcome::Unprofitable:
         stats->unprofitable_methods++;

@@ -1950,3 +1950,41 @@ TEST_F(TypedNonReturningMethodsTest, dedup_blocks_keeps_call_site_lines) {
   EXPECT_EQ(*lines.begin(), 100u);
   EXPECT_EQ(*lines.rbegin(), 100u + SITES - 1);
 }
+
+TEST_F(TypedNonReturningMethodsTest, method_handle_naming_method_by_subclass) {
+  // A method handle (tool-generated here) names `fail` by the subclass `Sub`,
+  // where it resolves to `Failures.fail`. Typing `fail` without a stub would
+  // leave the handle naming no method. Code is where ART runs such a handle;
+  // the static value is defensive coverage, as ART rejects a method handle as
+  // a static value.
+  for (bool in_code : {true, false}) {
+    SCOPED_TRACE(in_code);
+    reset();
+    auto* fail = add_failures_class()->get_dmethods().front();
+    add_class("LSub;", fail->get_class(), {});
+    add_callers(20);
+    auto* handle = redex::make_method_handle(
+        METHOD_HANDLE_TYPE_INVOKE_STATIC, "LSub;.fail:(Ljava/lang/String;)V");
+    if (in_code) {
+      add_class("LHolder;", type::java_lang_Object(),
+                {{"LHolder;.m:()V", ACC_PUBLIC | ACC_STATIC,
+                  R"((
+                    (const-method-handle invoke-static "LSub;.fail:(Ljava/lang/String;)V")
+                    (move-result-pseudo-object v0)
+                    (return-void)
+                  ))"}});
+    } else {
+      auto* holder = add_class("LHolder;", type::java_lang_Object(), {});
+      auto* field = DexField::make_field("LHolder;.f:Ljava/lang/Object;")
+                        ->make_concrete(ACC_PUBLIC | ACC_STATIC);
+      field->set_value(std::make_unique<DexEncodedValueMethodHandle>(handle));
+      holder->add_field(field);
+    }
+
+    auto stats = run_typing_only();
+
+    EXPECT_EQ(stats.typed_methods, 1);
+    EXPECT_EQ(stats.stub_methods, 1);
+    expect_typed_with_stub(fail, 20);
+  }
+}

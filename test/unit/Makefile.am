@@ -175,6 +175,7 @@ check_PROGRAMS = \
     outliner_type_analysis_test \
     package_private_preprocessor_method_handle_test \
     partial_pass_test \
+    pass_input_edits_test \
     pass_manager_feature_test \
     peephole_test \
     position_interning_test \
@@ -364,6 +365,9 @@ concurrent_containers_test_SOURCES = ConcurrentContainersTest.cpp
 concurrent_hashtable_test_SOURCES = ConcurrentHashtableTest.cpp
 
 atomic_map_test_SOURCES = AtomicMapTest.cpp
+
+pass_input_edits_test_SOURCES = PassInputEditsTest.cpp $(top_srcdir)/test/common/pass_input_edits/PassInputEdits.cpp
+pass_input_edits_test_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/test/common/pass_input_edits -I$(top_srcdir)/opt/remove-unused-fields
 
 pass_manager_feature_test_SOURCES = PassManagerFeatureTest.cpp
 

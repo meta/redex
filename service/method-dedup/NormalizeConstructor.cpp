@@ -14,6 +14,7 @@
 #include "Debug.h"
 #include "DexClass.h"
 #include "MethodReference.h"
+#include "MethodUtil.h"
 #include "PositionAmbiguity.h"
 #include "ReachingDefinitions.h"
 #include "ScopedCFG.h"
@@ -488,6 +489,8 @@ size_t dedup_constructors(const std::vector<DexClass*>& classes,
   OrderedMethodSet ctor_set;
   MethodToType global_pending_ctor_changes;
   MethodToType pending_colliding_constructors_changes;
+  const auto methods_named_by_method_handles =
+      method::gather_methods_named_by_method_handles(scope);
   walk::classes(classes, [&](DexClass* cls) {
     auto ctors = cls->get_ctors();
     if (ctors.size() < 2) {
@@ -498,6 +501,11 @@ size_t dedup_constructors(const std::vector<DexClass*>& classes,
              dexmethods_comparator>
         grouped_methods;
     for (auto* method : ctors) {
+      if (methods_named_by_method_handles.count(method) != 0) {
+        // Deduplication can change the prototype of a constructor, and with it
+        // the type of a method handle that names it.
+        continue;
+      }
       auto summary = summarize_constructor_logic(cls->get_ifields(), method);
       if (!summary) {
         TRACE(METH_DEDUP, 2, "no summary %s\n%s", SHOW(method),

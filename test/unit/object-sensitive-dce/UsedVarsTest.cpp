@@ -359,3 +359,55 @@ TEST_F(UsedVarsTest, noReturn) {
   code->clear_cfg();
   EXPECT_EQ(assembler::to_s_expr(code.get()), expected);
 }
+
+// A method handle call may do anything: it is kept even though its result is
+// unused, and an object passed to it escapes, so writes to it are kept.
+TEST_F(UsedVarsTest, invokePolymorphicIsRequired) {
+  create_simple_class("LFoo;");
+
+  const auto* code_str = R"(
+    (
+      (sget-object "LFoo;.h:Ljava/lang/invoke/MethodHandle;")
+      (move-result-pseudo-object v0)
+      (new-instance "LFoo;")
+      (move-result-pseudo-object v1)
+      (invoke-direct (v1) "LFoo;.<init>:()V")
+      (const v2 0)
+      (iput v2 v1 "LFoo;.bar:I")
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LFoo;)I")
+      (move-result v3)
+      (return-void)
+    )
+  )";
+  auto code = assembler::ircode_from_string(code_str);
+  side_effects::InvokeToSummaryMap invoke_to_eff_summary_map;
+  ptrs::InvokeToSummaryMap invoke_to_esc_summary_map;
+  for (auto& mie : InstructionIterable(*code)) {
+    auto* insn = mie.insn;
+    if (insn->opcode() == OPCODE_INVOKE_DIRECT) {
+      invoke_to_eff_summary_map.emplace(insn, side_effects::Summary({0}));
+      invoke_to_esc_summary_map.emplace(insn, ptrs::EscapeSummary{});
+    }
+  }
+  code->build_cfg();
+  auto& cfg = code->cfg();
+  auto fp_iter =
+      analyze(cfg, invoke_to_esc_summary_map, invoke_to_eff_summary_map);
+  optimize(*fp_iter, cfg);
+
+  code->clear_cfg();
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (sget-object "LFoo;.h:Ljava/lang/invoke/MethodHandle;")
+      (move-result-pseudo-object v0)
+      (new-instance "LFoo;")
+      (move-result-pseudo-object v1)
+      (invoke-direct (v1) "LFoo;.<init>:()V")
+      (const v2 0)
+      (iput v2 v1 "LFoo;.bar:I")
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LFoo;)I")
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}

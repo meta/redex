@@ -25,6 +25,7 @@
 #include "OptimizeEnums.h"
 #include "OptimizeEnumsUnsafeType.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "RemoveNullcheckStringArg.h"
 #include "Show.h"
 #include "TypeUtil.h"
@@ -1589,6 +1590,46 @@ TEST_F(OptimizeEnumsTest, inlinedNonReturningValuesLeavesNoUnreachableBlocks) {
   conf.parse_global_config();
   manager.run_passes(stores, conf);
   EXPECT_EQ(tab->get_super_class(), type::java_lang_Enum());
+}
+
+// An Object parameter passed to a method handle call may reach any code, so an
+// enum passed for it cannot be boxed:
+//
+//   static void print(Object value) throws Throwable { PRINT.invoke(value); }
+TEST_F(OptimizeEnumsTest, objectParamPassedToMethodHandleCallIsNotSafe) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.call:(Ljava/lang/invoke/MethodHandle;Ljava/lang/Object;)V"
+     (
+      (load-param-object v0)
+      (load-param-object v1)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;" "(Ljava/lang/Object;)V")
+      (return-void)
+     )
+    )
+  )");
+  method->get_code()->build_cfg();
+  auto summary =
+      optimize_enums::calculate_param_summary(method, type::java_lang_Object());
+  EXPECT_FALSE(summary.safe_params.contains(1));
+}
+
+// The same for an Object parameter passed to a call site.
+TEST_F(OptimizeEnumsTest, objectParamPassedToCallSiteIsNotSafe) {
+  // The `invoke-static` becomes an `invoke-custom`.
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.link:(Ljava/lang/Object;)V"
+     (
+      (load-param-object v0)
+      (invoke-static (v0) "LFoo;.placeholder:(Ljava/lang/Object;)V")
+      (return-void)
+     )
+    )
+  )");
+  redex::make_invoke_custom(method->get_code(), "run", "(Ljava/lang/Object;)V");
+  method->get_code()->build_cfg();
+  auto summary =
+      optimize_enums::calculate_param_summary(method, type::java_lang_Object());
+  EXPECT_FALSE(summary.safe_params.contains(0));
 }
 
 // `Arrays.asList(new Object[] {Bar.Y})`, with the array built by

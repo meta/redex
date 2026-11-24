@@ -684,3 +684,21 @@ TEST_F(LocalPointersTest,
   EXPECT_THAT(unordered_unsafe_unwrap(summaries.at(c_make).escaping_parameters),
               Contains(1));
 }
+
+// A method handle constant is an object reference, as a class constant is.
+TEST_F(LocalPointersTest, constMethodHandleIsAPointer) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const-method-handle invoke-instance "Ljava/lang/Object;.hashCode:()I")
+      (move-result-pseudo-object v0)
+      (return-object v0)
+    )
+  )");
+  code->build_cfg();
+  auto& cfg = code->cfg();
+  cfg.calculate_exit_block();
+  ptrs::FixpointIterator fp_iter(cfg, ptrs::InvokeToSummaryMap());
+  fp_iter.run(ptrs::Environment());
+  const auto& exit_env = fp_iter.get_exit_state_at(cfg.exit_block());
+  EXPECT_FALSE(exit_env.get_pointers(0).is_top());
+}

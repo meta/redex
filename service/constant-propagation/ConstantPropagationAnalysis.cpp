@@ -2353,13 +2353,10 @@ bool DefaultNoThrowAnalyzer::analyze_default(
     }
     src_index = 0;
   }
-  if (insn->has_dest()) {
-    auto dest = insn->dest();
-    if ((dest == *src_index) ||
-        (insn->dest_is_wide() && dest + 1 == *src_index)) {
-      return false;
-    }
-  }
+  // An instruction that may throw writes no register itself; any result goes
+  // to a separate move-result(-pseudo). So the object register still holds
+  // the dereferenced object here.
+  always_assert_log(!insn->has_dest(), "%s", SHOW(insn));
   auto src = insn->src(*src_index);
   auto value = env->get(src);
   value.meet_with(SignedConstantDomain(sign_domain::Interval::NEZ));

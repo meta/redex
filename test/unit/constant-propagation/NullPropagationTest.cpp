@@ -10,6 +10,8 @@
 #include "ConstantPropagationTestUtil.h"
 #include "Creators.h"
 #include "IRAssembler.h"
+#include "OpcodeList.h"
+#include "Show.h"
 
 struct NullPropagationTest : public ConstantPropagationTest {
  public:
@@ -108,4 +110,22 @@ TEST_F(NullPropagationTest, AputInvokeVirtual) {
 
   EXPECT_EQ(assembler::to_s_expr(code.get()),
             assembler::to_s_expr(expected_code.get()));
+}
+
+// After an instruction that would have thrown on a null object, the analysis
+// marks the object register non-null. That is sound only because no such
+// instruction writes a register itself; any result goes to a separate
+// move-result(-pseudo). The null-check method paths are all invoke-static.
+TEST_F(NullPropagationTest, NullCheckedInstructionsWriteNoDest) {
+  size_t checked = 0;
+  for (auto op : all_opcodes) {
+    IRInstruction insn(op);
+    if (op != OPCODE_INVOKE_STATIC &&
+        !constant_propagation::get_dereferenced_object_src_index(&insn)) {
+      continue;
+    }
+    EXPECT_FALSE(insn.has_dest()) << SHOW(op);
+    ++checked;
+  }
+  EXPECT_GT(checked, 1u);
 }

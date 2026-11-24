@@ -596,7 +596,7 @@ never_inline_eligibility_test_SOURCES = NeverInlineEligibilityTest.cpp
 
 nopper_test_SOURCES = NopperTest.cpp
 
-null_propagation_test_SOURCES = constant-propagation/NullPropagationTest.cpp
+null_propagation_test_SOURCES = constant-propagation/NullPropagationTest.cpp OpcodeList.cpp
 
 obfuscate_method_handle_test_SOURCES = ObfuscateMethodHandleTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 

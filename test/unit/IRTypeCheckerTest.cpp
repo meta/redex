@@ -4528,3 +4528,64 @@ TEST_F(IRTypeCheckerFinalFieldTest, iput_unresolvable_final_field) {
   checker.run();
   EXPECT_TRUE(checker.good()) << checker.what();
 }
+
+class IRTypeCheckerMethodHandleAccessTest : public RedexTest {
+ protected:
+  // `LOwner;` with the private static method `secret()` and the private static
+  // field `hidden`.
+  void SetUp() override {
+    ClassCreator owner(DexType::make_type("LOwner;"));
+    owner.set_super(type::java_lang_Object());
+    owner.add_method(DexMethod::make_method("LOwner;.secret:()V")
+                         ->make_concrete(ACC_PRIVATE | ACC_STATIC, false));
+    owner.add_field(DexField::make_field("LOwner;.hidden:I")
+                        ->make_concrete(ACC_PRIVATE | ACC_STATIC));
+    owner.create();
+  }
+
+  // Type checks `code` as the body of a static method of `cls`, with access
+  // validation.
+  static std::unique_ptr<IRTypeChecker> check(const std::string& cls,
+                                              const std::string& code) {
+    auto* method = DexMethod::make_method(cls + ".use:()V")
+                       ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+    method->set_code(assembler::ircode_from_string(code));
+    auto checker = std::make_unique<IRTypeChecker>(method);
+    checker->validate_access();
+    checker->run();
+    return checker;
+  }
+};
+
+// Tool-generated code: a method handle needs access to the method or field
+// it names, as the instruction it acts like does.
+TEST_F(IRTypeCheckerMethodHandleAccessTest, privateMethodOfOtherClass) {
+  auto checker = check("LUser;", R"((
+    (const-method-handle invoke-static "LOwner;.secret:()V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))");
+  EXPECT_TRUE(checker->fail());
+  EXPECT_THAT(checker->what(), HasSubstr("illegal access to private"));
+}
+
+TEST_F(IRTypeCheckerMethodHandleAccessTest, privateFieldOfOtherClass) {
+  auto checker = check("LUser;", R"((
+    (const-method-handle static-get "LOwner;.hidden:I")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))");
+  EXPECT_TRUE(checker->fail());
+  EXPECT_THAT(checker->what(), HasSubstr("illegal access to private"));
+}
+
+TEST_F(IRTypeCheckerMethodHandleAccessTest, privateMembersOfOwnClass) {
+  auto checker = check("LOwner;", R"((
+    (const-method-handle invoke-static "LOwner;.secret:()V")
+    (move-result-pseudo-object v0)
+    (const-method-handle static-get "LOwner;.hidden:I")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))");
+  EXPECT_TRUE(checker->good()) << checker->what();
+}

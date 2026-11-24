@@ -312,8 +312,8 @@ void assume_float(TypeEnvironment* state, reg_t reg) {
 }
 
 void assume_long(TypeEnvironment* state, reg_t reg) {
-  assume_wide_type(
-      state, reg, /* expected1 */ IRType::LONG1, /* expected2 */ IRType::LONG2);
+  assume_wide_type(state, reg, /* expected1 */ IRType::LONG1,
+                   /* expected2 */ IRType::LONG2);
 }
 
 void assume_double(TypeEnvironment* state, reg_t reg) {
@@ -1022,8 +1022,8 @@ void IRTypeChecker::run() {
 
   cfg::ScopedCFG cfg(code);
 
-  auto result = check_structure(
-      m_dex_method, *cfg, m_check_no_overwrite_this, m_relaxed_init_check);
+  auto result = check_structure(m_dex_method, *cfg, m_check_no_overwrite_this,
+                                m_relaxed_init_check);
   if (result != Result::Ok()) {
     m_complete = true;
     m_good = false;
@@ -1051,8 +1051,8 @@ void IRTypeChecker::run() {
     IRInstruction* insn = mie.insn;
     try {
       auto it = type_envs.find(insn);
-      always_assert_log(
-          it != type_envs.end(), "%s in:\n%s", SHOW(mie), SHOW(*cfg));
+      always_assert_log(it != type_envs.end(), "%s in:\n%s", SHOW(mie),
+                        SHOW(*cfg));
       check_instruction(insn, &it->second);
     } catch (const TypeCheckingException& e) {
       m_good = false;
@@ -1821,6 +1821,26 @@ void IRTypeChecker::check_instruction(IRInstruction* insn,
   case IOPCODE_WRITE_BARRIER: {
     break;
   }
+  }
+  if (m_validate_access) {
+    // The calls and field accesses of the method handles that `insn` holds
+    // need access like the instructions they act like. An ordinary invoke is
+    // checked above. `validate_access` accepts a member that does not resolve
+    // (nullptr), as for ordinary instructions.
+    for_each_invoke(insn, [&](IROpcode op, DexMethodRef* method,
+                              const DexMethodHandle* method_handle) {
+      if (method_handle != nullptr) {
+        ::validate_access(
+            m_dex_method,
+            resolve_call(op, method, method_handle, m_dex_method));
+      }
+    });
+    for_each_field_access(insn, [&](IROpcode, DexFieldRef*,
+                                    const DexMethodHandle* method_handle) {
+      if (method_handle != nullptr) {
+        ::validate_access(m_dex_method, resolve_field_handle(method_handle));
+      }
+    });
   }
   if (insn->has_field() && m_validate_access) {
     auto search = opcode::is_an_sfield_op(insn->opcode())

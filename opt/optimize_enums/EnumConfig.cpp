@@ -16,7 +16,6 @@
 #include "TypeUtil.h"
 #include "Walkers.h"
 #include <algorithm>
-#include <utility>
 
 #include "KotlinNullCheckMethods.h"
 
@@ -50,19 +49,6 @@ bool may_tell_boxed_enum_apart(const DexType* type) {
 // The uses of a value that can tell an enum constant apart from its boxed
 // Integer.
 const ptrs::TypeAndIdentityUses BOXED_ENUM_USES{may_tell_boxed_enum_apart};
-// The structure is used for hardcoding external method param summaries.
-struct ExternalMethodData {
-  std::string method_name;
-  std::optional<uint16_t> returned_param;
-  UnorderedSet<uint16_t> safe_params;
-  ExternalMethodData(std::string name,
-                     std::optional<uint16_t> returned,
-                     std::initializer_list<uint16_t> params)
-      : method_name(std::move(name)),
-        returned_param(returned),
-        safe_params(params) {}
-};
-
 void sanity_check_method_summary(const DexMethodRef* method,
                                  const optimize_enums::ParamSummary& summary,
                                  const DexType* object_type) {
@@ -94,22 +80,6 @@ void sanity_check_method_summary(const DexMethodRef* method,
  */
 void load_external_method_summaries(
     const DexType* object_type, optimize_enums::SummaryMap* param_summary_map) {
-  std::vector<ExternalMethodData> methods(
-      {ExternalMethodData("Lcom/google/common/base/Objects;.equal:(Ljava/lang/"
-                          "Object;Ljava/lang/"
-                          "Object;)Z",
-                          std::nullopt, {0, 1})});
-  for (auto& item : methods) {
-    auto* method = DexMethod::get_method(item.method_name);
-    if (method == nullptr) {
-      continue;
-    }
-    always_assert(!param_summary_map->count(method));
-    optimize_enums::ParamSummary summary(std::move(item.safe_params),
-                                         item.returned_param);
-    sanity_check_method_summary(method, summary, object_type);
-    param_summary_map->emplace(method, summary);
-  }
   // Load summaries for kotlin null assertion methods.
   const auto trusted_null_checks =
       kotlin_nullcheck_wrapper::get_trusted_kotlin_null_assertions();

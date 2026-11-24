@@ -4154,6 +4154,28 @@ TEST_P(OptimizeEnumsObservationTest, preservesObservedObjects) {
   bc.set_access(ACC_PUBLIC | ACC_FINAL | ACC_ENUM);
   store.add_classes({bc.create()});
 
+  ClassCreator gc(DexType::make_type("Lcom/google/common/base/Objects;"));
+  gc.set_super(type::java_lang_Object());
+  gc.set_access(ACC_PUBLIC);
+  auto* equal = assembler::method_from_string(R"(
+    (method (public static) "Lcom/google/common/base/Objects;.equal:(Ljava/lang/Object;Ljava/lang/Object;)Z"
+      ((load-param-object v0)
+       (load-param-object v1)
+       (if-eq v0 v1 :equal)
+       (if-eqz v0 :unequal)
+       (invoke-virtual (v0 v1) "Ljava/lang/Object;.equals:(Ljava/lang/Object;)Z")
+       (move-result v2)
+       (return v2)
+       (:equal)
+       (const v2 1)
+       (return v2)
+       (:unequal)
+       (const v2 0)
+       (return v2)))
+  )");
+  gc.add_method(equal);
+  store.add_classes({gc.create()});
+
   ClassCreator uc(DexType::make_type("LUser;"));
   uc.set_super(type::java_lang_Object());
   uc.set_access(ACC_PUBLIC);
@@ -4295,6 +4317,10 @@ INSTANTIATE_TEST_SUITE_P(
                                (instance-of v7 "[[Ljava/lang/Number;")
                                (move-result-pseudo v6))",
                             false, true},
+        EnumObservationCase{
+            "GuavaEqual",
+            R"((invoke-static (v0 v2) "Lcom/google/common/base/Objects;.equal:(Ljava/lang/Object;Ljava/lang/Object;)Z"))",
+            false, false},
         EnumObservationCase{
             "ObjectParameterInstanceOfComparable",
             R"((invoke-static (v0) "LUser;.isComparable:(Ljava/lang/Object;)Z"))",

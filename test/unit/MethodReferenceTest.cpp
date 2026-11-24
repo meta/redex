@@ -187,3 +187,43 @@ TEST_F(MethodReferenceTest, update_call_refs_simple_keeps_call_site_shared) {
   EXPECT_NE(callsites[0], callsite);
   EXPECT_EQ(callsites[0], callsites[1]);
 }
+
+// A method handle that a static field value holds calls `LA;.a` too.
+TEST_F(MethodReferenceTest,
+       update_call_refs_simple_updates_method_handle_of_static_field_value) {
+  auto* a = assembler::method_from_string(R"(
+    (method (public static) "LA;.a:()V"
+     (
+      (return-void)
+     )
+    )
+  )");
+  auto* b = assembler::method_from_string(R"(
+    (method (public static) "LA;.b:()V"
+     (
+      (return-void)
+     )
+    )
+  )");
+  auto* field =
+      DexField::make_field("LA;.HANDLE:Ljava/lang/invoke/MethodHandle;")
+          ->make_concrete(
+              ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+              std::make_unique<DexEncodedValueMethodHandle>(
+                  redex::make_method_handle(METHOD_HANDLE_TYPE_INVOKE_STATIC,
+                                            "LA;.b:()V")));
+  ClassCreator creator(DexType::make_type("LA;"));
+  creator.set_super(type::java_lang_Object());
+  creator.add_method(a);
+  creator.add_method(b);
+  creator.add_field(field);
+  Scope scope{creator.create()};
+
+  method_reference::update_call_refs_simple(scope, {{b, a}});
+
+  auto* method_handle = redex::encoded_value_as<DexEncodedValueMethodHandle>(
+                            field->get_static_value())
+                            ->methodhandle();
+  EXPECT_EQ(method_handle->type(), METHOD_HANDLE_TYPE_INVOKE_STATIC);
+  EXPECT_EQ(method_handle->methodref(), a);
+}

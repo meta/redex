@@ -179,6 +179,7 @@ void update_call_refs_simple(
       }
     }
   });
+  method_handle_rewriter.rewrite(scope);
 }
 
 template <typename T>

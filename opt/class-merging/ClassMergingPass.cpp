@@ -71,6 +71,9 @@ bool verify_model_spec(const std::vector<ModelSpec>& model_specs,
             model_spec.name.c_str(), SHOW(root));
       return false;
     }
+    always_assert_log(!model_spec.target_annotations ||
+                          !is_interface(type_class(root)),
+                      "[ClassMerging] target_annotations requires class roots");
   }
 
   for (const auto& spec : model_specs) {
@@ -80,6 +83,34 @@ bool verify_model_spec(const std::vector<ModelSpec>& model_specs,
                       model_spec.name.c_str());
   }
   return true;
+}
+
+/**
+ * An annotation selector picks classes by their marker, not by their place in
+ * a hierarchy, so it can pick a class that a hierarchy model also selects, for
+ * example a marked class that implements another model's interface root. The
+ * hierarchy model keeps such a class: dropping it from the selector leaves
+ * every other model's targets as they were without the selector.
+ */
+void drop_selector_targets_of_hierarchy_models(
+    std::vector<ModelSpec>& model_specs) {
+  UnorderedSet<const DexType*> hierarchy_targets;
+  for (const auto& spec : model_specs) {
+    if (spec.enabled && !spec.target_annotations.has_value()) {
+      insert_unordered_iterable(hierarchy_targets, spec.merging_targets);
+    }
+  }
+  for (auto& spec : model_specs) {
+    if (!spec.enabled || !spec.target_annotations.has_value()) {
+      continue;
+    }
+    auto dropped =
+        unordered_erase_if(spec.merging_targets, [&](const DexType* type) {
+          return hierarchy_targets.count(type) != 0;
+        });
+    TRACE(CLMG, 2, "[%s] left %zu targets to hierarchy models",
+          spec.name.c_str(), dropped);
+  }
 }
 
 /**
@@ -221,6 +252,29 @@ void ClassMergingPass::bind_config() {
       std::vector<std::string> root_names;
       model_spec.get("roots", {}, root_names);
       load_types(root_names, model.roots);
+      if (value.isMember("target_annotations")) {
+        const auto& annotations = value["target_annotations"];
+        always_assert_log(annotations.isArray(),
+                          "[ClassMerging] target_annotations must be an array");
+        std::vector<std::string> annotation_names;
+        for (const auto& annotation : annotations) {
+          always_assert_log(
+              annotation.isString(),
+              "[ClassMerging] target_annotations must contain strings");
+          annotation_names.push_back(annotation.asString());
+        }
+        model.target_annotations.emplace();
+        for (const auto& name : annotation_names) {
+          auto* annotation = DexType::get_type(name);
+          if (annotation == nullptr || type_class(annotation) == nullptr) {
+            TRACE(CLMG, 2, "Missing target annotation definition %s",
+                  name.c_str());
+            model.target_annotations->clear();
+            break;
+          }
+          model.target_annotations->insert(annotation);
+        }
+      }
       std::vector<std::string> excl_names;
       model_spec.get("exclude", {}, excl_names);
       utils::load_types_and_prefixes(excl_names, model.exclude_types,
@@ -305,8 +359,9 @@ void ClassMergingPass::bind_config() {
       model.skip_anonymous_classes = skip_anonymous_classes;
       model.preserve_unanimous_field_types = preserve_unanimous_field_types;
       model.update_method_profiles_stats = update_method_profiles_stats;
-      // Assume config based models are all generated code.
-      model_spec.get("is_generated_code", true, model.is_generated_code);
+      // Legacy models assume generated code; annotation selection does not.
+      model_spec.get("is_generated_code", !model.target_annotations.has_value(),
+                     model.is_generated_code);
 
       model.interdex_config.init_inferring_mode(
           interdex_grouping_inferring_mode_local);
@@ -340,6 +395,7 @@ void ClassMergingPass::run_pass(DexStoresVector& stores,
                                                             &model_spec);
     }
   }
+  drop_selector_targets_of_hierarchy_models(m_model_specs);
   check_models_do_not_overlap(m_model_specs);
   // Built once, before the spec loop, and shared across specs -- like
   // type_system -- so every spec reads the same pre-merge scope even though

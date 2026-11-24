@@ -127,6 +127,38 @@ the type of the component.
 Class Merging identifies pieces of generated code that have the same "shape".
 Erasing the types that differ allows the pieces of generated code to be merged.
 
+A model normally selects all descendants of its `roots`. The optional
+`target_annotations` array instead selects only internal leaf classes that are
+both directly below a class root and directly annotated with one of the listed
+annotation types. Interfaces implemented by a selected class do not restrict
+selection. Interface roots are not supported with this selector.
+
+For example, a compiler can mark data classes without changing their superclass:
+
+```json
+{
+  "name": "DataClasses",
+  "class_name_prefix": "DataClass",
+  "roots": ["Ljava/lang/Object;"],
+  "target_annotations": ["Lexample/MergeCandidate;"],
+  "is_generated_code": false,
+  "type_tag_config": "generate"
+}
+```
+
+Omitting `target_annotations` retains descendant selection. An empty array,
+a missing annotation definition, or no matching classes selects nothing; none
+of these cases falls back to all root descendants. Keep the marker annotations
+and their definitions until this pass runs. With `target_annotations`,
+`is_generated_code` defaults to `false` so checks also examine selected class
+bodies. The separate `generated.annos` classification is not a selector and
+must not exempt hand-written code from those checks. Legacy models keep their
+existing generated-code default. Roots cannot be duplicated across models;
+overlapping target sets must belong to one model. The one exception is a class
+that an annotation selector and a model without `target_annotations` both
+select (for example a marked class that implements another model's interface
+root): the model without `target_annotations` keeps it.
+
 ## ConstantPropagationPass
 
 `ConstantPropagationPass` substitutes the values of constants into expressions

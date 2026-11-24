@@ -124,6 +124,9 @@ struct ModelSpec {
   TypeSet roots;
   // A set of types to be merged, they should be subtypes of the roots.
   ConstTypeHashSet merging_targets;
+  // When present, select only annotated leaf classes directly below class
+  // roots. An empty set selects nothing; absence retains descendant discovery.
+  std::optional<UnorderedSet<DexType*>> target_annotations;
   // types to exclude from the model
   ConstTypeHashSet exclude_types;
   // prefixes of types to exclude from the model

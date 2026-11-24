@@ -9,6 +9,7 @@
 
 #include <iostream>
 
+#include "AnnoUtils.h"
 #include "ConfigFiles.h"
 #include "Debug.h"
 #include "ModelMerger.h"
@@ -61,6 +62,23 @@ namespace class_merging {
 
 void load_roots_subtypes_as_merging_targets(const TypeSystem& type_system,
                                             ModelSpec* spec) {
+  if (spec->target_annotations) {
+    spec->merging_targets.clear();
+    for (const auto* root : spec->roots) {
+      always_assert_log(
+          type_class(root) != nullptr && !is_interface(type_class(root)),
+          "[ClassMerging] target_annotations requires class roots");
+      for (const auto* child : type_system.get_children(root)) {
+        auto* cls = type_class(child);
+        if (cls != nullptr && !cls->is_external() && !is_interface(cls) &&
+            type_system.get_children(child).empty() &&
+            has_any_annotation(cls, *spec->target_annotations)) {
+          spec->merging_targets.insert(child);
+        }
+      }
+    }
+    return;
+  }
   TypeSet merging_targets_set;
   UnorderedSet<const DexType*> new_roots;
   for (auto root = spec->roots.begin(); root != spec->roots.end();) {

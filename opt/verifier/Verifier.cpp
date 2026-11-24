@@ -18,6 +18,7 @@
 #include "DexUtil.h"
 #include "IRInstruction.h"
 #include "PassManager.h"
+#include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
 #include "Walkers.h"
@@ -58,35 +59,29 @@ void build_refs(const Scope& scope,
 
     walk::opcodes(
         std::vector{cls}, [&](const DexMethod*, const IRInstruction* insn) {
-          if (insn->has_type()) {
-            auto* const tref = type_class(insn->get_type());
-            add_ref(tref);
-            return;
-          }
-          if (insn->has_field()) {
-            auto* const tref = type_class(insn->get_field()->get_class());
-            add_ref(tref);
-            return;
-          }
-          if (insn->has_method()) {
+          for_each_named_type(
+              insn, [&](const DexType* type) { add_ref(type_class(type)); });
+          for_each_field_access(
+              insn, [&](IROpcode, DexFieldRef* field, const DexMethodHandle*) {
+                add_ref(type_class(field->get_class()));
+              });
+          for_each_invoke(insn, [&](IROpcode, DexMethodRef* method,
+                                    const DexMethodHandle*) {
             // log methods class type, for virtual methods, this may not
             // actually exist and true verification would require that the
             // binding refers to a class that is valid.
-            auto* const mref = type_class(insn->get_method()->get_class());
-            add_ref(mref);
+            add_ref(type_class(method->get_class()));
 
-            // don't log return type or types of parameters for now, but this is
-            // how you might do it.
-            // const auto proto = insn->get_method()->get_proto();
+            // don't log return type or types of parameters for now, but this
+            // is how you might do it.
+            // const auto proto = method->get_proto();
             // const auto rref = type_class(proto->get_rtype());
             // if (rref) add_ref(rref);
             // for (const auto arg : proto->get_args()->get_type_list()) {
             //   const auto aref = type_class(arg);
             //   add_ref(aref);
             // }
-
-            return;
-          }
+          });
         });
   });
 }

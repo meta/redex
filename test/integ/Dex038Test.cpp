@@ -9,11 +9,15 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <fstream>
 #include <functional>
+#include <iterator>
 #include <string>
+#include <vector>
 
 #include <boost/filesystem.hpp>
 
+#include "AggregateException.h"
 #include "Creators.h"
 #include "DexCallSite.h"
 #include "DexClass.h"
@@ -458,4 +462,60 @@ TEST(Dex038Test, TypeCheckAllocateAndLowerEveryMethod) {
       load_dex_file(dexfile, 38));
   delete g_redex;
   g_redex = nullptr;
+}
+
+// A call_site_item is an encoded array that starts with the bootstrap method
+// handle, the method name and the method type. Loading a dex whose call site
+// array is shorter than that fails with an invalid-dex error.
+TEST(Dex038Test, ShortCallSiteItemIsInvalidDex) {
+  const char* dexfile = std::getenv("dexfile");
+  ASSERT_NE(nullptr, dexfile);
+  std::ifstream in(dexfile, std::ios::binary);
+  const std::vector<uint8_t> original((std::istreambuf_iterator<char>(in)),
+                                      std::istreambuf_iterator<char>());
+  ASSERT_GE(original.size(), sizeof(dex_header));
+
+  const auto* header = reinterpret_cast<const dex_header*>(original.data());
+  const auto* map_list =
+      reinterpret_cast<const dex_map_list*>(original.data() + header->map_off);
+  uint32_t callsite_ids_off = 0;
+  for (uint32_t i = 0; i < map_list->size; ++i) {
+    if (map_list->items[i].type == TYPE_CALL_SITE_ID_ITEM) {
+      callsite_ids_off = map_list->items[i].offset;
+    }
+  }
+  ASSERT_NE(callsite_ids_off, 0u);
+  const uint32_t array_off = reinterpret_cast<const dex_callsite_id*>(
+                                 original.data() + callsite_ids_off)
+                                 ->callsite_off;
+  // The array starts with its value count, a uleb128 that fits in one byte.
+  ASSERT_GE(original.at(array_off), 3);
+  ASSERT_LT(original.at(array_off), 0x80);
+
+  auto tmpdir = redex::make_tmp_dir("dex038_short_callsite_%%%%%%%%");
+  for (uint8_t value_count : {1, 2}) {
+    SCOPED_TRACE(int(value_count));
+    auto bytes = original;
+    bytes[array_off] = value_count;
+    auto path = tmpdir.path + "/short_callsite.dex";
+    {
+      std::ofstream out(path, std::ios::binary | std::ios::trunc);
+      out.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    }
+
+    g_redex = new RedexContext();
+    try {
+      // As in redex-all, the first error of the parallel loader is rethrown.
+      run_rethrow_first_aggregate([&]() { load_dex_file(path, 38); });
+      ADD_FAILURE() << "loaded a call site with " << int(value_count)
+                    << " values";
+    } catch (const RedexException& e) {
+      EXPECT_EQ(e.type, RedexError::INVALID_DEX) << e.what();
+    } catch (const std::exception& e) {
+      ADD_FAILURE() << "expected an invalid-dex error, got: " << e.what();
+    }
+    delete g_redex;
+    g_redex = nullptr;
+  }
 }

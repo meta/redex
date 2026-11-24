@@ -66,8 +66,12 @@ DexCallSite* DexIdx::get_callsiteidx_fromdex(uint32_t csidx) {
   auto callsite_eva = get_encoded_value_array(this, callsite_data);
   auto* evalues = callsite_eva->evalues();
   redex_assert(evalues != nullptr);
-  always_assert_type_log(!evalues->empty(), INVALID_DEX,
-                         "Missing callsite idx data");
+  // A call site starts with the bootstrap method handle, method name and
+  // method type.
+  always_assert_type_log(
+      evalues->size() >= 3, INVALID_DEX,
+      "Callsite item has too few values (%zu), expected at least 3",
+      evalues->size());
   DexEncodedValue* ev_linker_method_handle = evalues->at(0).get();
   always_assert_type_log(ev_linker_method_handle->evtype() ==
                              DEVT_METHOD_HANDLE,

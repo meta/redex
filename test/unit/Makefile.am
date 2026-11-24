@@ -671,7 +671,7 @@ registers_test_SOURCES = RegistersTest.cpp OpcodeList.cpp
 
 remark_test_SOURCES = RemarkTest.cpp
 
-remove_builders_test_SOURCES = RemoveBuildersTest.cpp
+remove_builders_test_SOURCES = RemoveBuildersTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 remove_null_check_string_arg_test_SOURCES = RemoveNullCheckStringArgTest.cpp ScopeHelper.cpp
 

@@ -13,7 +13,9 @@
 #include "IRAssembler.h"
 #include "PassManager.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "RemoveBuilders.h"
+#include "RemoveBuildersHelper.h"
 #include "Walkers.h"
 
 class RemoveBuildersTest : public RedexTest {};
@@ -127,4 +129,73 @@ TEST_F(RemoveBuildersTest, builderPassedToUnresolvedCallIsKept) {
 // An unresolved call that is not passed the builder does not keep it.
 TEST_F(RemoveBuildersTest, builderNotPassedToUnresolvedCallIsRemoved) {
   EXPECT_FALSE(make_keeps_builder(R"((invoke-static () "LMissing;.run:()V"))"));
+}
+
+namespace {
+
+// Whether a `LFoo$Builder;` that `method` creates escapes it.
+bool builder_escapes(DexMethod* method) {
+  auto* builder = DexType::make_type("LFoo$Builder;");
+  auto& cfg = method->get_code()->cfg();
+  auto taint_map =
+      get_tainted_regs(cfg, cfg.get_registers_size(),
+                       cfg.blocks_reverse_post_deprecated(), builder);
+  return tainted_reg_escapes(builder, method, *taint_map);
+}
+
+} // namespace
+
+// A method handle call runs code that is not known here:
+//
+//   Foo.Builder builder = new Foo.Builder();
+//   KEEP.invokeExact(builder);  // invoke-polymorphic
+TEST_F(RemoveBuildersTest, builderPassedToMethodHandleCallEscapes) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.make:(Ljava/lang/invoke/MethodHandle;)V"
+     (
+      (load-param-object v0)
+      (new-instance "LFoo$Builder;")
+      (move-result-pseudo-object v1)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LFoo$Builder;)V")
+      (return-void)
+     )
+    )
+  )");
+  method->get_code()->build_cfg();
+  EXPECT_TRUE(builder_escapes(method));
+}
+
+// A method handle call that is not passed the builder does not let it escape.
+TEST_F(RemoveBuildersTest, builderNotPassedToMethodHandleCallDoesNotEscape) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.make:(Ljava/lang/invoke/MethodHandle;)V"
+     (
+      (load-param-object v0)
+      (new-instance "LFoo$Builder;")
+      (move-result-pseudo-object v1)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
+      (return-void)
+     )
+    )
+  )");
+  method->get_code()->build_cfg();
+  EXPECT_FALSE(builder_escapes(method));
+}
+
+// The same for a call through a call site.
+TEST_F(RemoveBuildersTest, builderPassedToCallSiteEscapes) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.make:()V"
+     (
+      (new-instance "LFoo$Builder;")
+      (move-result-pseudo-object v0)
+      (invoke-static (v0) "LUser;.placeholder:(LFoo$Builder;)V")
+      (return-void)
+     )
+    )
+  )");
+  // The `invoke-static` becomes an `invoke-custom`.
+  redex::make_invoke_custom(method->get_code(), "keep", "(LFoo$Builder;)V");
+  method->get_code()->build_cfg();
+  EXPECT_TRUE(builder_escapes(method));
 }

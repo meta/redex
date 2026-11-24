@@ -1005,9 +1005,12 @@ bool tainted_reg_escapes(
     auto* insn = it.first;
     auto tainted = it.second.bits();
     auto op = insn->opcode();
-    if (opcode::is_a_method_invoke(op)) {
-      auto* invoked =
-          resolve_method_deprecated(insn->get_method(), opcode_to_search(insn));
+    if (opcode::is_an_invoke(op)) {
+      // invoke-polymorphic and invoke-custom have no callee to resolve.
+      auto* invoked = opcode::is_a_method_invoke(op)
+                          ? resolve_method_deprecated(insn->get_method(),
+                                                      opcode_to_search(insn))
+                          : nullptr;
       size_t args_reg_start{0};
       if (invoked == nullptr) {
         TRACE(BUILDERS, 5, "Unable to resolve %s", SHOW(insn));

@@ -16,6 +16,63 @@ import org.junit.Test;
 
 import com.facebook.redexinline.ForceInline;
 
+// A class with two constructors whose field initializers store the default
+// values allocation already wrote.
+class TwoCtors {
+  int count = 0;
+  Object last = null;
+
+  // CHECK: method: direct redex.TwoCtors.<init>:()void
+  // PRECHECK: iput {{.*}} redex.TwoCtors.count:int
+  // POSTCHECK-NOT: iput
+  // CHECK: return-void
+  TwoCtors() {}
+
+  TwoCtors(int start) {
+    count = start;
+  }
+}
+
+class InitCallingBase {
+  InitCallingBase() {
+    init();
+  }
+
+  void init() {}
+}
+
+// `InitCallingBase()` calls `init()` on `this`, which stores 5 into `x`
+// before the initializer of `x` runs, so the initializer's store of 0 is not
+// redundant.
+class InitOverridingSub extends InitCallingBase {
+  int x = 0;
+
+  // CHECK: method: direct redex.InitOverridingSub.<init>:()void
+  // CHECK: invoke-direct {{.*}} redex.InitCallingBase.<init>:()void
+  // CHECK: iput {{.*}} redex.InitOverridingSub.x:int
+  // CHECK: return-void
+  InitOverridingSub() {}
+
+  @Override
+  void init() {
+    x = 5;
+  }
+}
+
+// `a`'s initializer reads `b` before `b`'s initializer stores 2 into it.
+class ReadBeforeInit {
+  int a = this.b + 1;
+  int b = 2;
+
+  // CHECK: method: direct redex.ReadBeforeInit.<init>:()void
+  // PRECHECK: iget {{.*}} redex.ReadBeforeInit.b:int
+  // POSTCHECK-NOT: iget
+  // CHECK: iput {{.*}} redex.ReadBeforeInit.a:int
+  // CHECK: iput {{.*}} redex.ReadBeforeInit.b:int
+  // CHECK: return-void
+  ReadBeforeInit() {}
+}
+
 public class ConstantPropagationTest {
 
   // use getRandom* if need to prevent constant folding. Use a fixed seed to
@@ -1031,5 +1088,25 @@ public class ConstantPropagationTest {
     }
     assertThat(x).isNotEqualTo(4);
     // CHECK: return-void
+  }
+
+  @Test
+  public void constructorFieldsStartAtZero() {
+    TwoCtors empty = new TwoCtors();
+    assertThat(empty.count).isEqualTo(0);
+    assertThat(empty.last).isNull();
+    assertThat(new TwoCtors(3).count).isEqualTo(3);
+  }
+
+  @Test
+  public void superclassConstructorMayStoreToSubclassField() {
+    assertThat(new InitOverridingSub().x).isEqualTo(0);
+  }
+
+  @Test
+  public void initializerReadsLaterFieldAsZero() {
+    ReadBeforeInit r = new ReadBeforeInit();
+    assertThat(r.a).isEqualTo(1);
+    assertThat(r.b).isEqualTo(2);
   }
 }

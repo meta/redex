@@ -83,6 +83,7 @@ check_PROGRAMS = \
     constructor_accesses_test \
     constructor_analysis_test \
     constructor_field_analyzer_test \
+    constructor_fields_test \
     control_flow_test \
     copy_propagation_test \
     cpp_util_test \
@@ -392,6 +393,9 @@ constructor_analysis_test_SOURCES = ConstructorAnalysisTest.cpp
 
 constructor_field_analyzer_test_SOURCES = constant-propagation/ConstructorFieldAnalyzerTest.cpp
 constructor_field_analyzer_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
+
+constructor_fields_test_SOURCES = constant-propagation/ConstructorFieldsTest.cpp
+constructor_fields_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 control_flow_test_SOURCES = ControlFlowTest.cpp
 control_flow_test_LDADD = $(COMMON_MOCK_TEST_LIBS)

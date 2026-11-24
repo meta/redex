@@ -31,6 +31,10 @@ class ConstantPropagationPass : public Pass {
          true,
          m_config.transform.replace_moves_with_consts);
     bind("remove_dead_switch", true, m_config.transform.remove_dead_switch);
+    bind("track_constructor_fields", false, m_config.track_constructor_fields,
+         "In constructors, track the class's own fields from their zero "
+         "initial values until `this` may escape, so that redundant stores to "
+         "them are removed and reads of them become constants.");
   }
 
   void run_pass(DexStoresVector& stores,

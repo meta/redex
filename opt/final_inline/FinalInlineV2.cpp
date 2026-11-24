@@ -18,6 +18,7 @@
 #include "IRCode.h"
 #include "InitDeps.h"
 #include "LocalDce.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Resolver.h"
 #include "Show.h"
@@ -288,7 +289,9 @@ StaticFieldReadAnalysis::Result StaticFieldReadAnalysis::analyze(
   cfg_adapter::iterate_with_iterator(code, [&](const IRList::iterator& it) {
     auto* insn = it->insn;
     if (opcode::is_invoke_polymorphic(insn->opcode()) ||
-        opcode::is_invoke_custom(insn->opcode())) {
+        opcode::is_invoke_custom(insn->opcode()) ||
+        (opcode::is_a_method_invoke(insn->opcode()) &&
+         method::runs_method_handle_target(insn->get_method()))) {
       // The method handle or call site decides at run time what runs.
       ret = Result::top();
       callee_pending = false;

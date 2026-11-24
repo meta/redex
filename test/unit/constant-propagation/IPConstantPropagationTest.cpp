@@ -5791,3 +5791,69 @@ TEST_F(InterproceduralConstantPropagationTest,
   clinit->get_code()->clear_cfg();
   EXPECT_EQ(assembler::to_s_expr(clinit->get_code()), expected);
 }
+
+// Tool-generated: Foo.<clinit> loads a static-put method handle of Foo.x that
+// Bar holds and runs it through the library's
+// MethodHandle.invokeWithArguments, so the read of Foo.x after the call is not
+// the 5 that Foo.<clinit> wrote before it.
+TEST_F(InterproceduralConstantPropagationTest,
+       clinitReadAfterInvokeWithArgumentsOfHandleFromElsewhere) {
+  ClassCreator bar_creator(DexType::make_type("LBar;"));
+  bar_creator.set_super(type::java_lang_Object());
+  bar_creator.add_field(
+      DexField::make_field("LBar;.h:Ljava/lang/invoke/MethodHandle;")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  auto* bar_clinit = assembler::method_from_string(R"(
+    (method (public static constructor) "LBar;.<clinit>:()V"
+     (
+      (const-method-handle static-put "LFoo;.x:I")
+      (move-result-pseudo-object v0)
+      (sput-object v0 "LBar;.h:Ljava/lang/invoke/MethodHandle;")
+      (return-void)
+     )
+    )
+  )");
+  bar_clinit->rstate.set_root();
+  bar_creator.add_method(bar_clinit);
+
+  ClassCreator creator(DexType::make_type("LFoo;"));
+  creator.set_super(type::java_lang_Object());
+  for (const auto* spec : {"LFoo;.x:I", "LFoo;.y:I"}) {
+    creator.add_field(
+        DexField::make_field(spec)->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  }
+  auto* clinit = assembler::method_from_string(R"(
+    (method (public static constructor) "LFoo;.<clinit>:()V"
+     (
+      (const v0 5)
+      (sput v0 "LFoo;.x:I")
+      (sget-object "LBar;.h:Ljava/lang/invoke/MethodHandle;")
+      (move-result-pseudo-object v1)
+      (const v2 0)
+      (new-array v2 "[Ljava/lang/Object;")
+      (move-result-pseudo-object v2)
+      (invoke-virtual (v1 v2) "Ljava/lang/invoke/MethodHandle;.invokeWithArguments:([Ljava/lang/Object;)Ljava/lang/Object;")
+      (sget "LFoo;.x:I")
+      (move-result-pseudo v0)
+      (sput v0 "LFoo;.y:I")
+      (return-void)
+     )
+    )
+  )");
+  clinit->rstate.set_root();
+  creator.add_method(clinit);
+  auto expected = assembler::to_s_expr(clinit->get_code());
+
+  Scope scope{bar_creator.create(), creator.create()};
+  walk::code(scope, [](DexMethod*, IRCode& code) {
+    code.build_cfg();
+    code.cfg().calculate_exit_block();
+  });
+
+  InterproceduralConstantPropagationPass::Config config;
+  config.max_heap_analysis_iterations = 1;
+  InterproceduralConstantPropagationPass(config).run(make_simple_stores(scope),
+                                                     conf);
+  clinit->get_code()->clear_cfg();
+  EXPECT_EQ(assembler::to_s_expr(clinit->get_code()), expected);
+}

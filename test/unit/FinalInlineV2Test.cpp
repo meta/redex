@@ -1400,3 +1400,50 @@ TEST_F(FinalInlineTest,
   ASSERT_EQ(sub_cls->get_clinit(), clinit);
   EXPECT_TRUE(writes_field(clinit, field));
 }
+
+// Tool-generated: Foo.<clinit> loads a static-get method handle of Foo.x that
+// Bar holds and runs it through the library's
+// MethodHandle.invokeWithArguments before it writes 5 to Foo.x. The read sees
+// 0, so Foo.x must keep its zero encoded value and the write.
+TEST_F(FinalInlineTest, fieldReadThroughHandleFromElsewhereIsNotEncoded) {
+  ClassCreator bar_creator(DexType::make_type("LBar;"));
+  bar_creator.set_super(type::java_lang_Object());
+  create_field_with_zero_value("LBar;.h:Ljava/lang/invoke/MethodHandle;",
+                               &bar_creator);
+  bar_creator.add_method(assembler::method_from_string(R"(
+    (method (public static) "LBar;.<clinit>:()V"
+     (
+      (const-method-handle static-get "LFoo;.x:I")
+      (move-result-pseudo-object v0)
+      (sput-object v0 "LBar;.h:Ljava/lang/invoke/MethodHandle;")
+      (return-void)
+     )
+    )
+  )"));
+  auto* bar_cls = bar_creator.create();
+
+  auto* field = create_field_with_zero_value("LFoo;.x:I", m_cc.get());
+  auto* clinit = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.<clinit>:()V"
+     (
+      (sget-object "LBar;.h:Ljava/lang/invoke/MethodHandle;")
+      (move-result-pseudo-object v0)
+      (const v1 0)
+      (new-array v1 "[Ljava/lang/Object;")
+      (move-result-pseudo-object v1)
+      (invoke-virtual (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeWithArguments:([Ljava/lang/Object;)Ljava/lang/Object;")
+      (const v2 5)
+      (sput v2 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(clinit);
+  auto* cls = m_cc->create();
+
+  run({bar_cls, cls}, /* xstores */ nullptr);
+
+  EXPECT_EQ(field->get_static_value()->value(), 0);
+  ASSERT_EQ(cls->get_clinit(), clinit);
+  EXPECT_TRUE(writes_field(clinit, field));
+}

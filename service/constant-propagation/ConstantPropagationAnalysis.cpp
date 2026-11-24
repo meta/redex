@@ -18,6 +18,7 @@
 #include "DeterministicContainers.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
+#include "MethodUtil.h"
 #include "RedexContext.h"
 
 #include <bit>
@@ -1157,6 +1158,11 @@ bool ClinitFieldAnalyzer::analyze_invoke(const ClinitFieldAnalyzerState& state,
                                          const IRInstruction* insn,
                                          ConstantEnvironment* env) {
   if (state.class_under_init == nullptr) {
+    return false;
+  }
+  if (method::runs_method_handle_target(insn->get_method())) {
+    // Like a dynamic invoke, this runs code that cannot be resolved here.
+    env->clear_field_environment();
     return false;
   }
   // As in StaticFieldReadAnalysis, external cross-class calls are assumed not

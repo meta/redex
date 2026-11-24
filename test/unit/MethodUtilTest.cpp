@@ -288,3 +288,16 @@ TEST_F(MethodUtilTest, gather_fields_named_by_method_handles) {
   EXPECT_FALSE(named("LFields;.unnamed:I"));
   EXPECT_EQ(fields.size(), 3);
 }
+
+TEST_F(MethodUtilTest, runs_method_handle_target) {
+  EXPECT_TRUE(method::runs_method_handle_target(DexMethod::make_method(
+      "Ljava/lang/invoke/MethodHandle;.invokeWithArguments:([Ljava/lang/"
+      "Object;)Ljava/lang/Object;")));
+  EXPECT_TRUE(method::runs_method_handle_target(DexMethod::make_method(
+      "Ljava/lang/invoke/MethodHandle;.invokeWithArguments:(Ljava/util/"
+      "List;)Ljava/lang/Object;")));
+  EXPECT_FALSE(method::runs_method_handle_target(DexMethod::make_method(
+      "Ljava/lang/invoke/MethodHandle;.type:()Ljava/lang/invoke/MethodType;")));
+  EXPECT_FALSE(method::runs_method_handle_target(
+      DexMethod::make_method("LFoo;.invokeWithArguments:()V")));
+}

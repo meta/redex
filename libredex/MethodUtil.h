@@ -65,6 +65,15 @@ bool may_be_invoke_target(const DexMethod* method);
 bool can_change_signature(const DexMethod* method);
 
 /**
+ * Whether calling `method` runs the target of a method handle that the call
+ * receives, which can be any code: `MethodHandle.invokeWithArguments`. (Calls
+ * of the signature-polymorphic `MethodHandle.invoke` and `invokeExact` are
+ * invoke-polymorphic instructions.) An analysis that assumes a call of a
+ * library method runs no app code cannot assume that for these calls.
+ */
+bool runs_method_handle_target(const DexMethodRef* method);
+
+/**
  * The methods whose prototypes the method handles in `scope` fix: for every
  * method handle that code (const-method-handle, or the bootstrap method or a
  * bootstrap argument of a call site), a static field value or an annotation in

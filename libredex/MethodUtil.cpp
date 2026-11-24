@@ -546,6 +546,12 @@ bool can_change_signature(const DexMethod* method) {
          !method->rstate.no_optimizations();
 }
 
+bool runs_method_handle_target(const DexMethodRef* method) {
+  return method->get_class() ==
+             DexType::get_type("Ljava/lang/invoke/MethodHandle;") &&
+         method->get_name()->str() == "invokeWithArguments";
+}
+
 namespace {
 
 // Calls `f(method_handle, caller)`, in parallel, for every method handle that

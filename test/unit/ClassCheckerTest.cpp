@@ -385,6 +385,39 @@ TEST_F(ClassVCheckerTest, testDiamondHierarchyPasses) {
   EXPECT_EQ(hierarchy_errors(scope), "");
 }
 
+// class A extends B {}  class B extends A {}  class C extends C {}
+TEST_F(ClassVCheckerTest, testCyclicSuperclassesFail) {
+  Scope scope = create_empty_scope();
+  scope.push_back(make_class("LA;", "LB;"));
+  scope.push_back(make_class("LB;", "LA;"));
+  scope.push_back(make_class("LC;", "LC;"));
+
+  auto errors = hierarchy_errors(scope);
+  EXPECT_NE(errors.find("Class LA; is its own supertype: LA; -> LB; -> LA;"),
+            std::string::npos);
+  EXPECT_NE(errors.find("Class LC; extends itself"), std::string::npos);
+}
+
+// interface I extends I {}
+TEST_F(ClassVCheckerTest, testInterfaceExtendingItselfFails) {
+  Scope scope = create_empty_scope();
+  scope.push_back(make_class("LI;", nullptr, {"LI;"}, kInterface));
+
+  EXPECT_NE(hierarchy_errors(scope).find("Class LI; implements itself"),
+            std::string::npos);
+}
+
+// interface I extends J {}  interface J extends I {}
+TEST_F(ClassVCheckerTest, testCyclicSuperinterfacesFail) {
+  Scope scope = create_empty_scope();
+  scope.push_back(make_class("LI;", nullptr, {"LJ;"}, kInterface));
+  scope.push_back(make_class("LJ;", nullptr, {"LI;"}, kInterface));
+
+  EXPECT_NE(hierarchy_errors(scope).find(
+                "Class LI; is its own supertype: LI; -> LJ; -> LI;"),
+            std::string::npos);
+}
+
 // class B {}  class D extends B {}
 TEST_F(ClassVCheckerTest, testNonFinalSuperclassPasses) {
   Scope scope = create_empty_scope();

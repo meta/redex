@@ -20,6 +20,7 @@
  * - a superclass defined as an interface, or an implemented interface defined
  *   as a class (IncompatibleClassChangeError);
  * - an interface whose superclass is not java.lang.Object (ClassFormatError);
+ * - a cycle of superclasses and superinterfaces (ClassCircularityError);
  * - a superclass declared final (VerifyError).
  *
  * Apart from an interface's superclass, which must be java.lang.Object, a

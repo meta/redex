@@ -158,6 +158,83 @@ std::string describe(const DexType* type) {
   return res;
 }
 
+std::vector<const DexClass*> get_defined_supertypes(const DexClass* cls) {
+  std::vector<const DexClass*> res;
+  if (cls->get_super_class() != nullptr) {
+    const auto* super_cls = type_class(cls->get_super_class());
+    if (super_cls != nullptr) {
+      res.push_back(super_cls);
+    }
+  }
+  for (const auto* intf : *cls->get_interfaces()) {
+    const auto* intf_cls = type_class(intf);
+    if (intf_cls != nullptr) {
+      res.push_back(intf_cls);
+    }
+  }
+  return res;
+}
+
+// Describes a cycle of defined supertypes for each supertype edge that closes
+// one, searching depth-first from `classes` with an explicit stack, as
+// hierarchies can be deep.
+void find_supertype_cycles(const std::vector<const DexClass*>& classes,
+                           std::vector<std::string>* errors) {
+  enum class State { kOnStack, kDone };
+  UnorderedMap<const DexClass*, State> states;
+  struct Frame {
+    const DexClass* cls;
+    std::vector<const DexClass*> supertypes;
+    size_t next{0};
+  };
+  for (const auto* root : classes) {
+    if (states.find(root) != states.end()) {
+      continue;
+    }
+    std::vector<Frame> stack;
+    stack.push_back({root, get_defined_supertypes(root)});
+    states.emplace(root, State::kOnStack);
+    while (!stack.empty()) {
+      auto& frame = stack.back();
+      if (frame.next == frame.supertypes.size()) {
+        states[frame.cls] = State::kDone;
+        stack.pop_back();
+        continue;
+      }
+      const auto* super_cls = frame.supertypes[frame.next++];
+      auto it = states.find(super_cls);
+      if (it == states.end()) {
+        states.emplace(super_cls, State::kOnStack);
+        stack.push_back({super_cls, get_defined_supertypes(super_cls)});
+        continue;
+      }
+      if (it->second == State::kDone) {
+        continue;
+      }
+      if (super_cls == frame.cls) {
+        // The superclass, when defined, comes first in `supertypes`.
+        bool via_superclass =
+            frame.next == 1 && frame.cls->get_super_class() != nullptr &&
+            type_class(frame.cls->get_super_class()) == frame.cls;
+        errors->push_back(
+            "Class " + describe(super_cls->get_type()) +
+            (via_superclass ? " extends itself" : " implements itself"));
+        continue;
+      }
+      auto start =
+          std::find_if(stack.begin(), stack.end(),
+                       [&](const Frame& f) { return f.cls == super_cls; });
+      std::string cycle;
+      for (auto f = start; f != stack.end(); ++f) {
+        cycle += describe(f->cls->get_type()) + " -> ";
+      }
+      cycle += show(super_cls);
+      errors->push_back("Class " + show(super_cls) +
+                        " is its own supertype: " + cycle);
+    }
+  }
+}
+
 } // namespace
 
 std::optional<std::string> check_class_hierarchy(const Scope& scope) {
@@ -206,6 +283,7 @@ std::optional<std::string> check_class_hierarchy(const Scope& scope) {
     errors.insert(errors.end(), std::make_move_iterator(class_errors.begin()),
                   std::make_move_iterator(class_errors.end()));
   }
+  find_supertype_cycles(classes, &errors);
   if (errors.empty()) {
     return std::nullopt;
   }

@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <algorithm>
+
 #include <gtest/gtest.h>
 
 #include "ClassHierarchy.h"
@@ -777,4 +779,110 @@ TEST_F(ResolverTest, ResolveFieldHandleOfMethodHandle) {
   EXPECT_EQ(resolve_field_handle(redex::make_method_handle(
                 METHOD_HANDLE_TYPE_INVOKE_STATIC, "LA;.m:()V")),
             nullptr);
+}
+
+namespace {
+
+DexClass* make_handle_class(const char* name, const DexType* super) {
+  ClassCreator creator(DexType::make_type(name));
+  creator.set_super(const_cast<DexType*>(super));
+  return creator.create();
+}
+
+DexMethod* add_m(DexClass* cls) {
+  auto* method = DexMethod::make_method(show(cls->get_type()) + ".m:()V")
+                     ->make_concrete(ACC_PUBLIC, /* is_virtual */ true);
+  cls->add_method(method);
+  return method;
+}
+
+// A static method of `cls`, which holds the handles.
+DexMethod* add_holder(DexClass* cls) {
+  auto* method =
+      DexMethod::make_method(show(cls->get_type()) + ".hold:()V")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC, /* is_virtual */ false);
+  cls->add_method(method);
+  return method;
+}
+
+DexMethodHandle direct_handle(const char* method) {
+  return DexMethodHandle(METHOD_HANDLE_TYPE_INVOKE_DIRECT,
+                         DexMethod::make_method(method));
+}
+
+} // namespace
+
+// `LC;` extends `LB;`, which overrides `m` of `LA;`, which overrides `m` of
+// `LG;`. ART runs an invoke-direct handle of a method that is not private held
+// by `LC;` by taking `LC;`'s implementation, `LB;.m`, which Android 9 runs.
+// Android 10 and later run it only when the named class declares it, and
+// otherwise the named class's superclass's implementation.
+TEST_F(ResolverTest, ResolveNonvirtualMethodHandle) {
+  auto* g = make_handle_class("LG;", type::java_lang_Object());
+  auto* g_m = add_m(g);
+  auto* a = make_handle_class("LA;", g->get_type());
+  add_m(a);
+  auto* b = make_handle_class("LB;", a->get_type());
+  auto* b_m = add_m(b);
+  auto* c = make_handle_class("LC;", b->get_type());
+  auto* holder = add_holder(c);
+
+  // `LB;` declares `LB;.m`, so every version runs it.
+  auto names_b = direct_handle("LB;.m:()V");
+  EXPECT_EQ(resolve_method_handle(&names_b, holder), b_m);
+  EXPECT_EQ(resolve_method_handle_callees(&names_b, holder),
+            std::vector<DexMethod*>{b_m});
+  // `LC;` inherits `LB;.m` from its superclass, so every version runs it.
+  auto names_c = direct_handle("LC;.m:()V");
+  EXPECT_EQ(resolve_method_handle(&names_c, holder), b_m);
+  // `LA;` does not declare `LB;.m`: Android 10 and later run `LG;.m`.
+  auto names_a = direct_handle("LA;.m:()V");
+  EXPECT_EQ(resolve_method_handle(&names_a, holder), nullptr);
+  EXPECT_EQ(resolve_method_handle_callees(&names_a, holder),
+            (std::vector<DexMethod*>{b_m, g_m}));
+  // `LG;`'s superclass has no `m`, so Android 10 and later take a vtable entry
+  // of `Ljava/lang/Object;` that is not `m`.
+  auto names_g = direct_handle("LG;.m:()V");
+  EXPECT_EQ(resolve_method_handle(&names_g, holder), nullptr);
+  EXPECT_EQ(resolve_method_handle_callees(&names_g, holder),
+            std::vector<DexMethod*>{b_m});
+}
+
+// ART takes the vtable entry of the named method in the holder's class, which
+// is not known to be that method when the holder does not inherit it.
+TEST_F(ResolverTest, ResolveNonvirtualMethodHandleOfUnrelatedClass) {
+  auto* a = make_handle_class("LA;", type::java_lang_Object());
+  add_m(a);
+  auto* d = make_handle_class("LD;", type::java_lang_Object());
+  add_m(d);
+  auto* holder = add_holder(d);
+
+  auto names_a = direct_handle("LA;.m:()V");
+  EXPECT_EQ(resolve_method_handle(&names_a, holder), nullptr);
+  EXPECT_TRUE(resolve_method_handle_callees(&names_a, holder).empty());
+}
+
+// `Lp/B;.m` is package-private, so `Lq/C;.m` in another package cannot
+// override it and takes a slot of its own. An invoke-direct handle of
+// `Lp/B;.m` held by `Lp/D; extends Lq/C;` runs `Lp/B;.m`, the method in that
+// slot, though a search by name and prototype from `Lp/D;` finds `Lq/C;.m`.
+TEST_F(ResolverTest, ResolveNonvirtualMethodHandlePastPackagePrivateMethod) {
+  auto add_package_private_m = [](DexClass* cls) {
+    auto* method =
+        DexMethod::make_method(show(cls->get_type()) + ".m:()V")
+            ->make_concrete(DexAccessFlags(0), /* is_virtual */ true);
+    cls->add_method(method);
+    return method;
+  };
+  auto* b = make_handle_class("Lp/B;", type::java_lang_Object());
+  auto* b_m = add_package_private_m(b);
+  auto* c = make_handle_class("Lq/C;", b->get_type());
+  auto* c_m = add_package_private_m(c);
+  auto* d = make_handle_class("Lp/D;", c->get_type());
+  auto* holder = add_holder(d);
+
+  auto names_b = direct_handle("Lp/B;.m:()V");
+  auto callees = resolve_method_handle_callees(&names_b, holder);
+  EXPECT_NE(std::find(callees.begin(), callees.end(), b_m), callees.end());
+  EXPECT_NE(resolve_method_handle(&names_b, holder), c_m);
 }

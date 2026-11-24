@@ -14,6 +14,7 @@
 #include "DeterministicContainers.h"
 
 #include "Show.h"
+#include "TypeUtil.h"
 
 namespace {
 
@@ -367,12 +368,12 @@ DexMethod* resolve_method_impl(DexMethodRef* method,
   return mdef;
 }
 
-DexMethod* resolve_invoke_method_impl(const IRInstruction* insn,
+DexMethod* resolve_invoke_method_impl(IROpcode opcode,
+                                      DexMethodRef* callee_ref,
                                       const DexMethod* caller,
                                       bool* resolved_virtual_to_interface,
                                       bool default_interface_switch) {
-  auto* callee_ref = insn->get_method();
-  auto search = opcode_to_search(insn);
+  auto search = opcode_to_search(opcode);
   auto* callee =
       resolve_method_impl(callee_ref, search, caller, default_interface_switch);
   if (!default_interface_switch && (callee == nullptr) &&
@@ -501,15 +502,179 @@ DexMethod* resolve_invoke_method_deprecated(
     const IRInstruction* insn,
     const DexMethod* caller,
     bool* resolved_virtual_to_interface) {
-  return resolve_invoke_method_impl(insn, caller, resolved_virtual_to_interface,
-                                    false);
+  return resolve_invoke_method_impl(insn->opcode(), insn->get_method(), caller,
+                                    resolved_virtual_to_interface, false);
+}
+
+DexMethod* resolve_invoke_method_deprecated(
+    IROpcode opcode,
+    DexMethodRef* callee_ref,
+    const DexMethod* caller,
+    bool* resolved_virtual_to_interface) {
+  return resolve_invoke_method_impl(opcode, callee_ref, caller,
+                                    resolved_virtual_to_interface, false);
 }
 
 DexMethod* resolve_invoke_method(const IRInstruction* insn,
                                  const DexMethod* caller,
                                  bool* resolved_virtual_to_interface) {
-  return resolve_invoke_method_impl(insn, caller, resolved_virtual_to_interface,
-                                    true);
+  return resolve_invoke_method_impl(insn->opcode(), insn->get_method(), caller,
+                                    resolved_virtual_to_interface, true);
+}
+
+namespace {
+
+// What ART versions run for an invoke-direct handle of `method_ref`, a method
+// that is not private, held by code in `caller`.
+struct NonvirtualHandleTargets {
+  // The implementation in the caller's class, which Android 9 runs. Android 10
+  // and later run it too when the named class declares it.
+  DexMethod* caller_impl{nullptr};
+  // The implementation in the named class's superclass, which Android 10 and
+  // later run when the named class does not declare `caller_impl`.
+  DexMethod* named_super_impl{nullptr};
+  // Whether all versions run `caller_impl`.
+  bool agree{false};
+  // Every method that some version may run. Where a package-private method
+  // may make the method in the slot differ from the one that a search by
+  // name and prototype finds, these are all the candidates, and the other
+  // fields stay empty.
+  std::vector<DexMethod*> callees;
+};
+
+// Appends to `methods` the virtual methods named `name` with `proto` that
+// `cls` and its superclasses declare, each once.
+void append_declared_vmethods(const DexClass* cls,
+                              const DexString* name,
+                              const DexProto* proto,
+                              std::vector<DexMethod*>& methods) {
+  for (; cls != nullptr; cls = type_class(cls->get_super_class())) {
+    auto* method = DexMethod::get_method(cls->get_type(), name, proto);
+    if (method == nullptr || !method->is_def()) {
+      continue;
+    }
+    auto* def = method->as_def();
+    if (def->is_virtual() &&
+        std::find(methods.begin(), methods.end(), def) == methods.end()) {
+      methods.push_back(def);
+    }
+  }
+}
+
+// Whether the vtable slot that holds one of `methods`, which share a name and
+// prototype, may hold a method other than the one that a search by name and
+// prototype finds. A method takes over the slot of a superclass's method only
+// if it can access that method, and it can access a package-private method
+// only from the same runtime package: the same package name and class loader.
+// An internal and an external class are taken to have different loaders.
+bool slots_may_differ_from_names(const std::vector<DexMethod*>& methods) {
+  if (std::none_of(methods.begin(), methods.end(),
+                   [](const DexMethod* m) { return is_package_private(m); })) {
+    return false;
+  }
+  const auto* first = methods.front();
+  return std::any_of(methods.begin(), methods.end(), [&](const DexMethod* m) {
+    return !type::same_package(m->get_class(), first->get_class()) ||
+           m->is_external() != first->is_external();
+  });
+}
+
+NonvirtualHandleTargets resolve_nonvirtual_handle_targets(
+    DexMethodRef* method_ref, const DexMethod* caller) {
+  NonvirtualHandleTargets targets;
+  const auto* named_cls = type_class(method_ref->get_class());
+  const auto* caller_cls =
+      caller == nullptr ? nullptr : type_class(caller->get_class());
+  // ART finds an interface's method among the interface's methods, whose
+  // indices are not vtable indices, so the vtable entry it then takes from
+  // the caller's class is not known to belong to the method.
+  if (named_cls == nullptr || is_interface(named_cls) ||
+      caller_cls == nullptr) {
+    return targets;
+  }
+  const auto* name = method_ref->get_name();
+  const auto* proto = method_ref->get_proto();
+  auto* named = resolve_method_deprecated(named_cls, name, proto);
+  if (named == nullptr || !named->is_virtual()) {
+    return targets;
+  }
+  // ART takes the entry at the vtable index of `named` in the caller's class,
+  // which is the caller's implementation of the method only when the caller's
+  // class inherits `named`.
+  const auto* cls = caller_cls;
+  while (cls != nullptr && cls->get_type() != named->get_class()) {
+    cls = type_class(cls->get_super_class());
+  }
+  if (cls == nullptr) {
+    return targets;
+  }
+  const auto* named_super_cls = type_class(named_cls->get_super_class());
+  std::vector<DexMethod*> candidates;
+  append_declared_vmethods(caller_cls, name, proto, candidates);
+  append_declared_vmethods(named_super_cls, name, proto, candidates);
+  if (slots_may_differ_from_names(candidates)) {
+    targets.callees = std::move(candidates);
+    return targets;
+  }
+  targets.caller_impl =
+      resolve_method_deprecated(caller_cls, name, proto, MethodSearch::Virtual);
+  if (named_super_cls != nullptr) {
+    targets.named_super_impl = resolve_method_deprecated(
+        named_super_cls, name, proto, MethodSearch::Virtual);
+  }
+  targets.agree = targets.caller_impl != nullptr &&
+                  (targets.caller_impl->get_class() == named_cls->get_type() ||
+                   targets.caller_impl == targets.named_super_impl);
+  if (targets.agree) {
+    targets.callees = {targets.caller_impl};
+    return targets;
+  }
+  for (auto* target : {targets.caller_impl, targets.named_super_impl}) {
+    if (target != nullptr &&
+        std::find(targets.callees.begin(), targets.callees.end(), target) ==
+            targets.callees.end()) {
+      targets.callees.push_back(target);
+    }
+  }
+  return targets;
+}
+
+} // namespace
+
+DexMethod* resolve_method_handle(const DexMethodHandle* method_handle,
+                                 const DexMethod* caller) {
+  auto opcode = method_handle_opcode(method_handle);
+  if (!opcode::is_a_method_invoke(opcode)) {
+    return nullptr;
+  }
+  auto* method_ref = method_handle->methodref();
+  if (opcode == OPCODE_INVOKE_INTERFACE || opcode == OPCODE_INVOKE_VIRTUAL) {
+    // ART throws IncompatibleClassChangeError when it resolves a handle whose
+    // kind disagrees with whether the named class is an interface.
+    const auto* cls = type_class(method_ref->get_class());
+    if (cls != nullptr &&
+        is_interface(cls) != (opcode == OPCODE_INVOKE_INTERFACE)) {
+      return nullptr;
+    }
+  }
+  if (opcode == OPCODE_INVOKE_SUPER) {
+    auto targets = resolve_nonvirtual_handle_targets(method_ref, caller);
+    return targets.agree ? targets.caller_impl : nullptr;
+  }
+  return resolve_invoke_method_deprecated(opcode, method_ref, caller);
+}
+
+std::vector<DexMethod*> resolve_method_handle_callees(
+    const DexMethodHandle* method_handle, const DexMethod* caller) {
+  auto* callee = resolve_method_handle(method_handle, caller);
+  if (callee != nullptr) {
+    return {callee};
+  }
+  if (method_handle_opcode(method_handle) != OPCODE_INVOKE_SUPER) {
+    return {};
+  }
+  return resolve_nonvirtual_handle_targets(method_handle->methodref(), caller)
+      .callees;
 }
 
 DexField* resolve_field_handle(const DexMethodHandle* method_handle) {

@@ -612,7 +612,8 @@ reduce_gotos_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 reduce_sparse_switches_test_SOURCES = ReduceSparseSwitchesTest.cpp
 
-ref_checker_test_SOURCES = RefCheckerTest.cpp
+ref_checker_test_SOURCES = RefCheckerTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
+ref_checker_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 reflection_analysis_test_SOURCES = ReflectionAnalysisTest.cpp
 reflection_analysis_test_LDADD = $(COMMON_MOCK_TEST_LIBS)

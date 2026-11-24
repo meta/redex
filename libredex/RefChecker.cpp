@@ -33,28 +33,61 @@ CodeRefs::CodeRefs(const DexMethod* method,
     if (insn->has_type()) {
       always_assert(insn->get_type());
       types_set.insert(insn->get_type());
-    } else if (insn->has_method()) {
-      auto* callee = resolve_invoke_method_deprecated(insn, method);
+    } else if (insn->has_proto() || insn->has_callsite() ||
+               insn->has_methodhandle() || insn->has_signature_polymorphic()) {
+      // Includes the types of a call site's method type and bootstrap
+      // arguments, and those of the methods and fields that method handles
+      // name.
+      std::vector<const DexType*> named_types;
+      insn->gather_types(named_types);
+      insert_unordered_iterable(types_set, named_types);
+    }
+    // The calls and field accesses of the method handles that an instruction
+    // holds are checked like those of the instructions they act like.
+    for_each_invoke(insn, [&](IROpcode opcode, DexMethodRef* callee_ref,
+                              const DexMethodHandle* method_handle) {
+      auto* callee =
+          method_handle == nullptr
+              ? resolve_invoke_method_deprecated(opcode, callee_ref, method)
+              : resolve_method_handle(method_handle, method);
       if (callee == nullptr) {
         invalid_refs = true;
-        break;
+        return;
       }
-      auto* callee_ref = insn->get_method();
       if (callee != callee_ref) {
         types_set.insert(callee_ref->get_class());
       }
       methods_set.insert(callee);
-    } else if (insn->has_field()) {
-      auto* field_ref = insn->get_field();
-      auto* field = resolve_field(field_ref);
-      if (field == nullptr) {
+    });
+    if (insn->has_signature_polymorphic()) {
+      // A method handle call invokes its signature-polymorphic method, such as
+      // `MethodHandle.invokeExact`, virtually.
+      auto* callee = resolve_method_deprecated(
+          insn->get_signature_polymorphic()->method(), MethodSearch::Virtual);
+      if (callee == nullptr) {
         invalid_refs = true;
-        break;
+      } else {
+        methods_set.insert(callee);
       }
-      if (field != field_ref) {
-        types_set.insert(field_ref->get_class());
-      }
-      fields_set.insert(field);
+    }
+    for_each_field_access(insn,
+                          [&](IROpcode /* opcode */, DexFieldRef* field_ref,
+                              const DexMethodHandle* method_handle) {
+                            auto* field =
+                                method_handle == nullptr
+                                    ? resolve_field(field_ref)
+                                    : resolve_field_handle(method_handle);
+                            if (field == nullptr) {
+                              invalid_refs = true;
+                              return;
+                            }
+                            if (field != field_ref) {
+                              types_set.insert(field_ref->get_class());
+                            }
+                            fields_set.insert(field);
+                          });
+    if (invalid_refs) {
+      break;
     }
   }
   if (invalid_refs) {

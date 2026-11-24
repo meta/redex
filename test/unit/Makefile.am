@@ -57,6 +57,7 @@ check_PROGRAMS = \
     boxed_boolean_propagation_test \
     branch_prefix_hoisting_test \
     bridge_synth_inline_pass_test \
+    builder_analysis_test \
     call_site_summary_reductions_test \
     callsite_never_inline_cloning_end_to_end_test \
     callsite_never_inline_cloning_test \
@@ -310,6 +311,8 @@ boxed_boolean_propagation_test_SOURCES = constant-propagation/BoxedBooleanPropag
 branch_prefix_hoisting_test_SOURCES = BranchPrefixHoistingTest.cpp ScopeHelper.cpp
 
 bridge_synth_inline_pass_test_SOURCES = BridgeSynthInlinePassTest.cpp
+
+builder_analysis_test_SOURCES = BuilderAnalysisTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 call_site_summary_reductions_test_SOURCES = CallSiteSummaryReductionsTest.cpp
 

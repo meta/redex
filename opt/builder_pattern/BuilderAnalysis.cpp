@@ -511,17 +511,15 @@ ConstTypeHashSet BuilderAnalysis::escape_types() {
     for (const auto& it : pair.second) {
       auto* insn = it->insn;
       // If there is any invoke here, it is because we couldn't inline it.
-      if (opcode::is_a_method_invoke(insn->opcode())) {
+      // invoke-polymorphic and invoke-custom are never inlined.
+      if (opcode::is_an_invoke(insn->opcode())) {
         // We accept Object.<init> calls.
-        if (insn->get_method() == acceptable_method) {
+        if (insn->has_method() && insn->get_method() == acceptable_method) {
           continue;
         }
 
-        auto* method =
-            resolve_method_deprecated(insn->get_method(), MethodSearch::Any);
-
         TRACE(BLD_PATTERN, 2, "Excluding type %s since we couldn't inline %s",
-              SHOW(current_instance), SHOW(method));
+              SHOW(current_instance), SHOW(insn));
         escape_types.emplace(current_instance);
       } else if (insn->opcode() == OPCODE_INSTANCE_OF) {
         TRACE(BLD_PATTERN, 2, "Excluding type %s since instanceof used",

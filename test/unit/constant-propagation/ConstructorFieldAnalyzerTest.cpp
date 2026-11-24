@@ -70,7 +70,9 @@ class ConstructorFieldAnalyzerTest : public RedexTest {
  protected:
   // Runs constant propagation with the constructor field analysis over the
   // constructor `m_ctor` and returns how many field stores remain.
-  size_t optimize(const std::string& instructions) {
+  size_t optimize(
+      const std::string& instructions,
+      const UnorderedSet<const DexField*>& constructor_only_fields = {}) {
     const std::string initializer =
         m_initializer.empty()
             ? ""
@@ -84,8 +86,8 @@ class ConstructorFieldAnalyzerTest : public RedexTest {
                [](DexMethod*, IRCode& code) { code.build_cfg(); });
     auto* code = m_ctor->get_code();
     auto& cfg = code->cfg();
-    const auto class_fields =
-        cp::ClassConstructorFields::create(m_class, m_keeping);
+    const auto class_fields = cp::ClassConstructorFields::create(
+        m_class, m_keeping, constructor_only_fields);
     const auto& state = class_fields.constructors.at(m_ctor);
     auto env = cp::interprocedural::env_with_params(
         /* is_static */ false, code,
@@ -683,6 +685,87 @@ TEST_F(ConstructorFieldAnalyzerTest,
   auto it = fields.entry_writes.find(a);
   ASSERT_NE(it, fields.entry_writes.end());
   EXPECT_EQ(it->second, fields.constructors.at(a).tracked_fields());
+  walk::code(Scope{m_class},
+             [](DexMethod*, IRCode& code) { code.clear_cfg(); });
+}
+
+TEST_F(ConstructorFieldAnalyzerTest,
+       ConstructorOnlyFieldStaysTrackedAfterEscape) {
+  const std::string body = R"(
+    (invoke-static (v0) "LHelper;.mutate:(LDefaults;)V")
+    (const v3 0) (iput v3 v0 "LDefaults;.i:I")
+    (const v4 0) (iput v4 v0 "LDefaults;.z:Z")
+  )";
+  UnorderedSet<const DexField*> constructor_only;
+  constructor_only.insert(DexField::get_field("LDefaults;.i:I")->as_def());
+  EXPECT_EQ(optimize(body), 2);
+  // Only i stays tracked; z may have been changed by the helper.
+  EXPECT_EQ(optimize(body, constructor_only), 1);
+  EXPECT_NE(m_last_code.find("LDefaults;.z:Z"), std::string::npos)
+      << m_last_code;
+}
+
+TEST_F(ConstructorFieldAnalyzerTest,
+       ConstructorCallOnThisForgetsConstructorOnlyFields) {
+  UnorderedSet<const DexField*> constructor_only;
+  constructor_only.insert(DexField::get_field("LDefaults;.i:I")->as_def());
+  m_initializer = "";
+  // The second call runs this constructor's code again on the same object,
+  // which may store another value to i.
+  EXPECT_EQ(optimize(R"(
+    (const v3 1) (iput v3 v0 "LDefaults;.i:I")
+    (invoke-direct (v0 v1 v2) "LDefaults;.<init>:(ILjava/lang/Object;)V")
+    (iput v3 v0 "LDefaults;.i:I")
+  )",
+                     constructor_only),
+            2);
+}
+
+TEST_F(ConstructorFieldAnalyzerTest, KeptReadAfterEscapeForgetsOtherFields) {
+  m_ctor->set_code(assembler::ircode_from_string(R"(
+    ((load-param-object v0) (load-param v1) (load-param-object v2)
+     (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+     (const v3 7) (iput v3 v0 "LDefaults;.i:I")
+     (:loop)
+     (iget-boolean v0 "LDefaults;.z:Z") (move-result-pseudo v3)
+     (const v4 9) (invoke-virtual (v0 v4) "LDefaults;.set:(I)V")
+     (if-nez v1 :loop) (return-void))
+  )"));
+  walk::code(Scope{m_class},
+             [](DexMethod*, IRCode& code) { code.build_cfg(); });
+  auto* code = m_ctor->get_code();
+  auto& cfg = code->cfg();
+  const auto* kept = DexField::get_field("LDefaults;.z:Z")->as_def();
+  const auto* changed = DexField::get_field("LDefaults;.i:I")->as_def();
+  UnorderedSet<const DexField*> constructor_only;
+  constructor_only.insert(kept);
+  const auto class_fields =
+      cp::ClassConstructorFields::create(m_class, {}, constructor_only);
+  const auto& state = class_fields.constructors.at(m_ctor);
+  auto env = cp::interprocedural::env_with_params(
+      /* is_static */ false, code, cp::interprocedural::ArgumentDomain::top());
+  class_fields.initialize_fields(m_ctor, state.tracked_fields(), &env);
+  cp::intraprocedural::FixpointIterator fp_iter(
+      cfg,
+      InstructionAnalyzerCombiner<cp::ConstructorFieldAnalyzer,
+                                  cp::PrimitiveAnalyzer>(&state, nullptr));
+  fp_iter.run(env);
+  // The loop head is entered after set(9) may have changed i; reading the
+  // kept field there must still forget i.
+  bool checked = false;
+  for (auto* block : cfg.blocks()) {
+    for (const auto& mie : InstructionIterable(block)) {
+      if (mie.insn->opcode() == OPCODE_IGET_BOOLEAN) {
+        ASSERT_TRUE(state.is_this_access(mie.insn));
+        auto after = fp_iter.get_entry_state_at(block);
+        cp::ConstructorFieldAnalyzer::analyze_iget(&state, mie.insn, &after);
+        const auto value = after.get_field_environment().get(changed);
+        EXPECT_TRUE(value.is_top()) << value;
+        checked = true;
+      }
+    }
+  }
+  EXPECT_TRUE(checked);
   walk::code(Scope{m_class},
              [](DexMethod*, IRCode& code) { code.clear_cfg(); });
 }

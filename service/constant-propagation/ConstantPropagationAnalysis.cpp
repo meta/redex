@@ -1302,17 +1302,41 @@ UnorderedSet<const DexField*> get_tracked_fields(const DexClass* cls) {
 ConstructorFieldAnalyzerState ConstructorFieldAnalyzerState::create(
     const cfg::ControlFlowGraph& cfg,
     const DexClass* cls,
-    const UnorderedSet<const DexMethod*>& constructors_keeping_this) {
+    const UnorderedSet<const DexMethod*>& constructors_keeping_this,
+    const UnorderedSet<const DexField*>& constructor_only_fields) {
   ConstructorFieldAnalyzerState state(
       cls, get_tracked_fields(cls),
       local_pointers::ConstructorAccesses(cfg, cls, constructors_keeping_this));
+  // Callers may pass the fields of the whole program, so look up the class's
+  // own fields in them rather than scanning them.
+  for (const auto* field : UnorderedIterable(state.m_tracked_fields)) {
+    if (constructor_only_fields.count(field) != 0u) {
+      state.m_constructor_only_fields.insert(field);
+    }
+  }
   for (const auto& [insn, access] :
        UnorderedIterable(state.m_accesses.field_accesses())) {
+    if (state.m_tracked_fields.count(access.field) == 0u) {
+      continue;
+    }
+    const bool constructor_only =
+        state.m_constructor_only_fields.count(access.field) != 0u;
+    if (opcode::is_an_iput(insn->opcode()) &&
+        access.receiver != local_pointers::Receiver::This) {
+      // After `this` escapes, a call can hand it back under a name the
+      // pointer analysis does not connect to `this`, so such a store could
+      // change a constructor-only field. Callers name only fields that this
+      // constructor stores through `this` alone.
+      always_assert_log(!constructor_only,
+                        "Constructor-only field %s is stored through another "
+                        "receiver: %s",
+                        SHOW(access.field), SHOW(insn));
+    }
     // Once `this` may have escaped, other code may change its fields at any
-    // later point, for instance through a saved reference, so nothing after
-    // the escape is tracked.
-    if (access.after_escape || state.m_accesses.is_escape(insn) ||
-        state.m_tracked_fields.count(access.field) == 0u) {
+    // later point, for instance through a saved reference, so only
+    // constructor-only fields are tracked after an escape.
+    if ((access.after_escape || state.m_accesses.is_escape(insn)) &&
+        !constructor_only) {
       continue;
     }
     if (access.receiver == local_pointers::Receiver::This) {
@@ -1355,7 +1379,8 @@ struct OwnConstructorCall {
 
 ClassConstructorFields ClassConstructorFields::create(
     const DexClass* cls,
-    const UnorderedSet<const DexMethod*>& constructors_keeping_this) {
+    const UnorderedSet<const DexMethod*>& constructors_keeping_this,
+    const UnorderedSet<const DexField*>& constructor_only_fields) {
   ClassConstructorFields fields;
   std::vector<OwnConstructorCall> own_calls;
   bool has_excluded_constructor = false;
@@ -1369,7 +1394,7 @@ ClassConstructorFields ClassConstructorFields::create(
     always_assert_log(code->cfg_built(), "No CFG for %s", SHOW(ctor));
     auto& cfg = code->cfg();
     auto state = ConstructorFieldAnalyzerState::create(
-        cfg, cls, constructors_keeping_this);
+        cfg, cls, constructors_keeping_this, constructor_only_fields);
     const auto stored_before_escape = get_stored_before_escape(state);
     for (const auto& mie : cfg::InstructionIterable(cfg)) {
       const auto* call = state.accesses().get_delegating_call(mie.insn);
@@ -1435,17 +1460,32 @@ void ClassConstructorFields::initialize_fields(
   }
 }
 
+namespace {
+
+// After an escape, only constructor-only fields keep their values. After a
+// call of a constructor of the class on `this`, none do: the callee may store
+// to any of them, even when it keeps `this`.
+void forget_fields_others_may_change(const ConstructorFieldAnalyzerState& state,
+                                     const IRInstruction* insn,
+                                     ConstantEnvironment* env) {
+  if (state.accesses().get_delegating_call(insn) != nullptr) {
+    env->clear_field_environment();
+  } else if (state.accesses().is_escape(insn)) {
+    for (const auto* field : UnorderedIterable(state.tracked_fields())) {
+      if (state.constructor_only_fields().count(field) == 0u) {
+        env->set(field, ConstantValue::top());
+      }
+    }
+  }
+}
+
+} // namespace
+
 bool ConstructorFieldAnalyzer::analyze_default(
     const ConstructorFieldAnalyzerState* state,
     const IRInstruction* insn,
     ConstantEnvironment* env) {
-  // After an escape, other code may have changed any field. After a call of a
-  // constructor of the class on `this`, the callee may have stored to any of
-  // them, even when it keeps `this`.
-  if (state->accesses().is_escape(insn) ||
-      state->accesses().get_delegating_call(insn) != nullptr) {
-    env->clear_field_environment();
-  }
+  forget_fields_others_may_change(*state, insn, env);
   return false;
 }
 
@@ -1458,6 +1498,7 @@ bool ConstructorFieldAnalyzer::analyze_iget(
     return analyze_default(state, insn, env);
   }
   env->set(RESULT_REGISTER, env->get_field_environment().get(field));
+  forget_fields_others_may_change(*state, insn, env);
   return true;
 }
 
@@ -1469,11 +1510,14 @@ bool ConstructorFieldAnalyzer::analyze_iput(
   if (field != nullptr) {
     // Every iput has two sources: the stored value, then the receiver.
     env->set(field, env->get(insn->src(0)));
+    // Storing `this` into one of its own fields also lets it escape.
+    forget_fields_others_may_change(*state, insn, env);
     return true;
   }
   field = state->get_maybe_this_store(insn);
   if (field != nullptr) {
     env->set(field, ConstantValue::top());
+    forget_fields_others_may_change(*state, insn, env);
     return true;
   }
   return analyze_default(state, insn, env);

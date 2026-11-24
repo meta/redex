@@ -334,6 +334,11 @@ class InitFieldAnalyzer final
  * receiver is `this` record a value, so a copy constructor that writes another
  * instance's fields leaves the tracked values alone. A store whose receiver
  * may or may not be `this` makes its field unknown.
+ *
+ * A caller can name fields that no code but the class's constructors writes,
+ * each only on the object it builds, and that this constructor stores only
+ * through `this`. They stay tracked after `this` escapes, since the code that
+ * sees `this` cannot change them.
  */
 class ConstructorFieldAnalyzerState {
  public:
@@ -342,13 +347,18 @@ class ConstructorFieldAnalyzerState {
   static ConstructorFieldAnalyzerState create(
       const cfg::ControlFlowGraph& cfg,
       const DexClass* cls,
-      const UnorderedSet<const DexMethod*>& constructors_keeping_this);
+      const UnorderedSet<const DexMethod*>& constructors_keeping_this,
+      const UnorderedSet<const DexField*>& constructor_only_fields = {});
 
   // The class under construction.
   const DexType* get_class() const { return m_cls->get_type(); }
 
   const UnorderedSet<const DexField*>& tracked_fields() const {
     return m_tracked_fields;
+  }
+
+  const UnorderedSet<const DexField*>& constructor_only_fields() const {
+    return m_constructor_only_fields;
   }
 
   const local_pointers::ConstructorAccesses& accesses() const {
@@ -383,11 +393,15 @@ class ConstructorFieldAnalyzerState {
   const DexClass* m_cls;
   // The class's instance fields that are tracked: all but volatile fields.
   UnorderedSet<const DexField*> m_tracked_fields;
-  // How the constructor uses `this`. Fields that other code may change are
-  // unknown after each escape.
+  // Tracked fields that no code but the class's constructors writes, each only
+  // on the object it builds, and that this constructor stores only through
+  // `this`.
+  UnorderedSet<const DexField*> m_constructor_only_fields;
+  // How the constructor uses `this`. After each escape, only constructor-only
+  // fields keep their values.
   local_pointers::ConstructorAccesses m_accesses;
   // Accesses to tracked fields whose receiver is always `this`, where `this`
-  // cannot have escaped yet.
+  // cannot have escaped yet or the field is constructor-only.
   UnorderedMap<const IRInstruction*, const DexField*> m_this_accesses;
   // Stores to tracked fields whose receiver may or may not be `this`, where
   // `this` cannot have escaped yet.
@@ -418,7 +432,8 @@ struct ClassConstructorFields {
   // could change a constructor that is excluded from optimization.
   static ClassConstructorFields create(
       const DexClass* cls,
-      const UnorderedSet<const DexMethod*>& constructors_keeping_this);
+      const UnorderedSet<const DexMethod*>& constructors_keeping_this,
+      const UnorderedSet<const DexField*>& constructor_only_fields = {});
 };
 
 // Follows a constructor's tracked fields. It must see every instruction that

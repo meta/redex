@@ -771,6 +771,7 @@ TEST_F(MethodInlineTest, armv7_hard_size_limit_overrides_force_inline) {
 
 TEST_F(MethodInlineTest, minimal_self_loop_regression) {
   ConcurrentMethodResolverDeprecated concurrent_method_resolver;
+  DexMethod* foo_main = nullptr;
 
   bool intra_dex = false;
 
@@ -788,7 +789,7 @@ TEST_F(MethodInlineTest, minimal_self_loop_regression) {
     auto* foo_m1 = make_loopy_method(foo_cls, "foo_m1");
     candidates.insert(foo_m1);
     // foo_main calls foo_m1.
-    make_a_method_calls_others(foo_cls, "foo_main", {foo_m1});
+    foo_main = make_a_method_calls_others(foo_cls, "foo_main", {foo_m1});
     expected_inlined.insert(foo_m1);
   }
   auto scope = build_class_scope(stores);
@@ -809,6 +810,44 @@ TEST_F(MethodInlineTest, minimal_self_loop_regression) {
   for (auto* method : expected_inlined) {
     EXPECT_EQ(inlined.count(method), 1);
   }
+  // The inlined loop never returns, so foo_main must not return either.
+  auto& foo_main_cfg = foo_main->get_code()->cfg();
+  foo_main_cfg.remove_unreachable_blocks();
+  EXPECT_TRUE(foo_main_cfg.return_blocks().empty());
+}
+
+// Inlining the loop into the wrapper leaves the wrapper's return-void behind,
+// unreachable; the wrapper still never returns, so neither may the caller.
+TEST_F(MethodInlineTest, nested_self_loop_regression) {
+  auto* foo_cls = create_a_class("Lfoo;");
+  DexStoresVector stores;
+  {
+    DexStore store("root");
+    store.add_classes({});
+    store.add_classes({foo_cls});
+    stores.push_back(std::move(store));
+  }
+  auto* loop = make_loopy_method(foo_cls, "loop");
+  auto* wrapper = make_a_method_calls_others(foo_cls, "wrapper", {loop});
+  auto* caller = make_a_method_calls_others(foo_cls, "caller", {wrapper});
+  UnorderedSet<DexMethod*> candidates{loop, wrapper};
+  auto scope = build_class_scope(stores);
+  walk::parallel::code(scope, [&](auto*, IRCode& code) { code.build_cfg(); });
+  api::LevelChecker::init(0, scope);
+  inliner::InlinerConfig inliner_config;
+  inliner_config.populate(scope);
+  init_classes::InitClassesWithSideEffects init_classes_with_side_effects(
+      scope, /* create_init_class_insns */ false);
+  ConcurrentMethodResolverDeprecated concurrent_method_resolver;
+  MultiMethodInliner inliner(scope, init_classes_with_side_effects, stores,
+                             conf, candidates,
+                             std::ref(concurrent_method_resolver),
+                             inliner_config, /* min_sdk */ 0, InterDex);
+  inliner.inline_methods();
+  EXPECT_EQ(inliner.get_inlined().count(wrapper), 1);
+  auto& caller_cfg = caller->get_code()->cfg();
+  caller_cfg.remove_unreachable_blocks();
+  EXPECT_TRUE(caller_cfg.return_blocks().empty());
 }
 
 TEST_F(MethodInlineTest, non_unique_inlined_registers) {

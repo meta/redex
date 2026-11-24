@@ -2897,6 +2897,35 @@ float MultiMethodInliner::compute_profile_guided_discount(
 
 namespace inliner {
 
+namespace {
+
+// Whether inlining the callee amounts to deleting the call: the callee does
+// nothing but load its parameters and return. Without branching instructions it
+// follows a single path from its entry, which must reach a return-void; an
+// empty infinite loop never does, even when an unreachable return block is left
+// over in the cfg.
+bool is_trivial_callee(const cfg::ControlFlowGraph& cfg) {
+  for (const auto& mie : InstructionIterable(cfg)) {
+    if (mie.insn->opcode() != OPCODE_RETURN_VOID &&
+        !opcode::is_load_param(mie.insn->opcode())) {
+      return false;
+    }
+  }
+  // Every block has at most one successor, so a path with more steps than there
+  // are blocks has entered a loop.
+  size_t steps = 0;
+  for (const auto* block = cfg.entry_block();
+       block->branchingness() != opcode::Branchingness::BRANCH_RETURN;
+       block = block->goes_to()) {
+    if (block->goes_to() == nullptr || ++steps > cfg.num_blocks()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+} // namespace
+
 // return true on successful inlining, false otherwise
 bool inline_with_cfg(DexMethod* caller_method,
                      DexMethod* callee_method,
@@ -2927,15 +2956,7 @@ bool inline_with_cfg(DexMethod* caller_method,
   const auto& callee_cfg =
       reduced_cfg != nullptr ? *reduced_cfg : callee_code->cfg();
 
-  bool is_trivial = true;
-  for (const auto& mie : InstructionIterable(callee_cfg)) {
-    if (mie.insn->opcode() != OPCODE_RETURN_VOID &&
-        !opcode::is_load_param(mie.insn->opcode())) {
-      is_trivial = false;
-      break;
-    }
-  }
-  if (is_trivial) {
+  if (is_trivial_callee(callee_cfg)) {
     // no need to go through expensive general inlining, which would also add
     // unnecessary or even dubious positions
     caller_cfg.remove_insn(callsite_it);

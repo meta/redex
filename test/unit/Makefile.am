@@ -446,7 +446,7 @@ unreachable_lowering_pass_test_SOURCES = UnreachableLoweringPassTest.cpp
 
 int_type_patcher_test_SOURCES = IntTypePatcherTest.cpp
 
-instruction_sequence_outliner_test_SOURCES = InstructionSequenceOutlinerTest.cpp ScopeHelper.cpp
+instruction_sequence_outliner_test_SOURCES = InstructionSequenceOutlinerTest.cpp ScopeHelper.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 interprocedural_constant_propagation_test_SOURCES = constant-propagation/IPConstantPropagationTest.cpp
 

@@ -331,6 +331,28 @@ static CandidateInstructionCore to_core(IRInstruction* insn) {
   return core;
 }
 
+// Whether a core holds everything that an instruction with `opcode` refers
+// to. Outlined code is rebuilt from cores, and cores are compared to find
+// repeated sequences, so only such instructions can be outlined.
+static bool core_holds_refs(IROpcode opcode) {
+  switch (opcode::ref(opcode)) {
+  case opcode::Ref::None:
+  case opcode::Ref::Literal:
+  case opcode::Ref::String:
+  case opcode::Ref::Type:
+  case opcode::Ref::Field:
+  case opcode::Ref::Method:
+  case opcode::Ref::Data:
+    return true;
+  case opcode::Ref::CallSite:
+  case opcode::Ref::MethodHandle:
+  case opcode::Ref::Proto:
+  case opcode::Ref::SignaturePolymorphic:
+    return false;
+  }
+  not_reached();
+}
+
 using CandidateInstructionCores =
     std::array<CandidateInstructionCore, MIN_INSNS_SIZE>;
 using CandidateInstructionCoresHasher = boost::hash<CandidateInstructionCores>;
@@ -581,6 +603,9 @@ static bool ranges_overlap(const Ranges& a, const Ranges& b) {
 }
 
 static bool can_outline_opcode(IROpcode opcode, bool outline_control_flow) {
+  if (!core_holds_refs(opcode)) {
+    return false;
+  }
   switch (opcode) {
   case IOPCODE_LOAD_PARAM:
   case IOPCODE_LOAD_PARAM_OBJECT:

@@ -24,6 +24,7 @@
 #include "OutliningProfileGuidanceImpl.h"
 #include "PassManager.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "ScopeHelper.h"
 #include "ScopedCFG.h"
 #include "Show.h"
@@ -145,6 +146,53 @@ struct InstructionSequenceOutlinerTest : public RedexTest {
   void run(bool type_check = true) {
     std::vector<Pass*> passes = {new InstructionSequenceOutliner()};
     run_passes(passes, m_classes, type_check);
+  }
+
+  // Gives several methods one body, an outlinable sequence with `middle` in
+  // between, runs the outliner and expects every method to still hold its
+  // `opcode` instruction. An `invoke-static` in `middle` becomes an
+  // `invoke-custom` when `make_invoke_custom` is set.
+  void expect_kept_in_place(const std::string& middle,
+                            IROpcode opcode,
+                            bool make_invoke_custom = false) {
+    auto methods = create_param_flow(6);
+    // No SDK is loaded, so the reference checks accept `MethodHandle` only as
+    // a class in scope.
+    m_classes.push_back(create_internal_class(
+        DexType::make_type("Ljava/lang/invoke/MethodHandle;"),
+        type::java_lang_Object(), {}, ACC_PUBLIC | ACC_ABSTRACT));
+    type_class(DexType::make_type("LPF;"))
+        ->add_field(
+            DexField::make_field("LPF;.h:Ljava/lang/invoke/MethodHandle;")
+                ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+    std::ostringstream oss;
+    oss << "(\n(load-param-object v0)\n";
+    for (int i = 0; i < 7; i++) {
+      oss << R"((sput-object v0 "LPF;.sf1:Ljava/lang/Object;"))" << "\n";
+    }
+    oss << middle << "\n";
+    for (int i = 0; i < 7; i++) {
+      oss << R"((sput-object v0 "LPF;.sf2:Ljava/lang/Object;"))" << "\n";
+    }
+    oss << "(return-void)\n)";
+    for (auto* method : methods) {
+      method->set_code(assembler::ircode_from_string(oss.str()));
+      if (make_invoke_custom) {
+        redex::make_invoke_custom(method->get_code(), "run", "(LPFSub;)V");
+      }
+    }
+
+    run();
+
+    for (auto* method : methods) {
+      cfg::ScopedCFG cfg(method->get_code());
+      auto ii = cfg::InstructionIterable(*cfg);
+      EXPECT_TRUE(std::any_of(
+          ii.begin(), ii.end(),
+          [&](const auto& mie) { return mie.insn->opcode() == opcode; }))
+          << show(method) << " lost its " << show(opcode) << ":\n"
+          << show(*cfg);
+    }
   }
 
   ~InstructionSequenceOutlinerTest() {}
@@ -675,4 +723,44 @@ TEST_F(InstructionSequenceOutlinerTest, ComparisonOfUninitializedObject) {
   // The stores are outlined without the object, so the fixture still presents
   // outlinable code.
   EXPECT_GT(outlined_calls, 0u);
+}
+
+// The outliner does not represent method handles, method types, the call-site
+// prototype of invoke-polymorphic or call sites, so it leaves instructions
+// that hold them in place.
+TEST_F(InstructionSequenceOutlinerTest, MethodHandleConstantNotOutlined) {
+  expect_kept_in_place(R"(
+    (const-method-handle invoke-static "LPF;.target:()V")
+    (move-result-pseudo-object v1)
+    (sput-object v1 "LPF;.sf1:Ljava/lang/Object;")
+  )",
+                       OPCODE_CONST_METHOD_HANDLE);
+}
+
+TEST_F(InstructionSequenceOutlinerTest, MethodTypeConstantNotOutlined) {
+  expect_kept_in_place(R"(
+    (const-method-type "(LPFSub;)V")
+    (move-result-pseudo-object v1)
+    (sput-object v1 "LPF;.sf1:Ljava/lang/Object;")
+  )",
+                       OPCODE_CONST_METHOD_TYPE);
+}
+
+TEST_F(InstructionSequenceOutlinerTest, MethodHandleCallNotOutlined) {
+  expect_kept_in_place(R"(
+    (sget-object "LPF;.h:Ljava/lang/invoke/MethodHandle;")
+    (move-result-pseudo-object v1)
+    (sget-object "LPF;.sf1:Ljava/lang/Object;")
+    (move-result-pseudo-object v2)
+    (invoke-polymorphic (v1 v2) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(Ljava/lang/Object;)V")
+  )",
+                       OPCODE_INVOKE_POLYMORPHIC);
+}
+
+TEST_F(InstructionSequenceOutlinerTest, CallSiteCallNotOutlined) {
+  expect_kept_in_place(R"(
+    (invoke-static (v0) "LPF;.placeholder:(LPFSub;)V")
+  )",
+                       OPCODE_INVOKE_CUSTOM,
+                       /* make_invoke_custom */ true);
 }

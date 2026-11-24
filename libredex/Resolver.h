@@ -183,23 +183,37 @@ void for_each_invoke(const IRInstruction* insn, Fn&& f) {
 }
 
 /**
- * Whether what `insn` does depends on the class of the method that holds it,
- * beyond access checks, so that moving it to a method of another class can
- * change what it does: a call that resolves like invoke-super, by the
- * instruction or a method handle it holds, whose target ART finds from that
- * class, or an `invoke-custom`, whose bootstrap method receives a
- * `MethodHandles.Lookup` in that class.
+ * Whether what `insn` does depends on the class of the method that holds it
+ * itself, not only on that class's superclass, beyond access checks: a call by
+ * a method handle it holds that resolves like invoke-super, which runs the
+ * implementation that class has (see `resolve_method_handle`), or an
+ * `invoke-custom`, whose bootstrap method receives a `MethodHandles.Lookup` in
+ * that class. Moving it to a method of another class can change what it does
+ * even when that class has the same superclass.
  */
-inline bool depends_on_holder_class(const IRInstruction* insn) {
+inline bool depends_on_holder_class_beyond_superclass(
+    const IRInstruction* insn) {
   if (opcode::is_invoke_custom(insn->opcode())) {
     return true;
   }
   bool result = false;
-  for_each_invoke(insn, [&](IROpcode opcode, DexMethodRef* /* method_ref */,
-                            const DexMethodHandle* /* method_handle */) {
-    result = result || opcode == OPCODE_INVOKE_SUPER;
+  for_each_method_handle(insn, [&](const DexMethodHandle* method_handle) {
+    result =
+        result || method_handle_opcode(method_handle) == OPCODE_INVOKE_SUPER;
   });
   return result;
+}
+
+/**
+ * Whether what `insn` does depends on the class of the method that holds it,
+ * beyond access checks, so that moving it to a method of another class can
+ * change what it does: an invoke-super, whose target ART finds from that
+ * class's superclass, or an instruction that
+ * `depends_on_holder_class_beyond_superclass`.
+ */
+inline bool depends_on_holder_class(const IRInstruction* insn) {
+  return insn->opcode() == OPCODE_INVOKE_SUPER ||
+         depends_on_holder_class_beyond_superclass(insn);
 }
 
 /**

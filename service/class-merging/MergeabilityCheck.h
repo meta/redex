@@ -44,6 +44,7 @@ class MergeabilityChecker {
 
   void exclude_unsupported_cls_property(TypeSet& non_mergeables);
   void exclude_unsupported_bytecode(TypeSet& non_mergeables);
+  void exclude_method_handle_refs(TypeSet& non_mergeables);
   void exclude_static_fields(TypeSet& non_mergeables);
   void exclude_unsafe_sdk_and_store_refs(TypeSet& non_mergeables);
   void exclude_unhandled_anno_refs(TypeSet& non_mergeables);

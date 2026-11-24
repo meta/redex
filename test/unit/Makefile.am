@@ -66,6 +66,7 @@ check_PROGRAMS = \
     class_checker_test \
     class_merging_fields_test \
     class_merging_hot_cold_grouping_test \
+    class_merging_method_handle_test \
     class_merging_models_test \
     class_order_sample_test \
     check_breadcrumbs_test \
@@ -334,6 +335,10 @@ class_merging_fields_test_SOURCES = \
 
 class_merging_hot_cold_grouping_test_SOURCES = \
     ClassMergingHotColdGroupingTest.cpp ScopeHelper.cpp
+
+class_merging_method_handle_test_SOURCES = \
+    ClassMergingMethodHandleTest.cpp ScopeHelper.cpp \
+    $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 class_merging_models_test_SOURCES = \
     ClassMergingModelsTest.cpp ScopeHelper.cpp

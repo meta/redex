@@ -7,7 +7,10 @@
 
 #include "MergeabilityCheck.h"
 
+#include <array>
+
 #include "ClassUtil.h"
+#include "DexMethodHandle.h"
 #include "DexUtil.h"
 #include "IRCode.h"
 #include "LiveRange.h"
@@ -20,6 +23,24 @@
 #include "Walkers.h"
 
 using namespace class_merging;
+
+namespace {
+
+// The class of the member that `method_handle`, held by code of `holder`
+// (nullptr outside code), names, and the class of the member it resolves to.
+std::array<const DexType*, 2> classes_of_method_handle(
+    const DexMethodHandle* method_handle, const DexMethod* holder) {
+  if (DexMethodHandle::isInvokeType(method_handle->type())) {
+    const auto* method = resolve_method_handle(method_handle, holder);
+    return {method_handle->methodref()->get_class(),
+            method == nullptr ? nullptr : method->get_class()};
+  }
+  const auto* field = resolve_field_handle(method_handle);
+  return {method_handle->fieldref()->get_class(),
+          field == nullptr ? nullptr : field->get_class()};
+}
+
+} // namespace
 
 MergeabilityChecker::MergeabilityChecker(const Scope& scope,
                                          const ModelSpec& spec,
@@ -281,6 +302,44 @@ void MergeabilityChecker::exclude_unsupported_bytecode(
                         non_mergeables_opcode.end());
 }
 
+void MergeabilityChecker::exclude_method_handle_refs(TypeSet& non_mergeables) {
+  // Merging moves the code of a mergeable into its merger, which has the same
+  // superclass, and replaces or deletes its methods and fields. So a mergeable
+  // whose code does something that depends on the class that holds it beyond
+  // that class's superclass is not merged, and neither is the class of a
+  // member that a method handle names or resolves to, which the handle must go
+  // on naming. Unlike the other checks of bytecode, this one applies to the
+  // code of generated classes too.
+  TypeSet excluded = walk::parallel::methods<TypeSet, MergeContainers<TypeSet>>(
+      m_scope, [this](DexMethod* method) {
+        TypeSet result;
+        auto* code = method->get_code();
+        if (code == nullptr) {
+          return result;
+        }
+        for (const auto& mie : InstructionIterable(code->cfg())) {
+          auto* insn = mie.insn;
+          if (depends_on_holder_class_beyond_superclass(insn) &&
+              m_spec.merging_targets.count(method->get_class()) > 0) {
+            TRACE(CLMG, 5, "[non mergeable] %s depends on its class in %s",
+                  SHOW(insn), SHOW(method));
+            result.insert(method->get_class());
+          }
+          for_each_method_handle(insn, [&](const DexMethodHandle* handle) {
+            for (const auto* type : classes_of_method_handle(handle, method)) {
+              if (type != nullptr && m_spec.merging_targets.count(type) > 0) {
+                TRACE(CLMG, 5, "[non mergeable] named by a method handle in %s",
+                      SHOW(method));
+                result.insert(type);
+              }
+            }
+          });
+        }
+        return result;
+      });
+  non_mergeables.insert(excluded.begin(), excluded.end());
+}
+
 void MergeabilityChecker::exclude_static_fields(TypeSet& non_mergeables) {
   static const DexType* string_type = type::java_lang_String();
 
@@ -476,6 +535,13 @@ TypeSet MergeabilityChecker::get_non_mergeables() {
   TRACE(CLMG,
         4,
         "Non mergeables (opcodes) %zu",
+        non_mergeables.size() - prev_size);
+  prev_size = non_mergeables.size();
+
+  exclude_method_handle_refs(non_mergeables);
+  TRACE(CLMG,
+        4,
+        "Non mergeables (method handles) %zu",
         non_mergeables.size() - prev_size);
   prev_size = non_mergeables.size();
 

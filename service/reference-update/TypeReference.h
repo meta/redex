@@ -69,6 +69,13 @@ bool proto_has_reference_to(const DexProto* proto,
                             const UnorderedTypeSet& targets);
 
 /**
+ * `type` with its type, or element type, replaced by the new type if
+ * `old_to_new` maps it.
+ */
+DexType* get_new_type(const DexType* type,
+                      const UnorderedMap<const DexType*, DexType*>& old_to_new);
+
+/**
  * Get a new proto by updating the type references on the proto from an old type
  * to the provided new type.
  */

@@ -165,3 +165,15 @@ TEST_F(TypeReferenceTest, keeps_default_method_apart_from_overload) {
             DexType::make_type("LN;"));
   EXPECT_NE(default_method->get_name(), overload->get_name());
 }
+
+TEST_F(TypeReferenceTest, get_new_type) {
+  UnorderedMap<const DexType*, DexType*> old_to_new{
+      {DexType::make_type("LA;"), DexType::make_type("LB;")}};
+
+  EXPECT_EQ(get_new_type(DexType::make_type("LA;"), old_to_new),
+            DexType::make_type("LB;"));
+  EXPECT_EQ(get_new_type(DexType::make_type("[[LA;"), old_to_new),
+            DexType::make_type("[[LB;"));
+  EXPECT_EQ(get_new_type(DexType::make_type("LOther;"), old_to_new),
+            DexType::make_type("LOther;"));
+}

@@ -589,18 +589,6 @@ DexMethod* redex_internal_checkObjectNotNull() {
       "Lredex/$NullCheck;.null_check:(Ljava/lang/Object;)V"));
 }
 
-DexMethod* java_lang_invoke_MethodHandle_invoke() {
-  return dynamic_cast<DexMethod*>(
-      DexMethod::get_method("Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/"
-                            "lang/Object;)Ljava/lang/Object;"));
-}
-
-DexMethod* java_lang_invoke_MethodHandle_invokeExact() {
-  return dynamic_cast<DexMethod*>(DexMethod::get_method(
-      "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/"
-      "lang/Object;)Ljava/lang/Object;"));
-}
-
 std::optional<std::string_view> get_param_name(const DexMethod* m, size_t idx) {
   // First try to look it up from the debug info item.
   const auto* code = m->get_code();

@@ -803,44 +803,30 @@ void validate_access(const DexMethod* accessor, const DexMember* accessee) {
   throw TypeCheckingException(out.str());
 }
 
+// `invoke-polymorphic` calls a signature-polymorphic method (JLS 15.12.3): one
+// declared in java.lang.invoke.MethodHandle or java.lang.invoke.VarHandle whose
+// only parameter is an Object[], and which is native and varargs when its
+// definition is known. The call site's prototype, not the method's, types the
+// arguments and the result.
 void validate_invoke_polymorphic(const DexMethodRef* callee) {
   // callee must not be null, since this also acts as a precheck before any type
   // check.
   redex_assert(callee != nullptr);
 
-  if (callee->is_def()) {
-    // callee is a definition, we can match them exactly with what we want.
-    if (callee->as_def() != method::java_lang_invoke_MethodHandle_invoke() &&
-        callee->as_def() !=
-            method::java_lang_invoke_MethodHandle_invokeExact()) {
-      std::ostringstream out;
-      out << "invoke-polymorphic: Callee must be either MethodHandle.invoke or "
-             "MethodHandle.invokeExact, but found "
-          << show_deobfuscated(callee);
-      throw TypeCheckingException(out.str());
-    }
-    return;
+  const auto* cls = callee->get_class();
+  const auto* args = callee->get_proto()->get_args();
+  bool is_signature_polymorphic =
+      (cls == DexType::get_type("Ljava/lang/invoke/MethodHandle;") ||
+       cls == DexType::get_type("Ljava/lang/invoke/VarHandle;")) &&
+      args->size() == 1 && type::is_java_lang_object_array(args->at(0));
+  if (is_signature_polymorphic && callee->is_def()) {
+    const auto* def = callee->as_def();
+    is_signature_polymorphic = is_native(def) && is_varargs(def);
   }
-
-  // Fall back to manual check, since we don't know its full definition.
-  const auto* arg_types = callee->get_proto()->get_args();
-
-  // invoke-polymorphic works differently in terms of arg counts. The
-  // invoked function's arguments are always the object reference followed
-  // by an array of Objects (at least for now), but invoke-polymorphic
-  // accepts individual elements of the array as its arguments.
-  //   (invoke-polymorphic (v0 v1 v2)
-  //     "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;")
-  if (arg_types->size() != 1) {
+  if (!is_signature_polymorphic) {
     std::ostringstream out;
-    out << "invoke-polymorphic: Arg count of " << show_deobfuscated(callee)
-        << " is expected to be 1, but found " << arg_types->size();
-    throw TypeCheckingException(out.str());
-  }
-  if (!type::is_array(arg_types->at(0))) {
-    std::ostringstream out;
-    out << "invoke-polymorphic: Arg type of " << show_deobfuscated(callee)
-        << " is expected to be an array, but found " << arg_types->at(0);
+    out << "invoke-polymorphic: " << show_deobfuscated(callee)
+        << " is not signature polymorphic";
     throw TypeCheckingException(out.str());
   }
 }

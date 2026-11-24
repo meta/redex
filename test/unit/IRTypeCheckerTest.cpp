@@ -3123,7 +3123,7 @@ TEST_F(IRTypeCheckerTest, invokePolymorphic) {
       DexMethod::make_method(
           "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/"
           "lang/Object;)Ljava/lang/Object;")
-          ->make_concrete(ACC_PUBLIC | ACC_FINAL | ACC_VARARGS,
+          ->make_concrete(ACC_PUBLIC | ACC_FINAL | ACC_VARARGS | ACC_NATIVE,
                           /* is_virtual */ false);
   method_handle_creator.add_method(invoke_method);
   method_handle_creator.set_super(type::java_lang_Object());
@@ -3159,14 +3159,14 @@ TEST_F(IRTypeCheckerTest, invokePolymorphic) {
 }
 
 TEST_F(IRTypeCheckerTest, invokePolymorphicOnUnexpectedExternalMethod) {
-  // Mimic java.lang.invoke.MethodHandle.invoke as closely as possible except
-  // name.
+  // MethodHandle.invokeWithArguments has the parameter of a signature
+  // polymorphic method but is not native, so it is an ordinary method.
   auto* const type_method_handle =
       DexType::make_type("Ljava/lang/invoke/MethodHandle;");
   ClassCreator method_handle_creator(type_method_handle);
   auto* not_invoke_method =
       DexMethod::make_method(
-          "Ljava/lang/invoke/MethodHandle;.notInvoke:([Ljava/"
+          "Ljava/lang/invoke/MethodHandle;.invokeWithArguments:([Ljava/"
           "lang/Object;)Ljava/lang/Object;")
           ->make_concrete(ACC_PUBLIC | ACC_FINAL | ACC_VARARGS,
                           /* is_virtual */ false);
@@ -3187,7 +3187,7 @@ TEST_F(IRTypeCheckerTest, invokePolymorphicOnUnexpectedExternalMethod) {
       (move-result-pseudo-object v1)
       (const-string "S2")
       (move-result-pseudo-object v2)
-      (invoke-polymorphic (v0 v1 v2) "Ljava/lang/invoke/MethodHandle;.notInvoke:([Ljava/lang/Object;)Ljava/lang/Object;" "(Ljava/lang/String;Ljava/lang/String;)V")
+      (invoke-polymorphic (v0 v1 v2) "Ljava/lang/invoke/MethodHandle;.invokeWithArguments:([Ljava/lang/Object;)Ljava/lang/Object;" "(Ljava/lang/String;Ljava/lang/String;)V")
       (return-void)
   ))"));
   cls_foo_creator.add_method(method);
@@ -3198,12 +3198,12 @@ TEST_F(IRTypeCheckerTest, invokePolymorphicOnUnexpectedExternalMethod) {
 
   IRTypeChecker checker(method);
   checker.run();
-  EXPECT_THAT(checker.what(),
-              HasSubstr("invoke-polymorphic: Callee must be either "
-                        "MethodHandle.invoke or MethodHandle.invokeExact"));
+  EXPECT_THAT(checker.what(), HasSubstr("is not signature polymorphic"));
   EXPECT_TRUE(checker.fail());
 }
 
+// A method of MethodHandle is signature polymorphic only if its one parameter
+// is an Object[].
 TEST_F(IRTypeCheckerTest, invokePolymorphicOnWrongArgMethod) {
   auto* const type_foo = DexType::make_type("LFoo;");
   ClassCreator cls_foo_creator(type_foo);
@@ -3217,14 +3217,15 @@ TEST_F(IRTypeCheckerTest, invokePolymorphicOnWrongArgMethod) {
   method->set_code(assembler::ircode_from_string(R"(
     (
       (load-param-object v0)
-      (invoke-polymorphic (v0) "LFoo;.bar:()V" "()V")
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:()Ljava/lang/Object;" "()V")
       (return-void)
   ))"));
   IRTypeChecker checker(method);
   checker.run();
-  EXPECT_THAT(
-      checker.what(),
-      ContainsRegex("invoke-polymorphic.*Arg count.*is expected to be 1"));
+  EXPECT_THAT(checker.what(),
+              HasSubstr("invoke-polymorphic: "
+                        "Ljava/lang/invoke/MethodHandle;.invoke:()Ljava/lang/"
+                        "Object; is not signature polymorphic"));
   EXPECT_TRUE(checker.fail());
 }
 
@@ -3242,13 +3243,16 @@ TEST_F(IRTypeCheckerTest, invokePolymorphicOnFixedArgMethod) {
     (
       (load-param-object v0)
       (load-param-object v1)
-      (invoke-polymorphic (v0 v1) "LFoo;.bar:(Ljava/lang/Object;)V" "(Ljava/lang/Object;)V")
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invoke:(Ljava/lang/Object;)Ljava/lang/Object;" "(Ljava/lang/Object;)V")
       (return-void)
   ))"));
   IRTypeChecker checker(method);
   checker.run();
   EXPECT_THAT(checker.what(),
-              ContainsRegex("invoke-polymorphic.*is expected to be an array"));
+              HasSubstr("invoke-polymorphic: "
+                        "Ljava/lang/invoke/MethodHandle;.invoke:(Ljava/lang/"
+                        "Object;)Ljava/lang/Object; is not signature "
+                        "polymorphic"));
   EXPECT_TRUE(checker.fail());
 }
 
@@ -3304,6 +3308,56 @@ TEST_F(IRTypeCheckerTest, invokePolymorphicResultMismatchIsAnError) {
   IRTypeChecker checker(method);
   checker.run();
   EXPECT_TRUE(checker.fail());
+}
+
+// VarHandle accessors are signature polymorphic too:
+//
+//   boolean swapped = NEXT.compareAndSet(this, expected, next);
+TEST_F(IRTypeCheckerTest, invokePolymorphicOnVarHandle) {
+  ClassCreator var_handle_creator(
+      DexType::make_type("Ljava/lang/invoke/VarHandle;"));
+  var_handle_creator.add_method(
+      DexMethod::make_method(
+          "Ljava/lang/invoke/VarHandle;.compareAndSet:([Ljava/lang/Object;)Z")
+          ->make_concrete(ACC_PUBLIC | ACC_FINAL | ACC_VARARGS | ACC_NATIVE,
+                          /* is_virtual */ true));
+  var_handle_creator.set_super(type::java_lang_Object());
+  var_handle_creator.set_access(ACC_PUBLIC | ACC_ABSTRACT);
+  var_handle_creator.create();
+
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar:(Ljava/lang/invoke/VarHandle;LFoo;LFoo;LFoo;)Z"
+     (
+      (load-param-object v0)
+      (load-param-object v1)
+      (load-param-object v2)
+      (load-param-object v3)
+      (invoke-polymorphic (v0 v1 v2 v3) "Ljava/lang/invoke/VarHandle;.compareAndSet:([Ljava/lang/Object;)Z" "(LFoo;LFoo;LFoo;)Z")
+      (move-result v4)
+      (return v4)
+     )
+    )
+  )");
+  IRTypeChecker checker(method);
+  checker.run();
+  EXPECT_TRUE(checker.good()) << checker.what();
+}
+
+// Only MethodHandle and VarHandle declare signature-polymorphic methods.
+TEST_F(IRTypeCheckerTest, invokePolymorphicOutsideMethodHandleIsAnError) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar:(LFoo;)V"
+     (
+      (load-param-object v0)
+      (invoke-polymorphic (v0) "LFoo;.call:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
+      (return-void)
+     )
+    )
+  )");
+  IRTypeChecker checker(method);
+  checker.run();
+  EXPECT_TRUE(checker.fail());
+  EXPECT_THAT(checker.what(), HasSubstr("is not signature polymorphic"));
 }
 
 TEST_F(IRTypeCheckerTest, invokeOnClassInitializer) {

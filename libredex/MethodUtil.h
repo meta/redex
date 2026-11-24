@@ -160,10 +160,6 @@ DexMethod* kotlin_jvm_internal_Intrinsics_areEqual();
 
 DexMethod* redex_internal_checkObjectNotNull();
 
-DexMethod* java_lang_invoke_MethodHandle_invoke();
-
-DexMethod* java_lang_invoke_MethodHandle_invokeExact();
-
 inline unsigned count_opcode_of_types(const cfg::ControlFlowGraph& cfg,
                                       const UnorderedSet<IROpcode>& opcodes) {
   unsigned ret = 0;

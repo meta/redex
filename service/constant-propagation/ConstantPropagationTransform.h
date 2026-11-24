@@ -166,8 +166,11 @@ class Transform final {
   bool eliminate_redundant_null_check(const ConstantEnvironment&,
                                       const WholeProgramState& wps,
                                       const cfg::InstructionIterator& cfg_it);
-  bool replace_kotlin_areequal(const ConstantEnvironment&,
-                               const cfg::InstructionIterator& cfg_it);
+  // Whether `insn` calls Intrinsics.areEqual on a known non-null first
+  // argument, which replace_kotlin_areequal turns into a call to equals.
+  bool can_replace_kotlin_areequal(const ConstantEnvironment&,
+                                   const IRInstruction* insn) const;
+  void replace_kotlin_areequal(IRInstruction* insn);
   bool replace_with_throw(const ConstantEnvironment&,
                           const cfg::InstructionIterator& cfg_it,
                           npe::NullPointerExceptionCreator* npe_creator);

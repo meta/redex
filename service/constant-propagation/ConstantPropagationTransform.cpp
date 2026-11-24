@@ -358,9 +358,8 @@ void Transform::swap_kotlin_areequal(
   }
 }
 
-bool Transform::replace_kotlin_areequal(
-    const ConstantEnvironment& env, const cfg::InstructionIterator& cfg_it) {
-  auto* insn = cfg_it->insn;
+bool Transform::can_replace_kotlin_areequal(const ConstantEnvironment& env,
+                                            const IRInstruction* insn) const {
   if (insn->opcode() != OPCODE_INVOKE_STATIC) {
     return false;
   }
@@ -373,15 +372,15 @@ bool Transform::replace_kotlin_areequal(
   // Both invoke-static areEqual and invoke-virtual equals take two source
   // registers (the static args / receiver + arg), so in-place modification
   // preserves the associated move-result-pseudo.
-  if (!is_known_non_null(env.get(insn->src(0)))) {
-    return false;
-  }
+  return is_known_non_null(env.get(insn->src(0)));
+}
+
+void Transform::replace_kotlin_areequal(IRInstruction* insn) {
   auto* object_equals = method::java_lang_Object_equals();
   always_assert(object_equals != nullptr);
   insn->set_opcode(OPCODE_INVOKE_VIRTUAL);
   insn->set_method(object_equals);
   ++m_stats.kotlin_areequal_replaced;
-  return true;
 }
 
 bool Transform::eliminate_redundant_put(
@@ -1314,12 +1313,21 @@ void Transform::legacy_apply_constants_and_prune_unreachable(
     auto ii = InstructionIterable(block);
     for (auto it = ii.begin(); it != ii.end(); it++) {
       auto cfg_it = block->to_cfg_instruction_iterator(it);
-      bool any_changes = eliminate_redundant_put(env, wps, cfg_it) ||
-                         eliminate_redundant_null_check(env, wps, cfg_it) ||
-                         replace_kotlin_areequal(env, cfg_it) ||
-                         replace_with_throw(env, cfg_it, &npe_creator);
       auto* insn = cfg_it->insn;
+      bool replaces_areequal = false;
+      bool any_changes = eliminate_redundant_put(env, wps, cfg_it) ||
+                         eliminate_redundant_null_check(env, wps, cfg_it);
+      if (!any_changes) {
+        replaces_areequal = can_replace_kotlin_areequal(env, insn);
+        any_changes =
+            replaces_areequal || replace_with_throw(env, cfg_it, &npe_creator);
+      }
       intra_cp.analyze_instruction(insn, &env, insn == last_insn->insn);
+      // The call to equals replaces the one to areEqual only after the
+      // analysis reads it, as the analysis may know what areEqual returns.
+      if (replaces_areequal) {
+        replace_kotlin_areequal(insn);
+      }
       if (!any_changes && (m_redundant_move_results.count(insn) == 0u)) {
         simplify_instruction(env, wps, cfg_it, xstores, declaring_type,
                              context);

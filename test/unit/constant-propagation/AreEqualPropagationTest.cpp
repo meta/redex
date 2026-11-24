@@ -14,6 +14,7 @@
 using namespace std::string_view_literals;
 
 #include "ConstantPropagationTestUtil.h"
+#include "Creators.h"
 #include "IRAssembler.h"
 
 namespace {
@@ -490,3 +491,54 @@ INSTANTIATE_TEST_SUITE_P(
     [](const auto& info) { return info.param.name; });
 
 } // namespace
+
+// areEqual of two equal strings is true, which the analysis knows of the call
+// to areEqual but not of the call to equals that replaces it, so the branch on
+// its result goes.
+TEST_F(AreEqualSwappingTest, ReplacedAreEqualOfKnownStrings_BranchRemoved) {
+  DexMethod::make_method("Ljava/lang/Object;.equals:(Ljava/lang/Object;)Z");
+  auto* are_equal =
+      DexMethod::make_method(
+          "Lkotlin/jvm/internal/Intrinsics;.areEqual:(Ljava/lang/Object;Ljava/"
+          "lang/Object;)Z")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC, /* is_virtual */ false);
+  ClassCreator intrinsics(are_equal->get_class());
+  intrinsics.set_super(type::java_lang_Object());
+  intrinsics.set_external();
+  intrinsics.add_method(are_equal);
+  intrinsics.create();
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const-string "a")
+      (move-result-pseudo-object v0)
+      (const-string "a")
+      (move-result-pseudo-object v1)
+      (invoke-static (v0 v1) "Lkotlin/jvm/internal/Intrinsics;.areEqual:(Ljava/lang/Object;Ljava/lang/Object;)Z")
+      (move-result v2)
+      (if-eqz v2 :different)
+      (const v3 1)
+      (return v3)
+      (:different)
+      (const v3 0)
+      (return v3)
+    )
+  )");
+  auto state = cp::StringAnalyzerState::make_default();
+  do_const_prop(
+      code.get(),
+      InstructionAnalyzerCombiner<cp::StringAnalyzer, cp::PrimitiveAnalyzer>(
+          &state, nullptr));
+  const auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const-string "a")
+      (move-result-pseudo-object v0)
+      (const-string "a")
+      (move-result-pseudo-object v1)
+      (invoke-virtual (v0 v1) "Ljava/lang/Object;.equals:(Ljava/lang/Object;)Z")
+      (move-result v2)
+      (const v3 1)
+      (return v3)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}

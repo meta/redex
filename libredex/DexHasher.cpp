@@ -480,6 +480,7 @@ void Impl::hash(const DexMethod* m) {
 }
 
 void Impl::hash(const DexFieldRef* f) {
+  hash(f->get_class());
   hash(f->get_name());
   hash(f->is_concrete());
   hash(f->is_external());

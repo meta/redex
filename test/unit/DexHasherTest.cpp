@@ -347,3 +347,33 @@ TEST_F(DexHasherTest, MethodHashOfCallSiteIsTheSameInEveryContext) {
   g_redex = first_context;
   EXPECT_EQ(first, second);
 }
+
+TEST_F(DexHasherTest, FieldsOfDifferentClassesMakeDifferentHash) {
+  auto* method1 = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar1:()I"
+      (
+        (sget "LA;.f:I")
+        (move-result-pseudo v0)
+        (return v0)
+      )
+    )
+  )");
+
+  auto* method2 = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar2:()I"
+      (
+        (sget "LB;.f:I")
+        (move-result-pseudo v0)
+        (return v0)
+      )
+    )
+  )");
+
+  method1->get_code()->build_cfg();
+  method2->get_code()->build_cfg();
+
+  auto hash1 = hashing::DexMethodHasher(method1).run();
+  auto hash2 = hashing::DexMethodHasher(method2).run();
+
+  EXPECT_NE(hash1.code_hash, hash2.code_hash);
+}

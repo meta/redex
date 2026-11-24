@@ -407,6 +407,166 @@ TEST_F(OptimizeEnumsTest, hashCodeSubstituteDoesNotLookUpName) {
   EXPECT_CODE_EQ(hashcode->get_code(), expected.get());
 }
 
+// An enum with an instance kept only in its values array is not boxed.
+TEST_F(OptimizeEnumsTest, unstoredConstantKeepsEnum) {
+  DexStoresVector stores({create_enum_store()});
+  ClassCreator cc(DexType::make_type("LBaz;"));
+  cc.set_super(type::java_lang_Enum());
+  cc.set_access(ACC_PUBLIC | ACC_FINAL | ACC_ENUM);
+  auto* values =
+      dynamic_cast<DexField*>(DexField::make_field("LBaz;.$VALUES:[LBaz;"));
+  values->make_concrete(ACC_PRIVATE | ACC_STATIC | ACC_FINAL | ACC_SYNTHETIC);
+  cc.add_field(values);
+  auto* one = dynamic_cast<DexField*>(DexField::make_field("LBaz;.ONE:LBaz;"));
+  one->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL | ACC_ENUM);
+  cc.add_field(one);
+  cc.add_method(assembler::method_from_string(R"(
+    (method (private constructor) "LBaz;.<init>:(Ljava/lang/String;I)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (load-param v2)
+        (invoke-direct (v0 v1 v2) "Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V")
+        (return-void)
+      )
+    )
+  )"));
+  cc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LBaz;.<clinit>:()V"
+     (
+      (const-string "ONE")
+      (move-result-pseudo-object v1)
+      (const v2 0)
+      (new-instance "LBaz;")
+      (move-result-pseudo-object v3)
+      (invoke-direct (v3 v1 v2) "LBaz;.<init>:(Ljava/lang/String;I)V")
+      (sput-object v3 "LBaz;.ONE:LBaz;")
+      (const-string "TWO")
+      (move-result-pseudo-object v1)
+      (const v2 1)
+      (new-instance "LBaz;")
+      (move-result-pseudo-object v4)
+      (invoke-direct (v4 v1 v2) "LBaz;.<init>:(Ljava/lang/String;I)V")
+      (const v2 2)
+      (new-array v2 "[LBaz;")
+      (move-result-pseudo-object v0)
+      (const v2 0)
+      (aput-object v3 v0 v2)
+      (const v2 1)
+      (aput-object v4 v0 v2)
+      (sput-object v0 "LBaz;.$VALUES:[LBaz;")
+      (return-void)
+     )
+    )
+  )"));
+  auto* baz = cc.create();
+  for (auto* m : baz->get_all_methods()) {
+    m->get_code()->build_cfg();
+  }
+  stores[0].add_classes({baz});
+
+  optimize_enums::OptimizeEnumsPass pass;
+  PassManager manager({&pass});
+  ConfigFiles conf(Json::nullValue);
+  conf.parse_global_config();
+  manager.run_passes(stores, conf);
+
+  EXPECT_EQ(baz->get_super_class(), type::java_lang_Enum());
+}
+
+// One allocation instruction inside a loop can create both a named constant
+// and an extra instance kept only in the values array.
+TEST_F(OptimizeEnumsTest, repeatedAllocationSiteKeepsEnum) {
+  DexStoresVector stores({create_enum_store()});
+  ClassCreator cc(DexType::make_type("LLoopEnum;"));
+  cc.set_super(type::java_lang_Enum());
+  cc.set_access(ACC_PUBLIC | ACC_FINAL | ACC_ENUM);
+  cc.add_field(DexField::make_field("LLoopEnum;.$VALUES:[LLoopEnum;")
+                   ->make_concrete(ACC_PRIVATE | ACC_STATIC | ACC_FINAL |
+                                   ACC_SYNTHETIC));
+  cc.add_field(
+      DexField::make_field("LLoopEnum;.ONLY:LLoopEnum;")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL | ACC_ENUM));
+  cc.add_method(assembler::method_from_string(R"(
+    (method (private constructor) "LLoopEnum;.<init>:(Ljava/lang/String;I)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (load-param v2)
+        (invoke-direct (v0 v1 v2) "Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V")
+        (return-void)
+      )
+    )
+  )"));
+  cc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LLoopEnum;.values:()[LLoopEnum;"
+      (
+        (sget-object "LLoopEnum;.$VALUES:[LLoopEnum;")
+        (move-result-pseudo-object v0)
+        (return-object v0)
+      )
+    )
+  )"));
+  cc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LLoopEnum;.<clinit>:()V"
+      (
+        (const v4 0)
+        (const v5 2)
+        (new-array v5 "[LLoopEnum;")
+        (move-result-pseudo-object v0)
+        (:loop)
+        (const-string "ONLY")
+        (move-result-pseudo-object v1)
+        (const v2 0)
+        (new-instance "LLoopEnum;")
+        (move-result-pseudo-object v3)
+        (invoke-direct (v3 v1 v2) "LLoopEnum;.<init>:(Ljava/lang/String;I)V")
+        (aput-object v3 v0 v4)
+        (if-nez v4 :done)
+        (const v4 1)
+        (goto :loop)
+        (:done)
+        (sput-object v3 "LLoopEnum;.ONLY:LLoopEnum;")
+        (sput-object v0 "LLoopEnum;.$VALUES:[LLoopEnum;")
+        (return-void)
+      )
+    )
+  )"));
+  auto* loop_enum = cc.create();
+  for (auto* method : loop_enum->get_all_methods()) {
+    method->get_code()->build_cfg();
+  }
+
+  ClassCreator uc(DexType::make_type("LLoopUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  auto* count = assembler::method_from_string(R"(
+    (method (public static) "LLoopUser;.count:()I"
+      (
+        (invoke-static () "LLoopEnum;.values:()[LLoopEnum;")
+        (move-result-object v0)
+        (array-length v0)
+        (move-result-pseudo v1)
+        (return v1)
+      )
+    )
+  )");
+  uc.add_method(count);
+  auto* user = uc.create();
+  count->get_code()->build_cfg();
+  stores[0].add_classes({loop_enum, user});
+
+  optimize_enums::OptimizeEnumsPass pass;
+  PassManager manager({&pass});
+  ConfigFiles conf(Json::nullValue);
+  conf.parse_global_config();
+  manager.run_passes(stores, conf);
+  count->get_code()->build_cfg();
+
+  EXPECT_EQ(loop_enum->get_super_class(), type::java_lang_Enum())
+      << show(count->get_code()->cfg());
+}
+
 // When a candidate enum is unsafe for several reasons across different methods,
 // every reason must be recorded -- not just whichever one a worker thread
 // happened to observe first. `reject_unsafe_enums` runs the usage analysis in

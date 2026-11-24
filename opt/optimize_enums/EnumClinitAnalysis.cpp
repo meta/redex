@@ -19,6 +19,7 @@
 #include "IROpcode.h"
 #include "KotlinNullCheckMethods.h"
 #include "LocalPointersAnalysis.h"
+#include "LoopInfo.h"
 #include "MethodUtil.h"
 #include "Purity.h"
 #include "Resolver.h"
@@ -614,6 +615,7 @@ EnumAttributes analyze_enum_clinit(const DexClass* cls,
   auto* ordinal_field = get_ordinal_field();
   auto* enum_name_field = get_enum_name_field();
   EnumAttributes attributes;
+  UnorderedSet<const IRInstruction*> constant_allocations;
   for (const auto& pair : return_env.get_field_environment().bindings()) {
     const auto* enum_sfield = pair.first;
     if (enum_sfield->get_class() != cls->get_type() ||
@@ -645,6 +647,10 @@ EnumAttributes analyze_enum_clinit(const DexClass* cls,
     attributes.m_constants_map[enum_sfield].ordinal =
         static_cast<int32_t>(*ordinal_value);
     attributes.m_constants_map[enum_sfield].name = *name_value;
+    // A constant ordinal is read from a known allocation.
+    const auto allocation = heap_ptr->get_constant();
+    always_assert(allocation);
+    constant_allocations.insert(*allocation);
 
     for (auto* enum_ifield : cls->get_ifields()) {
       auto env_value = ptr.get(enum_ifield);
@@ -704,6 +710,24 @@ EnumAttributes analyze_enum_clinit(const DexClass* cls,
   if (!validate_result(cls, attributes.m_constants_map,
                        support_kt_19_enum_entries)) {
     return EnumAttributes();
+  }
+  // Every candidate allocation must create exactly one known constant. An
+  // unrecorded site, or a recorded site in a loop, can create an extra instance
+  // that the values array keeps even though no constant field does.
+  loop_impl::LoopInfo loops(cfg);
+  for (auto* block : cfg.blocks()) {
+    for (const auto& mie : InstructionIterable(block)) {
+      if (mie.insn->opcode() != OPCODE_NEW_INSTANCE ||
+          mie.insn->get_type() != cls->get_type()) {
+        continue;
+      }
+      if (!constant_allocations.contains(mie.insn) ||
+          loops.get_loop_for(block) != nullptr) {
+        TRACE(ENUM, 2, "\t%s creates an instance that is not a unique constant",
+              SHOW(cls));
+        return EnumAttributes();
+      }
+    }
   }
   return attributes;
 }

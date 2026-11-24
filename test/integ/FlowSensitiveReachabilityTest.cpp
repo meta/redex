@@ -369,3 +369,45 @@ TEST_F(FlowSensitiveReachabilityTest, throw_propagation) {
   ASSERT_TRUE(ii.begin()->insn->opcode() == OPCODE_INVOKE_STATIC);
   ASSERT_TRUE(std::prev(ii.end())->insn->opcode() == OPCODE_THROW);
 }
+
+TEST_F(FlowSensitiveReachabilityTest,
+       ignore_check_strings_counts_each_method_once) {
+  const auto& dexen = stores[0].get_dexen();
+  auto pg_config = process_and_get_proguard_config(dexen, R"(
+    -keepclasseswithmembers public class FlowSensitiveReachabilityTest {
+      public void root();
+    }
+  )");
+  EXPECT_TRUE(pg_config->ok);
+
+  // `root` is gathered in more than one step: the code after `obj.foo()` is
+  // only reached once `RegularInstantiable` becomes instantiable.
+  reachability::IgnoreSets ig_sets;
+  ig_sets.string_literals.insert(
+      DexType::get_type("LFlowSensitiveReachabilityTest;"));
+  int num_ignore_check_strings = 0;
+  reachability::ReachableAspects reachable_aspects;
+  auto scope = build_class_scope(stores);
+  walk::parallel::code(scope, [&](auto*, auto& code) { code.build_cfg(); });
+  auto method_override_graph = method_override_graph::build_graph(scope);
+
+  auto reachable_objects = reachability::compute_reachable_objects(
+      scope, *method_override_graph, ig_sets, &num_ignore_check_strings,
+      &reachable_aspects, false,
+      /* relaxed_keep_class_members */ true,
+      /* relaxed_keep_interfaces */ false,
+      /* cfg_gathering_check_instantiable */ true,
+      /* cfg_gathering_check_instance_callable */ true);
+
+  auto* cls = type_class(DexType::get_type("LFlowSensitiveReachabilityTest;"));
+  int num_marked_methods = 0;
+  for (auto* method : cls->get_all_methods()) {
+    if (reachable_objects->marked(method)) {
+      ++num_marked_methods;
+    }
+  }
+  EXPECT_GT(num_marked_methods, 1);
+  EXPECT_EQ(num_ignore_check_strings, num_marked_methods);
+
+  walk::parallel::code(scope, [&](auto*, auto& code) { code.clear_cfg(); });
+}

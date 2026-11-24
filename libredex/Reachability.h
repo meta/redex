@@ -424,7 +424,20 @@ void gather_dynamic_references(const MethodItemEntry* mie,
                                References* references);
 
 struct Stats {
+  // Counts each method once: a method's references are gathered in several
+  // steps, and how many steps depends on the order in which other objects get
+  // marked.
+  void record_ignore_check_strings(const DexMethod* method) {
+    if (m_methods_ignoring_check_strings.insert(method)) {
+      ++num_ignore_check_strings;
+    }
+  }
+
+  // Number of methods whose strings were not checked for class names.
   std::atomic<int> num_ignore_check_strings{0};
+
+ private:
+  ConcurrentSet<const DexMethod*> m_methods_ignoring_check_strings;
 };
 
 /*

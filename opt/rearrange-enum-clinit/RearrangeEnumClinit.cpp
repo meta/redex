@@ -149,18 +149,6 @@ struct Rearranger {
     MoveAwareChains mac(*cfg);
     auto use_def = mac.get_use_def_chains();
 
-    auto get_singleton = [&use_def](IRInstruction* insn,
-                                    src_index_t idx) -> IRInstruction* {
-      auto it = use_def.find(Use{insn, idx});
-      if (it == use_def.end()) {
-        return nullptr;
-      }
-      if (it->second.size() != 1) {
-        return nullptr;
-      }
-      return *it->second.begin();
-    };
-
     for (IRInstruction* insn = *ret_opt; insn != nullptr;) {
       // Written this way to ensure safe coding, always make progress.
       src_index_t use_idx;
@@ -194,7 +182,7 @@ struct Rearranger {
         return nullptr;
       }
 
-      insn = get_singleton(insn, use_idx);
+      insn = get_single_def(use_def, insn, use_idx);
     }
 
     return nullptr;
@@ -288,13 +276,6 @@ struct Rearranger {
   const live_range::Uses* array_uses{nullptr};
   UnorderedSet<const IRInstruction*> post_publication_uses;
   FailureReason failure_reason{FailureReason::NoMovableElements};
-
-  IRInstruction* find_singleton_def(IRInstruction* use_insn,
-                                    src_index_t src_index) const {
-    auto it = use_def.find({use_insn, src_index});
-    return it == use_def.end() || it->second.size() != 1 ? nullptr
-                                                         : *it->second.begin();
-  }
 
   static bool is_constructor_receiver_use(const live_range::Use& use) {
     return use.src_index == 0 && use.insn->srcs_size() != 0 &&
@@ -410,7 +391,7 @@ struct Rearranger {
       return false;
     }
     // Find the definition of the field object.
-    auto* array = find_singleton_def(array_sput, 0);
+    auto* array = live_range::get_single_def(use_def, array_sput, 0);
     auto position = insn_map.find(array);
     if (array == nullptr || position == insn_map.end()) {
       failure_reason = FailureReason::AmbiguousArray;
@@ -422,7 +403,7 @@ struct Rearranger {
       return false;
     }
     array_new_array = position->second;
-    array_size_definition = find_singleton_def(array, 0);
+    array_size_definition = live_range::get_single_def(use_def, array, 0);
     if (array_size_definition == nullptr ||
         array_size_definition->opcode() != OPCODE_CONST ||
         array_size_definition->get_literal() < 0 ||
@@ -441,7 +422,8 @@ struct Rearranger {
       if (use.insn == array_sput || use.insn->opcode() == OPCODE_MOVE_OBJECT) {
         continue;
       }
-      if (find_singleton_def(use.insn, use.src_index) != array) {
+      if (live_range::get_single_def(use_def, use.insn, use.src_index) !=
+          array) {
         failure_reason = FailureReason::AmbiguousArray;
         return false;
       }
@@ -468,9 +450,9 @@ struct Rearranger {
       }
       // See if we can hoist it. Check the input parameters.
       // 1. First parameter is object.
-      auto* object_insn = find_singleton_def(mie.insn, 0);
+      auto* object_insn = live_range::get_single_def(use_def, mie.insn, 0);
       // 2. Third parameter is index, should be const.
-      auto* index_insn = find_singleton_def(mie.insn, 2);
+      auto* index_insn = live_range::get_single_def(use_def, mie.insn, 2);
       if (object_insn == nullptr || index_insn == nullptr ||
           index_insn->opcode() != OPCODE_CONST ||
           index_insn->get_literal() < 0 ||

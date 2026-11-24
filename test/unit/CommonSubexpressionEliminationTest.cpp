@@ -2594,3 +2594,52 @@ TEST_F(CommonSubexpressionEliminationTest, invoke_polymorphic_is_barrier) {
   const auto* expected_str = code_str;
   test(Scope{type_class(type::java_lang_Object())}, code_str, expected_str, 0);
 }
+
+// Calling a method handle twice runs its target twice, so the second result is
+// not the first one.
+TEST_F(CommonSubexpressionEliminationTest, invoke_polymorphic_is_not_pure) {
+  const auto* code_str = R"(
+    (
+      (sget-object "LFoo;.h:Ljava/lang/invoke/MethodHandle;")
+      (move-result-pseudo-object v0)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()I")
+      (move-result v1)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()I")
+      (move-result v2)
+    )
+  )";
+  test(Scope{type_class(type::java_lang_Object())}, code_str, code_str, 0);
+}
+
+// A method that calls a method handle may do anything, so two calls to it are
+// not one.
+TEST_F(CommonSubexpressionEliminationTest,
+       caller_of_method_handle_is_not_pure) {
+  ClassCreator creator(DexType::make_type("LMethodHandleCaller;"));
+  creator.set_super(type::java_lang_Object());
+  auto* callee =
+      DexMethod::make_method(
+          "LMethodHandleCaller;.call:(Ljava/lang/invoke/MethodHandle;)I")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  callee->set_code(assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()I")
+      (move-result v1)
+      (return v1)
+    )
+  )"));
+  creator.add_method(callee);
+  auto* cls = creator.create();
+  const auto* code_str = R"(
+    (
+      (sget-object "LFoo;.h:Ljava/lang/invoke/MethodHandle;")
+      (move-result-pseudo-object v0)
+      (invoke-static (v0) "LMethodHandleCaller;.call:(Ljava/lang/invoke/MethodHandle;)I")
+      (move-result v1)
+      (invoke-static (v0) "LMethodHandleCaller;.call:(Ljava/lang/invoke/MethodHandle;)I")
+      (move-result v2)
+    )
+  )";
+  test(Scope{type_class(type::java_lang_Object()), cls}, code_str, code_str, 0);
+}

@@ -10,9 +10,12 @@
 #include "Debug.h"
 #include "DeterministicContainers.h"
 #include "DexClass.h"
+#include "DexMethodHandle.h"
 #include "DexUtil.h"
+#include "MethodHandleRewriter.h"
 #include "ObfuscateUtils.h"
 #include "PassManager.h"
+#include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
 #include "TypeUtil.h"
@@ -93,7 +96,8 @@ void update_refs(Scope& scope,
   InsertOnlyConcurrentMap<DexFieldRef*, DexField*> f_ref_def_cache;
   InsertOnlyConcurrentMap<DexMethodRef*, DexMethod*> m_ref_def_cache;
 
-  auto maybe_publicize_class = [&](DexMethod* referrer, DexClass* referree) {
+  auto maybe_publicize_class = [&](const DexMethod* referrer,
+                                   DexClass* referree) {
     if (is_public(referree)) {
       return;
     }
@@ -105,7 +109,56 @@ void update_refs(Scope& scope,
     }
   };
 
+  // A method handle is fixed up like the instruction it acts like.
+  auto fix_method_handle =
+      [&](const DexMethodHandle* method_handle,
+          const DexMethod* m) -> std::optional<DexMethodHandle> {
+    auto op = method_handle_opcode(method_handle);
+    DexField* field_def = nullptr;
+    DexMethod* method_def = nullptr;
+    if (!opcode::is_a_method_invoke(op)) {
+      // `method_handle_opcode` maps every invoke kind to an invoke, so this is
+      // a field handle.
+      auto* field_ref = method_handle->fieldref();
+      auto* resolved = resolve_field_handle(method_handle);
+      auto is_renamed = [&](DexFieldRef* ref) {
+        return find_renamable_ref(ref, f_ref_def_cache, field_name_mapping) !=
+               nullptr;
+      };
+      // Renaming changes what a handle resolves to when it renames the field
+      // that the handle resolves to, or a definition of the other kind that
+      // the handle names, which is renamed in place: a static-get handle of
+      // `LChild;.x:I`, where `Child` declares an instance field `x`, resolves
+      // to a static field `x` of a superclass. The handle then names the field
+      // that it resolves to.
+      if (resolved != nullptr && resolved != field_ref &&
+          (is_renamed(resolved) ||
+           (field_ref->is_def() && is_renamed(field_ref)))) {
+        field_def = resolved;
+      }
+    } else if (opcode::is_invoke_direct(op) || opcode::is_invoke_static(op)) {
+      auto* method_ref = method_handle->methodref();
+      if (!method_ref->is_def()) {
+        method_def = find_renamable_ref(method_ref, m_ref_def_cache,
+                                        method_name_mapping);
+      }
+    }
+    if (field_def == nullptr && method_def == nullptr) {
+      return std::nullopt;
+    }
+    TRACE(OBFUSCATE, 4, "Found a method handle to fixup %s",
+          SHOW(method_handle));
+    maybe_publicize_class(m, type_class(field_def != nullptr
+                                            ? field_def->get_class()
+                                            : method_def->get_class()));
+    return field_def != nullptr
+               ? DexMethodHandle(method_handle->type(), field_def)
+               : DexMethodHandle(method_handle->type(), method_def);
+  };
+  MethodHandleRewriter method_handle_rewriter({.handle = fix_method_handle});
+
   walk::parallel::opcodes(scope, [&](DexMethod* m, IRInstruction* instr) {
+    method_handle_rewriter.rewrite(instr, m);
     auto op = instr->opcode();
     if (instr->has_field()) {
       DexFieldRef* field_ref = instr->get_field();

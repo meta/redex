@@ -163,6 +163,7 @@ check_PROGRAMS = \
     never_compile_selection_test \
     never_inline_eligibility_test \
     null_propagation_test \
+    obfuscate_method_handle_test \
     object_inliner_test \
     object_propagation_test \
     optimize_enums_test \
@@ -570,6 +571,8 @@ never_inline_eligibility_test_SOURCES = NeverInlineEligibilityTest.cpp
 nopper_test_SOURCES = NopperTest.cpp
 
 null_propagation_test_SOURCES = constant-propagation/NullPropagationTest.cpp
+
+obfuscate_method_handle_test_SOURCES = ObfuscateMethodHandleTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 object_inliner_test_SOURCES = ObjectInlinerTest.cpp
 object_inliner_test_LDADD = $(COMMON_MOCK_TEST_LIBS)

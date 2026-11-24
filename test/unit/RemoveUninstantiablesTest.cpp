@@ -9,9 +9,13 @@
 
 #include "Creators.h"
 #include "Debug.h"
+#include "DexAnnotation.h"
+#include "DexMethodHandle.h"
 #include "IRAssembler.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "RemoveUninstantiablesImpl.h"
+#include "Resolver.h"
 #include "ScopeHelper.h"
 #include "SourceBlocks.h"
 #include "TypeUtil.h"
@@ -1220,6 +1224,131 @@ TEST_F(RemoveUninstantiablesTest, NpeStubsGetSourceBlocksFieldAccess) {
   }
 
   actual_ir->clear_cfg();
+}
+
+const char* const Base_init = R"(
+(method (public) "LBase;.<init>:()V"
+  ((load-param-object v0)
+   (return-void))
+))";
+
+const char* const Base_m = R"(
+(method (public) "LBase;.m:()V"
+  ((load-param-object v0)
+   (return-void))
+))";
+
+const char* const Sub_m = R"(
+(method (public) "LSub;.m:()V"
+  ((load-param-object v0)
+   (return-void))
+))";
+
+const char* const User_newBase = R"(
+(method (public static) "LUser;.newBase:()V"
+  ((new-instance "LBase;")
+   (move-result-pseudo-object v0)
+   (invoke-direct (v0) "LBase;.<init>:()V")
+   (return-void))
+))";
+
+// `Sub.m` overrides `Base.m`, and `Sub` is never instantiated, so `Sub.m` is
+// deleted. `user`, or the value of the static field `field` of `User`, holds a
+// method handle of `Sub.m`.
+void run_with_handle_of_uncallable_override(DexMethod* user,
+                                            DexField* field = nullptr) {
+  DexStoresVector dss{DexStore{"test_store"}};
+  auto* Base = def_class("LBase;", Base_init, Base_m);
+  auto* Sub = def_class("LSub;", Sub_m);
+  Sub->set_super_class(Base->get_type());
+  auto* User = def_class("LUser;", User_newBase);
+  User->add_method(user);
+  if (field != nullptr) {
+    User->add_field(field);
+  }
+  dss.back().add_classes({Base, Sub, User});
+
+  auto stats = run_remove_uninstantiables(dss);
+
+  EXPECT_NO_METHOD_DEF("LSub;.m:()V");
+  EXPECT_EQ(1, stats.removed_vmethods);
+}
+
+// The methods that the method handles in the code of `method` name.
+std::vector<DexMethodRef*> method_handle_methods(const DexMethod* method) {
+  std::vector<DexMethodRef*> methods;
+  for (const auto& mie : InstructionIterable(method->get_code())) {
+    for_each_method_handle(mie.insn, [&](const DexMethodHandle* handle) {
+      methods.push_back(handle->methodref());
+    });
+  }
+  return methods;
+}
+
+// The handle's type takes its receiver type from the class of the method it
+// names, so it keeps naming `Sub.m`, now through a reference that resolves to
+// `Base.m`, unlike an invoke-virtual, which would name `Base.m`.
+TEST_F(RemoveUninstantiablesTest, DeleteUncallableOverrideThatAHandleNames) {
+  auto* user = assembler::method_from_string(R"(
+    (method (public static) "LUser;.handle:()Ljava/lang/invoke/MethodHandle;"
+     ((const-method-handle invoke-instance "LSub;.m:()V")
+      (move-result-pseudo-object v0)
+      (return-object v0)))
+  )");
+
+  run_with_handle_of_uncallable_override(user);
+
+  auto* sub_m = DexMethod::get_method("LSub;.m:()V");
+  ASSERT_NE(nullptr, sub_m);
+  EXPECT_EQ(method_handle_methods(user), std::vector<DexMethodRef*>{sub_m});
+  EXPECT_EQ(resolve_method_deprecated(sub_m, MethodSearch::Virtual),
+            DexMethod::get_method("LBase;.m:()V"));
+}
+
+TEST_F(RemoveUninstantiablesTest,
+       DeleteUncallableOverrideThatACallSiteArgumentNames) {
+  auto* user = assembler::method_from_string(R"(
+    (method (public static) "LUser;.run:()V"
+     ((invoke-static () "LUser;.placeholder:()V")
+      (return-void)))
+  )");
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.push_back(
+      std::make_unique<DexEncodedValueMethodHandle>(redex::make_method_handle(
+          METHOD_HANDLE_TYPE_INVOKE_INSTANCE, "LSub;.m:()V")));
+  redex::make_invoke_custom(user->get_code(), "run", "()V", std::move(args));
+
+  run_with_handle_of_uncallable_override(user);
+
+  auto* sub_m = DexMethod::get_method("LSub;.m:()V");
+  ASSERT_NE(nullptr, sub_m);
+  auto methods = method_handle_methods(user);
+  EXPECT_NE(std::find(methods.begin(), methods.end(), sub_m), methods.end());
+}
+
+TEST_F(RemoveUninstantiablesTest,
+       DeleteUncallableOverrideThatAStaticFieldValueNames) {
+  auto* user = assembler::method_from_string(R"(
+    (method (public static) "LUser;.run:()V"
+     ((return-void)))
+  )");
+  auto* field =
+      DexField::make_field("LUser;.HANDLE:Ljava/lang/invoke/MethodHandle;")
+          ->make_concrete(
+              ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+              std::make_unique<DexEncodedValueMethodHandle>(
+                  redex::make_method_handle(METHOD_HANDLE_TYPE_INVOKE_INSTANCE,
+                                            "LSub;.m:()V")));
+
+  run_with_handle_of_uncallable_override(user, field);
+
+  auto* sub_m = DexMethod::get_method("LSub;.m:()V");
+  ASSERT_NE(nullptr, sub_m);
+  EXPECT_EQ(redex::encoded_value_as<DexEncodedValueMethodHandle>(
+                field->get_static_value())
+                ->methodhandle()
+                ->methodref(),
+            sub_m);
 }
 
 } // namespace

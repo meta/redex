@@ -663,7 +663,7 @@ remove_recursive_locks_test_SOURCES = RemoveRecursiveLocksTest.cpp
 
 remove_redundant_check_casts_test_SOURCES = RemoveRedundantCheckCastsTest.cpp VirtScopeHelper.cpp ScopeHelper.cpp
 
-remove_uninstantiables_test_SOURCES = RemoveUninstantiablesTest.cpp ScopeHelper.cpp
+remove_uninstantiables_test_SOURCES = RemoveUninstantiablesTest.cpp ScopeHelper.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 remove_uninstantiables_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 remove_unused_args_test_SOURCES = RemoveUnusedArgsTest.cpp ScopeHelper.cpp

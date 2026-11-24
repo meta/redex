@@ -12,6 +12,10 @@
 
 namespace method_fixup {
 
+// Makes code, static field values and annotations stop referring to the
+// vmethods that are keys of `removed_vmethods`, which the caller has deleted:
+// invokes name the replacement that each maps to instead, and a method handle
+// of a deleted vmethod names its descriptor through a new reference.
 void fixup_references_to_removed_methods(
     const Scope& scope,
     UnorderedMap<DexMethodRef*, DexMethodRef*>& removed_vmethods);

@@ -11,6 +11,7 @@
 #include "Debug.h"
 #include "DeterministicContainers.h"
 #include "LiveRange.h"
+#include "MethodUtil.h"
 #include "Resolver.h"
 #include "Show.h"
 #include "StringBuilder.h"
@@ -91,7 +92,7 @@ ExpandableMethodParams::MethodInfo ExpandableMethodParams::create_method_info(
       continue;
     }
     auto* code = method->get_code();
-    if ((code == nullptr) || method->rstate.no_optimizations()) {
+    if (!method::is_optimizable(method)) {
       continue;
     }
     live_range::MoveAwareChains chains(

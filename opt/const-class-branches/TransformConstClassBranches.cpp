@@ -97,13 +97,10 @@ bool ends_in_if_statment(const cfg::Block* b) {
 // Meant to be a quick guess, to skip some of the preliminary work in deciding
 // for real if the method should be operated upon if nothing looks relevant.
 bool should_consider_method(const PassState& pass_state, DexMethod* method) {
-  if (method->rstate.no_optimizations()) {
+  if (!method::is_optimizable(method)) {
     return false;
   }
   auto* code = method->get_code();
-  if (code == nullptr) {
-    return false;
-  }
   auto& cfg = code->cfg();
   bool found_branch = false;
   for (const auto* b : cfg.blocks()) {

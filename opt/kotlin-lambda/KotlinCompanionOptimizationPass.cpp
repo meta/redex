@@ -17,6 +17,7 @@
 #include "DexUtil.h"
 #include "IRCode.h"
 #include "LiveRange.h"
+#include "MethodUtil.h"
 #include "Mutators.h"
 #include "PassManager.h"
 #include "Resolver.h"
@@ -386,9 +387,8 @@ std::pair<RejectionReason, DexClass*> candidate_for_companion_relocation(
   for (auto* meth : cls->get_vmethods()) {
     // No need to check is_final(meth) — the class-level hierarchy check
     // already guarantees no subclasses, so no virtual method can be overridden.
-    if (root(meth) || !can_rename(meth) || meth->rstate.no_optimizations() ||
-        (meth->get_code() == nullptr) || uses_this(meth) ||
-        depends_on_its_class(meth)) {
+    if (root(meth) || !can_rename(meth) || !method::is_optimizable(meth) ||
+        uses_this(meth) || depends_on_its_class(meth)) {
       TRACE(KOTLIN_COMPANION, 5, "Method not relocatable: %s", SHOW(meth));
       return {RejectionReason::kMethodNotRelocatable, nullptr};
     }
@@ -404,8 +404,7 @@ std::pair<RejectionReason, DexClass*> candidate_for_companion_relocation(
         return {RejectionReason::kInvalidInit, nullptr};
       }
     } else if (root(meth) || !can_rename(meth) ||
-               meth->rstate.no_optimizations() ||
-               (meth->get_code() == nullptr) || uses_this(meth) ||
+               !method::is_optimizable(meth) || uses_this(meth) ||
                depends_on_its_class(meth)) {
       TRACE(KOTLIN_COMPANION, 5, "Method not relocatable: %s", SHOW(meth));
       return {RejectionReason::kMethodNotRelocatable, nullptr};

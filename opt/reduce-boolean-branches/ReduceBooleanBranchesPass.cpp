@@ -12,6 +12,7 @@
 #include "DexClass.h"
 #include "DexUtil.h"
 #include "LocalDce.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Purity.h"
 #include "Trace.h"
@@ -41,7 +42,7 @@ void ReduceBooleanBranchesPass::run_pass(DexStoresVector& stores,
       scope, [&config = m_config, &copy_prop_config,
               &pure_methods](DexMethod* method) {
         auto* const code = method->get_code();
-        if ((code == nullptr) || method->rstate.no_optimizations()) {
+        if (!method::is_optimizable(method)) {
           return reduce_boolean_branches_impl::Stats{};
         }
         always_assert(code->cfg_built());

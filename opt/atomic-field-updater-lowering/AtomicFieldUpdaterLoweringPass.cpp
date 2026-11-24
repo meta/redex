@@ -38,6 +38,7 @@
 #include "LiveRange.h"
 #include "LocalDce.h"
 #include "MethodOverrideGraph.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "ReachableClasses.h"
 #include "ReflectionAnalysis.h"
@@ -534,7 +535,7 @@ const DexMethodRef* match_backport_cas_forwarder(const DexMethod* method,
   if (cls == nullptr || is_interface(cls) || cls->get_clinit() != nullptr ||
       cls->get_super_class() != type::java_lang_Object() ||
       is_synchronized(method) || is_declared_synchronized(method) ||
-      method->rstate.no_optimizations() || method->get_code() == nullptr) {
+      !method::is_optimizable(method)) {
     return nullptr;
   }
   const auto& cfg = method->get_code()->cfg();
@@ -1069,8 +1070,7 @@ bool is_accessor_chain(
     const UnorderedMap<DexField*, const UpdaterInfo*>& by_field,
     UnorderedSet<DexMethod*>* chain) {
   UnorderedSet<DexMethod*> walked;
-  while (m != nullptr && m->get_code() != nullptr &&
-         !m->rstate.no_optimizations() && walked.insert(m).second) {
+  while (m != nullptr && method::is_optimizable(m) && walked.insert(m).second) {
     DexField* field = nullptr;
     DexMethod* delegate = nullptr;
     for (auto& mie : cfg::InstructionIterable(m->get_code()->cfg())) {
@@ -1125,8 +1125,7 @@ UnorderedSet<DexMethod*> find_receiver_chain_accessors(
 
   walk::parallel::methods(scope, [&](DexMethod* method) {
     auto* code = method->get_code();
-    if (code == nullptr || method->rstate.no_optimizations() ||
-        ops.is_forwarder(method)) {
+    if (!method::is_optimizable(method) || ops.is_forwarder(method)) {
       return;
     }
     always_assert(code->cfg_built());
@@ -1714,8 +1713,7 @@ Stats analyze_calls(const Scope& scope,
   return walk::parallel::methods<Stats>(scope, [&](DexMethod* method) {
     Stats stats;
     auto* code = method->get_code();
-    if (code == nullptr || method->rstate.no_optimizations() ||
-        ops.is_forwarder(method)) {
+    if (!method::is_optimizable(method) || ops.is_forwarder(method)) {
       return stats;
     }
     always_assert(code->cfg_built());

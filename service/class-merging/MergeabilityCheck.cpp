@@ -16,6 +16,7 @@
 #include "DexUtil.h"
 #include "IRCode.h"
 #include "LiveRange.h"
+#include "MethodUtil.h"
 #include "Model.h"
 #include "ReachableClasses.h"
 #include "RefChecker.h"
@@ -77,8 +78,7 @@ void MergeabilityChecker::exclude_unsupported_cls_property(
         has_ctor = true;
         // keep going
       }
-      if (method->rstate.no_optimizations() ||
-          (method->get_code() == nullptr)) {
+      if (!method::is_optimizable(method)) {
         non_mergeables.insert(type);
         TRACE(CLMG, 5, "Cannot optimize dmethod on %s", SHOW(type));
         break;

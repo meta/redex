@@ -14,6 +14,7 @@
 #include "DexUtil.h"
 #include "InitClassesWithSideEffects.h"
 #include "LocalDce.h"
+#include "MethodUtil.h"
 #include "Purity.h"
 #include "Show.h"
 #include "Trace.h"
@@ -83,11 +84,7 @@ void CommonSubexpressionEliminationPass::run_pass(DexStoresVector& stores,
       scope,
       [&](DexMethod* method) {
         auto* const code = method->get_code();
-        if (code == nullptr) {
-          return Stats();
-        }
-
-        if (method->rstate.no_optimizations()) {
+        if (!method::is_optimizable(method)) {
           return Stats();
         }
 

@@ -400,10 +400,7 @@ cp::WholeProgramState analyze_and_simplify_clinits(
 
   for (DexClass* cls : reverse_tsort_by_clinit_deps(scope, *init_cycles)) {
     auto* clinit = cls->get_clinit();
-    if (clinit != nullptr && clinit->get_code() == nullptr) {
-      continue;
-    }
-    if (clinit != nullptr && clinit->rstate.no_optimizations()) {
+    if (clinit != nullptr && !method::is_optimizable(clinit)) {
       continue;
     }
     ConstantEnvironment env;
@@ -509,10 +506,7 @@ cp::WholeProgramState analyze_and_simplify_inits(
     always_assert(ctors.size() <= 1);
     if (ctors.size() == 1) {
       auto* ctor = ctors[0];
-      if (ctor->get_code() == nullptr) {
-        continue;
-      }
-      if (ctor->rstate.no_optimizations()) {
+      if (!method::is_optimizable(ctor)) {
         continue;
       }
       auto* code = ctor->get_code();

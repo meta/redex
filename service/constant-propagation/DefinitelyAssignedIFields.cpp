@@ -23,6 +23,7 @@
 #include "IRCode.h"
 #include "IRInstruction.h"
 #include "LiveRange.h"
+#include "MethodUtil.h"
 #include "Resolver.h"
 #include "Timer.h"
 #include "Walkers.h"
@@ -260,8 +261,7 @@ UnorderedSet<const DexField*> get_definitely_assigned_ifields(
     // runtime, so it assigns nothing for sure. External constructors assign
     // none of the class's own fields.
     AnalysisResult res;
-    if (!ctor->is_external() && ctor->get_code() &&
-        !ctor->rstate.no_optimizations()) {
+    if (!ctor->is_external() && method::is_optimizable(ctor)) {
       auto inner = chain;
       inner.push_back(ctor);
       const auto& cfg = ctor->get_code()->cfg();

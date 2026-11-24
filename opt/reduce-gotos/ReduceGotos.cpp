@@ -41,6 +41,7 @@
 #include "IRInstruction.h"
 #include "IROpcode.h"
 #include "Liveness.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Show.h"
 #include "SourceBlocks.h"
@@ -654,7 +655,7 @@ void ReduceGotosPass::run_pass(DexStoresVector& stores,
       [&baseline_profile, huge_method_max,
        split_source_block_counts](DexMethod* method) {
         auto* const code = method->get_code();
-        if ((code == nullptr) || method->rstate.no_optimizations()) {
+        if (!method::is_optimizable(method)) {
           return Stats{};
         }
 

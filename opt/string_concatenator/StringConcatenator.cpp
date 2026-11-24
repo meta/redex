@@ -377,10 +377,10 @@ void StringConcatenatorPass::run_pass(DexStoresVector& stores,
       scope,
       [&config, &methods_to_remove](DexMethod* m) {
         auto* code = m->get_code();
-        if (code == nullptr) {
+        if (!method::is_optimizable(m)) {
           return Stats{};
         }
-        if (!method::is_clinit(m) || m->rstate.no_optimizations()) {
+        if (!method::is_clinit(m)) {
           // TODO maybe later? If we expand to non-clinit methods, `analyze()`
           // will have to consider StringBuilders passed in as arguments.
           return Stats{};

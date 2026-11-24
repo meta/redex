@@ -13,6 +13,7 @@
 #include "Debug.h"
 #include "DeterministicContainers.h"
 #include "DexUtil.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Resolver.h"
 #include "Show.h"
@@ -266,10 +267,7 @@ std::vector<DexClass*> StaticReloPassV2::gen_candidates(const Scope& scope) {
         cls->get_sfields().empty() && cls->get_vmethods().empty()) {
       for (const auto& method : cls->get_dmethods()) {
         if (!is_static(method) || !can_rename(method) || !can_delete(method) ||
-            method->rstate.no_optimizations()) {
-          return;
-        }
-        if (method->get_code() == nullptr) {
+            !method::is_optimizable(method)) {
           return;
         }
       }

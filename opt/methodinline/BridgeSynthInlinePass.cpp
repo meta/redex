@@ -54,13 +54,10 @@ bool rewrite_bridge_with_abstract_super_target(DexMethod* method) {
   if (!is_bridgelike_synthetic(method)) {
     return false;
   }
-  if (method->rstate.no_optimizations()) {
+  if (!method::is_optimizable(method)) {
     return false;
   }
   auto* code = method->get_code();
-  if (code == nullptr) {
-    return false;
-  }
 
   auto& cfg = code->cfg();
   cfg::CFGMutation mutation(cfg);

@@ -13,6 +13,7 @@
 #include "InitClassesWithSideEffects.h"
 #include "LocalDce.h"
 #include "MethodOverrideGraph.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Purity.h"
 #include "Trace.h"
@@ -109,7 +110,7 @@ void LocalDcePass::run_pass(DexStoresVector& stores,
   auto stats =
       walk::parallel::methods<LocalDce::Stats>(scope, [&](DexMethod* m) {
         auto* code = m->get_code();
-        if (code == nullptr || m->rstate.no_optimizations()) {
+        if (!method::is_optimizable(m)) {
           return LocalDce::Stats();
         }
 

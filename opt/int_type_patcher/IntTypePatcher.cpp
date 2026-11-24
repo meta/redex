@@ -9,6 +9,7 @@
 #include "Debug.h"
 #include "DexUtil.h"
 #include "IROpcode.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Show.h"
 #include "Trace.h"
@@ -49,7 +50,7 @@ void IntTypePatcherPass::run(DexMethod* m) {
   }
 
   IRCode* code = m->get_code();
-  if ((code == nullptr) || m->rstate.no_optimizations()) {
+  if (!method::is_optimizable(m)) {
     return;
   }
   always_assert(code->cfg_built());

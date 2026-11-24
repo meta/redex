@@ -14,6 +14,7 @@
 #include "DexClass.h"
 #include "IRInstruction.h"
 #include "Inliner.h"
+#include "MethodUtil.h"
 #include "Resolver.h"
 #include "ScopedCFG.h"
 #include "Show.h"
@@ -86,14 +87,12 @@ bool calls_disallowed(DexMethod* method,
 
 Result run(DexClass* cls) {
   auto* clinit = cls->get_clinit();
-  if (clinit == nullptr || clinit->get_code() == nullptr ||
-      clinit->rstate.no_optimizations()) {
+  if (clinit == nullptr || !method::is_optimizable(clinit)) {
     return Result::kIneligible;
   }
 
   auto* dollar_values = find_dollar_values(cls);
-  if (dollar_values == nullptr || dollar_values->get_code() == nullptr ||
-      dollar_values->rstate.no_optimizations()) {
+  if (dollar_values == nullptr || !method::is_optimizable(dollar_values)) {
     return Result::kIneligible;
   }
 

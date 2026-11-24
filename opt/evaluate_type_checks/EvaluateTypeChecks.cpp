@@ -21,6 +21,7 @@
 #include "IRInstruction.h"
 #include "InitClassesWithSideEffects.h"
 #include "LiveRange.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Trace.h"
 #include "TypeInference.h"
@@ -506,7 +507,7 @@ void EvaluateTypeChecksPass::run_pass(DexStoresVector& stores,
   auto stats = walk::parallel::methods<RemoveResult>(
       scope, [&shrinker](DexMethod* method) {
         auto* code = method->get_code();
-        if (code == nullptr || method->rstate.no_optimizations()) {
+        if (!method::is_optimizable(method)) {
           return RemoveResult{};
         }
         auto has_instance_of_check_cast = [&code]() {

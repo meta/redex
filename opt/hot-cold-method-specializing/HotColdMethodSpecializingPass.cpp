@@ -12,6 +12,7 @@
 #include "DexUtil.h"
 #include "InitClassesWithSideEffects.h"
 #include "MethodOverrideGraph.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "RedexContext.h"
 #include "Show.h"
@@ -512,8 +513,7 @@ void HotColdMethodSpecializingPass::run_pass(DexStoresVector& stores,
 
     std::vector<DexMethod*> specialized_methods;
     for (auto* method : cls->get_all_methods()) {
-      if ((method->get_code() == nullptr) || method::is_any_init(method) ||
-          method->rstate.no_optimizations() ||
+      if (!method::is_optimizable(method) || method::is_any_init(method) ||
           method->rstate.should_not_outline()) {
         continue;
       }

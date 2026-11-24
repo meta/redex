@@ -17,6 +17,7 @@
 #include "DeterministicContainers.h"
 #include "Lazy.h"
 #include "LiveRange.h"
+#include "MethodUtil.h"
 #include "RedexContext.h"
 #include "Show.h"
 #include "Trace.h"
@@ -232,7 +233,7 @@ void WrappedPrimitives::optimize_method(
     const cp::WholeProgramState& /*wps*/,
     DexMethod* method,
     cfg::ControlFlowGraph& cfg) {
-  if (method->get_code() == nullptr || method->rstate.no_optimizations()) {
+  if (!method::is_optimizable(method)) {
     return;
   }
   if (!contains_relevant_invoke(m_all_wrapped_apis, method)) {

@@ -2421,7 +2421,7 @@ void sweep_code(
   *remove_uninstantiables_stats = walk::parallel::methods<
       remove_uninstantiables_impl::Stats>(scope, [&](DexMethod* method) {
     auto* code = method->get_code();
-    if ((code == nullptr) || method->rstate.no_optimizations()) {
+    if (!method::is_optimizable(method)) {
       return remove_uninstantiables_impl::Stats();
     }
     always_assert(code->cfg_built());
@@ -2505,7 +2505,7 @@ remove_uninstantiables_impl::Stats sweep_uncallable_virtual_methods(
       if (is_static(m)) {
         return;
       }
-      if (!m->rstate.no_optimizations() && (m->get_code() != nullptr) &&
+      if (method::is_optimizable(m) &&
           (reachable_aspects.callable_instance_methods.count_unsafe(m) == 0u)) {
         uncallable_instance_methods.insert(m);
       }

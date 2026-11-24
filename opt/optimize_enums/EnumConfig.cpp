@@ -11,6 +11,7 @@
 #include "Debug.h"
 #include "IRCode.h"
 #include "LocalPointersAnalysis.h"
+#include "MethodUtil.h"
 #include "Show.h"
 #include "Trace.h"
 #include "TypeUtil.h"
@@ -203,8 +204,7 @@ void calculate_param_summaries(
       [object_type, &override_graph](DexMethod* method) {
         // The code of a method marked `no_optimizations` may not be what
         // runs, so its body says nothing about what it does.
-        return (method->get_code() != nullptr) &&
-               !method->rstate.no_optimizations() &&
+        return method::is_optimizable(method) &&
                !method_override_graph::is_true_virtual(override_graph,
                                                        method) &&
                params_contain_object_type(method, object_type);

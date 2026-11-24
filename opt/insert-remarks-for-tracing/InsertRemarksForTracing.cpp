@@ -15,6 +15,7 @@
 #include "DexUtil.h"
 #include "IRCode.h"
 #include "IRList.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "RedexContext.h"
 #include "Show.h"
@@ -38,12 +39,9 @@ void InsertRemarksForTracingPass::run_pass(DexStoresVector& stores,
   std::atomic<size_t> inserted{0};
   walk::parallel::methods(scope, [&](DexMethod* method) {
     auto* code = method->get_code();
-    if (code == nullptr) {
-      return;
-    }
     // Respect the no-optimizations blocklist (build-time bytecode may not match
     // runtime for such methods).
-    if (method->rstate.no_optimizations()) {
+    if (!method::is_optimizable(method)) {
       return;
     }
     // val_str = the deobfuscated, fully-qualified method name (interned). It

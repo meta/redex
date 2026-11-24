@@ -25,6 +25,7 @@
 #include "Histogram.h"
 #include "IRCode.h"
 #include "InitClassesWithSideEffects.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Purity.h"
 #include "Show.h"
@@ -269,13 +270,10 @@ void StringSwitchTransformPass::run_pass(DexStoresVector& stores,
       /*scope=*/{}, /*create_init_class_insns=*/false);
   auto stats = walk::parallel::methods<DriverStats, CombineDriverStats>(
       scope, [&](DexMethod* method, DriverStats* acc) {
-        if (method->rstate.no_optimizations()) {
+        if (!method::is_optimizable(method)) {
           return;
         }
         auto* code = method->get_code();
-        if (code == nullptr) {
-          return;
-        }
         auto& cfg = code->cfg();
         if (!may_contain_string_switch(cfg)) {
           return;

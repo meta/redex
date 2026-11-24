@@ -24,6 +24,7 @@
 #include "IRCode.h"
 #include "IRInstruction.h"
 #include "LiveRange.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Show.h"
 #include "Trace.h"
@@ -775,7 +776,7 @@ void ReduceArrayLiteralsPass::run_pass(DexStoresVector& stores,
       scope,
       [&](DexMethod* m) {
         auto* const code = m->get_code();
-        if (code == nullptr || m->rstate.no_optimizations()) {
+        if (!method::is_optimizable(m)) {
           return ReduceArrayLiterals::Stats();
         }
         always_assert(code->cfg_built());

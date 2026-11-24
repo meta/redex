@@ -9,6 +9,7 @@
 
 #include "Debug.h"
 #include "DexUtil.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Show.h"
 #include "Trace.h"
@@ -33,8 +34,8 @@ void DedupBlocksPass::run_pass(DexStoresVector& stores,
       scope,
       [&](DexMethod* method) {
         auto* const code = method->get_code();
-        if (code == nullptr || m_config.method_blocklist.count(method) != 0 ||
-            method->rstate.no_optimizations()) {
+        if (!method::is_optimizable(method) ||
+            m_config.method_blocklist.count(method) != 0) {
           return dedup_blocks_impl::Stats();
         }
 

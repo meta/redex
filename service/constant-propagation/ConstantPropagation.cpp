@@ -11,6 +11,7 @@
 #include "ConstantPropagationTransform.h"
 #include "IPConstantPropagationAnalysis.h"
 
+#include "MethodUtil.h"
 #include "ScopedCFG.h"
 #include "Trace.h"
 #include "Walkers.h"
@@ -20,7 +21,7 @@ namespace constant_propagation {
 Transform::Stats ConstantPropagation::run(DexMethod* method,
                                           const XStoreRefs* xstores,
                                           const NullCheckMethods& state) {
-  if (method->get_code() == nullptr || method->rstate.no_optimizations()) {
+  if (!method::is_optimizable(method)) {
     return Transform::Stats();
   }
   TRACE(CONSTP, 2, "Method: %s", SHOW(method));

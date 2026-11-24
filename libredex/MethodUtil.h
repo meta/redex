@@ -171,6 +171,14 @@ inline bool has_code(const DexMethodRef* meth) {
 }
 
 /**
+ * Whether passes may change the code of `method`: it has code, and it is not
+ * marked `no_optimizations`.
+ */
+inline bool is_optimizable(const DexMethod* method) {
+  return method->get_code() != nullptr && !method->rstate.no_optimizations();
+}
+
+/**
  * Return true if method signatures (name and proto) match.
  */
 inline bool signatures_match(const DexMethodRef* a, const DexMethodRef* b) {

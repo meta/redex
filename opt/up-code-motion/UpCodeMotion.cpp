@@ -38,6 +38,7 @@
 #include "IRCode.h"
 #include "IRInstruction.h"
 #include "IROpcode.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "RedexContext.h"
 #include "Show.h"
@@ -388,7 +389,7 @@ void UpCodeMotionPass::run_pass(DexStoresVector& stores,
 
   Stats stats = walk::parallel::methods<Stats>(scope, [&](DexMethod* method) {
     auto* const code = method->get_code();
-    if ((code == nullptr) || method->rstate.no_optimizations()) {
+    if (!method::is_optimizable(method)) {
       return Stats{};
     }
 

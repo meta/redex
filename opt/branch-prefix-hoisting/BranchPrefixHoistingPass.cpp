@@ -11,6 +11,7 @@
 
 #include "BranchPrefixHoisting.h"
 #include "DexUtil.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Show.h"
 #include "Trace.h"
@@ -70,7 +71,7 @@ void BranchPrefixHoistingPass::run_pass(DexStoresVector& stores,
       [can_allocate_regs, &positions_marked_unreliable, &merges_not_recorded](
           DexMethod* method) -> size_t {
         auto* const code = method->get_code();
-        if ((code == nullptr) || method->rstate.no_optimizations()) {
+        if (!method::is_optimizable(method)) {
           return 0;
         }
         TraceContext context{method};

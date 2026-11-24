@@ -18,6 +18,7 @@
 #include "DexUtil.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Resolver.h"
 #include "Show.h"
@@ -519,7 +520,7 @@ void ResultPropagationPass::run_pass(DexStoresVector& stores,
   const auto stats = walk::parallel::methods<ResultPropagation::Stats>(
       scope, [&](DexMethod* m) {
         auto* const code = m->get_code();
-        if (code == nullptr || m->rstate.no_optimizations()) {
+        if (!method::is_optimizable(m)) {
           return ResultPropagation::Stats();
         }
 

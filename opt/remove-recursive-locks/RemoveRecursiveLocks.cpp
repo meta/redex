@@ -24,6 +24,7 @@
 #include "DexUtil.h"
 #include "IRInstruction.h"
 #include "MethodProfiles.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "ReachingDefinitions.h"
 #include "Show.h"
@@ -757,10 +758,9 @@ void run_impl(DexStoresVector& stores,
         // `Stats{}` is the identity of the walker's reduction, and the walker
         // default-constructs one per thread, so only the value returned for a
         // method may carry a count.
-        Stats method_stats =
-            code != nullptr && !method->rstate.no_optimizations()
-                ? run_locks_removal(method, code)
-                : Stats{};
+        Stats method_stats = method::is_optimizable(method)
+                                 ? run_locks_removal(method, code)
+                                 : Stats{};
         method_stats.all_methods = 1;
         return method_stats;
       });

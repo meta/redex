@@ -38,8 +38,7 @@ void RemoveNullcheckStringArg::run_pass(DexStoresVector& stores,
   Scope scope = build_class_scope(stores);
   Stats stats = walk::parallel::methods<Stats>(scope, [&](DexMethod* method) {
     auto* code = method->get_code();
-    if (method->rstate.no_optimizations() || code == nullptr ||
-        (new_methods.count(method) != 0u)) {
+    if (!method::is_optimizable(method) || (new_methods.count(method) != 0u)) {
       return Stats();
     }
     always_assert(code->cfg_built());

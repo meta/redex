@@ -17,6 +17,7 @@
 #include "ConstantEnvironment.h"
 #include "ConstantPropagationAnalysis.h"
 #include "Debug.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Show.h"
 #include "Trace.h"
@@ -220,7 +221,7 @@ MethodTransformsMap ResourcesInliningPass::find_transformations(
   MethodTransformsMap possible_transformations;
 
   walk::parallel::methods(scope, [&](DexMethod* method) {
-    if (method->rstate.no_optimizations()) {
+    if (!method::is_optimizable(method)) {
       return;
     }
 
@@ -233,9 +234,6 @@ MethodTransformsMap ResourcesInliningPass::find_transformations(
 
     // Retrieving cfg
     auto* get_code = method->get_code();
-    if (get_code == nullptr) {
-      return;
-    }
     auto& cfg = get_code->cfg();
 
     if (!exists_possible_transformation(cfg, value_method_refs,

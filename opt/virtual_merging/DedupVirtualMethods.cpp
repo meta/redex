@@ -15,6 +15,7 @@
 #include "MethodFixup.h"
 #include "MethodOverrideGraph.h"
 #include "MethodProfiles.h"
+#include "MethodUtil.h"
 #include "PositionAmbiguity.h"
 #include "Resolver.h"
 #include "Show.h"
@@ -53,14 +54,10 @@ bool eligible_code(const cfg::ControlFlowGraph& cfg) {
 namespace dedup_vmethods {
 
 bool is_removable_copy(const DexMethod* method) {
-  if (root(method) || !can_rename(method) ||
-      method->rstate.no_optimizations()) {
+  if (root(method) || !can_rename(method) || !method::is_optimizable(method)) {
     return false;
   }
   const auto* code = method->get_code();
-  if (code == nullptr) {
-    return false;
-  }
   always_assert(code->cfg_built());
   return eligible_code(code->cfg());
 }
@@ -143,13 +140,12 @@ uint32_t remove_duplicated_vmethods(
 
   walk::classes(scope, [&](DexClass* cls) {
     for (auto* method : cls->get_vmethods()) {
-      if (method->get_code() == nullptr) {
-        // TODO: look at the abstract methods and we can lift the
-        // implementations to the abstract class if lots of them are identical.
-        continue;
-      }
-      // Its code at runtime may differ from the code Redex sees.
-      if (method->rstate.no_optimizations()) {
+      // An abstract method has no code.
+      // TODO: look at the abstract methods and we can lift the
+      // implementations to the abstract class if lots of them are identical.
+      // A method excluded from optimization: its code at runtime may differ
+      // from the code Redex sees.
+      if (!method::is_optimizable(method)) {
         continue;
       }
       if (removed_to_survivor.count(method) != 0) {

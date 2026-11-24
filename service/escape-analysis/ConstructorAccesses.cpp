@@ -203,8 +203,7 @@ UnorderedSet<const DexMethod*> get_constructors_keeping_this(
           auto* code = ctor->get_code();
           // The code of a constructor excluded from optimization may differ
           // at runtime.
-          if (code == nullptr || ctor->rstate.no_optimizations() ||
-              own.count(ctor) != 0u) {
+          if (!method::is_optimizable(ctor) || own.count(ctor) != 0u) {
             continue;
           }
           cfg::ScopedCFG cfg(code);

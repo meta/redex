@@ -13,6 +13,7 @@
 #include "Debug.h"
 #include "DexClass.h"
 #include "DexUtil.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Walkers.h"
 
@@ -21,8 +22,7 @@ namespace check_casts {
 impl::Stats remove_redundant_check_casts(const CheckCastConfig& config,
                                          DexMethod* method,
                                          const api::AndroidSDK& android_sdk) {
-  if ((method == nullptr) || (method->get_code() == nullptr) ||
-      method->rstate.no_optimizations()) {
+  if ((method == nullptr) || !method::is_optimizable(method)) {
     return impl::Stats{};
   }
 

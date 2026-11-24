@@ -11,6 +11,7 @@
 #include "DeterministicContainers.h"
 #include "IRInstruction.h"
 #include "KotlinNullCheckMethods.h"
+#include "MethodUtil.h"
 #include "Show.h"
 
 using namespace kotlin_nullcheck_wrapper;
@@ -152,7 +153,7 @@ Transform::Stats Transform::apply(
   auto* code = method->get_code();
   TRACE(TYPE_TRANSFORM, 4, "Processing %s", SHOW(method));
   Transform::Stats stats{};
-  if ((code == nullptr) || method->rstate.no_optimizations()) {
+  if (!method::is_optimizable(method)) {
     return stats;
   }
   for (const auto& block : code->cfg().blocks()) {

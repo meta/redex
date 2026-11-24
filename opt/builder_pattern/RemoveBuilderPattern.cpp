@@ -16,6 +16,7 @@
 #include "DexUtil.h"
 #include "GlobalConfig.h"
 #include "InitClassesWithSideEffects.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Show.h"
 #include "Trace.h"
@@ -190,8 +191,7 @@ class RemoveClasses {
     std::vector<DexMethod*> methods;
 
     walk::parallel::methods(m_scope, [&](DexMethod* method) {
-      if ((method == nullptr) || (method->get_code() == nullptr) ||
-          method->rstate.no_optimizations()) {
+      if ((method == nullptr) || !method::is_optimizable(method)) {
         return;
       }
 

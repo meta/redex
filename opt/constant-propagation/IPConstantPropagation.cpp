@@ -20,6 +20,7 @@
 #include "DexUtil.h"
 #include "IPConstantPropagationAnalysis.h"
 #include "MethodOverrideGraph.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Purity.h"
 #include "ScopedMetrics.h"
@@ -320,8 +321,7 @@ void PassImpl::optimize(
   AtomicStatCounter<size_t> concat_reduced{0};
   m_transform_stats =
       walk::parallel::methods<Transform::Stats>(scope, [&](DexMethod* method) {
-        if (method->get_code() == nullptr ||
-            method->rstate.no_optimizations()) {
+        if (!method::is_optimizable(method)) {
           return Transform::Stats();
         }
         auto& code = *method->get_code();

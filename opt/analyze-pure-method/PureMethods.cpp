@@ -9,6 +9,7 @@
 #include "Debug.h"
 #include "DexUtil.h"
 #include "LocalPointersAnalysis.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "Purity.h"
 #include "Show.h"
@@ -57,8 +58,7 @@ AnalyzePureMethodsPass::analyze_and_set_pure_methods(Scope& scope) {
 
   Stats stats = walk::parallel::methods<Stats>(scope, [&](DexMethod* method) {
     Stats method_stats;
-    if ((method->get_code() == nullptr) || method->rstate.no_optimizations() ||
-        method->rstate.immutable_getter()) {
+    if (!method::is_optimizable(method) || method->rstate.immutable_getter()) {
       return method_stats;
     }
     auto* code = method->get_code();

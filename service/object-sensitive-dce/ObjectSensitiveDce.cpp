@@ -17,6 +17,7 @@
 #include "InitClassPruner.h"
 #include "InitClassesWithSideEffects.h"
 #include "LocalPointersAnalysis.h"
+#include "MethodUtil.h"
 #include "TypeUtil.h"
 #include "UsedVarsAnalysis.h"
 #include "Walkers.h"
@@ -106,7 +107,7 @@ void ObjectSensitiveDce::dce() {
   UnorderedMap<uint16_t, size_t> invokes_with_summaries{0};
 
   walk::parallel::code(m_scope, [&](DexMethod* method, IRCode& code) {
-    if (method->get_code() == nullptr || method->rstate.no_optimizations()) {
+    if (!method::is_optimizable(method)) {
       return;
     }
     auto& cfg = code.cfg();

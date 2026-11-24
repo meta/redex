@@ -578,6 +578,13 @@ std::optional<bool> is_instance_of_if_known(const DexType* type,
   if (reaches_base(cls->get_super_class())) {
     return true;
   }
+  // An interface extends only interfaces and Object, so the superclass chain
+  // alone decides whether a class is an instance of a class other than Object.
+  const auto* base_cls = type_class(base_type);
+  if (base_cls != nullptr && !is_interface(base_cls) &&
+      base_type != type::java_lang_Object()) {
+    return known ? std::optional<bool>(false) : std::nullopt;
+  }
   for (const auto* intf : *cls->get_interfaces()) {
     if (reaches_base(intf)) {
       return true;

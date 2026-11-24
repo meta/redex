@@ -289,4 +289,25 @@ TEST_F(TypeUtilTest, is_instance_of_if_known) {
   EXPECT_EQ(is_instance_of_if_known(integer, serializable), true);
   EXPECT_EQ(is_instance_of_if_known(integer, java_lang_String()), false);
   EXPECT_EQ(is_instance_of_if_known(number, integer), false);
+
+  // class Bar implements LibMarker {}  // LibMarker is not loaded
+  // Only interfaces lie behind LibMarker, so Bar is no Number, but may be
+  // Serializable.
+  auto* bar = DexType::make_type("LBar;");
+  ClassCreator bc(bar);
+  bc.set_super(object);
+  bc.add_interface(DexType::make_type("LLibMarker;"));
+  bc.create();
+  EXPECT_EQ(is_instance_of_if_known(bar, number), false);
+  EXPECT_EQ(is_instance_of_if_known(bar, serializable), std::nullopt);
+
+  // class Baz extends LibBase implements Serializable {}  // LibBase unloaded
+  // Serializable, as every interface, leads to Object.
+  auto* baz = DexType::make_type("LBaz;");
+  ClassCreator zc(baz);
+  zc.set_super(DexType::make_type("LLibBase;"));
+  zc.add_interface(serializable);
+  zc.create();
+  EXPECT_EQ(is_instance_of_if_known(baz, object), true);
+  EXPECT_EQ(is_instance_of_if_known(baz, number), std::nullopt);
 }

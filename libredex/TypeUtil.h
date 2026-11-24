@@ -254,7 +254,9 @@ std::optional<int32_t> evaluate_type_check(const DexType* src_type,
  * judged from the classes Redex has loaded. Unlike `check_cast`, which answers
  * false where it does not know a class, this answers nullopt when `type` is not
  * `base_type` and is not loaded itself, or when no class or interface above
- * `type` leads to `base_type` and one of those it visited is not loaded.
+ * `type` leads to `base_type` and one of those it visited is not loaded. For a
+ * loaded `base_type` that is neither an interface nor Object, only superclasses
+ * are visited.
  */
 std::optional<bool> is_instance_of_if_known(const DexType* type,
                                             const DexType* base_type);

@@ -112,7 +112,7 @@ class PriorityThreadPool {
   // Wait for all work items to be processed.
   void wait(bool init_shutdown = false) {
     always_assert(m_threads > 0);
-    auto start = std::chrono::system_clock::now();
+    auto start = std::chrono::steady_clock::now();
     {
       // We wait until *all* work is done, i.e. nothing is running or pending.
       std::unique_lock<std::mutex> lock{m_mutex};
@@ -124,7 +124,7 @@ class PriorityThreadPool {
         m_work_condition.notify_all();
       }
     }
-    auto end = std::chrono::system_clock::now();
+    auto end = std::chrono::steady_clock::now();
     m_waited_time += end - start;
   }
 

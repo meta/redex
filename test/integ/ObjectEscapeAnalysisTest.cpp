@@ -141,6 +141,21 @@ TEST_F(ObjectEscapeAnalysisTest, reduceTo42C) {
   ASSERT_EQ(actual.str(), assembler::to_s_expr(expected.get()).str());
 }
 
+TEST_F(ObjectEscapeAnalysisTest, reduceTo42WithManyBuilders) {
+  run();
+
+  auto actual = get_s_expr(
+      "Lcom/facebook/redextest/"
+      "ObjectEscapeAnalysisTest;.reduceTo42WithManyBuilders:()I");
+  auto expected = assembler::ircode_from_string(R"(
+   (
+      (const v4 42)
+      (return v4)
+    )
+)");
+  ASSERT_EQ(actual.str(), assembler::to_s_expr(expected.get()).str());
+}
+
 TEST_F(ObjectEscapeAnalysisTest, reduceTo42D) {
   run();
 

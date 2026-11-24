@@ -5,8 +5,11 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <functional>
+
 #include <gtest/gtest.h>
 
+#include "DexAnnotation.h"
 #include "DexClass.h"
 #include "DexMethodHandle.h"
 #include "IRAssembler.h"
@@ -649,4 +652,79 @@ TEST_F(RenamerTest, MethodHandleOfInheritedMethod) {
   auto* insn = run->get_code()->begin()->insn;
   ASSERT_EQ(insn->opcode(), OPCODE_CONST_METHOD_HANDLE);
   EXPECT_EQ(insn->get_methodhandle()->methodref()->get_name(), a_f->get_name());
+}
+
+namespace {
+
+// Makes a scope in which `B` inherits `A.f`, and `C` holds `method_handle`, an
+// invoke-instance handle of `LB;.f:()V`, as `hold` attaches it. Returns `A.f`.
+DexMethod* make_scope_with_handle_of_inherited_method(
+    std::vector<DexClass*>& scope,
+    DexMethodHandle*& method_handle,
+    const std::function<void(DexClass*, DexMethodHandle*)>& hold) {
+  scope = create_empty_scope();
+  auto* obj_t = type::java_lang_Object();
+  auto* a_cls = create_internal_class(DexType::make_type("LA;"), obj_t, {});
+  scope.push_back(a_cls);
+  auto* void_void =
+      DexProto::make_proto(type::_void(), DexTypeList::make_type_list({}));
+  auto* a_f = create_empty_method(a_cls, "f", void_void);
+  auto* b_t = DexType::make_type("LB;");
+  scope.push_back(create_internal_class(b_t, a_cls->get_type(), {}));
+  auto* c_cls = create_internal_class(DexType::make_type("LC;"), obj_t, {});
+  scope.push_back(c_cls);
+  method_handle = new DexMethodHandle(METHOD_HANDLE_TYPE_INVOKE_INSTANCE,
+                                      DexMethod::make_method("LB;.f:()V"));
+  g_redex->publish_methodhandle(method_handle);
+  hold(c_cls, method_handle);
+  return a_f;
+}
+
+} // namespace
+
+/**
+ * A method handle that an annotation or a static field value holds follows
+ * the rename too.
+ *
+ * class A { void f() {} }
+ *   class B extends A { }
+ * @Callback(invoke-instance LB;.f) class C { }
+ * class C { static MethodHandle HANDLE = invoke-instance LB;.f }
+ */
+TEST_F(RenamerTest, AnnotationMethodHandleOfInheritedMethod) {
+  std::vector<DexClass*> scope;
+  DexMethodHandle* method_handle = nullptr;
+  auto* a_f = make_scope_with_handle_of_inherited_method(
+      scope, method_handle, [](DexClass* cls, DexMethodHandle* handle) {
+        auto annotation = std::make_unique<DexAnnotation>(
+            DexType::make_type("LCallback;"), DAV_RUNTIME);
+        annotation->add_element(
+            "value", std::make_unique<DexEncodedValueMethodHandle>(handle));
+        auto annotation_set = std::make_unique<DexAnnotationSet>();
+        annotation_set->add_annotation(std::move(annotation));
+        ASSERT_TRUE(cls->attach_annotation_set(std::move(annotation_set)));
+      });
+
+  rename_virtuals(scope);
+
+  ASSERT_NE(a_f->get_name(), DexString::make_string("f"));
+  EXPECT_EQ(method_handle->methodref()->get_name(), a_f->get_name());
+}
+
+TEST_F(RenamerTest, StaticFieldValueMethodHandleOfInheritedMethod) {
+  std::vector<DexClass*> scope;
+  DexMethodHandle* method_handle = nullptr;
+  auto* a_f = make_scope_with_handle_of_inherited_method(
+      scope, method_handle, [](DexClass* cls, DexMethodHandle* handle) {
+        cls->add_field(
+            DexField::make_field("LC;.HANDLE:Ljava/lang/invoke/MethodHandle;")
+                ->make_concrete(
+                    ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+                    std::make_unique<DexEncodedValueMethodHandle>(handle)));
+      });
+
+  rename_virtuals(scope);
+
+  ASSERT_NE(a_f->get_name(), DexString::make_string("f"));
+  EXPECT_EQ(method_handle->methodref()->get_name(), a_f->get_name());
 }

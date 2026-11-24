@@ -13,6 +13,7 @@
 #include "ConcurrentContainers.h"
 #include "Debug.h"
 #include "DexAccess.h"
+#include "DexAnnotation.h"
 #include "DexClass.h"
 #include "DexUtil.h"
 #include "ObfuscateUtils.h"
@@ -484,6 +485,24 @@ void collect_refs(Scope& scope, RefsMap& def_refs) {
                           collect_ref(callee);
                         });
       });
+  // The method handles that static field values and annotations hold call
+  // methods too.
+  auto collect_refs_of = [&](const Gatherable& value) {
+    std::vector<DexMethodHandle*> method_handles;
+    value.gather_methodhandles(method_handles);
+    for (const auto* method_handle : method_handles) {
+      if (DexMethodHandle::isInvokeType(method_handle->type())) {
+        collect_ref(method_handle->methodref());
+      }
+    }
+  };
+  walk::parallel::fields(scope, [&](DexField* field) {
+    if (auto* value = field->get_static_value()) {
+      collect_refs_of(*value);
+    }
+  });
+  walk::parallel::annotations(
+      scope, [&](DexAnnotation* annotation) { collect_refs_of(*annotation); });
 }
 
 } // namespace

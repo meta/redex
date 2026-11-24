@@ -99,8 +99,9 @@ bool valid_r_class_clinit(const DexMethod* clinit,
   bool is_valid{true};
   cfg_adapter::iterate(code, [&](const MethodItemEntry& mie) {
     if (mie.type == MFLOW_OPCODE) {
-      if (mie.insn->has_method() && !is_tolerable_instrumentation_invoke(
-                                        mie.insn, global_resources_config)) {
+      if (opcode::is_an_invoke(mie.insn->opcode()) &&
+          !is_tolerable_instrumentation_invoke(mie.insn,
+                                               global_resources_config)) {
         is_valid = false;
         return cfg_adapter::LoopExit::LOOP_BREAK;
       }

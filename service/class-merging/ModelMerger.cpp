@@ -13,6 +13,7 @@
 #include "Creators.h" // NOLINT
 #include "Debug.h"
 #include "Inliner.h"
+#include "MethodHandleRewriter.h"
 #include "MethodReference.h"
 #include "ModelMethodMerger.h"
 #include "Resolver.h"
@@ -118,11 +119,22 @@ void update_code_type_refs(
   for (const auto& pair : UnorderedIterable(mergeable_to_merger)) {
     mergeables.insert(pair.first);
   }
+  // A Class among the bootstrap arguments of a call site is a type reference
+  // like that of a const-class.
+  MethodHandleRewriter class_argument_rewriter(
+      {.class_type = [&](DexType* type) {
+        return type_reference::get_new_type(type, mergeable_to_merger);
+      }});
   auto patcher = [&](DexMethod* meth, IRCode& code) {
     auto& cfg = code.cfg();
     auto ii = cfg::InstructionIterable(cfg);
     for (auto it = ii.begin(); it != ii.end(); ++it) {
       auto* insn = it->insn;
+
+      if (insn->has_callsite()) {
+        class_argument_rewriter.rewrite(insn, meth);
+        continue;
+      }
 
       /////////////////////////////////////////////////////
       // Resolve method refs referencing a mergeable to defs

@@ -5,14 +5,18 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <functional>
 #include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "ClassMergingTestFixture.h"
+#include "DexAnnotation.h"
+#include "DexCallSite.h"
 #include "DexClass.h"
 #include "DexMethodHandle.h"
+#include "RedexTestUtils.h"
 #include "Resolver.h"
 #include "ScopeHelper.h"
 #include "Show.h"
@@ -36,14 +40,17 @@ class ClassMergingMethodHandleTest : public ClassMergingTest {
     m_b = make_mergeable("Lcom/redextest/B;");
   }
 
-  // Runs one model for the subclasses of `Base` and returns whether `A` was
-  // merged away.
-  bool run_merging() {
+  // Runs one model for the subclasses of `Base`, which `edit_model` may
+  // change, and returns whether `A` was merged away.
+  bool run_merging(const std::function<void(Json::Value&)>& edit_model = {}) {
     Json::Value model;
     model["name"] = "Handles";
     model["class_name_prefix"] = "Handles";
     model["roots"].append("Lcom/redextest/Base;");
     model["include_primary_dex"] = true;
+    if (edit_model) {
+      edit_model(model);
+    }
     ClassMergingTest::run_merging({model});
     return std::none_of(m_scope.begin(), m_scope.end(), [](DexClass* cls) {
       return cls->get_type() == DexType::get_type("Lcom/redextest/A;");
@@ -214,4 +221,110 @@ TEST_F(ClassMergingMethodHandleTest,
   ASSERT_EQ(method_handles.size(), 1);
   EXPECT_EQ(show(method_handles[0]->methodref()),
             "Lcom/redextest/User;.<init>:(Lcom/redextest/A;)V");
+}
+
+namespace {
+
+// A call site in the static method `User.use` whose only bootstrap argument is
+// the Class of `type`.
+DexCallSite* add_call_site_with_class_argument(DexClass* user,
+                                               const char* type) {
+  auto* use = assembler::method_from_string(R"(
+    (method (public static) "Lcom/redextest/User;.use:()V"
+     (
+      (invoke-static () "Lcom/redextest/User;.placeholder:()V")
+      (return-void)
+     )
+    )
+  )");
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.push_back(
+      std::make_unique<DexEncodedValueType>(DexType::make_type(type)));
+  auto* callsite =
+      redex::make_invoke_custom(use->get_code(), "run", "()V", std::move(args));
+  use->get_code()->build_cfg();
+  user->add_method(use);
+  return callsite;
+}
+
+// The Class that `callsite` passes to its bootstrap method.
+std::string class_argument_of(const DexCallSite* callsite) {
+  return show(
+      redex::encoded_value_as<DexEncodedValueType>(callsite->args().at(0).get())
+          ->type());
+}
+
+// The Class that the call site of `User.use` passes to its bootstrap method.
+std::string class_argument() {
+  std::string type;
+  Scope scope{type_class(DexType::get_type("Lcom/redextest/User;"))};
+  walk::opcodes(scope, [&](DexMethod*, IRInstruction* insn) {
+    if (insn->has_callsite()) {
+      type = class_argument_of(insn->get_callsite());
+    }
+  });
+  return type;
+}
+
+} // namespace
+
+// Without type tags, merging makes a const-class of `A` name the merged class;
+// a Class of `A` among the bootstrap arguments of a call site must too.
+TEST_F(ClassMergingMethodHandleTest,
+       classArgumentNamesTheMergedClassWithoutTypeTags) {
+  // Classes with true virtual methods are not merged without type tags.
+  for (auto* cls : {m_a, m_b}) {
+    cls->remove_method(cls->get_vmethods().front());
+  }
+  auto* user = make_class("Lcom/redextest/User;", type::java_lang_Object());
+  auto* callsite =
+      add_call_site_with_class_argument(user, "[Lcom/redextest/A;");
+
+  EXPECT_TRUE(run_merging([](Json::Value& model) {
+    model["type_tag_config"] = "none";
+    model["interdex_grouping"] = "disabled";
+  }));
+  EXPECT_EQ(class_argument().rfind("[Lcom/redextest/HandlesBaseShape", 0), 0)
+      << class_argument();
+  EXPECT_EQ(class_argument_of(callsite), "[Lcom/redextest/A;");
+}
+
+// ART links each call site once, so instructions that share a call site must
+// share its replacement.
+TEST_F(ClassMergingMethodHandleTest,
+       sharedCallSiteWithClassArgumentStaysShared) {
+  for (auto* cls : {m_a, m_b}) {
+    cls->remove_method(cls->get_vmethods().front());
+  }
+  auto* user = make_class("Lcom/redextest/User;", type::java_lang_Object());
+  auto* use = assembler::method_from_string(R"(
+    (method (public static) "Lcom/redextest/User;.use:()V"
+     (
+      (invoke-static () "Lcom/redextest/User;.placeholder:()V")
+      (invoke-static () "Lcom/redextest/User;.placeholder:()V")
+      (return-void)
+     )
+    )
+  )");
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.push_back(std::make_unique<DexEncodedValueType>(
+      DexType::make_type("Lcom/redextest/A;")));
+  auto* callsite =
+      redex::make_invoke_custom(use->get_code(), "run", "()V", std::move(args));
+  use->get_code()->build_cfg();
+  user->add_method(use);
+
+  EXPECT_TRUE(run_merging([](Json::Value& model) {
+    model["type_tag_config"] = "none";
+    model["interdex_grouping"] = "disabled";
+  }));
+  std::vector<DexCallSite*> callsites;
+  walk::opcodes(Scope{user}, [&](DexMethod*, IRInstruction* insn) {
+    if (insn->has_callsite()) {
+      callsites.push_back(insn->get_callsite());
+    }
+  });
+  ASSERT_EQ(callsites.size(), 2);
+  EXPECT_NE(callsites[0], callsite);
+  EXPECT_EQ(callsites[0], callsites[1]);
 }

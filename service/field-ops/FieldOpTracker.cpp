@@ -197,22 +197,14 @@ class WritesAnalyzer {
           escape(non_zero_obj_defs, nullptr, nullptr, true);
           continue;
         }
-        if (insn->has_method()) {
-          const auto* type_list = insn->get_method()->get_proto()->get_args();
-          bool is_instance = op != OPCODE_INVOKE_STATIC;
+        if (opcode::is_an_invoke(op)) {
           for (size_t src_idx = 0; src_idx < insn->srcs_size(); src_idx++) {
             auto non_zero_value_defs = get_non_zero_defs(insn->src(src_idx));
             if (non_zero_value_defs.empty()) {
               continue;
             }
-            const DexType* arg_type;
-            if (src_idx == 0 && is_instance) {
-              arg_type = insn->get_method()->get_class();
-            } else {
-              arg_type = type_list->at(src_idx -
-                                       static_cast<unsigned long>(is_instance));
-            }
-            if (!has_lifetime(insn->src(src_idx), arg_type)) {
+            if (!has_lifetime(insn->src(src_idx),
+                              insn->get_invoke_src_type(src_idx))) {
               continue;
             }
             DexMethod* invoked_ctor{nullptr};

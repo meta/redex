@@ -57,13 +57,15 @@ class FieldOpTrackerMethodHandleTest : public RedexTest {
     ))");
   }
 
-  void run_remove_unused_fields() {
+  void run_remove_unused_fields(
+      const std::vector<DexClass*>& other_classes = {}) {
     remove_unused_fields::PassImpl pass;
     PassManager manager({&pass});
     ConfigFiles config(Json::nullValue);
     config.parse_global_config();
     DexStore store("classes");
     store.add_classes({m_cls});
+    store.add_classes(other_classes);
     std::vector<DexStore> stores;
     stores.emplace_back(std::move(store));
     manager.run_passes(stores, config);
@@ -184,4 +186,47 @@ TEST_F(FieldOpTrackerMethodHandleTest, handle_read_counts_field_of_its_kind) {
   ASSERT_TRUE(stats.count(m_field));
   EXPECT_EQ(stats.at(m_field).reads, 1);
   EXPECT_FALSE(stats.count(child_f));
+}
+
+// An object passed to a method handle call escapes there. The write that
+// stores it into an unread field may be all that keeps it alive, so the write
+// stays.
+// In Java:
+//
+//   Listener l = new Listener();
+//   keepAlive = l;  // never read
+//   register.invokeExact(l);
+TEST_F(FieldOpTrackerMethodHandleTest, argument_of_handle_call_escapes) {
+  auto* keep_alive = DexField::make_field("LFoo;.keepAlive:LListener;")
+                         ->make_concrete(ACC_PRIVATE | ACC_STATIC);
+  m_cls->add_field(keep_alive);
+  ClassCreator listener(DexType::make_type("LListener;"));
+  listener.set_super(type::java_lang_Object());
+  listener.add_method(DexMethod::make_method("LListener;.<init>:()V")
+                          ->make_concrete(ACC_PUBLIC | ACC_CONSTRUCTOR,
+                                          assembler::ircode_from_string(R"((
+            (load-param-object v0)
+            (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+            (return-void)
+          ))"),
+                                          /* is_virtual */ false));
+  auto* listener_cls = listener.create();
+  DexMethod::make_method("Ljava/lang/Object;.<init>:()V")
+      ->make_concrete(ACC_PUBLIC | ACC_CONSTRUCTOR, /* is_virtual */ false);
+  auto* init = add_method("LFoo;.init:(Ljava/lang/invoke/MethodHandle;)V",
+                          std::string(R"((
+    (load-param-object v0)
+    (new-instance "LListener;")
+    (move-result-pseudo-object v1)
+    (invoke-direct (v1) "LListener;.<init>:()V")
+    (sput-object v1 "LFoo;.keepAlive:LListener;")
+    (invoke-polymorphic (v0 v1) ")") +
+                              kInvokeExact +
+                              R"(" "(LListener;)V")
+    (return-void)
+  ))");
+
+  run_remove_unused_fields({listener_cls});
+
+  EXPECT_TRUE(has_field_insn(init));
 }

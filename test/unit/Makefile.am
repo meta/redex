@@ -144,6 +144,7 @@ check_PROGRAMS = \
     match_flow_test \
     match_test \
     materialize_null_checks_test \
+    method_devirtualizer_method_handle_test \
     method_handle_rewriter_test \
     method_inline_test \
     method_profiles_test \
@@ -521,6 +522,8 @@ match_flow_test_SOURCES = MatchFlowTest.cpp
 match_flow_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 materialize_null_checks_test_SOURCES = MaterializeNullChecksTest.cpp
+
+method_devirtualizer_method_handle_test_SOURCES = MethodDevirtualizerMethodHandleTest.cpp
 
 method_handle_rewriter_test_SOURCES = MethodHandleRewriterTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 

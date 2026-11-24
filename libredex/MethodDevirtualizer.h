@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "ConcurrentContainers.h"
 #include "DeterministicContainers.h"
 #include "DexClass.h"
 #include "Pass.h"
@@ -81,7 +82,9 @@ class MethodDevirtualizer {
       const std::vector<DexClass*>& scope,
       const UnorderedSet<DexMethod*>& methods);
 
-  void verify_and_split(const std::vector<DexMethod*>& candidates,
-                        UnorderedSet<DexMethod*>& using_this,
-                        UnorderedSet<DexMethod*>& not_using_this);
+  void verify_and_split(
+      const std::vector<DexMethod*>& candidates,
+      const InsertOnlyConcurrentSet<const DexMethod*>& method_handle_methods,
+      UnorderedSet<DexMethod*>& using_this,
+      UnorderedSet<DexMethod*>& not_using_this);
 };

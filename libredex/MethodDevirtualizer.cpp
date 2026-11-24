@@ -186,6 +186,7 @@ std::vector<DexMethod*> get_devirtualizable_dmethods(
 
 void MethodDevirtualizer::verify_and_split(
     const std::vector<DexMethod*>& candidates,
+    const InsertOnlyConcurrentSet<const DexMethod*>& method_handle_methods,
     UnorderedSet<DexMethod*>& using_this,
     UnorderedSet<DexMethod*>& not_using_this) {
   for (auto* const m : candidates) {
@@ -195,6 +196,14 @@ void MethodDevirtualizer::verify_and_split(
     }
     if (m->rstate.no_optimizations()) {
       TRACE(VIRT, 2, "failed to devirt method %s: no_optimizations", SHOW(m));
+      continue;
+    }
+    // A method handle that names or calls the method passes it the receiver.
+    // Dropping the receiver changes the handle's method type, and so does
+    // keeping it as the first parameter of an invoke-static handle when the
+    // handle names the method through a subclass.
+    if (method_handle_methods.count(m) != 0u) {
+      TRACE(VIRT, 2, "failed to devirt method %s: method handle", SHOW(m));
       continue;
     }
     if (m->is_external() || is_abstract(m) || is_native(m)) {
@@ -236,10 +245,12 @@ void MethodDevirtualizer::staticize_methods_using_this(
 DevirtualizerMetrics MethodDevirtualizer::devirtualize_methods(
     const Scope& scope, const std::vector<DexClass*>& target_classes) {
   reset_metrics();
+  const auto method_handle_methods =
+      method::gather_methods_named_by_method_handles(scope);
   auto vmethods = get_devirtualizable_vmethods(
       scope, target_classes, m_config.do_not_devirt_anno);
   UnorderedSet<DexMethod*> using_this, not_using_this;
-  verify_and_split(vmethods, using_this, not_using_this);
+  verify_and_split(vmethods, method_handle_methods, using_this, not_using_this);
   TRACE(VIRT,
         2,
         " VIRT to devirt vmethods using this %zu, not using this %zu",
@@ -258,7 +269,7 @@ DevirtualizerMetrics MethodDevirtualizer::devirtualize_methods(
       scope, target_classes, {m_config.do_not_devirt_anno});
   using_this.clear();
   not_using_this.clear();
-  verify_and_split(dmethods, using_this, not_using_this);
+  verify_and_split(dmethods, method_handle_methods, using_this, not_using_this);
   TRACE(VIRT,
         2,
         " VIRT to devirt dmethods using this %zu, not using this %zu",

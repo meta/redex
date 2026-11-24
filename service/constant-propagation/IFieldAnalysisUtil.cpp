@@ -11,6 +11,7 @@
 #include <optional>
 
 #include "Debug.h"
+#include "Resolver.h"
 #include "TypeSystem.h"
 #include "Walkers.h"
 
@@ -367,38 +368,49 @@ UnorderedSet<const DexField*> gather_ifields_written_only_by_constructors(
     // Remove candidate field if it was written in code other than its class'
     // init function, or in an init function excluded from optimization.
     cfg_adapter::iterate_with_iterator(&code, [&](const IRList::iterator& it) {
-      auto* insn = it->insn;
-      auto op = insn->opcode();
-      if (opcode::is_an_iput(op)) {
-        auto* field = resolve_field(insn->get_field(), FieldSearch::Instance);
-        if (field == nullptr) {
-          // If couldn't resolve the field, move on.
-          return cfg_adapter::LOOP_CONTINUE;
-        }
-        if (method::is_init(method) &&
-            method->get_class() == field->get_class()) {
-          // See `ConstructorAccesses` on constructors excluded from
-          // optimization.
-          if (method->rstate.no_optimizations()) {
+      for_each_field_access(
+          it->insn,
+          [&](IROpcode op, DexFieldRef* field_ref,
+              const DexMethodHandle* method_handle) {
+            if (!opcode::is_an_iput(op)) {
+              return;
+            }
+            // A method handle can be called anywhere, on any object.
+            if (method_handle != nullptr) {
+              if (auto* field = resolve_field_handle(method_handle)) {
+                invalid_candidates.insert(field);
+              }
+              return;
+            }
+            auto* field = resolve_field(field_ref, FieldSearch::Instance);
+            if (field == nullptr) {
+              return;
+            }
+            if (method::is_init(method) &&
+                method->get_class() == field->get_class()) {
+              // See `ConstructorAccesses` on constructors excluded from
+              // optimization.
+              if (method->rstate.no_optimizations()) {
+                invalid_candidates.insert(field);
+              }
+              return;
+            }
+            // We assert that final fields are not modified outside of <init>
+            // methods. javac seems to enforce this, but it's unclear if the
+            // JVM spec actually forbids that. Doing the check here simplifies
+            // the constant propagation analysis later -- we can determine the
+            // values of these fields without analyzing any methods invoked
+            // from the <init> methods.
+            always_assert_log(
+                !is_final(field),
+                "FinalInlinePassV2: encountered one final instance "
+                "field been changed outside of its class's <init> "
+                "file, for temporary solution set "
+                "\"inline_instance_field\" in \"FinalInlinePassV2\" "
+                "to be false. Field: %s",
+                SHOW(field));
             invalid_candidates.insert(field);
-          }
-          return cfg_adapter::LOOP_CONTINUE;
-        }
-        // We assert that final fields are not modified outside of <init>
-        // methods. javac seems to enforce this, but it's unclear if the JVM
-        // spec actually forbids that. Doing the check here simplifies the
-        // constant propagation analysis later -- we can determine the
-        // values of these fields without analyzing any methods invoked from
-        // the <init> methods.
-        always_assert_log(!is_final(field),
-                          "FinalInlinePassV2: encountered one final instance "
-                          "field been changed outside of its class's <init> "
-                          "file, for temporary solution set "
-                          "\"inline_instance_field\" in \"FinalInlinePassV2\" "
-                          "to be false. Field: %s",
-                          SHOW(field));
-        invalid_candidates.insert(field);
-      }
+          });
       return cfg_adapter::LOOP_CONTINUE;
     });
   });

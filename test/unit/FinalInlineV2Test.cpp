@@ -1051,3 +1051,145 @@ TEST_F(FinalInlineTest, instanceFieldReadThroughCallSiteInCallee) {
 
   EXPECT_CODE_EQ(reader->get_code(), expected.get());
 }
+
+class FinalInlinePutHandleTest : public FinalInlineTest,
+                                 public ::testing::WithParamInterface<bool> {};
+
+// Tool-generated: set() writes Foo.x through an instance-put method handle, so
+// Foo.x is not always the 5 that the constructor writes. The handle is either
+// loaded in set() or loaded in the constructor and passed to set() through a
+// field.
+TEST_P(FinalInlinePutHandleTest, instanceFieldWrittenThroughPutHandle) {
+  const bool handle_in_constructor = GetParam();
+  auto* field = dynamic_cast<DexField*>(DexField::make_field("LFoo;.x:I"));
+  field->make_concrete(ACC_PUBLIC);
+  m_cc->add_field(field);
+  create_field_with_zero_value("LFoo;.h:Ljava/lang/invoke/MethodHandle;",
+                               m_cc.get());
+
+  const std::string load_handle = R"(
+      (const-method-handle instance-put "LFoo;.x:I")
+      (move-result-pseudo-object v2)
+  )";
+  m_cc->add_method(assembler::method_from_string(
+      R"((method (public constructor) "LFoo;.<init>:()V" (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+  )" +
+      (handle_in_constructor
+           ? load_handle +
+                 R"((sput-object v2 "LFoo;.h:Ljava/lang/invoke/MethodHandle;"))"
+           : std::string()) +
+      R"(
+      (const v1 5)
+      (iput v1 v0 "LFoo;.x:I")
+      (return-void)
+    ))
+  )"));
+
+  m_cc->add_method(assembler::method_from_string(
+      R"((method (public static) "LFoo;.set:(LFoo;)V" (
+      (load-param-object v0)
+  )" +
+      (handle_in_constructor
+           ? std::string(
+                 R"((sget-object "LFoo;.h:Ljava/lang/invoke/MethodHandle;"))"
+                 R"((move-result-pseudo-object v2))")
+           : load_handle) +
+      R"(
+      (const v1 7)
+      (invoke-polymorphic (v2 v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LFoo;I)V")
+      (return-void)
+    ))
+  )"));
+
+  auto* reader = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.getX:(LFoo;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.x:I")
+      (move-result-pseudo v0)
+      (return v0)
+     )
+    )
+  )");
+  m_cc->add_method(reader);
+  auto* cls = m_cc->create();
+  auto expected = std::make_unique<IRCode>(*reader->get_code());
+
+  auto store = DexStore("store");
+  store.add_classes({cls});
+  DexStoresVector stores{store};
+  auto scope = build_class_scope(stores);
+  XStoreRefs xstores(stores, true);
+  run(scope, &xstores);
+
+  EXPECT_CODE_EQ(reader->get_code(), expected.get());
+}
+
+INSTANTIATE_TEST_SUITE_P(HandleLocation,
+                         FinalInlinePutHandleTest,
+                         ::testing::Bool(),
+                         [](const ::testing::TestParamInfo<bool>& info) {
+                           return info.param ? "HandleInConstructor"
+                                             : "HandleInSetter";
+                         });
+
+// Tool-generated: set() writes through an instance-put method handle of
+// LChild;.x, which ART resolves to the instance field Foo.x, past the static
+// field Child.x. So Foo.x is not always the 5 that the constructor writes.
+TEST_F(FinalInlineTest, inheritedInstanceFieldWrittenThroughPutHandle) {
+  auto* field = dynamic_cast<DexField*>(DexField::make_field("LFoo;.x:I"));
+  field->make_concrete(ACC_PUBLIC);
+  m_cc->add_field(field);
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (const v1 5)
+      (iput v1 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* reader = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.getX:(LFoo;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.x:I")
+      (move-result-pseudo v0)
+      (return v0)
+     )
+    )
+  )");
+  m_cc->add_method(reader);
+  auto* cls = m_cc->create();
+  auto expected = std::make_unique<IRCode>(*reader->get_code());
+
+  ClassCreator child_creator(DexType::make_type("LChild;"));
+  child_creator.set_super(cls->get_type());
+  create_field_with_zero_value("LChild;.x:I", &child_creator);
+  child_creator.add_method(assembler::method_from_string(R"(
+    (method (public static) "LChild;.set:(LChild;)V"
+     (
+      (load-param-object v0)
+      (const-method-handle instance-put "LChild;.x:I")
+      (move-result-pseudo-object v2)
+      (const v1 7)
+      (invoke-polymorphic (v2 v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LChild;I)V")
+      (return-void)
+     )
+    )
+  )"));
+  auto* child_cls = child_creator.create();
+
+  auto store = DexStore("store");
+  store.add_classes({cls, child_cls});
+  DexStoresVector stores{store};
+  auto scope = build_class_scope(stores);
+  XStoreRefs xstores(stores, true);
+  run(scope, &xstores);
+
+  EXPECT_CODE_EQ(reader->get_code(), expected.get());
+}

@@ -909,19 +909,39 @@ void MethodReferencesGatherer::default_gather_mie(const MethodItemEntry& mie,
     } else if (opcode::is_a_return(op)) {
       refs->returns = true;
     }
-    if (gather_methods && insn->has_method()) {
-      gather_invoke_targets(op, insn->get_method(), refs);
+    if (gather_methods) {
+      for_each_invoke(insn, [&](IROpcode opcode, DexMethodRef* method_ref,
+                                const DexMethodHandle* method_handle) {
+        gather_invoke_targets(opcode, method_ref, method_handle, refs);
+      });
     }
   }
 }
 
-void MethodReferencesGatherer::gather_invoke_targets(IROpcode op,
-                                                     DexMethodRef* method_ref,
-                                                     References* refs) const {
+void MethodReferencesGatherer::gather_invoke_targets(
+    IROpcode op,
+    DexMethodRef* method_ref,
+    const DexMethodHandle* method_handle,
+    References* refs) const {
   if (opcode::is_invoke_super(op)) {
-    auto* callee =
-        resolve_method_deprecated(method_ref, MethodSearch::Super, m_method);
-    if ((callee != nullptr) && !callee->is_external()) {
+    // A method handle can run a different method on different ART versions.
+    std::vector<DexMethod*> callees;
+    if (method_handle == nullptr) {
+      auto* callee =
+          resolve_method_deprecated(method_ref, MethodSearch::Super, m_method);
+      if (callee != nullptr) {
+        callees.push_back(callee);
+      }
+    } else {
+      // Unlike the method that an invoke-super names, the handle's method ref
+      // need not lead to these.
+      callees = resolve_method_handle_callees(method_handle, m_method);
+      refs->methods.insert(refs->methods.end(), callees.begin(), callees.end());
+    }
+    for (auto* callee : callees) {
+      if (callee->is_external()) {
+        continue;
+      }
       always_assert(callee->is_virtual());
       if (is_abstract(callee)) {
         TRACE(REACH, 1,

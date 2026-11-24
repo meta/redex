@@ -140,8 +140,7 @@ class EnumUpcastDetector {
       }
       for (const auto& mie : InstructionIterable(block)) {
         engine.analyze_instruction(mie.insn, &env);
-        if (mie.insn->opcode() == OPCODE_IF_EQ ||
-            mie.insn->opcode() == OPCODE_IF_NE) {
+        if (compares_by_identity(mie.insn)) {
           process_identity_comparison(engine, cfg, block, mie.insn, env);
         }
         process_instruction(mie.insn, &env);
@@ -240,6 +239,26 @@ class EnumUpcastDetector {
     default:
       break;
     }
+  }
+
+  /**
+   * Whether `insn` compares its two sources by identity: `if-eq`, `if-ne`, or
+   * `Enum.equals(Object)`, which the transformation turns into
+   * `Integer.equals(Object)` on a boxed receiver. That compares values, and
+   * each constant is boxed to the one cached `Integer` of its ordinal, so it
+   * agrees with `==` on the boxed values.
+   */
+  bool compares_by_identity(const IRInstruction* insn) const {
+    if (insn->opcode() == OPCODE_IF_EQ || insn->opcode() == OPCODE_IF_NE) {
+      return true;
+    }
+    if (insn->opcode() != OPCODE_INVOKE_VIRTUAL) {
+      return false;
+    }
+    const auto* method = insn->get_method();
+    return (method->get_class() == ENUM_TYPE ||
+            m_candidate_enums->count_unsafe(method->get_class()) != 0u) &&
+           method::signatures_match(method, ENUM_EQUALS_METHOD);
   }
 
   struct IdentityRisks {
@@ -558,9 +577,15 @@ class EnumUpcastDetector {
         (m_candidate_enums->count_unsafe(container) != 0u)) {
       EnumTypes a_types = env->get(insn->src(0));
       auto this_types = discard_primitives(a_types);
-      // Method is equals or compareTo.
-      if (method::signatures_match(method, ENUM_EQUALS_METHOD) ||
-          method::signatures_match(method, ENUM_COMPARETO_METHOD)) {
+      if (method::signatures_match(method, ENUM_EQUALS_METHOD)) {
+        // `process_identity_comparison` judges the argument; the
+        // transformation needs a receiver of one enum.
+        if (this_types.size() > 1) {
+          reject(insn, this_types, UnsafeType::kUsageMultiEnumTypes);
+        }
+        return;
+      }
+      if (method::signatures_match(method, ENUM_COMPARETO_METHOD)) {
         EnumTypes b_types = env->get(insn->src(1));
         auto that_types = discard_primitives(b_types);
         const DexType* this_type =

@@ -4319,6 +4319,19 @@ INSTANTIATE_TEST_SUITE_P(
                             .bar_safe = false,
                             .baz_safe = false,
                             .bar_boxed_beside_enum_baz = true},
+        EnumObservationCase{
+            "EqualsInteger",
+            R"((invoke-virtual (v0 v3) "LBar;.equals:(Ljava/lang/Object;)Z")
+               (move-result v6))",
+            false, true},
+        EnumObservationCase{
+            .name = "EqualsDifferentEnums",
+            .instructions =
+                R"((invoke-virtual (v0 v2) "LBar;.equals:(Ljava/lang/Object;)Z")
+               (move-result v6))",
+            .bar_safe = false,
+            .baz_safe = false,
+            .bar_boxed_beside_enum_baz = true},
         EnumObservationCase{.name = "EqualJoinedEnums",
                             .instructions = R"((if-eqz v5 :baz)
                                (move-object v6 v0)
@@ -4369,6 +4382,17 @@ INSTANTIATE_TEST_SUITE_P(
             R"((invoke-static (v0 v2) "Lcom/google/common/base/Objects;.equal:(Ljava/lang/Object;Ljava/lang/Object;)Z"))",
             false, false},
         EnumObservationCase{"EqualSameEnum", "(if-eq v0 v1 :done) (:done)",
+                            true, true},
+        EnumObservationCase{
+            "EqualsSameEnum",
+            R"((invoke-virtual (v0 v1) "LBar;.equals:(Ljava/lang/Object;)Z")
+               (move-result v6))",
+            true, true},
+        EnumObservationCase{"EqualsString",
+                            R"((const-string "RED")
+               (move-result-pseudo-object v6)
+               (invoke-virtual (v0 v6) "LBar;.equals:(Ljava/lang/Object;)Z")
+               (move-result v6))",
                             true, true},
         EnumObservationCase{
             "ObjectParameterInstanceOfComparable",

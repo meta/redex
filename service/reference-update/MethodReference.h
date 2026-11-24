@@ -68,6 +68,10 @@ IRInstruction* make_invoke(DexMethod* callee,
  */
 void patch_callsite(const CallSite& callsite, const NewCallee& new_callee);
 
+/**
+ * Makes every invoke and method handle in `scope` that calls a key of
+ * `old_to_new_callee` call its value instead.
+ */
 void update_call_refs_simple(
     const Scope& scope,
     const UnorderedMap<DexMethod*, DexMethod*>& old_to_new_callee);

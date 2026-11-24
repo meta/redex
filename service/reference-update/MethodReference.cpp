@@ -9,8 +9,10 @@
 
 #include "ControlFlow.h"
 #include "Debug.h"
+#include "DexMethodHandle.h"
 #include "DexUtil.h"
 #include "IRList.h"
+#include "MethodHandleRewriter.h"
 #include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
@@ -113,52 +115,44 @@ void update_call_refs_simple(
     return;
   }
 
-  auto patcher = [&](DexMethod* meth, IRCode& code) {
-    if (code.cfg_built()) {
-      auto& cfg = code.cfg();
-      for (auto& mie : cfg::InstructionIterable(cfg)) {
-        auto* insn = mie.insn;
-        if (!insn->has_method()) {
-          continue;
+  // The method that replaces `method`, or nullptr.
+  auto get_new_callee = [&](DexMethod* method) -> DexMethod* {
+    if (method == nullptr) {
+      return nullptr;
+    }
+    auto it = old_to_new_callee.find(method);
+    if (it == old_to_new_callee.end()) {
+      return nullptr;
+    }
+    // At this point, a non static private should not exist.
+    always_assert_log(!is_private(it->second) || is_static(it->second), "%s\n",
+                      vshow(it->second).c_str());
+    return it->second;
+  };
+  // A method handle calls what `resolve_method_handle` says, which can depend
+  // on the class that holds it.
+  MethodHandleRewriter method_handle_rewriter(
+      {.handle = [&](const DexMethodHandle* method_handle,
+                     const DexMethod* meth) -> std::optional<DexMethodHandle> {
+        auto* new_callee =
+            get_new_callee(resolve_method_handle(method_handle, meth));
+        if (new_callee == nullptr) {
+          return std::nullopt;
         }
-        auto* const method = resolve_method_deprecated(
-            insn->get_method(), opcode_to_search(insn), meth);
-        if (method == nullptr || old_to_new_callee.count(method) == 0) {
-          continue;
-        }
-        auto* new_callee = old_to_new_callee.at(method);
-        // At this point, a non static private should not exist.
-        always_assert_log(!is_private(new_callee) || is_static(new_callee),
-                          "%s\n",
-                          vshow(new_callee).c_str());
-        TRACE(REFU, 9, " Updated call %s to %s", SHOW(insn), SHOW(new_callee));
-        insn->set_method(new_callee);
-        if (new_callee->is_virtual()) {
-          always_assert_log(opcode::is_invoke_virtual(insn->opcode()),
-                            "invalid callsite %s\n",
-                            SHOW(insn));
-        } else if (is_static(new_callee)) {
-          always_assert_log(opcode::is_invoke_static(insn->opcode()),
-                            "invalid callsite %s\n",
-                            SHOW(insn));
-        }
-      }
-    } else {
-      for (auto& mie : InstructionIterable(code)) {
-        auto* insn = mie.insn;
-        if (!insn->has_method()) {
-          continue;
-        }
-        auto* const method = resolve_method_deprecated(
-            insn->get_method(), opcode_to_search(insn), meth);
-        if (method == nullptr || old_to_new_callee.count(method) == 0) {
-          continue;
-        }
-        auto* new_callee = old_to_new_callee.at(method);
-        // At this point, a non static private should not exist.
-        always_assert_log(!is_private(new_callee) || is_static(new_callee),
-                          "%s\n",
-                          vshow(new_callee).c_str());
+        DexMethodHandle new_method_handle(method_handle->type(), new_callee);
+        always_assert_log(resolve_method_handle(&new_method_handle, meth) ==
+                              new_callee,
+                          "invalid method handle of %s in %s\n",
+                          SHOW(new_callee), SHOW(meth));
+        TRACE(REFU, 9, " Updated method handle of %s to %s",
+              SHOW(method_handle->methodref()), SHOW(new_callee));
+        return new_method_handle;
+      }});
+  auto patch = [&](DexMethod* meth, IRInstruction* insn) {
+    if (insn->has_method()) {
+      auto* new_callee = get_new_callee(resolve_method_deprecated(
+          insn->get_method(), opcode_to_search(insn), meth));
+      if (new_callee != nullptr) {
         TRACE(REFU, 9, " Updated call %s to %s", SHOW(insn), SHOW(new_callee));
         insn->set_method(new_callee);
         if (new_callee->is_virtual()) {
@@ -172,8 +166,19 @@ void update_call_refs_simple(
         }
       }
     }
+    method_handle_rewriter.rewrite(insn, meth);
   };
-  walk::parallel::code(scope, patcher);
+  walk::parallel::code(scope, [&](DexMethod* meth, IRCode& code) {
+    if (code.cfg_built()) {
+      for (auto& mie : cfg::InstructionIterable(code.cfg())) {
+        patch(meth, mie.insn);
+      }
+    } else {
+      for (auto& mie : InstructionIterable(code)) {
+        patch(meth, mie.insn);
+      }
+    }
+  });
 }
 
 template <typename T>

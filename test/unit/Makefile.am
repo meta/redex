@@ -144,6 +144,7 @@ check_PROGRAMS = \
     method_handle_rewriter_test \
     method_inline_test \
     method_profiles_test \
+    method_reference_test \
     method_splitting_test \
     method_splitter_test_fixture_test \
     method_splitter_region_no_live_out_test \
@@ -511,6 +512,8 @@ method_handle_rewriter_test_SOURCES = MethodHandleRewriterTest.cpp $(top_srcdir)
 method_inline_test_SOURCES = MethodInlineTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 method_profiles_test_SOURCES = MethodProfilesTest.cpp
+
+method_reference_test_SOURCES = MethodReferenceTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 tail_duplication_test_SOURCES = TailDuplicationTest.cpp
 

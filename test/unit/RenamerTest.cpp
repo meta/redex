@@ -8,6 +8,9 @@
 #include <gtest/gtest.h>
 
 #include "DexClass.h"
+#include "DexMethodHandle.h"
+#include "IRAssembler.h"
+#include "IRCode.h"
 #include "RedexTest.h"
 #include "ScopeHelper.h"
 #include "Show.h"
@@ -608,4 +611,42 @@ TEST_F(RenamerTest, Interface3IntfOverEscape) {
       type_class(DexType::get_type("LN;"))->get_vmethods()[0]->get_name() ==
       DexString::get_string("h"));
   print_scope(scope);
+}
+
+/**
+ * A method handle (tool-generated here) that names a renamed method through a
+ * subclass follows the rename, like an invoke of that method would.
+ *
+ * class A { void f() {} }
+ *   class B extends A { }
+ * class C { static void run() { const-method-handle invoke-instance LB;.f } }
+ */
+TEST_F(RenamerTest, MethodHandleOfInheritedMethod) {
+  std::vector<DexClass*> scope = create_empty_scope();
+  auto* obj_t = type::java_lang_Object();
+  auto* a_cls = create_internal_class(DexType::make_type("LA;"), obj_t, {});
+  scope.push_back(a_cls);
+  auto* void_void =
+      DexProto::make_proto(type::_void(), DexTypeList::make_type_list({}));
+  auto* a_f = create_empty_method(a_cls, "f", void_void);
+  auto* b_t = DexType::make_type("LB;");
+  scope.push_back(create_internal_class(b_t, a_cls->get_type(), {}));
+  auto* c_cls = create_internal_class(DexType::make_type("LC;"), obj_t, {});
+  scope.push_back(c_cls);
+  auto* run = DexMethod::make_method("LC;.run:()V")
+                  ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                                  assembler::ircode_from_string(R"((
+                                    (const-method-handle invoke-instance "LB;.f:()V")
+                                    (move-result-pseudo-object v0)
+                                    (return-void)
+                                  ))"),
+                                  /* is_virtual */ false);
+  c_cls->add_method(run);
+
+  rename_virtuals(scope);
+
+  ASSERT_NE(a_f->get_name(), DexString::make_string("f"));
+  auto* insn = run->get_code()->begin()->insn;
+  ASSERT_EQ(insn->opcode(), OPCODE_CONST_METHOD_HANDLE);
+  EXPECT_EQ(insn->get_methodhandle()->methodref()->get_name(), a_f->get_name());
 }

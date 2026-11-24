@@ -443,45 +443,46 @@ int VirtualRenamer::rename_virtual_scopes(const DexType* type, int& seed) {
  * Collect all method refs to concrete methods (definitions).
  */
 void collect_refs(Scope& scope, RefsMap& def_refs) {
+  auto collect_ref = [&](DexMethodRef* callee) {
+    if (callee->is_concrete()) {
+      return;
+    }
+    auto* cls = type_class(callee->get_class());
+    if (cls == nullptr || cls->is_external()) {
+      return;
+    }
+    DexMethod* top = nullptr;
+    if (is_interface(cls)) {
+      top = resolve_method_deprecated(callee, MethodSearch::Interface);
+    } else {
+      top = find_top_impl(cls, callee->get_name(), callee->get_proto());
+      if (top == nullptr) {
+        TRACE(OBFUSCATE, 2, "Possible top miranda: %s", SHOW(callee));
+        // see if it's a virtual call to an interface miranda method
+        top = find_top_intf_impl(cls, callee->get_name(), callee->get_proto());
+        if (top != nullptr) {
+          TRACE(OBFUSCATE, 2, "Top miranda: %s", SHOW(top));
+        }
+      }
+    }
+    if (top == nullptr || top == callee) {
+      return;
+    }
+    redex_assert(type_class(top->get_class()) != nullptr);
+    if (type_class(top->get_class())->is_external()) {
+      return;
+    }
+    // it's a top definition on an internal class, save it
+    def_refs.update(top, [&](auto*, auto& set, bool) { set.insert(callee); });
+  };
   walk::parallel::opcodes(
       scope, [](DexMethod*) { return true; },
       [&](DexMethod*, IRInstruction* insn) {
-        if (!insn->has_method()) {
-          return;
-        }
-        auto* callee = insn->get_method();
-        if (callee->is_concrete()) {
-          return;
-        }
-        auto* cls = type_class(callee->get_class());
-        if (cls == nullptr || cls->is_external()) {
-          return;
-        }
-        DexMethod* top = nullptr;
-        if (is_interface(cls)) {
-          top = resolve_method_deprecated(callee, MethodSearch::Interface);
-        } else {
-          top = find_top_impl(cls, callee->get_name(), callee->get_proto());
-          if (top == nullptr) {
-            TRACE(OBFUSCATE, 2, "Possible top miranda: %s", SHOW(callee));
-            // see if it's a virtual call to an interface miranda method
-            top = find_top_intf_impl(cls, callee->get_name(),
-                                     callee->get_proto());
-            if (top != nullptr) {
-              TRACE(OBFUSCATE, 2, "Top miranda: %s", SHOW(top));
-            }
-          }
-        }
-        if (top == nullptr || top == callee) {
-          return;
-        }
-        redex_assert(type_class(top->get_class()) != nullptr);
-        if (type_class(top->get_class())->is_external()) {
-          return;
-        }
-        // it's a top definition on an internal class, save it
-        def_refs.update(top,
-                        [&](auto*, auto& set, bool) { set.insert(callee); });
+        for_each_invoke(insn,
+                        [&](IROpcode /* opcode */, DexMethodRef* callee,
+                            const DexMethodHandle* /* method_handle */) {
+                          collect_ref(callee);
+                        });
       });
 }
 

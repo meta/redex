@@ -388,11 +388,19 @@ ClassMap collect_can_merge(const Scope& scope,
  * what an invoke-direct handle of a method that is not private runs, which
  * depends on the class of the code that holds it and, from Android 10, on the
  * superclass of the named class (see `resolve_method_handle`), so neither of
- * these classes is merged either.
+ * these classes is merged either. Nor is a type that merging must not replace
+ * in the prototype of the handle's method (see
+ * `gather_types_pinned_by_method_handle`) the mergeable.
  */
 void record_method_handle_value(const DexMethodHandle* method_handle,
                                 const DexMethod* holder,
                                 DontMergeStatus* dont_merge_status) {
+  std::vector<const DexType*> pinned_types;
+  type_reference::gather_types_pinned_by_method_handle(method_handle,
+                                                       pinned_types);
+  for (const auto* type : pinned_types) {
+    record_dont_merge_state(type, kConditional, dont_merge_status);
+  }
   if (!DexMethodHandle::isInvokeType(method_handle->type())) {
     record_dont_merge_state(method_handle->fieldref()->get_class(), kStrict,
                             dont_merge_status);

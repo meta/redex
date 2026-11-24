@@ -20,6 +20,7 @@
 #include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
+#include "TypeReference.h"
 #include "Walkers.h"
 
 using namespace class_merging;
@@ -329,6 +330,17 @@ void MergeabilityChecker::exclude_method_handle_refs(TypeSet& non_mergeables) {
             for (const auto* type : classes_of_method_handle(handle, method)) {
               if (type != nullptr && m_spec.merging_targets.count(type) > 0) {
                 TRACE(CLMG, 5, "[non mergeable] named by a method handle in %s",
+                      SHOW(method));
+                result.insert(type);
+              }
+            }
+            std::vector<const DexType*> pinned_types;
+            type_reference::gather_types_pinned_by_method_handle(handle,
+                                                                 pinned_types);
+            for (const auto* type : pinned_types) {
+              if (m_spec.merging_targets.count(type) > 0) {
+                TRACE(CLMG, 5,
+                      "[non mergeable] pinned by a method handle in %s",
                       SHOW(method));
                 result.insert(type);
               }

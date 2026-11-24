@@ -302,6 +302,49 @@ TEST_F(VerticalMergingMethodHandleTest, handleOfMethodWithoutDefinition) {
   EXPECT_EQ(impl->get_super_class(), base->get_type());
 }
 
+// Merging `LBase;` into `LImpl;` makes the constructor `LUser;.<init>(LBase;)`
+// collide with `LUser;.<init>(LImpl;)`, which a type reference update resolves
+// by adding a parameter to one of them. A method handle cannot pass it.
+TEST_F(VerticalMergingMethodHandleTest,
+       constructorHandleKeepsTheTypesOfItsParameters) {
+  auto* base = make_base(ACC_PUBLIC | ACC_ABSTRACT);
+  auto* impl = make_impl();
+  ClassCreator creator(DexType::make_type("LUser;"));
+  creator.set_super(type::java_lang_Object());
+  for (const auto* param : {"LBase;", "LImpl;"}) {
+    add_method(creator, std::string(R"(
+      (method (public constructor) "LUser;.<init>:()") +
+                            param + R"()V"
+       (
+        (load-param-object v0)
+        (load-param-object v1)
+        (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+        (return-void)
+       )
+      )
+    )");
+  }
+  add_method(creator, R"(
+    (method (public static) "LUser;.use:()V"
+     (
+      (new-instance "LImpl;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "LImpl;.<init>:()V")
+      (const-method-handle invoke-constructor "LUser;.<init>:(LBase;)V")
+      (move-result-pseudo-object v1)
+      (return-void)
+     )
+    )
+  )");
+  m_user = creator.create();
+
+  EXPECT_EQ(run_pass(base, impl), 3);
+  auto method_handles = held_method_handles("LUser;.use:()V");
+  ASSERT_EQ(method_handles.size(), 1);
+  EXPECT_EQ(method_handles[0]->methodref(),
+            DexMethod::get_method("LUser;.<init>:(LBase;)V"));
+}
+
 namespace {
 
 // `LUser;.use` creates a `LBase;` and calls `LImpl;.make`, so `LImpl;` has no

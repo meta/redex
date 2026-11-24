@@ -12,8 +12,12 @@
 
 #include "ClassMergingTestFixture.h"
 #include "DexClass.h"
+#include "DexMethodHandle.h"
+#include "Resolver.h"
 #include "ScopeHelper.h"
+#include "Show.h"
 #include "TypeUtil.h"
+#include "Walkers.h"
 
 using namespace class_merging_test;
 
@@ -44,6 +48,17 @@ class ClassMergingMethodHandleTest : public ClassMergingTest {
     return std::none_of(m_scope.begin(), m_scope.end(), [](DexClass* cls) {
       return cls->get_type() == DexType::get_type("Lcom/redextest/A;");
     });
+  }
+
+  // The method handles that the code in the scope holds.
+  std::vector<DexMethodHandle*> held_method_handles() {
+    std::vector<DexMethodHandle*> method_handles;
+    walk::opcodes(m_scope, [&](DexMethod*, IRInstruction* insn) {
+      for_each_method_handle(insn, [&](const DexMethodHandle* handle) {
+        method_handles.push_back(const_cast<DexMethodHandle*>(handle));
+      });
+    });
+    return method_handles;
   }
 
   DexClass* m_a{nullptr};
@@ -163,4 +178,40 @@ TEST_F(ClassMergingMethodHandleTest, invokeSuperWithoutHandlesMerges) {
   )");
 
   EXPECT_TRUE(run_merging());
+}
+
+// Merging `A` and `B` makes the constructors `User(A)` and `User(B)` collide,
+// which a type reference update resolves by adding a parameter to one of
+// them. A method handle cannot pass it.
+TEST_F(ClassMergingMethodHandleTest,
+       constructorHandleKeepsTheTypesOfItsParameters) {
+  auto* user = make_class("Lcom/redextest/User;", type::java_lang_Object());
+  for (const auto* param : {"Lcom/redextest/A;", "Lcom/redextest/B;"}) {
+    add_method(user, std::string(R"(
+      (method (public constructor) "Lcom/redextest/User;.<init>:()") +
+                         param + R"()V"
+       (
+        (load-param-object v0)
+        (load-param-object v1)
+        (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+        (return-void)
+       )
+      )
+    )");
+  }
+  add_method(user, R"(
+    (method (public static) "Lcom/redextest/User;.use:()V"
+     (
+      (const-method-handle invoke-constructor "Lcom/redextest/User;.<init>:(Lcom/redextest/A;)V")
+      (move-result-pseudo-object v0)
+      (return-void)
+     )
+    )
+  )");
+
+  EXPECT_FALSE(run_merging());
+  auto method_handles = held_method_handles();
+  ASSERT_EQ(method_handles.size(), 1);
+  EXPECT_EQ(show(method_handles[0]->methodref()),
+            "Lcom/redextest/User;.<init>:(Lcom/redextest/A;)V");
 }

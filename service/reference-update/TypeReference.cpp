@@ -777,4 +777,23 @@ void fix_colliding_dmethods(
   });
 }
 
+void gather_types_pinned_by_method_handle(const DexMethodHandle* method_handle,
+                                          std::vector<const DexType*>& types) {
+  if (!DexMethodHandle::isInvokeType(method_handle->type())) {
+    return;
+  }
+  auto* method_ref = method_handle->methodref();
+  if (!method::is_init(method_ref)) {
+    auto* method = method_ref->as_def();
+    if (method == nullptr || method->is_virtual() || can_rename(method)) {
+      return;
+    }
+  }
+  const auto* proto = method_ref->get_proto();
+  types.push_back(type::make_element_type_if_array(proto->get_rtype()));
+  for (const auto* arg : *proto->get_args()) {
+    types.push_back(type::make_element_type_if_array(arg));
+  }
+}
+
 } // namespace type_reference

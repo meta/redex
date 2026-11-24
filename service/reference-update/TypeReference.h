@@ -13,6 +13,7 @@
 #include "ClassHierarchy.h"
 #include "DeterministicContainers.h"
 #include "DexClass.h"
+#include "DexMethodHandle.h"
 
 using TypeSet = std::set<const DexType*, dextypes_comparator>;
 using UnorderedTypeSet = UnorderedSet<const DexType*>;
@@ -111,4 +112,15 @@ void update_field_type_references(
 void fix_colliding_dmethods(
     const Scope& scope,
     const std::vector<std::pair<DexMethod*, DexProto*>>& colliding_methods);
+
+/**
+ * Adds to `types` the types that merging classes must not replace while
+ * `method_handle` names its method, because the method would gain parameters
+ * that a method handle cannot pass: the types, or element types, in the
+ * prototype of a constructor or of a direct method that cannot be renamed,
+ * since a collision after the type is replaced makes `fix_colliding_dmethods`
+ * add parameters to it.
+ */
+void gather_types_pinned_by_method_handle(const DexMethodHandle* method_handle,
+                                          std::vector<const DexType*>& types);
 } // namespace type_reference

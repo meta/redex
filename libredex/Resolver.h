@@ -455,6 +455,32 @@ DexMethod* resolve_method_handle(const DexMethodHandle* method_handle,
 std::vector<DexMethod*> resolve_method_handle_callees(
     const DexMethodHandle* method_handle, const DexMethod* caller);
 
+/**
+ * The method that a call from code in `caller` resolves to, which ART checks
+ * access to: for an invoke (null `method_handle`), the method that
+ * `method_ref` names, found by `search`; for the call that `method_handle`
+ * makes, the method that the handle names, found as the handle's kind finds
+ * it. For an invoke-direct handle of a method that is not private, that is the
+ * method that the named class has by that name and prototype, which need not
+ * be a method the handle runs (see `resolve_method_handle_callees`).
+ */
+DexMethod* resolve_call(MethodSearch search,
+                        DexMethodRef* method_ref,
+                        const DexMethodHandle* method_handle,
+                        const DexMethod* caller);
+
+/**
+ * `resolve_call` for an invoke with `opcode` or a call that a method handle
+ * makes, which `for_each_invoke` reports.
+ */
+inline DexMethod* resolve_call(IROpcode opcode,
+                               DexMethodRef* method_ref,
+                               const DexMethodHandle* method_handle,
+                               const DexMethod* caller) {
+  return resolve_call(opcode_to_search(opcode), method_ref, method_handle,
+                      caller);
+}
+
 DexMethod* resolve_invoke_method_deprecated(
     const IRInstruction* insn,
     MethodRefCache& ref_cache,

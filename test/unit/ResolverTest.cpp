@@ -6,13 +6,16 @@
  */
 
 #include <algorithm>
+#include <string>
 
 #include <gtest/gtest.h>
 
 #include "ClassHierarchy.h"
 #include "Creators.h"
 #include "DexClass.h"
+#include "DexMethodHandle.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "Resolver.h"
 
 DexFieldRef* make_field_ref(DexType* cls, const char* name, DexType* type) {
@@ -885,4 +888,64 @@ TEST_F(ResolverTest, ResolveNonvirtualMethodHandlePastPackagePrivateMethod) {
   auto callees = resolve_method_handle_callees(&names_b, holder);
   EXPECT_NE(std::find(callees.begin(), callees.end(), b_m), callees.end());
   EXPECT_NE(resolve_method_handle(&names_b, holder), c_m);
+}
+
+namespace {
+
+// Makes `name` with superclass `super` and a public virtual `m:()V`, unless
+// `declares_m` is false.
+DexClass* make_class_with_m(const char* name,
+                            const DexType* super,
+                            bool declares_m = true) {
+  ClassCreator creator(DexType::make_type(name));
+  creator.set_super(const_cast<DexType*>(super));
+  if (declares_m) {
+    creator.add_method(DexMethod::make_method(std::string(name) + ".m:()V")
+                           ->make_concrete(ACC_PUBLIC,
+                                           std::unique_ptr<IRCode>(nullptr),
+                                           /* is_virtual */ true));
+  }
+  return creator.create();
+}
+
+DexMethod* m_of(const char* cls) {
+  return DexMethod::get_method(std::string(cls) + ".m:()V")->as_def();
+}
+
+} // namespace
+
+// An invoke and a call through most method handles resolve to the method that
+// they name, found by the invoke's or the handle's kind.
+TEST_F(ResolverTest, ResolveCallOfInvokeAndHandle) {
+  auto* a = make_class_with_m("LA;", type::java_lang_Object());
+  make_class_with_m("LB;", a->get_type(), /* declares_m */ false);
+  auto* b_m = DexMethod::make_method("LB;.m:()V");
+
+  EXPECT_EQ(resolve_call(OPCODE_INVOKE_VIRTUAL, b_m, nullptr, nullptr),
+            m_of("LA;"));
+  auto* handle = redex::make_method_handle(METHOD_HANDLE_TYPE_INVOKE_INSTANCE,
+                                           "LB;.m:()V");
+  EXPECT_EQ(resolve_call(OPCODE_INVOKE_VIRTUAL, b_m, handle, nullptr),
+            m_of("LA;"));
+}
+
+// An invoke-direct handle of `A.m` held by `C extends B extends A`, where `B`
+// overrides `m`, resolves to `A.m`, which ART checks access to, though it runs
+// `B.m` on Android 9 and `A`'s superclass's method on Android 10 and later.
+TEST_F(ResolverTest, ResolveCallOfInvokeDirectHandleIsNamedMethod) {
+  auto* a = make_class_with_m("LA;", type::java_lang_Object());
+  auto* b = make_class_with_m("LB;", a->get_type());
+  auto* c = make_class_with_m("LC;", b->get_type(), /* declares_m */ false);
+  auto* user = DexMethod::make_method("LC;.use:()V")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                                   std::unique_ptr<IRCode>(nullptr),
+                                   /* is_virtual */ false);
+  c->add_method(user);
+  auto* handle =
+      redex::make_method_handle(METHOD_HANDLE_TYPE_INVOKE_DIRECT, "LA;.m:()V");
+
+  EXPECT_EQ(
+      resolve_call(OPCODE_INVOKE_SUPER, handle->methodref(), handle, user),
+      m_of("LA;"));
+  EXPECT_EQ(resolve_method_handle(handle, user), nullptr);
 }

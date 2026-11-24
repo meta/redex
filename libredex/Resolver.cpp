@@ -677,6 +677,21 @@ std::vector<DexMethod*> resolve_method_handle_callees(
       .callees;
 }
 
+DexMethod* resolve_call(MethodSearch search,
+                        DexMethodRef* method_ref,
+                        const DexMethodHandle* method_handle,
+                        const DexMethod* caller) {
+  if (method_handle == nullptr) {
+    return resolve_method_deprecated(method_ref, search, caller);
+  }
+  if (method_handle_opcode(method_handle) == OPCODE_INVOKE_SUPER) {
+    // ART finds the named method before it takes the caller's implementation.
+    return resolve_method_deprecated(method_handle->methodref(),
+                                     MethodSearch::Virtual);
+  }
+  return resolve_method_handle(method_handle, caller);
+}
+
 DexField* resolve_field_handle(const DexMethodHandle* method_handle) {
   auto type = method_handle->type();
   if (DexMethodHandle::isInvokeType(type)) {

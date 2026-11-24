@@ -8,8 +8,11 @@
 /**
  * VirtualMergingPass removes virtual methods that override other virtual
  * methods, by merging them, under certain conditions.
- * - we omit virtual scopes that are involved in invoke-supers (this could be
- *   made less conservative)
+ * - we omit virtual scopes that are involved in invoke-supers, through an
+ *   instruction or a method handle (this could be made less conservative)
+ * - we omit virtual methods that method handles name, as a handle's method
+ *   type depends on the class it names, so it cannot be remapped like an
+ *   invoke-virtual.
  * - we omit virtual methods that might be involved in unresolved
  *   invoke-virtuals.
  * - of course, the usual `can_rename` and not `root` conditions.
@@ -136,18 +139,27 @@ void VirtualMerging::flush() { m_inliner->flush(); }
 VirtualMerging::~VirtualMerging() {}
 
 // Part 1: Identify which virtual methods get invoked via invoke-super --- we'll
-// stay away from those virtual scopes
+// stay away from those virtual scopes --- and which virtual methods method
+// handles name --- we'll keep those methods.
 // TODO: Relax this. Some portions of those virtual scopes could still
 // be handled
 void VirtualMerging::find_unsupported_virtual_scopes() {
   ConcurrentSet<const DexMethod*> invoke_super_methods;
   ConcurrentSet<const DexMethodRef*> invoke_super_unresolved_method_refs;
+  ConcurrentSet<const DexMethod*> method_handle_named_methods;
   walk::parallel::opcodes(
       m_scope,
       [](const DexMethod*) { return true; },
       [&](const DexMethod*, IRInstruction* insn) {
-        if (insn->opcode() == OPCODE_INVOKE_SUPER) {
-          auto* method_ref = insn->get_method();
+        // A method handle that calls like invoke-super counts like one.
+        for_each_invoke(insn, [&](IROpcode opcode, DexMethodRef* method_ref,
+                                  const DexMethodHandle* method_handle) {
+          if (method_handle != nullptr && method_ref->is_def()) {
+            method_handle_named_methods.insert(method_ref->as_def());
+          }
+          if (opcode != OPCODE_INVOKE_SUPER) {
+            return;
+          }
           auto* method =
               resolve_method_deprecated(method_ref, MethodSearch::Virtual);
           if (method == nullptr) {
@@ -155,7 +167,7 @@ void VirtualMerging::find_unsupported_virtual_scopes() {
           } else {
             invoke_super_methods.insert(method);
           }
-        }
+        });
       });
 
   m_stats.invoke_super_methods = invoke_super_methods.size();
@@ -170,6 +182,9 @@ void VirtualMerging::find_unsupported_virtual_scopes() {
        UnorderedIterable(invoke_super_unresolved_method_refs)) {
     m_unsupported_named_protos[method->get_name()].insert(method->get_proto());
   }
+
+  insert_unordered_iterable(m_method_handle_named_methods,
+                            method_handle_named_methods);
 }
 
 // Part 2: Identify all overriding virtual methods which might potentially be
@@ -199,6 +214,12 @@ void VirtualMerging::compute_mergeable_scope_methods() {
 
     if (m_unsupported_virtual_scopes.count(virtual_scope) != 0u) {
       TRACE(VM, 5, "[VM] virtual method {%s} in an unsupported virtual scope",
+            SHOW(overriding_method));
+      return;
+    }
+
+    if (m_method_handle_named_methods.count(overriding_method) != 0u) {
+      TRACE(VM, 5, "[VM] virtual method {%s} is named by a method handle",
             SHOW(overriding_method));
       return;
     }

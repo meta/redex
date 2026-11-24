@@ -160,6 +160,7 @@ class VirtualMerging {
   UnorderedSet<const virtual_scope::VirtualScope*> m_unsupported_virtual_scopes;
   UnorderedMap<const DexString*, UnorderedSet<DexProto*>>
       m_unsupported_named_protos;
+  UnorderedSet<const DexMethod*> m_method_handle_named_methods;
 
   void compute_mergeable_scope_methods();
   ConcurrentMap<const virtual_scope::VirtualScope*,

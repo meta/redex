@@ -121,3 +121,15 @@ TEST(AccumulatingTimer, multipleThreadsMultipleScopes) {
   // Assume that thread startup is not too expensive.
   EXPECT_TRUE(is_close(NUM_ITERS * kOneSecInMus, global_mus, NUM_ITERS));
 }
+
+TEST(AccumulatingTimer, shortDurationsAreNotTruncated) {
+  AccumulatingTimer timer{};
+  constexpr int kDurations = 2000;
+  constexpr auto kDuration = std::chrono::nanoseconds(500);
+  for (int i = 0; i < kDurations; ++i) {
+    timer.add(kDuration);
+  }
+  // Truncating each duration to whole microseconds would sum to zero.
+  EXPECT_EQ(timer.get_microseconds(), 1000);
+  EXPECT_DOUBLE_EQ(timer.get_seconds(), 0.001);
+}

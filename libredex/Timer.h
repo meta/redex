@@ -53,7 +53,9 @@ void maybe_record_chrome_trace(
     std::chrono::high_resolution_clock::time_point end);
 
 // An accumulating thread-safe timer with a scope-based approach.
-// Note: uses uint64_t microseconds to simplify and use optimized atomic.
+// Note: uses uint64_t nanoseconds to simplify and use optimized atomic. Each
+// scope adds its exact duration: truncating every scope to a coarser unit
+// would undercount timers whose scopes are short and numerous.
 class AccumulatingTimer {
  public:
   class AccumulatingTimerScope {
@@ -62,10 +64,7 @@ class AccumulatingTimer {
         : m_context(context),
           m_start(std::chrono::high_resolution_clock::now()) {}
     ~AccumulatingTimerScope() {
-      auto end = std::chrono::high_resolution_clock::now();
-      auto dur_in_mus =
-          std::chrono::duration_cast<std::chrono::microseconds>(end - m_start);
-      m_context->m_microseconds->fetch_add((uint64_t)dur_in_mus.count());
+      m_context->add(std::chrono::high_resolution_clock::now() - m_start);
     }
 
     // Disallow copying.
@@ -87,9 +86,13 @@ class AccumulatingTimer {
 
   AccumulatingTimerScope scope() { return AccumulatingTimerScope(this); }
 
-  uint64_t get_microseconds() const { return m_microseconds->load(); }
+  void add(std::chrono::nanoseconds duration) {
+    m_nanoseconds->fetch_add((uint64_t)duration.count());
+  }
+
+  uint64_t get_microseconds() const { return m_nanoseconds->load() / 1000; }
   double get_seconds() const {
-    return ((double)m_microseconds->load()) / 1000000;
+    return ((double)m_nanoseconds->load()) / 1000000000;
   }
 
   using times_t = std::vector<std::pair<std::string, double>>;
@@ -97,17 +100,17 @@ class AccumulatingTimer {
   // there should be no currently running Timers when this function is called
   static times_t get_times();
 
-  static void add_timer(std::string msg,
-                        std::shared_ptr<std::atomic<uint64_t>> microseconds);
-
  private:
   using times_impl_t =
       std::list<std::pair<std::string, std::shared_ptr<std::atomic<uint64_t>>>>;
+
+  static void add_timer(std::string msg,
+                        std::shared_ptr<std::atomic<uint64_t>> nanoseconds);
 
   static std::mutex& get_s_lock();
   // We dynamically allocate the static list of times to avoid problems with the
   // static initialization / destruction order.
   static times_impl_t* s_times;
-  std::shared_ptr<std::atomic<uint64_t>> m_microseconds{
+  std::shared_ptr<std::atomic<uint64_t>> m_nanoseconds{
       std::make_shared<std::atomic<uint64_t>>(0)};
 };

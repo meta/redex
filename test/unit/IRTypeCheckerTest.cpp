@@ -3235,6 +3235,23 @@ TEST_F(IRTypeCheckerTest, invokePolymorphicOnFixedArgMethod) {
   EXPECT_TRUE(checker.fail());
 }
 
+// A move-result reads the result of a method handle call.
+TEST_F(IRTypeCheckerTest, moveResultAfterInvokePolymorphic) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar:(Ljava/lang/invoke/MethodHandle;)V"
+     (
+      (load-param-object v0)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;" "()Ljava/lang/Object;")
+      (move-result-object v1)
+      (return-void)
+     )
+    )
+  )");
+  IRTypeChecker checker(method);
+  checker.run();
+  EXPECT_TRUE(checker.good()) << checker.what();
+}
+
 TEST_F(IRTypeCheckerTest, invokeOnClassInitializer) {
   auto* const type_foo = DexType::make_type("LFoo;");
   ClassCreator cls_foo_creator(type_foo);

@@ -210,8 +210,7 @@ class IRInstruction final {
   }
 
   bool has_move_result() const {
-    return has_method() || has_signature_polymorphic() ||
-           m_opcode == OPCODE_FILLED_NEW_ARRAY;
+    return opcode::writes_result_register(m_opcode);
   }
 
   bool has_move_result_any() const {

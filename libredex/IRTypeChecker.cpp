@@ -633,19 +633,12 @@ Result check_structure(DexMethod* method,
             return Result::make_error("Encountered " + show(*it) +
                                       " at start of the method");
           }
-          auto prev_op = prev->insn->opcode();
-          if (!(opcode::is_a_method_invoke(prev_op) ||
-                opcode::is_filled_new_array(prev_op))) {
+          if (!prev->insn->has_move_result()) {
             return Result::make_error(
                 "Encountered " + show(*it) +
                 " without appropriate prefix "
                 "instruction. Expected invoke or filled-new-array, got " +
                 show(prev->insn));
-          }
-          if (!prev->insn->has_move_result()) {
-            return Result::make_error("Encountered " + show(*it) +
-                                      " without appropriate prefix "
-                                      "instruction");
           }
         }
 

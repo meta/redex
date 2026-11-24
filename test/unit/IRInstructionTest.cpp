@@ -769,3 +769,12 @@ TEST_F(IRInstructionTest, GatherTypesOfMethodTypesMethodHandlesAndCallSites) {
           "Ljava/lang/invoke/MethodHandle;", "Ljava/lang/invoke/CallSite;",
           "LI;", "V", "LJ;"}));
 }
+
+// Both dynamic invokes write the result register, which a following
+// move-result reads.
+TEST_F(IRInstructionTest, DynamicInvokesHaveMoveResult) {
+  for (auto op : {OPCODE_INVOKE_POLYMORPHIC, OPCODE_INVOKE_CUSTOM}) {
+    EXPECT_TRUE(opcode::writes_result_register(op)) << show(op);
+    EXPECT_TRUE(IRInstruction(op).has_move_result()) << show(op);
+  }
+}

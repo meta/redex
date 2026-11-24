@@ -149,7 +149,7 @@ bool may_throw(IROpcode);
 inline bool can_throw(IROpcode op) { return may_throw(op) || is_throw(op); }
 
 constexpr inline bool writes_result_register(IROpcode op) {
-  return is_a_method_invoke(op) || is_filled_new_array(op);
+  return is_an_invoke(op) || is_filled_new_array(op);
 }
 
 constexpr inline bool is_branch(IROpcode op) {

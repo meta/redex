@@ -9,6 +9,7 @@
 #include "Creators.h"
 #include "DexAnnotation.h"
 #include "DexCallSite.h"
+#include "DexLoader.h"
 #include "DexPosition.h"
 #include "IODIMetadata.h"
 #include "IODIPlan.h"
@@ -174,6 +175,55 @@ TEST_F(DexIoTest, WritesCompleteDexAndRecordsItsByteCount) {
   output->write();
   EXPECT_GT(output->m_stats.num_bytes, 0);
   EXPECT_EQ(redex::file_size(filename), output->m_stats.num_bytes);
+}
+
+TEST_F(DexIoTest, WritesJavaLangObjectWithoutSuperclass) {
+  // A platform dex such as core-oj defines Object, the one class whose class
+  // def has no superclass.
+  auto* object_type = type::java_lang_Object();
+  ClassCreator object_creator(object_type);
+  object_creator.set_access(ACC_PUBLIC);
+  object_creator.add_method(
+      DexMethod::make_method("Ljava/lang/Object;.hashCode:()I")
+          ->make_concrete(ACC_PUBLIC | ACC_NATIVE, /* is_virtual */ true));
+  classes.push_back(object_creator.create());
+  auto* sub_type = DexType::make_type("LSub;");
+  ClassCreator sub_creator(sub_type);
+  sub_creator.set_super(object_type);
+  classes.push_back(sub_creator.create());
+
+  auto temp = redex::make_tmp_dir("dex-io-%%%%-%%%%");
+  redex::create_directories(temp.path + "/meta");
+  ConfigFiles config(Json::Value(Json::objectValue), temp.path);
+  const auto filename = temp.path + "/output.dex";
+  make_output(filename, config)->write();
+
+  delete g_redex;
+  g_redex = new RedexContext();
+  auto loaded =
+      load_classes_from_dex(DexLocation::make_location("dex", filename));
+  ASSERT_EQ(loaded.size(), 2u);
+  const auto* loaded_object = type_class(type::java_lang_Object());
+  ASSERT_NE(loaded_object, nullptr);
+  EXPECT_EQ(loaded_object->get_super_class(), nullptr);
+  EXPECT_EQ(loaded_object->get_vmethods().size(), 1u);
+  const auto* loaded_sub = type_class(DexType::get_type("LSub;"));
+  ASSERT_NE(loaded_sub, nullptr);
+  EXPECT_EQ(loaded_sub->get_super_class(), type::java_lang_Object());
+}
+
+TEST_F(DexIoTest, RejectsMissingSuperclassOfOtherClasses) {
+  auto* type = DexType::make_type("LNoSuper;");
+  ClassCreator creator(type);
+  creator.set_super(type::java_lang_Object());
+  auto* cls = creator.create();
+  cls->set_super_class(nullptr);
+  classes.push_back(cls);
+
+  auto temp = redex::make_tmp_dir("dex-io-%%%%-%%%%");
+  redex::create_directories(temp.path + "/meta");
+  ConfigFiles config(Json::Value(Json::objectValue), temp.path);
+  EXPECT_THROW(make_output(temp.path + "/output.dex", config), RedexException);
 }
 
 TEST_F(DexIoTest, RejectsOpenFailureBeforeWritingSymbolFiles) {

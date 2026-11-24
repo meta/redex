@@ -2073,7 +2073,9 @@ void DexClass::gather_types(C& ltype) const {
     f->gather_types(ltype);
   }
 
-  ltype.insert(ltype.end(), m_super_class);
+  if (m_super_class != nullptr) {
+    ltype.insert(ltype.end(), m_super_class);
+  }
   ltype.insert(ltype.end(), m_self);
   if (m_interfaces) {
     m_interfaces->gather_types(ltype);

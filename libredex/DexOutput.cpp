@@ -932,7 +932,12 @@ void DexOutput::generate_class_data() {
     DexClass* clz = m_classes->at(i);
     cdefs[i].typeidx = m_dodx.typeidx(clz->get_type());
     cdefs[i].access_flags = clz->get_access();
-    cdefs[i].super_idx = m_dodx.typeidx(clz->get_super_class());
+    const auto* super_class = clz->get_super_class();
+    always_assert_log(super_class != nullptr ||
+                          clz->get_type() == type::java_lang_Object(),
+                      "Only Object has super=null, not %s", SHOW(clz));
+    cdefs[i].super_idx =
+        super_class == nullptr ? DEX_NO_INDEX : m_dodx.typeidx(super_class);
     cdefs[i].interfaces_off = 0;
     cdefs[i].annotations_off = 0;
     cdefs[i].interfaces_off = m_tl_emit_offsets[clz->get_interfaces()];

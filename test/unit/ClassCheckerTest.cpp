@@ -275,3 +275,159 @@ TEST_F(ClassVCheckerTest, testVeryFunnyBusiness) {
   checker.run(scope);
   EXPECT_TRUE(checker.fail());
 }
+
+namespace {
+
+DexClass* make_class(const char* name,
+                     const char* super,
+                     const std::vector<const char*>& interfaces = {},
+                     DexAccessFlags access = ACC_PUBLIC,
+                     bool external = false) {
+  std::vector<DexType*> intfs;
+  intfs.reserve(interfaces.size());
+  for (const auto* intf : interfaces) {
+    intfs.push_back(DexType::make_type(intf));
+  }
+  return create_class(DexType::make_type(name),
+                      super == nullptr ? type::java_lang_Object()
+                                       : DexType::make_type(super),
+                      intfs, access, external);
+}
+
+const DexAccessFlags kInterface = ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT;
+
+std::string hierarchy_errors(const Scope& scope) {
+  auto errors = check_class_hierarchy(scope);
+  return errors ? *errors : "";
+}
+
+} // namespace
+
+// class C implements I {}
+// class D extends C {}
+TEST_F(ClassVCheckerTest, testClassHierarchyWithKindsAsDefined) {
+  Scope scope = create_empty_scope();
+  scope.push_back(make_class("LI;", nullptr, {}, kInterface));
+  scope.push_back(make_class("LC;", nullptr, {"LI;"}));
+  scope.push_back(make_class("LD;", "LC;"));
+
+  EXPECT_EQ(hierarchy_errors(scope), "");
+}
+
+// interface I {}  // external
+// class C extends I {}
+TEST_F(ClassVCheckerTest, testSuperclassDefinedAsInterfaceFails) {
+  Scope scope = create_empty_scope();
+  make_class("LI;", nullptr, {}, kInterface, /* external */ true);
+  scope.push_back(make_class("LC;", "LI;"));
+
+  EXPECT_NE(
+      hierarchy_errors(scope).find("Superclass LI; of LC; is an interface"),
+      std::string::npos);
+}
+
+// abstract class S {}  // external, from a library jar older than the app
+// class Lite implements S {}
+TEST_F(ClassVCheckerTest, testInterfaceDefinedAsClassFails) {
+  Scope scope = create_empty_scope();
+  make_class("LS;", nullptr, {}, ACC_PUBLIC | ACC_ABSTRACT,
+             /* external */ true);
+  scope.push_back(make_class("LLite;", nullptr, {"LS;"}));
+
+  EXPECT_NE(hierarchy_errors(scope).find(
+                "Class LLite; implements non-interface class LS;"),
+            std::string::npos);
+}
+
+// class S {}
+// interface J extends S {}
+TEST_F(ClassVCheckerTest, testSuperinterfaceDefinedAsClassFails) {
+  Scope scope = create_empty_scope();
+  scope.push_back(make_class("LS;", nullptr));
+  scope.push_back(make_class("LJ;", nullptr, {"LS;"}, kInterface));
+
+  EXPECT_NE(hierarchy_errors(scope).find(
+                "Class LJ; implements non-interface class LS;"),
+            std::string::npos);
+}
+
+// interface J extends I {}, with java.lang.Object as superclass
+TEST_F(ClassVCheckerTest, testInterfaceExtendingObjectPasses) {
+  Scope scope = create_empty_scope();
+  scope.push_back(make_class("LI;", nullptr, {}, kInterface));
+  scope.push_back(make_class("LJ;", nullptr, {"LI;"}, kInterface));
+
+  EXPECT_EQ(hierarchy_errors(scope), "");
+}
+
+// An interface whose superclass is the class C.
+TEST_F(ClassVCheckerTest, testInterfaceWithOtherSuperclassFails) {
+  Scope scope = create_empty_scope();
+  scope.push_back(make_class("LC;", nullptr));
+  scope.push_back(make_class("LI;", "LC;", {}, kInterface));
+
+  EXPECT_NE(hierarchy_errors(scope).find(
+                "Interface LI; has superclass LC;, but interfaces must have "
+                "java.lang.Object as superclass"),
+            std::string::npos);
+}
+
+// interface I {}  interface J extends I {}  interface K extends I {}
+// class C implements J, K {}  class D extends C implements I {}
+TEST_F(ClassVCheckerTest, testDiamondHierarchyPasses) {
+  Scope scope = create_empty_scope();
+  scope.push_back(make_class("LI;", nullptr, {}, kInterface));
+  scope.push_back(make_class("LJ;", nullptr, {"LI;"}, kInterface));
+  scope.push_back(make_class("LK;", nullptr, {"LI;"}, kInterface));
+  scope.push_back(make_class("LC;", nullptr, {"LJ;", "LK;"}));
+  scope.push_back(make_class("LD;", "LC;", {"LI;"}));
+
+  EXPECT_EQ(hierarchy_errors(scope), "");
+}
+
+// class B {}  class D extends B {}
+TEST_F(ClassVCheckerTest, testNonFinalSuperclassPasses) {
+  Scope scope = create_empty_scope();
+  scope.push_back(make_class("LB;", nullptr));
+  scope.push_back(make_class("LD;", "LB;"));
+
+  EXPECT_EQ(hierarchy_errors(scope), "");
+}
+
+// final class F {}  // external
+// class D extends F {}
+TEST_F(ClassVCheckerTest, testFinalSuperclassFails) {
+  Scope scope = create_empty_scope();
+  make_class("LF;", nullptr, {}, ACC_PUBLIC | ACC_FINAL, /* external */ true);
+  scope.push_back(make_class("LD;", "LF;"));
+
+  EXPECT_NE(
+      hierarchy_errors(scope).find("Superclass LF; of LD; is declared final"),
+      std::string::npos);
+}
+
+// Two library classes that do not fit together fail without any class of the
+// program referring to them:
+// interface I {}  // external
+// class E extends I {}  // external
+TEST_F(ClassVCheckerTest, testInconsistentExternalClassesFail) {
+  Scope scope = create_empty_scope();
+  make_class("LI;", nullptr, {}, kInterface, /* external */ true);
+  make_class("LE;", "LI;", {}, ACC_PUBLIC, /* external */ true);
+
+  EXPECT_NE(
+      hierarchy_errors(scope).find("Superclass LI; of LE; is an interface"),
+      std::string::npos);
+}
+
+// Types missing from the input can be either kind, final or not:
+// class C extends MissingClass implements MissingInterface {}
+// interface J extends MissingInterface {}
+TEST_F(ClassVCheckerTest, testMissingSupertypesPass) {
+  Scope scope = create_empty_scope();
+  scope.push_back(make_class("LC;", "LMissingClass;", {"LMissingInterface;"}));
+  scope.push_back(
+      make_class("LJ;", nullptr, {"LMissingInterface;"}, kInterface));
+
+  EXPECT_EQ(hierarchy_errors(scope), "");
+}

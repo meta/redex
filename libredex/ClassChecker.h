@@ -7,8 +7,29 @@
 
 #pragma once
 
+#include <optional>
+#include <string>
+
 #include "ConcurrentContainers.h"
 #include "DexClass.h"
+
+/**
+ * Describes the classes in `scope`, and the external classes, whose supertypes
+ * the runtime refuses to link, or returns std::nullopt when there are none:
+ *
+ * - a superclass defined as an interface, or an implemented interface defined
+ *   as a class (IncompatibleClassChangeError);
+ * - an interface whose superclass is not java.lang.Object (ClassFormatError);
+ * - a superclass declared final (VerifyError).
+ *
+ * Apart from an interface's superclass, which must be java.lang.Object, a
+ * supertype without a definition is not an error: types missing from the
+ * input are legitimate, and analyses handle them.
+ *
+ * These are the structural properties of the class hierarchy; ART checks more
+ * when it links a class (access to the supertypes, for example).
+ */
+std::optional<std::string> check_class_hierarchy(const Scope& scope);
 
 class ClassChecker {
  public:

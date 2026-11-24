@@ -491,16 +491,16 @@ void MultiMethodInliner::inline_callees(DexMethod* caller,
           auto timer2 = m_inline_callees_should_inline_timer.scope();
           // Cost model is based on fully inlining callee everywhere; let's
           // see if we can get more detailed call-site specific information
+          bool use_call_site_cost = false;
           if (should_inline_at_call_site(caller, block, insn, callee,
-                                         &no_return, &for_speed, &reduced_code,
-                                         &insn_size, &partial_code)) {
+                                         &no_return, &for_speed,
+                                         &partial_code)) {
             always_assert(!no_return);
             // Yes, we know might have dead_blocks and a refined insn_size
+            use_call_site_cost = true;
           } else if (should_inline_always(callee)) {
-            // We'll fully inline the callee without any adjustments
             no_return = false;
-            reduced_code = nullptr;
-            insn_size = get_callee_insn_size(callee);
+            use_call_site_cost = true;
           } else if (should_partially_inline(block, insn, callee,
                                              &partial_code)) {
             partial = true;
@@ -511,6 +511,19 @@ void MultiMethodInliner::inline_callees(DexMethod* caller,
             always_assert(!reduced_code);
           } else {
             continue;
+          }
+          if (use_call_site_cost) {
+            // Inline the code the call site's cost was estimated from: the
+            // callee as reduced by the site's constant arguments, if there are
+            // any. The cost is cached per instruction, so this second lookup is
+            // cheap.
+            const auto* inlined_cost = get_call_site_inlined_cost(insn, callee);
+            if (inlined_cost != nullptr) {
+              reduced_code = inlined_cost->reduced_code;
+              insn_size = inlined_cost->insn_size;
+            } else {
+              insn_size = get_callee_insn_size(callee);
+            }
           }
         } else {
           insn_size = get_callee_insn_size(callee);
@@ -1091,7 +1104,14 @@ void MultiMethodInliner::compute_callee_costs(DexMethod* method) {
       m_call_site_summarizer
           ? m_call_site_summarizer->get_callee_call_site_invokes(method)
           : nullptr;
+  // Summaries for which no call site passes should_inline_at_call_site. Their
+  // reduced code is still needed if the method gets inlined everywhere, which
+  // is decided last.
+  std::shared_ptr<InsertOnlyConcurrentSet<const CallSiteSummary*>>
+      summaries_rejected_at_call_site;
   if (callee_call_site_invokes != nullptr) {
+    summaries_rejected_at_call_site =
+        std::make_shared<InsertOnlyConcurrentSet<const CallSiteSummary*>>();
     UnorderedMap<const CallSiteSummary*, std::vector<const IRInstruction*>>
         invokes;
     for (const auto* invoke_insn : *callee_call_site_invokes) {
@@ -1103,22 +1123,19 @@ void MultiMethodInliner::compute_callee_costs(DexMethod* method) {
     }
     for (auto& p : UnorderedIterable(invokes)) {
       m_scheduler.augment(method, [this, call_site_summary = p.first,
-                                   insns = std::move(p.second), method]() {
+                                   insns = std::move(p.second), method,
+                                   summaries_rejected_at_call_site]() {
         TraceContext context(method);
         // Populate caches
         auto timer = m_call_site_inlined_cost_timer.scope();
-        bool keep_reduced_code = false;
+        bool inlined_at_call_site = false;
         for (const auto* insn : insns) {
           if (should_inline_at_call_site(nullptr, nullptr, insn, method)) {
-            keep_reduced_code = true;
+            inlined_at_call_site = true;
           }
         }
-        if (!keep_reduced_code) {
-          CalleeCallSiteSummary key{method, call_site_summary};
-          const auto* cached = m_call_site_inlined_costs.get(key);
-          if (cached != nullptr) {
-            make_partial(method, const_cast<InlinedCost*>(cached));
-          }
+        if (!inlined_at_call_site) {
+          summaries_rejected_at_call_site->insert(call_site_summary);
         }
       });
     }
@@ -1140,10 +1157,22 @@ void MultiMethodInliner::compute_callee_costs(DexMethod* method) {
   // it as a "continuation".
   m_scheduler.augment(
       method,
-      [this, method] {
+      [this, method, summaries_rejected_at_call_site] {
         TraceContext context(method);
         // Populate cache
-        should_inline_always(method);
+        if (should_inline_always(method) ||
+            summaries_rejected_at_call_site == nullptr) {
+          return;
+        }
+        // Release the reduced code that no call site will inline.
+        for (const auto* call_site_summary :
+             UnorderedIterable(*summaries_rejected_at_call_site)) {
+          CalleeCallSiteSummary key{method, call_site_summary};
+          const auto* cached = m_call_site_inlined_costs.get(key);
+          if (cached != nullptr) {
+            make_partial(method, const_cast<InlinedCost*>(cached));
+          }
+        }
       },
       /* continuation */ true);
 }
@@ -2078,8 +2107,6 @@ bool MultiMethodInliner::should_inline_at_call_site(
     DexMethod* callee,
     bool* no_return,
     bool* for_speed,
-    std::shared_ptr<ReducedCode>* reduced_code,
-    size_t* insn_size,
     PartialCode* partial_code) {
   const auto* inlined_cost = get_call_site_inlined_cost(invoke_insn, callee);
   if (inlined_cost == nullptr) {
@@ -2118,12 +2145,6 @@ bool MultiMethodInliner::should_inline_at_call_site(
     return false;
   }
 
-  if (reduced_code != nullptr) {
-    *reduced_code = inlined_cost->reduced_code;
-  }
-  if (insn_size != nullptr) {
-    *insn_size = inlined_cost->insn_size;
-  }
   if (for_speed != nullptr) {
     *for_speed = size_increased;
   }

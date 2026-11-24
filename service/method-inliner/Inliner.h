@@ -592,18 +592,14 @@ class MultiMethodInliner {
   /**
    * Whether it's beneficial to inline the callee at a particular callsite.
    * no_return may be set to true when the return value is false.
-   * reduced_cfg and insn_size are set when the return value is true.
    */
-  bool should_inline_at_call_site(
-      DexMethod* caller,
-      cfg::Block* caller_block,
-      const IRInstruction* invoke_insn,
-      DexMethod* callee,
-      bool* no_return = nullptr,
-      bool* for_speed = nullptr,
-      std::shared_ptr<ReducedCode>* reduced_code = nullptr,
-      size_t* insn_size = nullptr,
-      PartialCode* partial_code = nullptr);
+  bool should_inline_at_call_site(DexMethod* caller,
+                                  cfg::Block* caller_block,
+                                  const IRInstruction* invoke_insn,
+                                  DexMethod* callee,
+                                  bool* no_return = nullptr,
+                                  bool* for_speed = nullptr,
+                                  PartialCode* partial_code = nullptr);
 
   /**
    * Whether we should, and legally can, partially inline a particular callee

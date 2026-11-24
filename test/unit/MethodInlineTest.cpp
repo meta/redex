@@ -6,6 +6,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <optional>
 
 #include "ApiLevelChecker.h"
 #include "Creators.h"
@@ -5307,4 +5308,112 @@ TEST_F(MethodInlineTest, delete_methods_keeps_method_handle_target) {
       delete_methods(scope, removable, std::ref(concurrent_method_resolver));
   EXPECT_TRUE(deleted.empty());
   EXPECT_EQ(foo_cls->get_dmethods().size(), 1);
+}
+
+// Builds `LFoo;.callee:(I)I`, a switch on its argument whose every case costs
+// more than the invoke it would replace, called by three wrappers. Each wrapper
+// passes on the constant its two callers give it, so the constant is known at
+// the call site but not in the wrapper's code; the wrappers are too big to be
+// inlined into their callers. Runs the inliner over callee and wrappers and
+// returns the wrappers, or nothing when the callee was not inlined everywhere.
+static std::optional<std::vector<DexMethod*>> inline_switch_through_wrappers(
+    ConfigFiles& conf) {
+  auto effects = [](int n) {
+    std::string s;
+    for (int i = 0; i < n; i++) {
+      s += R"((invoke-static () "LBar;.effect:()V"))";
+    }
+    return s;
+  };
+  std::string cases;
+  for (int c = 0; c < 5; c++) {
+    cases += "(:c" + std::to_string(c) + " " + std::to_string(c) + ")" +
+             effects(4) + "(const v1 " + std::to_string(10 + c) +
+             ") (return v1)";
+  }
+  std::string methods = R"((method (public static) "LFoo;.callee:(I)I"
+      ((load-param v0) (switch v0 (:c0 :c1 :c2 :c3 :c4)) (const v1 0)
+       (return v1) )" + cases +
+                        "))";
+  for (int i = 0; i < 3; i++) {
+    auto n = std::to_string(i);
+    methods += R"((method (public static) "LFoo;.wrapper)" + n +
+               R"(:(I)I" ((load-param v0) )" + effects(12) +
+               R"( (invoke-static (v0) "LFoo;.callee:(I)I") (move-result v0)
+                   (return v0))))";
+    for (int k = 0; k < 2; k++) {
+      methods += R"((method (public static) "LFoo;.caller)" + n + "_" +
+                 std::to_string(k) + R"(:()I" ((const v0 )" + n +
+                 R"() (invoke-static (v0) "LFoo;.wrapper)" + n +
+                 R"(:(I)I") (move-result v0) (return v0))))";
+    }
+  }
+  auto* foo_cls = assembler::class_from_string(R"((class (public) "LFoo;" )" +
+                                               methods + ")");
+  auto* callee = DexMethod::get_method("LFoo;.callee:(I)I")->as_def();
+  std::vector<DexMethod*> wrappers;
+  wrappers.reserve(3);
+  for (int i = 0; i < 3; i++) {
+    wrappers.push_back(
+        DexMethod::get_method("LFoo;.wrapper" + std::to_string(i) + ":(I)I")
+            ->as_def());
+  }
+
+  DexStoresVector stores;
+  {
+    DexStore store("root");
+    store.add_classes({});
+    store.add_classes({foo_cls});
+    stores.push_back(std::move(store));
+  }
+  UnorderedSet<DexMethod*> candidates{callee};
+  insert_unordered_iterable(candidates, wrappers);
+  auto scope = build_class_scope(stores);
+  walk::parallel::code(scope, [&](auto*, IRCode& code) { code.build_cfg(); });
+  api::LevelChecker::init(0, scope);
+  inliner::InlinerConfig inliner_config;
+  inliner_config.populate(scope);
+  inliner_config.multiple_callers = true;
+  inliner_config.use_call_site_summaries = true;
+  inliner_config.shrinker.run_local_dce = true;
+  inliner_config.shrinker.run_const_prop = true;
+  inliner_config.shrinker.compute_pure_methods = false;
+  init_classes::InitClassesWithSideEffects init_classes_with_side_effects(
+      scope, /* create_init_class_insns */ false);
+  ConcurrentMethodResolverDeprecated concurrent_method_resolver;
+  MultiMethodInliner inliner(
+      scope, init_classes_with_side_effects, stores, conf, candidates,
+      std::ref(concurrent_method_resolver), inliner_config, /* min_sdk */ 0,
+      InterDex, /* true_virtual_callers */ {}, /* inline_for_speed */ nullptr,
+      /* analyze_and_prune_inits */ false, {});
+  inliner.inline_methods();
+  if (inliner.get_inlined().count(callee) == 0u) {
+    return std::nullopt;
+  }
+  for (auto* wrapper : wrappers) {
+    wrapper->get_code()->clear_cfg();
+    remove_position(wrapper->get_code());
+  }
+  return wrappers;
+}
+
+// Inlining a method everywhere is decided by estimating each call site's cost
+// from the callee as reduced by the site's constant arguments. Each call site
+// here only pays off through deleting the callee, so the per-site check rejects
+// it; the reduced callee, not the whole switch, must still be what gets
+// inlined.
+TEST_F(MethodInlineTest, inline_everywhere_inlines_reduced_callee) {
+  auto wrappers = inline_switch_through_wrappers(conf);
+  ASSERT_TRUE(wrappers);
+  std::string effects;
+  for (int j = 0; j < 16; j++) {
+    effects += R"((invoke-static () "LBar;.effect:()V"))";
+  }
+  for (int i = 0; i < 3; i++) {
+    auto expected = assembler::ircode_from_string(
+        "((load-param v0) " + effects + " (const v0 " + std::to_string(10 + i) +
+        ") (return v0))");
+    SCOPED_TRACE(i);
+    EXPECT_CODE_EQ(expected.get(), wrappers->at(i)->get_code());
+  }
 }

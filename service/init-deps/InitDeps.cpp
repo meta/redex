@@ -16,6 +16,8 @@
 #include "Debug.h"
 #include "DeterministicContainers.h"
 #include "DexClass.h"
+#include "DexMethodHandle.h"
+#include "Resolver.h"
 #include "Show.h"
 #include "Timer.h"
 #include "Trace.h"
@@ -73,13 +75,32 @@ auto compute_deps(const Scope& scope,
       cfg_adapter::iterate_with_iterator(
           clinit->get_code(), [&](const IRList::iterator& it) {
             auto* insn = it->insn;
-            if (opcode::is_an_sfield_op(insn->opcode())) {
-              add_dep(type_class(insn->get_field()->get_class()));
-            } else if (opcode::is_invoke_static(insn->opcode())) {
-              add_dep(type_class(insn->get_method()->get_class()));
-            } else if (opcode::is_new_instance(insn->opcode())) {
+            // A method handle initializes the class of its member when it is
+            // called, as the instruction it acts like does.
+            for_each_field_access(insn,
+                                  [&](IROpcode op, DexFieldRef* field,
+                                      const DexMethodHandle* /* handle */) {
+                                    if (opcode::is_an_sfield_op(op)) {
+                                      add_dep(type_class(field->get_class()));
+                                    }
+                                  });
+            for_each_invoke(insn,
+                            [&](IROpcode op, DexMethodRef* method,
+                                const DexMethodHandle* /* handle */) {
+                              if (opcode::is_invoke_static(op)) {
+                                add_dep(type_class(method->get_class()));
+                              }
+                            });
+            if (opcode::is_new_instance(insn->opcode())) {
               add_dep(type_class(insn->get_type()));
             }
+            // Unlike an invoke-direct of a constructor, an invoke-constructor
+            // handle allocates an instance, as a new-instance does.
+            for_each_method_handle(insn, [&](const DexMethodHandle* handle) {
+              if (handle->type() == METHOD_HANDLE_TYPE_INVOKE_CONSTRUCTOR) {
+                add_dep(type_class(handle->methodref()->get_class()));
+              }
+            });
             return cfg_adapter::LOOP_CONTINUE;
           });
     }

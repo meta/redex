@@ -1447,3 +1447,61 @@ TEST_F(FinalInlineTest, fieldReadThroughHandleFromElsewhereIsNotEncoded) {
   ASSERT_EQ(cls->get_clinit(), clinit);
   EXPECT_TRUE(writes_field(clinit, field));
 }
+
+// A class initializer that calls a method handle of a static method
+// initializes the method's class, as an invoke-static would. Here that class
+// reads a field of the class under initialization, which still holds its
+// default value, so the initializers form a cycle and neither is folded.
+TEST_F(FinalInlineTest, clinitCycleThroughMethodHandle) {
+  auto* x = create_field_with_zero_value("LFoo;.X:I", m_cc.get(),
+                                         ACC_PUBLIC | ACC_STATIC | ACC_FINAL);
+  // Tool-generated: static { TOUCH_BAR.invokeExact(); X = 5; }
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public static constructor) "LFoo;.<clinit>:()V"
+     (
+      (const-method-handle invoke-static "LBar;.touch:()V")
+      (move-result-pseudo-object v0)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
+      (const v1 5)
+      (sput v1 "LFoo;.X:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* foo = m_cc->create();
+
+  ClassCreator bar_creator(DexType::make_type("LBar;"));
+  bar_creator.set_super(type::java_lang_Object());
+  auto* y = create_field_with_zero_value("LBar;.Y:I", &bar_creator,
+                                         ACC_PUBLIC | ACC_STATIC | ACC_FINAL);
+  // static { Y = Foo.X; }, which reads 0 when Foo's initializer runs first.
+  bar_creator.add_method(assembler::method_from_string(R"(
+    (method (public static constructor) "LBar;.<clinit>:()V"
+     (
+      (sget "LFoo;.X:I")
+      (move-result-pseudo v0)
+      (sput v0 "LBar;.Y:I")
+      (return-void)
+     )
+    )
+  )"));
+  bar_creator.add_method(assembler::method_from_string(R"(
+    (method (public static) "LBar;.touch:()V"
+     (
+      (return-void)
+     )
+    )
+  )"));
+  auto* bar = bar_creator.create();
+
+  auto store = DexStore("store");
+  store.add_classes({foo, bar});
+  DexStoresVector stores{store};
+  auto scope = build_class_scope(stores);
+  XStoreRefs xstores(stores, true);
+  run(scope, &xstores);
+
+  EXPECT_NE(bar->get_clinit(), nullptr);
+  EXPECT_EQ(y->get_static_value()->value(), 0);
+  EXPECT_EQ(x->get_static_value()->value(), 0);
+}

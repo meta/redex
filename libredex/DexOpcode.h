@@ -70,6 +70,13 @@ inline bool is_invoke(DexOpcode op) {
   return op >= DOPCODE_INVOKE_VIRTUAL && op <= DOPCODE_INVOKE_INTERFACE_RANGE;
 }
 
+// One of the fourteen invoke opcodes. `is_invoke` excludes `invoke-polymorphic`
+// and `invoke-custom` and their range forms.
+inline bool is_an_invoke(DexOpcode op) {
+  return is_invoke(op) || (op >= DOPCODE_INVOKE_POLYMORPHIC &&
+                           op <= DOPCODE_INVOKE_CUSTOM_RANGE);
+}
+
 inline bool is_fopcode(DexOpcode op) {
   return op == FOPCODE_PACKED_SWITCH || op == FOPCODE_SPARSE_SWITCH ||
          op == FOPCODE_FILLED_ARRAY;

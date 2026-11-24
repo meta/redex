@@ -785,11 +785,13 @@ uint16_t calc_outs_size(const IRCode* code) {
       continue;
     }
     auto* insn = mie.dex_insn;
-    if (dex_opcode::is_invoke_range(insn->opcode())) {
-      size = std::max(size, boost::numeric_cast<uint16_t>(insn->range_size()));
-    } else if (dex_opcode::is_invoke(insn->opcode())) {
-      size = std::max(size, boost::numeric_cast<uint16_t>(insn->srcs_size()));
+    auto op = insn->opcode();
+    if (!dex_opcode::is_an_invoke(op)) {
+      continue;
     }
+    auto words =
+        dex_opcode::has_range(op) ? insn->range_size() : insn->srcs_size();
+    size = std::max(size, boost::numeric_cast<uint16_t>(words));
   }
   return size;
 }

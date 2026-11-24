@@ -23,6 +23,57 @@
 
 class IRInstructionTest : public RedexTest {};
 
+// A method's outs_size must cover the argument words of every call it makes,
+// method handle calls and call-site calls included, or ART rejects the method.
+TEST_F(IRInstructionTest, DynamicInvokesCountTowardOutsSize) {
+  auto* invoke_exact = DexMethod::make_method(
+      "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)"
+      "Ljava/lang/Object;");
+  for (auto op : {DOPCODE_INVOKE_POLYMORPHIC, DOPCODE_INVOKE_POLYMORPHIC_RANGE,
+                  DOPCODE_INVOKE_CUSTOM, DOPCODE_INVOKE_CUSTOM_RANGE}) {
+    bool polymorphic = op == DOPCODE_INVOKE_POLYMORPHIC ||
+                       op == DOPCODE_INVOKE_POLYMORPHIC_RANGE;
+    bool range = dex_opcode::has_range(op);
+    // The range forms pass three longs, the others an int and a long. A method
+    // handle call also passes the handle.
+    std::string args = range ? "JJJ" : "IJ";
+    uint16_t words = (range ? 6 : 3) + (polymorphic ? 1 : 0);
+    auto* method = DexMethod::make_method(
+                       "LFoo;.call" + std::to_string(op) + ":(" +
+                       (polymorphic ? "Ljava/lang/invoke/MethodHandle;" : "") +
+                       args + ")V")
+                       ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+    std::string proto = "(" + args + ")V";
+    DexInstruction* invoke;
+    if (polymorphic) {
+      invoke = new DexOpcodeSignaturePolymorphic(op, invoke_exact,
+                                                 DexProto::make_proto(proto));
+    } else {
+      invoke = new DexOpcodeCallSite(op, redex::make_callsite("run", proto));
+    }
+    if (range) {
+      invoke->set_range_base(0);
+      invoke->set_range_size(words);
+    } else {
+      invoke->set_arg_word_count(words);
+      for (uint16_t i = 0; i < words; ++i) {
+        invoke->set_src(i, i);
+      }
+    }
+    auto code = std::make_unique<DexCode>();
+    code->set_registers_size(words);
+    code->set_ins_size(words);
+    code->set_outs_size(words);
+    code->get_instructions().push_back(invoke);
+    code->get_instructions().push_back(new DexInstruction(DOPCODE_RETURN_VOID));
+    method->set_dex_code(std::move(code));
+    method->balloon();
+    instruction_lowering::lower(method);
+    method->sync();
+    EXPECT_EQ(method->get_dex_code()->get_outs_size(), words) << show(op);
+  }
+}
+
 // for nicer gtest error messages
 std::ostream& operator<<(std::ostream& os, const DexInstruction& to_show) {
   return os << show(&to_show);

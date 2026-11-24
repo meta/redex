@@ -428,6 +428,23 @@ optimize_enums::EnumAttributes analyze_clinit(const DexClass* cls,
                                              &reads);
 }
 
+// Run the usage analysis on `scope` and return every reason it records for
+// rejecting `type`. The analysis reports reasons from several threads.
+std::set<optimize_enums::UnsafeType> rejection_reasons(
+    const Scope& scope, optimize_enums::Config* config, const DexType* type) {
+  std::mutex reasons_mutex;
+  std::set<optimize_enums::UnsafeType> reasons;
+  optimize_enums::reject_unsafe_enums(
+      scope, config,
+      [&](const DexType* rejected, optimize_enums::UnsafeType reason) {
+        if (rejected == type) {
+          std::lock_guard<std::mutex> lock(reasons_mutex);
+          reasons.insert(reason);
+        }
+      });
+  return reasons;
+}
+
 TEST_F(OptimizeEnumsTest, analyzeRConstMembers) {
   DexStoresVector stores({create_enum_store()});
   auto scope = build_class_scope(stores);
@@ -735,17 +752,7 @@ TEST_F(OptimizeEnumsTest, rejectionReasonsAreComplete) {
     optimize_enums::Config config(100);
     config.candidate_enums.insert(bar_type);
 
-    std::mutex reasons_mutex;
-    std::set<optimize_enums::UnsafeType> bar_reasons;
-    auto reject_fn = [&](const DexType* type, optimize_enums::UnsafeType u) {
-      if (type != bar_type) {
-        return;
-      }
-      std::lock_guard<std::mutex> lock(reasons_mutex);
-      bar_reasons.insert(u);
-    };
-
-    optimize_enums::reject_unsafe_enums(scope, &config, reject_fn);
+    auto bar_reasons = rejection_reasons(scope, &config, bar_type);
 
     EXPECT_EQ(bar_reasons, kExpectedReasons) << "iteration " << iteration;
     // The enum is rejected -- outcome is unchanged by the determinism fix.

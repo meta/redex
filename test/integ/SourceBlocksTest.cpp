@@ -24,6 +24,7 @@
 #include "InlinerConfig.h"
 #include "RedexContext.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "ScopedCFG.h"
 #include "Show.h"
 #include "SourceBlocks.h"
@@ -886,10 +887,14 @@ TEST_F(SourceBlocksTest,
 
 namespace {
 
-uint64_t stable_hash_of(const char* ir) {
-  auto code = assembler::ircode_from_string(ir);
+uint64_t stable_hash_of(IRCode* code) {
   code->build_cfg();
   return insert_source_blocks::testing::stable_hash(code->cfg());
+}
+
+uint64_t stable_hash_of(const std::string& ir) {
+  auto code = assembler::ircode_from_string(ir);
+  return stable_hash_of(code.get());
 }
 
 // Reaches a switch, a loop back-edge and a typed catch only after the entry
@@ -940,7 +945,7 @@ TEST_F(SourceBlocksTest, stable_hash_covers_edges_past_the_entry_block) {
     always_assert_log(pos != std::string::npos, "%s not in IR",
                       std::string(from).c_str());
     ir.replace(pos, from.size(), to);
-    return stable_hash_of(ir.c_str());
+    return stable_hash_of(ir);
   };
 
   EXPECT_NE(base, variant("(:b 2)", "(:b 3)")) << "switch case key";
@@ -951,6 +956,69 @@ TEST_F(SourceBlocksTest, stable_hash_covers_edges_past_the_entry_block) {
   EXPECT_NE(base, variant("(goto :loop)", "(return v0)")) << "loop back-edge";
   EXPECT_NE(base, variant("(const v0 7)", "(const v0 8)"))
       << "instruction in a block behind the switch";
+}
+
+TEST_F(SourceBlocksTest, stable_hash_covers_method_constants) {
+  auto handle = [](const std::string& method) {
+    return stable_hash_of(
+        R"(((const-method-handle invoke-static ")" + method +
+        R"(") (move-result-pseudo-object v0) (return-object v0)))");
+  };
+  EXPECT_NE(handle("LFoo;.a:()V"), handle("LFoo;.b:()V"));
+
+  auto type = [](const std::string& proto) {
+    return stable_hash_of(
+        R"(((const-method-type ")" + proto +
+        R"(") (move-result-pseudo-object v0) (return-object v0)))");
+  };
+  EXPECT_NE(type("(I)V"), type("(J)V"));
+}
+
+TEST_F(SourceBlocksTest, stable_hash_covers_call_site_prototype) {
+  auto call = [](const std::string& proto) {
+    return stable_hash_of(
+        R"(((load-param-object v0) (load-param v1) (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" ")" +
+        proto + R"(") (return-void)))");
+  };
+  EXPECT_NE(call("(I)V"), call("(F)V"));
+}
+
+TEST_F(SourceBlocksTest, stable_hash_covers_call_sites) {
+  auto call = [](std::string_view method_name) {
+    auto code = assembler::ircode_from_string(
+        R"(((invoke-static () "LFoo;.placeholder:()V") (return-void)))");
+    // The `invoke-static` becomes an `invoke-custom`.
+    redex::make_invoke_custom(code.get(), method_name, "()V");
+    return stable_hash_of(code.get());
+  };
+  EXPECT_NE(call("a"), call("b"));
+}
+
+// Method handles and call sites with the same content hash alike, even when
+// they are separate objects, as in two builds.
+TEST_F(SourceBlocksTest, stable_hash_of_equal_method_constants_is_equal) {
+  auto handle = [] {
+    auto code = assembler::ircode_from_string(
+        R"(((const-method-handle invoke-static "LFoo;.placeholder:()V") (move-result-pseudo-object v0) (return-object v0)))");
+    for (auto& mie : InstructionIterable(*code)) {
+      if (mie.insn->has_methodhandle()) {
+        // A separate object with the same content.
+        mie.insn->set_methodhandle(redex::make_method_handle(
+            METHOD_HANDLE_TYPE_INVOKE_STATIC, "LFoo;.placeholder:()V"));
+      }
+    }
+    return stable_hash_of(code.get());
+  };
+  EXPECT_EQ(handle(), handle());
+
+  auto call = [] {
+    auto code = assembler::ircode_from_string(
+        R"(((invoke-static () "LFoo;.placeholder:()V") (return-void)))");
+    // Each call makes a new call site.
+    redex::make_invoke_custom(code.get(), "a", "()V");
+    return stable_hash_of(code.get());
+  };
+  EXPECT_EQ(call(), call());
 }
 
 TEST_F(SourceBlocksTest, stable_hash_does_not_depend_on_block_layout) {

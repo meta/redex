@@ -88,6 +88,8 @@ uint64_t stable_hash_value(const IRInstruction* insn) {
     stable_hash =
         stable_hash * 41 +
         stable_hash_value(show(insn->get_signature_polymorphic()->method()));
+    stable_hash =
+        stable_hash * 79 + stable_hash_value(show(insn->get_callsite_proto()));
     break;
   case opcode::Ref::Field:
     stable_hash = stable_hash * 43 + stable_hash_value(show(insn->get_field()));
@@ -105,11 +107,17 @@ uint64_t stable_hash_value(const IRInstruction* insn) {
   case opcode::Ref::Literal:
     stable_hash = stable_hash * 61 + insn->get_literal();
     break;
-  case opcode::Ref::MethodHandle:
-  case opcode::Ref::CallSite:
   case opcode::Ref::Proto:
-    always_assert_log(false, "Unsupported Ref");
-    __builtin_unreachable();
+    stable_hash = stable_hash * 67 + stable_hash_value(show(insn->get_proto()));
+    break;
+  case opcode::Ref::MethodHandle:
+    stable_hash =
+        stable_hash * 71 + stable_hash_value(show(insn->get_methodhandle()));
+    break;
+  case opcode::Ref::CallSite:
+    stable_hash =
+        stable_hash * 73 + stable_hash_value(show(insn->get_callsite()));
+    break;
   case opcode::Ref::None:
     break;
   }

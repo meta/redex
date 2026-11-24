@@ -29,6 +29,10 @@
  *
  * These are the structural properties of the class hierarchy; ART checks more
  * when it links a class (access to the supertypes, for example).
+ *
+ * redex-all rejects an input for which this reports anything, so that
+ * analyses can rely on these properties instead of each tolerating their
+ * violation.
  */
 std::optional<std::string> check_class_hierarchy(const Scope& scope);
 
@@ -58,6 +62,7 @@ class ClassChecker {
 
  private:
   bool m_good;
+  std::optional<std::string> m_class_hierarchy_errors;
   bool m_external_check{false};
   bool m_definition_check{false};
   UnorderedSet<const DexType*> m_external_check_allowlist;

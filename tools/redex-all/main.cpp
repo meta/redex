@@ -41,6 +41,7 @@
 
 #include "AggregateException.h"
 #include "ChromeTraceWriter.h"
+#include "ClassChecker.h"
 #include "ClassOrderSample.h"
 #include "CommandProfiling.h"
 #include "ConfigFiles.h"
@@ -1578,6 +1579,12 @@ void redex_frontend(ConfigFiles& conf, /* input */
   });
   DexStoreClassesIterator it(stores);
   Scope scope = build_class_scope(it);
+  // From here on, Redex relies on the class hierarchy properties that the JVM
+  // specification and ART guarantee.
+  auto class_hierarchy_errors = check_class_hierarchy(scope);
+  // The message argument is evaluated only when the assertion fails.
+  always_assert_type_log(!class_hierarchy_errors, RedexError::INVALID_DEX, "%s",
+                         class_hierarchy_errors->c_str());
   Timer::scope("No Optimizations Rules", [&] {
     // this will change rstate of methods
     keep_rules::process_no_optimizations_rules(

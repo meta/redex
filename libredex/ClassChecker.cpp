@@ -328,6 +328,14 @@ void ClassChecker::init_setting(
 }
 
 void ClassChecker::run(const Scope& scope) {
+  // Checked again here so that a pass that breaks these properties is caught.
+  m_class_hierarchy_errors = check_class_hierarchy(scope);
+  if (m_class_hierarchy_errors) {
+    // Some of the checks below walk the class hierarchy and rely on these
+    // properties; a cycle would make them loop.
+    m_good = false;
+    return;
+  }
   std::mutex finals_mutex;
   std::unordered_map<const DexClass*, NamedMethodMap> class_to_final_methods;
   auto hierarchy = build_type_hierarchy(scope);
@@ -428,6 +436,9 @@ void ClassChecker::run(const Scope& scope) {
 
 std::ostringstream ClassChecker::print_failed_classes() {
   std::ostringstream oss;
+  if (m_class_hierarchy_errors) {
+    oss << *m_class_hierarchy_errors << '\n';
+  }
   if (!m_failed_classes_external_check.empty()) {
     oss << "External classes with internal class hierarchy (likely dependency "
            "setting issue if fail at input):"

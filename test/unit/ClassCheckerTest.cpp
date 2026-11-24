@@ -464,3 +464,70 @@ TEST_F(ClassVCheckerTest, testMissingSupertypesPass) {
 
   EXPECT_EQ(hierarchy_errors(scope), "");
 }
+
+// ClassChecker::run reports a hierarchy the runtime cannot link:
+// interface I {}  // external
+// class C extends I {}
+TEST_F(ClassVCheckerTest, testClassCheckerRunFailsOnUnlinkableHierarchy) {
+  Scope scope = create_empty_scope();
+  make_class("LI;", nullptr, {}, kInterface, /* external */ true);
+  scope.push_back(make_class("LC;", "LI;"));
+
+  ClassChecker checker;
+  checker.run(scope);
+  EXPECT_TRUE(checker.fail());
+  EXPECT_NE(checker.print_failed_classes().str().find(
+                "Superclass LI; of LC; is an interface"),
+            std::string::npos);
+}
+
+// The other checks walk the hierarchy, so they do not run on one the runtime
+// cannot link, and only the hierarchy error is reported:
+// class A { final void foo(int) }  class B extends A { void foo(int) }
+// abstract class S {}  // external
+// class Lite implements S {}
+TEST_F(ClassVCheckerTest,
+       testClassCheckerRunSkipsOtherChecksOnUnlinkableHierarchy) {
+  auto* int_return_void = DexProto::make_proto(
+      type::_void(), DexTypeList::make_type_list({type::_int()}));
+  auto scope = make_scope_with_a_foo_b_foo(
+      int_return_void, ACC_PUBLIC | ACC_FINAL, int_return_void, ACC_PUBLIC);
+  make_class("LS;", nullptr, {}, ACC_PUBLIC | ACC_ABSTRACT,
+             /* external */ true);
+  scope.push_back(make_class("LLite;", nullptr, {"LS;"}));
+
+  ClassChecker checker;
+  checker.run(scope);
+  EXPECT_TRUE(checker.fail());
+  auto report = checker.print_failed_classes().str();
+  EXPECT_NE(report.find("Class LLite; implements non-interface class LS;"),
+            std::string::npos);
+  EXPECT_EQ(report.find("Methods incorrectly overriding"), std::string::npos);
+}
+
+// A type missing from the input stays a legitimate supertype for
+// ClassChecker::run, as it is for check_class_hierarchy:
+// class C extends MissingClass implements MissingInterface {}
+TEST_F(ClassVCheckerTest, testClassCheckerRunAcceptsMissingSupertypes) {
+  Scope scope = create_empty_scope();
+  scope.push_back(make_class("LC;", "LMissingClass;", {"LMissingInterface;"}));
+
+  ClassChecker checker;
+  checker.run(scope);
+  EXPECT_FALSE(checker.fail());
+}
+
+// ClassChecker::run stops at a cycle instead of walking it:
+// class A extends B {}  class B extends A {}
+TEST_F(ClassVCheckerTest, testClassCheckerRunFailsOnCycle) {
+  Scope scope = create_empty_scope();
+  scope.push_back(make_class("LA;", "LB;"));
+  scope.push_back(make_class("LB;", "LA;"));
+
+  ClassChecker checker;
+  checker.run(scope);
+  EXPECT_TRUE(checker.fail());
+  EXPECT_NE(checker.print_failed_classes().str().find(
+                "Class LA; is its own supertype: LA; -> LB; -> LA;"),
+            std::string::npos);
+}

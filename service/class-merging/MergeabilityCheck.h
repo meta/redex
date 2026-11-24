@@ -9,6 +9,7 @@
 
 #include "DexClass.h"
 
+class DexMethodHandle;
 class RefChecker;
 
 namespace class_merging {
@@ -45,6 +46,7 @@ class MergeabilityChecker {
   void exclude_unsupported_cls_property(TypeSet& non_mergeables);
   void exclude_unsupported_bytecode(TypeSet& non_mergeables);
   void exclude_method_handle_refs(TypeSet& non_mergeables);
+  void exclude_unsupported_static_value_method_handles(TypeSet& non_mergeables);
   void exclude_static_fields(TypeSet& non_mergeables);
   void exclude_unsafe_sdk_and_store_refs(TypeSet& non_mergeables);
   void exclude_unhandled_anno_refs(TypeSet& non_mergeables);
@@ -54,6 +56,12 @@ class MergeabilityChecker {
                                           const char* context);
 
   TypeSet exclude_unsupported_bytecode_refs_for(DexMethod* method);
+  // `holder` is the method whose code holds `method_handle`, or nullptr when
+  // a static field value holds it.
+  void exclude_unsupported_method_handle_refs(
+      const DexMethodHandle* method_handle,
+      const DexMethod* holder,
+      TypeSet& non_mergeables);
 };
 
 } // namespace class_merging

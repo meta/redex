@@ -356,3 +356,106 @@ TEST_F(ClassMergingMethodHandleTest,
   EXPECT_EQ(class_argument().rfind("Lcom/redextest/HandlesBaseShape", 0), 0)
       << class_argument();
 }
+
+namespace {
+
+// Gives `A` and `B` the instance field `f` of type `type`.
+void add_instance_fields(const std::vector<DexClass*>& classes,
+                         const std::string& type) {
+  for (auto* cls : classes) {
+    cls->add_field(
+        DexField::make_field(cls->get_type()->str_copy() + ".f:" + type)
+            ->make_concrete(ACC_PUBLIC));
+  }
+}
+
+// Gives `cls` a static field whose value is a method handle of kind `type` for
+// `ref`, and returns the field.
+DexField* add_method_handle_value(DexClass* cls,
+                                  MethodHandleType type,
+                                  const std::string& ref) {
+  auto* field =
+      DexField::make_field(cls->get_type()->str_copy() + ".HANDLE" +
+                           std::to_string(cls->get_sfields().size()) +
+                           ":Ljava/lang/invoke/MethodHandle;")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+                          std::make_unique<DexEncodedValueMethodHandle>(
+                              redex::make_method_handle(type, ref)));
+  cls->add_field(field);
+  return field;
+}
+
+DexMethodHandle* method_handle_value(const DexField* field) {
+  return redex::encoded_value_as<DexEncodedValueMethodHandle>(
+             field->get_static_value())
+      ->methodhandle();
+}
+
+// Gives `cls` an annotation whose only element is `value`.
+void annotate(DexClass* cls, std::unique_ptr<DexEncodedValue> value) {
+  auto annotation = std::make_unique<DexAnnotation>(
+      DexType::make_type("Lcom/redextest/Anno;"), DAV_RUNTIME);
+  annotation->add_element("value", std::move(value));
+  auto annotation_set = std::make_unique<DexAnnotationSet>();
+  annotation_set->add_annotation(std::move(annotation));
+  ASSERT_TRUE(cls->attach_annotation_set(std::move(annotation_set)));
+}
+
+} // namespace
+
+// A method handle that a static field value holds keeps a class from being
+// merged as one that code holds does.
+TEST_F(ClassMergingMethodHandleTest, staticFieldValueFieldHandleKeepsItsClass) {
+  add_instance_fields({m_a, m_b}, "B");
+  auto* user = make_class("Lcom/redextest/User;", type::java_lang_Object());
+  auto* getter = add_method_handle_value(user, METHOD_HANDLE_TYPE_INSTANCE_GET,
+                                         "Lcom/redextest/A;.f:B");
+
+  EXPECT_FALSE(run_merging());
+  EXPECT_EQ(show(method_handle_value(getter)->fieldref()),
+            "Lcom/redextest/A;.f:B");
+}
+
+TEST_F(ClassMergingMethodHandleTest,
+       staticFieldValueConstructorHandleKeepsItsClass) {
+  auto* user = make_class("Lcom/redextest/User;", type::java_lang_Object());
+  auto* constructor =
+      add_method_handle_value(user, METHOD_HANDLE_TYPE_INVOKE_CONSTRUCTOR,
+                              "Lcom/redextest/A;.<init>:()V");
+
+  EXPECT_FALSE(run_merging());
+  EXPECT_EQ(show(method_handle_value(constructor)->methodref()),
+            "Lcom/redextest/A;.<init>:()V");
+}
+
+// An annotation keeps the classes that its method handles and method types
+// name from being merged, like those that its method and field values name.
+TEST_F(ClassMergingMethodHandleTest, annotationConstructorHandleKeepsItsClass) {
+  auto* user = make_class("Lcom/redextest/User;", type::java_lang_Object());
+  annotate(user,
+           std::make_unique<DexEncodedValueMethodHandle>(
+               redex::make_method_handle(METHOD_HANDLE_TYPE_INVOKE_CONSTRUCTOR,
+                                         "Lcom/redextest/A;.<init>:()V")));
+
+  EXPECT_FALSE(run_merging());
+}
+
+TEST_F(ClassMergingMethodHandleTest, annotationFieldHandleKeepsItsClass) {
+  add_instance_fields({m_a, m_b}, "I");
+  auto* user = make_class("Lcom/redextest/User;", type::java_lang_Object());
+  annotate(
+      user,
+      std::make_unique<DexEncodedValueMethodHandle>(redex::make_method_handle(
+          METHOD_HANDLE_TYPE_INSTANCE_GET, "Lcom/redextest/A;.f:I")));
+
+  EXPECT_FALSE(run_merging());
+}
+
+TEST_F(ClassMergingMethodHandleTest, annotationMethodTypeKeepsItsClasses) {
+  auto* user = make_class("Lcom/redextest/User;", type::java_lang_Object());
+  annotate(user,
+           std::make_unique<DexEncodedValueMethodType>(
+               DexProto::make_proto("([Lcom/redextest/A;)V")));
+
+  EXPECT_FALSE(run_merging());
+}

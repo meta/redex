@@ -5317,7 +5317,7 @@ TEST_F(MethodInlineTest, delete_methods_keeps_method_handle_target) {
 // inlined into their callers. Runs the inliner over callee and wrappers and
 // returns the wrappers, or nothing when the callee was not inlined everywhere.
 static std::optional<std::vector<DexMethod*>> inline_switch_through_wrappers(
-    ConfigFiles& conf) {
+    ConfigFiles& conf, size_t max_reduced_size = MAX_REDUCED_SIZE) {
   auto effects = [](int n) {
     std::string s;
     for (int i = 0; i < n; i++) {
@@ -5378,6 +5378,7 @@ static std::optional<std::vector<DexMethod*>> inline_switch_through_wrappers(
   inliner_config.shrinker.run_local_dce = true;
   inliner_config.shrinker.run_const_prop = true;
   inliner_config.shrinker.compute_pure_methods = false;
+  inliner_config.max_reduced_size = max_reduced_size;
   init_classes::InitClassesWithSideEffects init_classes_with_side_effects(
       scope, /* create_init_class_insns */ false);
   ConcurrentMethodResolverDeprecated concurrent_method_resolver;
@@ -5397,6 +5398,21 @@ static std::optional<std::vector<DexMethod*>> inline_switch_through_wrappers(
   return wrappers;
 }
 
+// Expects each wrapper to hold only its own case of the switch, folded.
+static void expect_folded_switch(const std::vector<DexMethod*>& wrappers) {
+  std::string effects;
+  for (int j = 0; j < 16; j++) {
+    effects += R"((invoke-static () "LBar;.effect:()V"))";
+  }
+  for (size_t i = 0; i < wrappers.size(); i++) {
+    auto expected = assembler::ircode_from_string(
+        "((load-param v0) " + effects + " (const v0 " + std::to_string(10 + i) +
+        ") (return v0))");
+    SCOPED_TRACE(i);
+    EXPECT_CODE_EQ(expected.get(), wrappers[i]->get_code());
+  }
+}
+
 // Inlining a method everywhere is decided by estimating each call site's cost
 // from the callee as reduced by the site's constant arguments. Each call site
 // here only pays off through deleting the callee, so the per-site check rejects
@@ -5405,15 +5421,14 @@ static std::optional<std::vector<DexMethod*>> inline_switch_through_wrappers(
 TEST_F(MethodInlineTest, inline_everywhere_inlines_reduced_callee) {
   auto wrappers = inline_switch_through_wrappers(conf);
   ASSERT_TRUE(wrappers);
-  std::string effects;
-  for (int j = 0; j < 16; j++) {
-    effects += R"((invoke-static () "LBar;.effect:()V"))";
-  }
-  for (int i = 0; i < 3; i++) {
-    auto expected = assembler::ircode_from_string(
-        "((load-param v0) " + effects + " (const v0 " + std::to_string(10 + i) +
-        ") (return v0))");
-    SCOPED_TRACE(i);
-    EXPECT_CODE_EQ(expected.get(), wrappers->at(i)->get_code());
-  }
+  expect_folded_switch(*wrappers);
+}
+
+// The same, with each call site's reduced callee released as soon as its cost
+// is measured: it is rebuilt for inlining, so inlining still matches the cost.
+TEST_F(MethodInlineTest, inline_everywhere_rebuilds_released_reduced_callee) {
+  auto wrappers =
+      inline_switch_through_wrappers(conf, /* max_reduced_size */ 1);
+  ASSERT_TRUE(wrappers);
+  expect_folded_switch(*wrappers);
 }

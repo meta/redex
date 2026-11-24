@@ -482,6 +482,7 @@ void MultiMethodInliner::inline_callees(DexMethod* caller,
           continue;
         }
         std::shared_ptr<ReducedCode> reduced_code;
+        bool rebuild_reduced_code{false};
         bool no_return{false};
         bool partial{false};
         bool for_speed{false};
@@ -520,6 +521,7 @@ void MultiMethodInliner::inline_callees(DexMethod* caller,
             const auto* inlined_cost = get_call_site_inlined_cost(insn, callee);
             if (inlined_cost != nullptr) {
               reduced_code = inlined_cost->reduced_code;
+              rebuild_reduced_code = inlined_cost->reduced_code_released;
               insn_size = inlined_cost->insn_size;
             } else {
               insn_size = get_callee_insn_size(callee);
@@ -549,7 +551,8 @@ void MultiMethodInliner::inline_callees(DexMethod* caller,
         const auto* needs_receiver_cast = get_recorded_receiver_cast(insn);
         inlinables.push_back((Inlinable){callee, insn, no_return, partial,
                                          for_speed, std::move(reduced_code),
-                                         insn_size, needs_receiver_cast});
+                                         insn_size, needs_receiver_cast,
+                                         rebuild_reduced_code});
       }
     }
   }
@@ -667,12 +670,25 @@ void MultiMethodInliner::make_partial(const DexMethod* method,
         method, inlined_cost->reduced_code->cfg(),
         m_config.max_partially_inlined_code_units);
   }
-  inlined_cost->reduced_code.reset();
-  // `insn_size` was measured on the reduced cfg. Without that cfg the *full*
-  // callee body is what gets copied into the caller, so keeping the reduced
-  // number would make `inline_inlinables` under-charge `estimated_caller_size`
-  // and under-state the size passed to `is_inlinable`.
-  inlined_cost->insn_size = get_callee_insn_size(method);
+  // Release the reduced code to save memory. A call site that inlines the
+  // callee rebuilds it (`rebuild_call_site_reduced_code`), so the costs, which
+  // were measured on it, still describe the code that gets inlined.
+  if (inlined_cost->reduced_code) {
+    inlined_cost->reduced_code.reset();
+    inlined_cost->reduced_code_released = true;
+  }
+}
+
+std::shared_ptr<ReducedCode> MultiMethodInliner::rebuild_call_site_reduced_code(
+    const IRInstruction* invoke_insn, const DexMethod* callee) {
+  const auto* call_site_summary =
+      m_call_site_summarizer->get_instruction_call_site_summary(invoke_insn);
+  auto reduced_code = apply_call_site_summary(
+      is_static(callee), callee->get_class(), callee->get_proto(),
+      callee->get_code()->cfg(), call_site_summary);
+  // The released copy was built from the same summary, so this one exists too.
+  always_assert(reduced_code);
+  return reduced_code;
 }
 
 const DexType* MultiMethodInliner::get_needs_init_class(
@@ -805,8 +821,6 @@ size_t MultiMethodInliner::inline_inlinables(
   size_t constructor_fences = 0;
   for (const auto& inlinable : ordered_inlinables) {
     auto* callee_method = inlinable.callee;
-    const auto& reduced_code = inlinable.reduced_code;
-    const auto* reduced_cfg = reduced_code ? &reduced_code->cfg() : nullptr;
     auto* callsite_insn = inlinable.insn;
 
     if (remaining_callsites &&
@@ -875,6 +889,14 @@ size_t MultiMethodInliner::inline_inlinables(
         }
       }
     }
+
+    // A reduced callee that was released to save memory is rebuilt only for the
+    // call sites that get this far, and only for this iteration.
+    auto reduced_code =
+        inlinable.rebuild_reduced_code
+            ? rebuild_call_site_reduced_code(callsite_insn, callee_method)
+            : inlinable.reduced_code;
+    const auto* reduced_cfg = reduced_code ? &reduced_code->cfg() : nullptr;
 
     bool caller_too_large_;
     auto not_inlinable = !is_inlinable(

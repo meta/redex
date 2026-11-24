@@ -905,6 +905,7 @@ bool PrimitiveAnalyzer::analyze_binop(const IRInstruction* insn,
   if (cst_left && cst_right) {
     TRACE(CONSTP, 5, "Attempting to fold %s", SHOW(insn));
     bool use_result_reg = false;
+    bool folded = true;
     switch (op) {
     case OPCODE_ADD_INT:
     case OPCODE_ADD_LONG: {
@@ -953,19 +954,24 @@ bool PrimitiveAnalyzer::analyze_binop(const IRInstruction* insn,
       break;
     }
     default:
-      return analyze_default(insn, env);
+      // Fall through to the transfer functions below; shifts get exact
+      // results there, masking the distance as Dalvik does.
+      folded = false;
+      break;
     }
-    auto res_const_dom = SignedConstantDomain::top();
-    if (result != std::nullopt) {
-      if (opcode::is_binop64(op)) {
-        res_const_dom = SignedConstantDomain(*result);
-      } else {
-        int32_t result32 = (int32_t)(*result & 0xFFFFFFFF);
-        res_const_dom = SignedConstantDomain(result32);
+    if (folded) {
+      auto res_const_dom = SignedConstantDomain::top();
+      if (result != std::nullopt) {
+        if (opcode::is_binop64(op)) {
+          res_const_dom = SignedConstantDomain(*result);
+        } else {
+          int32_t result32 = (int32_t)(*result & 0xFFFFFFFF);
+          res_const_dom = SignedConstantDomain(result32);
+        }
       }
+      env->set(use_result_reg ? RESULT_REGISTER : insn->dest(), res_const_dom);
+      return true;
     }
-    env->set(use_result_reg ? RESULT_REGISTER : insn->dest(), res_const_dom);
-    return true;
   }
 
   switch (op) {

@@ -999,12 +999,18 @@ void Transform::simplify_instruction(const ConstantEnvironment& env,
   case OPCODE_AND_INT:
   case OPCODE_OR_INT:
   case OPCODE_XOR_INT:
+  case OPCODE_SHL_INT:
+  case OPCODE_SHR_INT:
+  case OPCODE_USHR_INT:
   case OPCODE_ADD_LONG:
   case OPCODE_SUB_LONG:
   case OPCODE_MUL_LONG:
   case OPCODE_AND_LONG:
   case OPCODE_OR_LONG:
   case OPCODE_XOR_LONG:
+  case OPCODE_SHL_LONG:
+  case OPCODE_SHR_LONG:
+  case OPCODE_USHR_LONG:
   case OPCODE_NOT_INT:
   case OPCODE_NEG_INT:
   case OPCODE_NEG_LONG:

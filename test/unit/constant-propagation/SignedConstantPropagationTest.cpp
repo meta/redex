@@ -2546,6 +2546,260 @@ TEST_F(ConstantPropagationTest, FoldBitwiseArithAndLogicalRightShiftLit) {
   EXPECT_CODE_EQ(code.get(), expected_code.get());
 }
 
+struct ConstantShiftFoldCase {
+  std::string name;
+  std::string opcode;
+  bool wide;
+  int64_t value;
+  int32_t shift;
+  int64_t expected;
+};
+
+class FoldConstantShiftTest
+    : public ConstantPropagationTest,
+      public ::testing::WithParamInterface<ConstantShiftFoldCase> {};
+
+TEST_P(FoldConstantShiftTest, FoldsConstantOperands) {
+  const auto& param = GetParam();
+  const std::string load = param.wide ? "const-wide" : "const";
+  const std::string operands = "(" + load + " v0 " +
+                               std::to_string(param.value) + ") (const v2 " +
+                               std::to_string(param.shift) + ")";
+  auto code = assembler::ircode_from_string(
+      "(" + operands + " (" + param.opcode + " v0 v0 v2) (return-void))");
+  do_const_prop(code.get());
+  auto expected_code = assembler::ircode_from_string(
+      "(" + operands + " (" + load + " v0 " + std::to_string(param.expected) +
+      ") (return-void))");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+// Dalvik uses only the low 5 (int) or 6 (long) bits of the distance.
+INSTANTIATE_TEST_SUITE_P(
+    FoldConstantShiftTests,
+    FoldConstantShiftTest,
+    ::testing::ValuesIn(std::initializer_list<FoldConstantShiftTest::ParamType>{
+        {.name = "shl_int_by_8",
+         .opcode = "shl-int",
+         .wide = false,
+         .value = -1,
+         .shift = 8,
+         .expected = -256},
+        {.name = "shl_int_by_31_reaches_sign_bit",
+         .opcode = "shl-int",
+         .wide = false,
+         .value = 1,
+         .shift = 31,
+         .expected = std::numeric_limits<int32_t>::min()},
+        {.name = "shl_int_distance_32_masks_to_0",
+         .opcode = "shl-int",
+         .wide = false,
+         .value = 3,
+         .shift = 32,
+         .expected = 3},
+        {.name = "shl_int_distance_minus1_masks_to_31",
+         .opcode = "shl-int",
+         .wide = false,
+         .value = 1,
+         .shift = -1,
+         .expected = std::numeric_limits<int32_t>::min()},
+        {.name = "shl_int_distance_minus32_masks_to_0",
+         .opcode = "shl-int",
+         .wide = false,
+         .value = 1,
+         .shift = -32,
+         .expected = 1},
+        {.name = "shl_int_distance_int_min_masks_to_0",
+         .opcode = "shl-int",
+         .wide = false,
+         .value = 1,
+         .shift = std::numeric_limits<int32_t>::min(),
+         .expected = 1},
+        {.name = "shl_int_distance_int_max_masks_to_31",
+         .opcode = "shl-int",
+         .wide = false,
+         .value = 1,
+         .shift = std::numeric_limits<int32_t>::max(),
+         .expected = std::numeric_limits<int32_t>::min()},
+        {.name = "shr_int_distance_33_masks_to_1_and_sign_fills",
+         .opcode = "shr-int",
+         .wide = false,
+         .value = -2,
+         .shift = 33,
+         .expected = -1},
+        {.name = "shr_int_min_distance_minus1_masks_to_31_and_sign_fills",
+         .opcode = "shr-int",
+         .wide = false,
+         .value = std::numeric_limits<int32_t>::min(),
+         .shift = -1,
+         .expected = -1},
+        {.name = "ushr_int_distance_33_masks_to_1_and_zero_fills",
+         .opcode = "ushr-int",
+         .wide = false,
+         .value = -1,
+         .shift = 33,
+         .expected = std::numeric_limits<int32_t>::max()},
+        {.name = "ushr_int_distance_32_masks_to_0",
+         .opcode = "ushr-int",
+         .wide = false,
+         .value = -1,
+         .shift = 32,
+         .expected = -1},
+        {.name = "ushr_int_distance_minus1_masks_to_31",
+         .opcode = "ushr-int",
+         .wide = false,
+         .value = -1,
+         .shift = -1,
+         .expected = 1},
+        {.name = "shl_long_by_32",
+         .opcode = "shl-long",
+         .wide = true,
+         .value = 3,
+         .shift = 32,
+         .expected = 12884901888LL /* 3L << 32 */},
+        {.name = "shl_long_distance_minus1_masks_to_63",
+         .opcode = "shl-long",
+         .wide = true,
+         .value = 1,
+         .shift = -1,
+         .expected = std::numeric_limits<int64_t>::min()},
+        {.name = "shl_long_distance_64_masks_to_0",
+         .opcode = "shl-long",
+         .wide = true,
+         .value = -1,
+         .shift = 64,
+         .expected = -1},
+        {.name = "shl_long_distance_minus64_masks_to_0",
+         .opcode = "shl-long",
+         .wide = true,
+         .value = 1,
+         .shift = -64,
+         .expected = 1},
+        {.name = "shl_long_distance_int_min_masks_to_0",
+         .opcode = "shl-long",
+         .wide = true,
+         .value = 1,
+         .shift = std::numeric_limits<int32_t>::min(),
+         .expected = 1},
+        {.name = "shl_long_distance_int_max_masks_to_63",
+         .opcode = "shl-long",
+         .wide = true,
+         .value = 1,
+         .shift = std::numeric_limits<int32_t>::max(),
+         .expected = std::numeric_limits<int64_t>::min()},
+        {.name = "shr_long_min_by_63_sign_fills",
+         .opcode = "shr-long",
+         .wide = true,
+         .value = std::numeric_limits<int64_t>::min(),
+         .shift = 63,
+         .expected = -1},
+        {.name = "shr_long_distance_65_masks_to_1_and_sign_fills",
+         .opcode = "shr-long",
+         .wide = true,
+         .value = -2,
+         .shift = 65,
+         .expected = -1},
+        {.name = "ushr_long_distance_65_masks_to_1_and_zero_fills",
+         .opcode = "ushr-long",
+         .wide = true,
+         .value = -1,
+         .shift = 65,
+         .expected = std::numeric_limits<int64_t>::max()},
+        {.name = "ushr_long_distance_minus1_masks_to_63",
+         .opcode = "ushr-long",
+         .wide = true,
+         .value = -1,
+         .shift = -1,
+         .expected = 1},
+        {.name = "ushr_long_distance_64_masks_to_0",
+         .opcode = "ushr-long",
+         .wide = true,
+         .value = -1,
+         .shift = 64,
+         .expected = -1},
+    }),
+    [](const testing::TestParamInfo<FoldConstantShiftTest::ParamType>& info) {
+      return info.param.name;
+    });
+
+// The destination is also the distance operand.
+TEST_F(ConstantPropagationTest, FoldConstantShiftIntoDistanceRegister) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const-wide v0 3)
+      (const v2 32)
+      (shl-long v2 v0 v2)
+      (return-void)
+    )
+  )");
+  do_const_prop(code.get());
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (const-wide v0 3)
+      (const v2 32)
+      (const-wide v2 12884901888) ; 3L << 32
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantPropagationTest, KeepShiftByUnknownDistance) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param v2)
+      (const-wide v0 3)
+      (shl-long v0 v0 v2)
+      (return-void)
+    )
+  )");
+  auto expected_code =
+      assembler::ircode_from_string(assembler::to_string(code.get()));
+  do_const_prop(code.get());
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+TEST_F(ConstantPropagationTest, KeepShiftOfUnknownValueByConstantDistance) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param-wide v0)
+      (const v2 32)
+      (shl-long v0 v0 v2)
+      (return-void)
+    )
+  )");
+  auto expected_code =
+      assembler::ircode_from_string(assembler::to_string(code.get()));
+  do_const_prop(code.get());
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+// The value is only partly known, but the bits the shift keeps are all known.
+TEST_F(ConstantPropagationTest, FoldShiftWhoseResultBitsAreAllKnown) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param v0)
+      (const v3 65535)
+      (and-int v0 v0 v3)
+      (const v2 16)
+      (ushr-int v0 v0 v2)
+      (return-void)
+    )
+  )");
+  do_const_prop(code.get());
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (load-param v0)
+      (const v3 65535)
+      (and-int v0 v0 v3)
+      (const v2 16)
+      (const v0 0)
+      (return-void)
+    )
+  )");
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
 TEST_F(ConstantPropagationTest, FoldDivIntLit) {
   auto code = assembler::ircode_from_string(R"(
     (

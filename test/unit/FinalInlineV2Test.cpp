@@ -223,6 +223,24 @@ TEST_F(FinalInlineTest, encodeValues) {
   EXPECT_EQ(field->get_static_value()->value(), 1);
 }
 
+TEST_F(FinalInlineTest, encodeConstantShiftResult) {
+  auto* field = create_field_with_zero_value("LFoo;.bar:J", m_cc.get());
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public static) "LFoo;.<clinit>:()V"
+      ((const-wide v0 3)
+       (const v2 32)
+       (shl-long v0 v0 v2)
+       (sput-wide v0 "LFoo;.bar:J")
+       (return-void)))
+  )"));
+  auto* cls = m_cc->create();
+
+  run({cls}, nullptr);
+
+  EXPECT_EQ(cls->get_clinit(), nullptr);
+  EXPECT_EQ(field->get_static_value()->value(), 12884901888ULL); // 3L << 32
+}
+
 TEST_F(FinalInlineTest, constructorUpdatesStaticFieldInClinit) {
   create_field_with_zero_value("LFoo;.sNextId:I", m_cc.get(),
                                ACC_PRIVATE | ACC_STATIC);

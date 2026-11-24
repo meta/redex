@@ -183,6 +183,26 @@ void for_each_invoke(const IRInstruction* insn, Fn&& f) {
 }
 
 /**
+ * Whether what `insn` does depends on the class of the method that holds it,
+ * beyond access checks, so that moving it to a method of another class can
+ * change what it does: a call that resolves like invoke-super, by the
+ * instruction or a method handle it holds, whose target ART finds from that
+ * class, or an `invoke-custom`, whose bootstrap method receives a
+ * `MethodHandles.Lookup` in that class.
+ */
+inline bool depends_on_holder_class(const IRInstruction* insn) {
+  if (opcode::is_invoke_custom(insn->opcode())) {
+    return true;
+  }
+  bool result = false;
+  for_each_invoke(insn, [&](IROpcode opcode, DexMethodRef* /* method_ref */,
+                            const DexMethodHandle* /* method_handle */) {
+    result = result || opcode == OPCODE_INVOKE_SUPER;
+  });
+  return result;
+}
+
+/**
  * Calls `f(opcode, field_ref, method_handle)` for every field that `insn` reads
  * or writes: its own if it is a field instruction, with a null
  * `method_handle`, and the field that each method handle it holds gets or

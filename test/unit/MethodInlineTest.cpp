@@ -4986,3 +4986,186 @@ TEST_F(MethodInlineTest, cross_store_force_inline_method_type_is_not_inlined) {
   ))",
                                    .force_inline_with_min_sdk_api = true}));
 }
+
+namespace {
+
+// Returns whether the static method `LFoo;.callee:()V`, whose body is `code`,
+// is inlined into `LBar;.caller:()V`. `edit` runs on the callee before the
+// CFGs are built. `LFoo;` extends `LBase;`; `LBase;` has the public virtual
+// method `run`, and `LFoo;` has the public virtual method `own` and the private
+// instance method `helper`.
+bool inlines_into_other_class(
+    const ConfigFiles& conf,
+    const std::string& code,
+    const std::function<void(DexMethod*)>& edit = {}) {
+  auto make_method = [](const char* name, DexAccessFlags access,
+                        bool is_virtual) {
+    return DexMethod::make_method(name)->make_concrete(
+        access, assembler::ircode_from_string(R"((
+          (load-param-object v0)
+          (return-void)
+        ))"),
+        is_virtual);
+  };
+  auto* base_cls = create_a_class("LBase;");
+  base_cls->add_method(make_method("LBase;.run:()V", ACC_PUBLIC, true));
+  ClassCreator foo_creator(DexType::make_type("LFoo;"));
+  foo_creator.set_super(base_cls->get_type());
+  foo_creator.add_method(make_method("LFoo;.own:()V", ACC_PUBLIC, true));
+  foo_creator.add_method(make_method("LFoo;.helper:()V", ACC_PRIVATE, false));
+  auto* callee = DexMethod::make_method("LFoo;.callee:()V")
+                     ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                                     assembler::ircode_from_string(code),
+                                     /* is_virtual */ false);
+  foo_creator.add_method(callee);
+  auto* foo_cls = foo_creator.create();
+  auto* bar_cls = create_a_class("LBar;");
+  bar_cls->add_method(DexMethod::make_method("LBar;.caller:()V")
+                          ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                                          assembler::ircode_from_string(R"((
+                            (invoke-static () "LFoo;.callee:()V")
+                            (return-void)
+                          ))"),
+                                          /* is_virtual */ false));
+  auto* boot_cls = create_a_class("LBoot;");
+  if (edit) {
+    edit(callee);
+  }
+
+  DexStoresVector stores;
+  DexStore store("classes");
+  store.add_classes({base_cls, foo_cls, bar_cls, boot_cls});
+  stores.push_back(std::move(store));
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](auto*, IRCode& code) { code.build_cfg(); });
+  api::LevelChecker::init(0, scope);
+
+  inliner::InlinerConfig inliner_config;
+  inliner_config.populate(scope);
+  init_classes::InitClassesWithSideEffects init_classes_with_side_effects(
+      scope, /* create_init_class_insns */ false);
+  UnorderedSet<DexMethod*> candidates{callee};
+  ConcurrentMethodResolverDeprecated concurrent_method_resolver;
+  MultiMethodInliner inliner(
+      scope, init_classes_with_side_effects, stores, conf, candidates,
+      std::ref(concurrent_method_resolver), inliner_config, /* min_sdk */ 0,
+      InterDex, /* true_virtual_callers */ {}, /* inline_for_speed */ nullptr,
+      /* analyze_and_prune_inits */ false, /* configured_pure_methods */ {});
+  inliner.inline_methods();
+  return inliner.get_inlined().count(callee) != 0;
+}
+
+} // namespace
+
+// What an invoke-direct handle of a method that is not private runs depends on
+// the class that holds it (see `resolve_method_handle`).
+TEST_F(MethodInlineTest, nonvirtual_method_handle_is_not_inlined) {
+  EXPECT_FALSE(inlines_into_other_class(conf, R"((
+    (const-method-handle invoke-direct "LBase;.run:()V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))"));
+}
+
+// An invoke-direct handle of a method that the holding class declares and
+// that is not private calls that method itself; held by another class it would
+// run that class's implementation.
+TEST_F(MethodInlineTest,
+       method_handle_of_own_non_private_method_is_not_inlined) {
+  EXPECT_FALSE(inlines_into_other_class(conf, R"((
+    (const-method-handle invoke-direct "LFoo;.own:()V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))"));
+}
+
+// The same holds for a handle among the bootstrap arguments of a call site.
+TEST_F(MethodInlineTest, nonvirtual_method_handle_of_call_site_is_not_inlined) {
+  EXPECT_FALSE(inlines_into_other_class(
+      conf,
+      R"((
+    (invoke-static () "LFoo;.placeholder:()V")
+    (return-void)
+  ))",
+      [](DexMethod* callee) {
+        std::vector<std::unique_ptr<DexEncodedValue>> args;
+        args.push_back(std::make_unique<DexEncodedValueMethodHandle>(
+            redex::make_method_handle(METHOD_HANDLE_TYPE_INVOKE_DIRECT,
+                                      "LBase;.run:()V")));
+        redex::make_invoke_custom(callee->get_code(), "run", "()V",
+                                  std::move(args));
+      }));
+}
+
+// As for an invoke-virtual, the access of a method that does not resolve is
+// unknown.
+TEST_F(MethodInlineTest, method_handle_of_unknown_virtual_is_not_inlined) {
+  EXPECT_FALSE(inlines_into_other_class(conf, R"((
+    (const-method-handle invoke-instance "LUnknown;.m:()V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))"));
+}
+
+// As for an sget, the access of a field that does not resolve is unknown.
+TEST_F(MethodInlineTest, method_handle_of_unknown_field_is_not_inlined) {
+  EXPECT_FALSE(inlines_into_other_class(conf, R"((
+    (const-method-handle static-get "LUnknown;.f:I")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))"));
+}
+
+// A handle that code may hold in any class does not keep its code in place.
+TEST_F(MethodInlineTest, method_handle_of_public_virtual_is_inlined) {
+  EXPECT_TRUE(inlines_into_other_class(conf, R"((
+    (const-method-handle invoke-instance "LBase;.run:()V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))"));
+}
+
+// Inlining into `LBar;` would make the private instance method `helper`
+// public and static, which an invoke-direct handle cannot call, so the callee
+// stays in its class.
+TEST_F(MethodInlineTest, method_handle_of_private_method_is_not_inlined) {
+  EXPECT_FALSE(inlines_into_other_class(conf, R"((
+    (const-method-handle invoke-direct "LFoo;.helper:()V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))"));
+  EXPECT_TRUE(is_private(DexMethod::get_method("LFoo;.helper:()V")->as_def()));
+}
+
+TEST_F(MethodInlineTest,
+       call_site_method_handle_of_private_method_is_not_inlined) {
+  EXPECT_FALSE(inlines_into_other_class(
+      conf,
+      R"((
+    (invoke-static () "LFoo;.placeholder:()V")
+    (return-void)
+  ))",
+      [](DexMethod* callee) {
+        std::vector<std::unique_ptr<DexEncodedValue>> args;
+        args.push_back(std::make_unique<DexEncodedValueMethodHandle>(
+            redex::make_method_handle(METHOD_HANDLE_TYPE_INVOKE_DIRECT,
+                                      "LFoo;.helper:()V")));
+        redex::make_invoke_custom(callee->get_code(), "run", "()V",
+                                  std::move(args));
+      }));
+  EXPECT_TRUE(is_private(DexMethod::get_method("LFoo;.helper:()V")->as_def()));
+}
+
+// The bootstrap method of an invoke-custom receives a lookup in the class of
+// the code that holds it, so the callee stays in its class.
+TEST_F(MethodInlineTest, invoke_custom_is_not_inlined) {
+  EXPECT_FALSE(inlines_into_other_class(conf,
+                                        R"((
+    (invoke-static () "LFoo;.placeholder:()V")
+    (return-void)
+  ))",
+                                        [](DexMethod* callee) {
+                                          redex::make_invoke_custom(
+                                              callee->get_code(), "run", "()V");
+                                        }));
+}

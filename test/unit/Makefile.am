@@ -406,7 +406,7 @@ dexvt_test_SOURCES = DexVtTest.cpp
 
 dex_type_environment_test_SOURCES = type-analysis/DexTypeEnvironmentTest.cpp
 
-dex_util_test_SOURCES = DexUtilTest.cpp
+dex_util_test_SOURCES = DexUtilTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 dominators_test_SOURCES = DominatorsTest.cpp
 

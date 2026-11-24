@@ -7,9 +7,11 @@
 
 #include "DexUtil.h"
 #include "Creators.h"
+#include "DexAnnotation.h"
 #include "IRAssembler.h"
 #include "IRInstruction.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "TypeUtil.h"
 
 class DexUtilTest : public RedexTest {};
@@ -217,4 +219,188 @@ TEST_F(DexUtilTest, invoke_super_prevents_relocation) {
   sub.create();
   f->get_code()->build_cfg();
   EXPECT_FALSE(gather_invoked_methods_that_prevent_relocation(f));
+}
+
+namespace {
+
+// `LChild;` with a private instance method `priv`, a private static method
+// `spriv` and a private static field `sfield`, and `LTarget;` to move code to.
+struct RelocationFixture {
+  DexMethod* priv;
+  DexMethod* spriv;
+  DexField* sfield;
+  DexType* target;
+};
+
+RelocationFixture make_relocation_fixture() {
+  ClassCreator child(DexType::make_type("LChild;"));
+  child.set_super(type::java_lang_Object());
+  auto* priv = assembler::method_from_string(R"(
+    (method (private) "LChild;.priv:()V"
+     ((load-param-object v0) (return-void)))
+  )");
+  child.add_method(priv);
+  auto* spriv = assembler::method_from_string(R"(
+    (method (private static) "LChild;.spriv:()V"
+     ((return-void)))
+  )");
+  child.add_method(spriv);
+  auto* sfield = DexField::make_field("LChild;.sfield:I")
+                     ->make_concrete(ACC_PRIVATE | ACC_STATIC);
+  child.add_field(sfield);
+  child.create();
+  ClassCreator target(DexType::make_type("LTarget;"));
+  target.set_super(type::java_lang_Object());
+  return {priv, spriv, sfield, target.create()->get_type()};
+}
+
+// Adds the public static method `LChild;.user:()V` with `body`.
+DexMethod* add_user(const std::string& body) {
+  auto* user = DexMethod::make_method("LChild;.user:()V")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                                   assembler::ircode_from_string(body),
+                                   /* is_virtual */ false);
+  type_class(DexType::make_type("LChild;"))->add_method(user);
+  return user;
+}
+
+} // namespace
+
+// A method handle of kind invoke-direct calls a private instance method like
+// invoke-direct does, so a body that holds one cannot move to another class.
+TEST_F(DexUtilTest, invoke_direct_method_handle_prevents_relocation) {
+  make_relocation_fixture();
+  auto* user = add_user(R"((
+    (const-method-handle invoke-direct "LChild;.priv:()V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))");
+  user->get_code()->build_cfg();
+  UnorderedSet<DexMethodRef*> preventing;
+  EXPECT_FALSE(
+      gather_invoked_methods_that_prevent_relocation(user, &preventing));
+  EXPECT_EQ(preventing.size(), 1u);
+  EXPECT_EQ(preventing.count(DexMethod::get_method("LChild;.priv:()V")), 1u);
+}
+
+// ART calls an invoke-direct method handle of a method that is not private
+// without virtual dispatch, picking the target by the class holding the handle
+// (see `resolve_method_handle`), so a body that holds one cannot move to
+// another class.
+TEST_F(DexUtilTest, nonvirtual_method_handle_prevents_relocation) {
+  ClassCreator base(DexType::make_type("LBase;"));
+  base.set_super(type::java_lang_Object());
+  base.add_method(assembler::method_from_string(R"(
+    (method (public) "LBase;.m:()V"
+     ((load-param-object v0) (return-void)))
+  )"));
+  base.create();
+  ClassCreator child(DexType::make_type("LChild;"));
+  child.set_super(DexType::make_type("LBase;"));
+  child.create();
+  auto* user = add_user(R"((
+    (const-method-handle invoke-direct "LBase;.m:()V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))");
+  user->get_code()->build_cfg();
+  EXPECT_FALSE(gather_invoked_methods_that_prevent_relocation(user));
+}
+
+// A method handle of a private static method is checked for access when it is
+// resolved, so moving the body that loads it makes the method public.
+TEST_F(DexUtilTest, relocation_makes_method_handle_target_public) {
+  auto f = make_relocation_fixture();
+  auto* user = add_user(R"((
+    (const-method-handle invoke-static "LChild;.spriv:()V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))");
+  user->get_code()->build_cfg();
+  ASSERT_TRUE(relocate_method_if_no_changes(user, f.target));
+  EXPECT_EQ(user->get_class(), f.target);
+  EXPECT_TRUE(is_public(f.spriv));
+}
+
+TEST_F(DexUtilTest, visibility_changes_of_field_method_handle) {
+  auto f = make_relocation_fixture();
+  auto* user = add_user(R"((
+    (const-method-handle static-get "LChild;.sfield:I")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))");
+  user->get_code()->build_cfg();
+  auto changes = get_visibility_changes(user, f.target);
+  EXPECT_EQ(changes.fields.size(), 1u);
+  EXPECT_EQ(changes.fields.count(f.sfield), 1u);
+}
+
+// The bootstrap method of an invoke-custom receives a lookup in the class of
+// the code that holds it, so a body that holds one cannot move to another
+// class.
+TEST_F(DexUtilTest, invoke_custom_prevents_relocation) {
+  make_relocation_fixture();
+  auto* user = add_user(R"((
+    (invoke-static () "LBoot;.placeholder:()Ljava/lang/Runnable;")
+    (move-result-object v0)
+    (return-void)
+  ))");
+  redex::make_invoke_custom(user->get_code(), "run", "()Ljava/lang/Runnable;");
+  user->get_code()->build_cfg();
+  EXPECT_FALSE(gather_invoked_methods_that_prevent_relocation(user));
+}
+
+// A bytecode tool can emit an invoke-custom whose bootstrap arguments hold an
+// invoke-static handle of a private static method.
+TEST_F(DexUtilTest, visibility_changes_of_invoke_custom_bootstrap_argument) {
+  auto f = make_relocation_fixture();
+  auto* user = add_user(R"((
+    (invoke-static () "LBoot;.placeholder:()Ljava/lang/Runnable;")
+    (move-result-object v0)
+    (return-void)
+  ))");
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.push_back(
+      std::make_unique<DexEncodedValueMethodHandle>(redex::make_method_handle(
+          METHOD_HANDLE_TYPE_INVOKE_STATIC, "LChild;.spriv:()V")));
+  redex::make_invoke_custom(user->get_code(), "run", "()Ljava/lang/Runnable;",
+                            std::move(args));
+  user->get_code()->build_cfg();
+  auto changes = get_visibility_changes(user, f.target);
+  EXPECT_EQ(changes.methods.size(), 1u);
+  EXPECT_EQ(changes.methods.count(f.spriv), 1u);
+}
+
+// ART runs an invoke-direct method handle of a method that is not private and
+// that the class holding the handle declares by calling that method itself, so
+// moving the body makes that method public, not the one invoke-super would
+// call.
+TEST_F(DexUtilTest, visibility_changes_of_method_handle_of_own_method) {
+  ClassCreator base(DexType::make_type("LBase;"));
+  base.set_super(type::java_lang_Object());
+  base.add_method(assembler::method_from_string(R"(
+    (method (protected) "LBase;.m:()V"
+     ((load-param-object v0) (return-void)))
+  )"));
+  base.create();
+  ClassCreator child(DexType::make_type("LChild;"));
+  child.set_super(DexType::make_type("LBase;"));
+  auto* own = assembler::method_from_string(R"(
+    (method (protected) "LChild;.m:()V"
+     ((load-param-object v0) (return-void)))
+  )");
+  child.add_method(own);
+  child.create();
+  ClassCreator target(DexType::make_type("LTarget;"));
+  target.set_super(type::java_lang_Object());
+  auto* target_type = target.create()->get_type();
+  auto* user = add_user(R"((
+    (const-method-handle invoke-direct "LChild;.m:()V")
+    (move-result-pseudo-object v0)
+    (return-void)
+  ))");
+  user->get_code()->build_cfg();
+  auto changes = get_visibility_changes(user->get_code(), target_type, user);
+  EXPECT_EQ(changes.methods.size(), 1u);
+  EXPECT_EQ(changes.methods.count(own), 1u);
 }

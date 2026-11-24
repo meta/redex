@@ -12,7 +12,9 @@
 #include "ControlFlow.h"
 #include "Creators.h"
 #include "Debug.h"
+#include "DexCallSite.h"
 #include "DexClass.h"
+#include "DexMethodHandle.h"
 #include "DexStore.h"
 #include "EditableCfgAdapter.h"
 #include "IRInstruction.h"
@@ -297,58 +299,69 @@ struct VisibilityChangeGetter {
   VisibilityChanges& changes;
   DexType* scope;
   const DexMethod* effective_caller_resolved_from;
-  void process_insn(IRInstruction* insn) {
-    if (insn->has_field()) {
-      auto* cls = type_class(insn->get_field()->get_class());
-      if (cls != nullptr && !cls->is_external() && !is_public(cls)) {
-        changes.classes.insert(cls);
-      }
-      auto* field = resolve_field(insn->get_field(),
-                                  opcode::is_an_sfield_op(insn->opcode())
-                                      ? FieldSearch::Static
-                                      : FieldSearch::Instance);
-      if (field != nullptr && field->is_concrete()) {
-        if (!is_public(field)) {
-          changes.fields.insert(field);
-        }
-        cls = type_class(field->get_class());
-        if (!is_public(cls)) {
-          changes.classes.insert(cls);
-        }
-      }
-    } else if (insn->has_method()) {
-      auto* cls = type_class(insn->get_method()->get_class());
-      if (cls != nullptr && !cls->is_external() && !is_public(cls)) {
-        changes.classes.insert(cls);
-      }
-      auto* current_method =
-          resolve_method_deprecated(insn->get_method(), opcode_to_search(insn),
-                                    effective_caller_resolved_from);
-      if (current_method != nullptr && current_method->is_concrete() &&
-          (scope == nullptr || current_method->get_class() != scope)) {
-        if (!is_public(current_method)) {
-          changes.methods.insert(current_method);
-        }
-        cls = type_class(current_method->get_class());
-        if (cls != nullptr && !cls->is_external() && !is_public(cls)) {
-          changes.classes.insert(cls);
-        }
-      }
-    } else if (insn->has_type()) {
-      const auto* type = insn->get_type();
-      auto* cls = type_class(type);
-      if (cls != nullptr && !cls->is_external() && !is_public(cls)) {
-        changes.classes.insert(cls);
-      }
+
+  void process_type(const DexType* type) {
+    auto* cls = type_class(type);
+    if (cls != nullptr && !cls->is_external() && !is_public(cls)) {
+      changes.classes.insert(cls);
     }
+  }
+
+  // `field` is what an access of `field_ref` gets or puts, if known.
+  void process_field(DexFieldRef* field_ref, DexField* field) {
+    process_type(field_ref->get_class());
+    if (field != nullptr && field->is_concrete()) {
+      if (!is_public(field)) {
+        changes.fields.insert(field);
+      }
+      process_type(field->get_class());
+    }
+  }
+
+  // `method` is what a call of `method_ref` runs, if known.
+  void process_method(DexMethodRef* method_ref, DexMethod* method) {
+    process_type(method_ref->get_class());
+    if (method != nullptr && method->is_concrete() &&
+        (scope == nullptr || method->get_class() != scope)) {
+      if (!is_public(method)) {
+        changes.methods.insert(method);
+      }
+      process_type(method->get_class());
+    }
+  }
+
+  void process_insn(IRInstruction* insn) {
+    if (insn->has_type()) {
+      process_type(insn->get_type());
+    }
+    // A method handle, whether loaded by const-method-handle or held by a call
+    // site, is checked for access when it is resolved, like the instruction
+    // that it acts like.
+    for_each_field_access(insn, [&](IROpcode opcode, DexFieldRef* field_ref,
+                                    const DexMethodHandle* method_handle) {
+      process_field(field_ref,
+                    method_handle == nullptr
+                        ? resolve_field(field_ref,
+                                        opcode::is_an_sfield_op(opcode)
+                                            ? FieldSearch::Static
+                                            : FieldSearch::Instance)
+                        : resolve_field_handle(method_handle));
+    });
+    for_each_invoke(insn, [&](IROpcode opcode, DexMethodRef* method_ref,
+                              const DexMethodHandle* method_handle) {
+      process_method(
+          method_ref,
+          method_handle == nullptr
+              ? resolve_method_deprecated(method_ref, opcode_to_search(opcode),
+                                          effective_caller_resolved_from)
+              : resolve_method_handle(method_handle,
+                                      effective_caller_resolved_from));
+    });
   }
 
   void process_catch_types(const std::vector<const DexType*>& types) {
     for (const auto* type : types) {
-      auto* cls = type_class(type);
-      if (cls != nullptr && !cls->is_external() && !is_public(cls)) {
-        changes.classes.insert(cls);
-      }
+      process_type(type);
     }
   }
 };
@@ -388,6 +401,29 @@ VisibilityChanges get_visibility_changes(
   return changes;
 }
 
+namespace {
+
+// Whether an invoke `opcode` of `method_ref` in `caller` stops being valid once
+// `caller` moves to another class and visibility changes make the called
+// method public.
+bool invoked_method_prevents_relocation(const DexMethod* caller,
+                                        IROpcode opcode,
+                                        DexMethodRef* method_ref) {
+  auto* meth =
+      resolve_method_deprecated(method_ref, opcode_to_search(opcode), caller);
+  if (meth == nullptr) {
+    return opcode != OPCODE_INVOKE_VIRTUAL ||
+           !unknown_virtuals::is_method_known_to_be_public(method_ref);
+  }
+  always_assert(meth->is_def());
+  // What an invoke-super calls depends on the class that makes the call.
+  return (meth->is_external() && !is_public(meth)) ||
+         (opcode == OPCODE_INVOKE_DIRECT && !method::is_init(meth)) ||
+         opcode == OPCODE_INVOKE_SUPER;
+}
+
+} // namespace
+
 // Check that visibility / accessibility changes to the current method
 // won't need to change a referenced method into a virtual or static one.
 bool gather_invoked_methods_that_prevent_relocation(
@@ -398,32 +434,32 @@ bool gather_invoked_methods_that_prevent_relocation(
   always_assert(code->cfg_built());
   const auto& cfg = code->cfg();
   bool can_relocate = true;
+  auto check = [&](IROpcode opcode, DexMethodRef* method_ref) {
+    if (invoked_method_prevents_relocation(method, opcode, method_ref)) {
+      can_relocate = false;
+      if (methods_preventing_relocation != nullptr) {
+        methods_preventing_relocation->emplace(method_ref);
+      }
+    }
+  };
   for (const auto& mie : InstructionIterable(cfg)) {
     auto* insn = mie.insn;
-    auto opcode = insn->opcode();
-    if (opcode::is_a_method_invoke(opcode)) {
-      auto* meth = resolve_method_deprecated(insn->get_method(),
-                                             opcode_to_search(insn), method);
-      if ((meth == nullptr) && opcode == OPCODE_INVOKE_VIRTUAL &&
-          unknown_virtuals::is_method_known_to_be_public(insn->get_method())) {
-        continue;
+    for_each_invoke(insn, [&](IROpcode opcode, DexMethodRef* method_ref,
+                              const DexMethodHandle* /* method_handle */) {
+      check(opcode, method_ref);
+    });
+    // Like a call that resolves like invoke-super, an invoke-custom depends on
+    // the class of the code that holds it (see `depends_on_holder_class`): its
+    // bootstrap method receives a lookup in that class.
+    if (opcode::is_invoke_custom(insn->opcode())) {
+      can_relocate = false;
+      if (methods_preventing_relocation != nullptr) {
+        methods_preventing_relocation->emplace(
+            insn->get_callsite()->method_handle()->methodref());
       }
-      if (meth != nullptr) {
-        always_assert(meth->is_def());
-        // What an invoke-super calls depends on the class that makes the call.
-        if ((meth->is_external() && !is_public(meth)) ||
-            (opcode == OPCODE_INVOKE_DIRECT && !method::is_init(meth)) ||
-            opcode == OPCODE_INVOKE_SUPER) {
-          meth = nullptr;
-        }
-      }
-      if (meth == nullptr) {
-        can_relocate = false;
-        if (methods_preventing_relocation == nullptr) {
-          break;
-        }
-        methods_preventing_relocation->emplace(insn->get_method());
-      }
+    }
+    if (!can_relocate && methods_preventing_relocation == nullptr) {
+      break;
     }
   }
 

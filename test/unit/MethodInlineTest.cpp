@@ -10,6 +10,7 @@
 #include "ApiLevelChecker.h"
 #include "Creators.h"
 #include "Debug.h"
+#include "Deleter.h"
 #include "DexAnnotation.h"
 #include "DexAsm.h"
 #include "DexUtil.h"
@@ -5168,4 +5169,38 @@ TEST_F(MethodInlineTest, invoke_custom_is_not_inlined) {
                                           redex::make_invoke_custom(
                                               callee->get_code(), "run", "()V");
                                         }));
+}
+
+// An inlined method that a method handle (tool-generated here) still calls
+// must not be deleted: the handle would no longer link.
+TEST_F(MethodInlineTest, delete_methods_keeps_method_handle_target) {
+  auto* foo_cls = create_a_class("LFoo;");
+  auto* helper = DexMethod::make_method("LFoo;.helper:(I)V")
+                     ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                                     assembler::ircode_from_string(R"((
+                                       (load-param v0)
+                                       (return-void)
+                                     ))"),
+                                     /* is_virtual */ false);
+  foo_cls->add_method(helper);
+  auto* bar_cls = create_a_class("LBar;");
+  bar_cls->add_method(DexMethod::make_method("LBar;.run:()V")
+                          ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                                          assembler::ircode_from_string(R"((
+                            (const-method-handle invoke-static "LFoo;.helper:(I)V")
+                            (move-result-pseudo-object v0)
+                            (const v1 7)
+                            (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(I)V")
+                            (return-void)
+                          ))"),
+                                          /* is_virtual */ false));
+  Scope scope{foo_cls, bar_cls};
+  walk::code(scope, [](auto*, IRCode& code) { code.build_cfg(); });
+
+  UnorderedSet<DexMethod*> removable{helper};
+  ConcurrentMethodResolverDeprecated concurrent_method_resolver;
+  auto deleted =
+      delete_methods(scope, removable, std::ref(concurrent_method_resolver));
+  EXPECT_TRUE(deleted.empty());
+  EXPECT_EQ(foo_cls->get_dmethods().size(), 1);
 }

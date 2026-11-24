@@ -15,14 +15,17 @@
 #include "DexMethodHandle.h"
 
 class DexCallSite;
+class DexClass;
+class DexEncodedValue;
 class DexMethod;
 class DexProto;
 class DexType;
 class IRInstruction;
 
 /**
- * Rewrites the method handles and call sites that instructions hold, for one
- * operation of a pass that changes what code refers to.
+ * Rewrites the method handles and call sites that instructions hold, and the
+ * method handles and method types that static field values and annotations
+ * hold, for one operation of a pass that changes what code refers to.
  *
  * Method handles and call sites are shared: every instruction that names the
  * same method handle or call site item holds the same object, and ART links
@@ -43,17 +46,23 @@ class MethodHandleRewriter {
     // What `handle`, held by code of `holder`, becomes: a value naming the
     // handle type and the method or field. std::nullopt, or a value equal to
     // `handle`, keeps it. What a handle calls can depend on the class that
-    // holds it, hence `holder`. Unset keeps every handle.
+    // holds it, hence `holder`. `holder` is nullptr for a handle that a static
+    // field value or an annotation holds, which no code holds and ART never
+    // resolves, so a mapping that needs the holder's class to tell what an
+    // invoke-direct handle of a method that is not private runs has none for
+    // these. Unset keeps every handle.
     std::function<std::optional<DexMethodHandle>(const DexMethodHandle* handle,
                                                  const DexMethod* holder)>
         handle = nullptr;
     // The type whose Class a call site passes to its bootstrap method in place
     // of the Class of `type`; returning `type` keeps it. Unset keeps every
-    // Class.
+    // Class. A Class that a static field value or an annotation holds is a
+    // type reference like any other, which this does not change.
     std::function<DexType*(DexType* type)> class_type = nullptr;
     // The prototype that a call site names in place of `proto`, as its method
-    // type or as a method type among its bootstrap arguments; returning
-    // `proto` keeps it. Unset keeps every prototype.
+    // type or as a method type among its bootstrap arguments, and that a
+    // method type held by a static field value or an annotation names;
+    // returning `proto` keeps it. Unset keeps every prototype.
     std::function<DexProto*(DexProto* proto)> method_type = nullptr;
   };
 
@@ -68,6 +77,14 @@ class MethodHandleRewriter {
    * something else. Returns whether `insn` changed.
    */
   bool rewrite(IRInstruction* insn, const DexMethod* holder);
+
+  /**
+   * Makes the static field values of the classes in `scope` and the
+   * annotations of these classes, their fields, their methods and the
+   * methods' parameters hold the replacements of the method handles and
+   * method types they hold, inside arrays and annotations too.
+   */
+  void rewrite(const std::vector<DexClass*>& scope);
 
  private:
   struct HandleKey {
@@ -94,6 +111,7 @@ class MethodHandleRewriter {
   DexType* replace(DexType* type) const;
   DexProto* replace(DexProto* proto) const;
   DexCallSite* replace(DexCallSite* callsite, const DexMethod* holder);
+  void rewrite(DexEncodedValue* value);
 
   Mappings m_mappings;
   InsertOnlyConcurrentMap<HandleKey, DexMethodHandle*, HandleKeyHash> m_handles;

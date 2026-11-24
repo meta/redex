@@ -12,8 +12,10 @@
 
 #include "DexAnnotation.h"
 #include "DexCallSite.h"
+#include "DexClass.h"
 #include "IRInstruction.h"
 #include "RedexContext.h"
+#include "Walkers.h"
 
 namespace {
 
@@ -72,6 +74,42 @@ bool MethodHandleRewriter::rewrite(IRInstruction* insn,
     return replacement != callsite;
   }
   return false;
+}
+
+void MethodHandleRewriter::rewrite(const std::vector<DexClass*>& scope) {
+  // Each encoded value has one owner, a field or an annotation element, so no
+  // two workers write the same value. Only the replacement handles are shared,
+  // and nothing mutates them.
+  walk::parallel::fields(scope, [&](DexField* field) {
+    if (auto* value = field->get_static_value()) {
+      rewrite(value);
+    }
+  });
+  walk::parallel::annotations(scope, [&](DexAnnotation* annotation) {
+    for (const auto& element : annotation->anno_elems()) {
+      rewrite(element.encoded_value.get());
+    }
+  });
+}
+
+void MethodHandleRewriter::rewrite(DexEncodedValue* value) {
+  if (auto* method_handle_value =
+          dynamic_cast<DexEncodedValueMethodHandle*>(value)) {
+    method_handle_value->set_methodhandle(
+        replace(method_handle_value->methodhandle(), /* holder */ nullptr));
+  } else if (auto* method_type_value =
+                 dynamic_cast<DexEncodedValueMethodType*>(value)) {
+    method_type_value->set_proto(replace(method_type_value->proto()));
+  } else if (auto* array_value = dynamic_cast<DexEncodedValueArray*>(value)) {
+    for (const auto& element : *array_value->evalues()) {
+      rewrite(element.get());
+    }
+  } else if (auto* annotation_value =
+                 dynamic_cast<DexEncodedValueAnnotation*>(value)) {
+    for (const auto& element : annotation_value->annotations()) {
+      rewrite(element.encoded_value.get());
+    }
+  }
 }
 
 DexMethodHandle* MethodHandleRewriter::replace(DexMethodHandle* handle,

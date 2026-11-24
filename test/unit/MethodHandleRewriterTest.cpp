@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include "Creators.h"
 #include "DexAnnotation.h"
 #include "DexCallSite.h"
 #include "DexClass.h"
@@ -68,6 +69,40 @@ std::unique_ptr<IRInstruction> make_invoke_custom(DexCallSite* callsite) {
   auto insn = std::make_unique<IRInstruction>(OPCODE_INVOKE_CUSTOM);
   insn->set_callsite(callsite);
   return insn;
+}
+
+DexField* make_static_field(const char* field,
+                            std::unique_ptr<DexEncodedValue> value) {
+  return DexField::make_field(field)->make_concrete(
+      ACC_PUBLIC | ACC_STATIC | ACC_FINAL, std::move(value));
+}
+
+std::unique_ptr<DexAnnotationSet> make_annotation_set(
+    std::unique_ptr<DexEncodedValue> value) {
+  auto annotation = std::make_unique<DexAnnotation>(
+      DexType::make_type("LAnno;"), DAV_RUNTIME);
+  annotation->add_element("value", std::move(value));
+  auto annotation_set = std::make_unique<DexAnnotationSet>();
+  annotation_set->add_annotation(std::move(annotation));
+  return annotation_set;
+}
+
+// The value of the only element of the only annotation in `annotation_set`.
+DexEncodedValue* annotation_value(const DexAnnotationSet* annotation_set) {
+  return annotation_set->get_annotations()
+      .at(0)
+      ->anno_elems()
+      .at(0)
+      .encoded_value.get();
+}
+
+DexMethodHandle* method_handle_of(const DexEncodedValue* value) {
+  return redex::encoded_value_as<DexEncodedValueMethodHandle>(value)
+      ->methodhandle();
+}
+
+DexProto* proto_of(const DexEncodedValue* value) {
+  return redex::encoded_value_as<DexEncodedValueMethodType>(value)->proto();
 }
 
 } // namespace
@@ -261,4 +296,105 @@ TEST_F(MethodHandleRewriterTest, replacement_depends_on_holder) {
   EXPECT_EQ(arg_method_handle(second_invoke->get_callsite(), 0)->methodref(),
             DexMethod::make_method("LSecond;.a:()V"));
   EXPECT_EQ(first_invoke->get_callsite(), third_invoke->get_callsite());
+}
+
+// A static field value holds the replacement that an instruction of a method
+// holding the same handle gets. No code holds the value, so the mapping gets
+// no holder for it.
+TEST_F(MethodHandleRewriterTest, static_field_value) {
+  auto* original = handle_of_a();
+  auto* field = make_static_field(
+      "LFoo;.HANDLE:Ljava/lang/invoke/MethodHandle;",
+      std::make_unique<DexEncodedValueMethodHandle>(original));
+  auto insn = make_const_method_handle(original);
+  auto* code_holder = DexMethod::make_method("LFoo;.user:()V")
+                          ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                                          /* is_virtual */ false);
+  ClassCreator creator(DexType::make_type("LFoo;"));
+  creator.set_super(type::java_lang_Object());
+  creator.add_field(field);
+  creator.add_method(code_holder);
+  Scope scope{creator.create()};
+  std::vector<const DexMethod*> holders;
+  MethodHandleRewriter rewriter(
+      {.handle = [&](const DexMethodHandle* method_handle,
+                     const DexMethod* holder) {
+        holders.push_back(holder);
+        return a_to_b().handle(method_handle, holder);
+      }});
+
+  rewriter.rewrite(scope);
+  EXPECT_TRUE(rewriter.rewrite(insn.get(), code_holder));
+
+  auto* replacement = method_handle_of(field->get_static_value());
+  EXPECT_EQ(replacement->methodref(), DexMethod::make_method("LFoo;.b:()V"));
+  EXPECT_EQ(replacement, insn->get_methodhandle());
+  EXPECT_EQ(original->methodref(), DexMethod::make_method("LFoo;.a:()V"));
+  ASSERT_EQ(holders.size(), 2);
+  EXPECT_EQ(holders[0], nullptr);
+  EXPECT_EQ(holders[1], code_holder);
+}
+
+// Annotations of the class, its fields, its methods and their parameters hold
+// method handles and method types, also inside arrays and annotations.
+TEST_F(MethodHandleRewriterTest, annotations) {
+  // Annotations attach to concrete members only when they are synthetic.
+  auto* field = DexField::make_field("LFoo;.f:I")
+                    ->make_concrete(ACC_PUBLIC | ACC_SYNTHETIC);
+  ASSERT_TRUE(field->attach_annotation_set(make_annotation_set(
+      std::make_unique<DexEncodedValueMethodHandle>(handle_of_a()))));
+  auto* method = DexMethod::make_method("LFoo;.m:(I)V")
+                     ->make_concrete(ACC_PUBLIC | ACC_ABSTRACT | ACC_SYNTHETIC,
+                                     /* is_virtual */ true);
+  auto* elements = new DexEncodedValueArray::Storage();
+  elements->push_back(std::make_unique<DexEncodedValueMethodType>(
+      DexProto::make_proto("(LFoo;)V")));
+  ASSERT_TRUE(method->attach_annotation_set(
+      make_annotation_set(std::make_unique<DexEncodedValueArray>(elements))));
+  EncodedAnnotations nested;
+  nested.emplace_back(
+      DexString::make_string("value"),
+      std::make_unique<DexEncodedValueMethodHandle>(handle_of_a()));
+  method->attach_param_annotation_set(
+      0,
+      make_annotation_set(std::make_unique<DexEncodedValueAnnotation>(
+          DexType::make_type("LNested;"), std::move(nested))));
+  ClassCreator creator(DexType::make_type("LFoo;"));
+  creator.set_super(type::java_lang_Object());
+  creator.set_access(ACC_PUBLIC | ACC_ABSTRACT);
+  creator.add_field(field);
+  creator.add_method(method);
+  auto* cls = creator.create();
+  ASSERT_TRUE(cls->attach_annotation_set(
+      make_annotation_set(std::make_unique<DexEncodedValueMethodType>(
+          DexProto::make_proto("()LFoo;")))));
+  Scope scope{cls};
+  auto mappings = a_to_b();
+  mappings.method_type = [](DexProto* proto) {
+    return proto == DexProto::make_proto("(LFoo;)V")
+               ? DexProto::make_proto("(LBar;)V")
+           : proto == DexProto::make_proto("()LFoo;")
+               ? DexProto::make_proto("()LBar;")
+               : proto;
+  };
+  MethodHandleRewriter rewriter(std::move(mappings));
+
+  rewriter.rewrite(scope);
+
+  auto* b = DexMethod::make_method("LFoo;.b:()V");
+  EXPECT_EQ(
+      method_handle_of(annotation_value(field->get_anno_set()))->methodref(),
+      b);
+  const auto* array = redex::encoded_value_as<DexEncodedValueArray>(
+      annotation_value(method->get_anno_set()));
+  EXPECT_EQ(proto_of(array->evalues()->at(0).get()),
+            DexProto::make_proto("(LBar;)V"));
+  const auto* annotation = redex::encoded_value_as<DexEncodedValueAnnotation>(
+      annotation_value(method->get_param_anno()->at(0).get()));
+  EXPECT_EQ(
+      method_handle_of(annotation->annotations().at(0).encoded_value.get())
+          ->methodref(),
+      b);
+  EXPECT_EQ(proto_of(annotation_value(cls->get_anno_set())),
+            DexProto::make_proto("()LBar;"));
 }

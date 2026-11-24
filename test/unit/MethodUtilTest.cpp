@@ -8,6 +8,7 @@
 #include "MethodUtil.h"
 
 #include "Creators.h"
+#include "DexAnnotation.h"
 #include "IRAssembler.h"
 #include "RedexTest.h"
 #include "RedexTestUtils.h"
@@ -90,4 +91,200 @@ TEST_F(MethodUtilTest, clinitWithDynamicInvokeMayHaveSideEffects) {
   EXPECT_NE(method::clinit_may_have_side_effects(
                 custom, /* allow_benign_method_invocations */ false),
             nullptr);
+}
+
+// A method handle names its method wherever it is held: in code, among the
+// bootstrap method and arguments of a call site, in a static field value or in
+// an annotation. An
+// invoke-instance handle that names a method by a subclass also names the
+// method that it resolves to.
+TEST_F(MethodUtilTest, gather_methods_named_by_method_handles) {
+  auto make_class = [](const char* name, DexType* super,
+                       const std::vector<const char*>& methods) {
+    ClassCreator creator(DexType::make_type(name));
+    creator.set_super(super);
+    for (const auto* method : methods) {
+      creator.add_method(assembler::method_from_string(method));
+    }
+    return creator.create();
+  };
+  auto* base = make_class("LBase;", type::java_lang_Object(), {R"(
+    (method (public) "LBase;.run:()V" ((load-param-object v0) (return-void)))
+  )"});
+  make_class("LSub;", base->get_type(), {});
+  make_class("LBoot;", type::java_lang_Object(), {R"(
+    (method (public static) "LBoot;.bootstrap:(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/CallSite;"
+     ((const v0 0) (return-object v0)))
+  )"});
+  auto* foo = make_class("LFoo;", type::java_lang_Object(),
+                         {
+                             R"(
+    (method (public static) "LFoo;.compute:(I)I" ((load-param v0) (return v0)))
+  )",
+                             R"(
+    (method (public static) "LFoo;.linked:()V" ((return-void)))
+  )",
+                             R"(
+    (method (public static) "LFoo;.stored:()V" ((return-void)))
+  )",
+                             R"(
+    (method (public static) "LFoo;.annotated:()V" ((return-void)))
+  )",
+                             R"(
+    (method (public static) "LFoo;.unnamed:()V" ((return-void)))
+  )",
+                         });
+  auto* user = make_class("LUser;", type::java_lang_Object(), {R"(
+    (method (public static) "LUser;.use:()V"
+     (
+      (const-method-handle invoke-static "LFoo;.compute:(I)I")
+      (move-result-pseudo-object v0)
+      (const-method-handle invoke-instance "LSub;.run:()V")
+      (move-result-pseudo-object v0)
+      (const-method-handle static-get "LFoo;.field:I")
+      (move-result-pseudo-object v0)
+      (invoke-static () "LUser;.placeholder:()V")
+      (return-void)
+     )
+    )
+  )"});
+  std::vector<std::unique_ptr<DexEncodedValue>> bootstrap_args;
+  bootstrap_args.push_back(
+      std::make_unique<DexEncodedValueMethodHandle>(redex::make_method_handle(
+          METHOD_HANDLE_TYPE_INVOKE_STATIC, "LFoo;.linked:()V")));
+  redex::make_invoke_custom(
+      DexMethod::get_method("LUser;.use:()V")->as_def()->get_code(), "run",
+      "()V", std::move(bootstrap_args));
+  user->add_field(
+      DexField::make_field("LUser;.HANDLE:Ljava/lang/invoke/MethodHandle;")
+          ->make_concrete(
+              ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+              std::make_unique<DexEncodedValueMethodHandle>(
+                  redex::make_method_handle(METHOD_HANDLE_TYPE_INVOKE_STATIC,
+                                            "LFoo;.stored:()V"))));
+  auto annotation = std::make_unique<DexAnnotation>(
+      DexType::make_type("LAnno;"), DAV_RUNTIME);
+  annotation->add_element(
+      "value",
+      std::make_unique<DexEncodedValueMethodHandle>(redex::make_method_handle(
+          METHOD_HANDLE_TYPE_INVOKE_STATIC, "LFoo;.annotated:()V")));
+  auto annotation_set = std::make_unique<DexAnnotationSet>();
+  annotation_set->add_annotation(std::move(annotation));
+  ASSERT_TRUE(user->attach_annotation_set(std::move(annotation_set)));
+
+  auto methods = method::gather_methods_named_by_method_handles(
+      {base, type_class(DexType::get_type("LSub;")),
+       type_class(DexType::get_type("LBoot;")), foo, user});
+
+  auto named = [&](const char* method) {
+    return methods.count(DexMethod::get_method(method)->as_def()) != 0;
+  };
+  EXPECT_TRUE(named("LFoo;.compute:(I)I"));
+  EXPECT_TRUE(named("LBase;.run:()V"));
+  EXPECT_TRUE(
+      named("LBoot;.bootstrap:(Ljava/lang/invoke/MethodHandles$Lookup;"
+            "Ljava/lang/String;Ljava/lang/invoke/MethodType;"
+            "Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/CallSite;"));
+  EXPECT_TRUE(named("LFoo;.linked:()V"));
+  EXPECT_TRUE(named("LFoo;.stored:()V"));
+  EXPECT_TRUE(named("LFoo;.annotated:()V"));
+  EXPECT_FALSE(named("LFoo;.unnamed:()V"));
+  EXPECT_EQ(methods.size(), 6);
+}
+
+// An invoke-direct method handle of `LA;.m` in `LC;`, a subclass of `LB;`,
+// which overrides `m`, names `LA;.m` and runs `LB;.m` on Android 9.
+TEST_F(MethodUtilTest, gather_methods_named_by_invoke_direct_method_handle) {
+  auto make_class = [](const char* name, DexType* super,
+                       const std::vector<const char*>& methods) {
+    ClassCreator creator(DexType::make_type(name));
+    creator.set_super(super);
+    for (const auto* method : methods) {
+      creator.add_method(assembler::method_from_string(method));
+    }
+    return creator.create();
+  };
+  auto* a = make_class("LA;", type::java_lang_Object(), {R"(
+    (method (public) "LA;.m:()V" ((load-param-object v0) (return-void)))
+  )"});
+  auto* b = make_class("LB;", a->get_type(), {R"(
+    (method (public) "LB;.m:()V" ((load-param-object v0) (return-void)))
+  )"});
+  auto* c = make_class("LC;", b->get_type(), {R"(
+    (method (public static) "LC;.use:()V"
+     (
+      (const-method-handle invoke-direct "LA;.m:()V")
+      (move-result-pseudo-object v0)
+      (return-void)
+     )
+    )
+  )"});
+
+  auto methods = method::gather_methods_named_by_method_handles({a, b, c});
+
+  EXPECT_EQ(methods.count(DexMethod::get_method("LA;.m:()V")->as_def()), 1);
+  EXPECT_EQ(methods.count(DexMethod::get_method("LB;.m:()V")->as_def()), 1);
+  EXPECT_EQ(methods.size(), 2);
+}
+
+// A field method handle names its field wherever it is held: in code, in a
+// static field value or in an annotation. A handle that names a field by a
+// subclass names the field that it resolves to.
+TEST_F(MethodUtilTest, gather_fields_named_by_method_handles) {
+  ClassCreator base(DexType::make_type("LFields;"));
+  base.set_super(type::java_lang_Object());
+  for (const auto* field :
+       {"LFields;.read:I", "LFields;.written:I", "LFields;.unnamed:I"}) {
+    base.add_field(
+        DexField::make_field(field)->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  }
+  base.add_field(
+      DexField::make_field("LFields;.annotated:I")->make_concrete(ACC_PUBLIC));
+  auto* base_cls = base.create();
+  ClassCreator sub(DexType::make_type("LSubFields;"));
+  sub.set_super(base_cls->get_type());
+  auto* sub_cls = sub.create();
+
+  ClassCreator user(DexType::make_type("LFieldUser;"));
+  user.set_super(type::java_lang_Object());
+  user.add_method(assembler::method_from_string(R"(
+    (method (public static) "LFieldUser;.use:()V"
+     (
+      (const-method-handle static-get "LSubFields;.read:I")
+      (move-result-pseudo-object v0)
+      (const-method-handle invoke-static "LFieldUser;.use:()V")
+      (move-result-pseudo-object v0)
+      (return-void)
+     )
+    )
+  )"));
+  user.add_field(
+      DexField::make_field("LFieldUser;.HANDLE:Ljava/lang/invoke/MethodHandle;")
+          ->make_concrete(
+              ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+              std::make_unique<DexEncodedValueMethodHandle>(
+                  redex::make_method_handle(METHOD_HANDLE_TYPE_STATIC_PUT,
+                                            "LFields;.written:I"))));
+  auto* user_cls = user.create();
+  auto annotation = std::make_unique<DexAnnotation>(
+      DexType::make_type("LAnno;"), DAV_RUNTIME);
+  annotation->add_element(
+      "value",
+      std::make_unique<DexEncodedValueMethodHandle>(redex::make_method_handle(
+          METHOD_HANDLE_TYPE_INSTANCE_GET, "LFields;.annotated:I")));
+  auto annotation_set = std::make_unique<DexAnnotationSet>();
+  annotation_set->add_annotation(std::move(annotation));
+  ASSERT_TRUE(user_cls->attach_annotation_set(std::move(annotation_set)));
+
+  auto fields = method::gather_fields_named_by_method_handles(
+      {base_cls, sub_cls, user_cls});
+
+  auto named = [&](const char* field) {
+    return fields.count(DexField::get_field(field)->as_def()) != 0;
+  };
+  EXPECT_TRUE(named("LFields;.read:I"));
+  EXPECT_TRUE(named("LFields;.written:I"));
+  EXPECT_TRUE(named("LFields;.annotated:I"));
+  EXPECT_FALSE(named("LFields;.unnamed:I"));
+  EXPECT_EQ(fields.size(), 3);
 }

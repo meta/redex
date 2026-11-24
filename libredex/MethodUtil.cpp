@@ -15,6 +15,7 @@
 #include "RedexContext.h"
 #include "Resolver.h"
 #include "TypeUtil.h"
+#include "Walkers.h"
 
 namespace {
 
@@ -543,6 +544,82 @@ bool may_be_invoke_target(const DexMethod* method) {
 bool can_change_signature(const DexMethod* method) {
   return can_rename(method) && !is_native(method) &&
          !method->rstate.no_optimizations();
+}
+
+namespace {
+
+// Calls `f(method_handle, caller)`, in parallel, for every method handle that
+// `scope` holds: in code, with the method that holds it as `caller`, and in a
+// static field value or an annotation, which no code holds, with a null
+// `caller`.
+template <typename Fn>
+void walk_method_handles(const Scope& scope, const Fn& f) {
+  auto walk_value = [&](const Gatherable& value) {
+    std::vector<DexMethodHandle*> method_handles;
+    value.gather_methodhandles(method_handles);
+    for (const auto* method_handle : method_handles) {
+      f(method_handle, /* caller */ nullptr);
+    }
+  };
+  walk::parallel::fields(scope, [&](DexField* field) {
+    if (auto* value = field->get_static_value()) {
+      walk_value(*value);
+    }
+  });
+  walk::parallel::annotations(
+      scope, [&](DexAnnotation* annotation) { walk_value(*annotation); });
+  walk::parallel::opcodes(scope, [&](DexMethod* method, IRInstruction* insn) {
+    for_each_method_handle(insn, [&](const DexMethodHandle* method_handle) {
+      f(method_handle, method);
+    });
+  });
+}
+
+} // namespace
+
+InsertOnlyConcurrentSet<const DexMethod*>
+gather_methods_named_by_method_handles(const Scope& scope) {
+  InsertOnlyConcurrentSet<const DexMethod*> methods;
+  // What a method handle in code calls depends on the method that holds it.
+  walk_method_handles(
+      scope,
+      [&](const DexMethodHandle* method_handle, const DexMethod* caller) {
+        if (!DexMethodHandle::isInvokeType(method_handle->type())) {
+          return;
+        }
+        if (auto* method = method_handle->methodref()->as_def()) {
+          methods.insert(method);
+        }
+        if (auto* method = resolve_call(method_handle_opcode(method_handle),
+                                        method_handle->methodref(),
+                                        method_handle, caller)) {
+          methods.insert(method);
+        }
+        for (auto* callee :
+             resolve_method_handle_callees(method_handle, caller)) {
+          methods.insert(callee);
+        }
+      });
+  return methods;
+}
+
+InsertOnlyConcurrentSet<const DexField*> gather_fields_named_by_method_handles(
+    const Scope& scope) {
+  InsertOnlyConcurrentSet<const DexField*> fields;
+  walk_method_handles(
+      scope,
+      [&](const DexMethodHandle* method_handle, const DexMethod* /* caller */) {
+        if (DexMethodHandle::isInvokeType(method_handle->type())) {
+          return;
+        }
+        if (auto* field = method_handle->fieldref()->as_def()) {
+          fields.insert(field);
+        }
+        if (auto* field = resolve_field_handle(method_handle)) {
+          fields.insert(field);
+        }
+      });
+  return fields;
 }
 
 #define DEFINE_CACHED_METHOD(func_name, _)                 \

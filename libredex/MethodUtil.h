@@ -64,6 +64,33 @@ bool may_be_invoke_target(const DexMethod* method);
  */
 bool can_change_signature(const DexMethod* method);
 
+/**
+ * The methods whose prototypes the method handles in `scope` fix: for every
+ * method handle that code (const-method-handle, or the bootstrap method or a
+ * bootstrap argument of a call site), a static field value or an annotation in
+ * `scope` holds, the method that it names, the method that it resolves to
+ * (`resolve_call`) and every method that calling it can run on some ART
+ * version (`resolve_method_handle_callees`; a handle outside code resolves
+ * without a caller). Changing the prototype of the member changes the handle's
+ * type, and the caller of an invoke-polymorphic fixes the prototype of the
+ * call, so a pass cannot rewrite these calls when it changes such a prototype:
+ * it must leave these methods, and the virtual scopes that they belong to, as
+ * they are.
+ */
+InsertOnlyConcurrentSet<const DexMethod*>
+gather_methods_named_by_method_handles(const Scope& scope);
+
+/**
+ * The fields that the method handles in `scope` get or put: for every method
+ * handle that code, a static field value or an annotation in `scope` holds, the
+ * field that it names and the field that it resolves to
+ * (`resolve_field_handle`). Such a handle reads or writes its field without a
+ * field instruction, so a pass that learns how a field is used from field
+ * instructions alone cannot delete, move or rewrite these fields.
+ */
+InsertOnlyConcurrentSet<const DexField*> gather_fields_named_by_method_handles(
+    const Scope& scope);
+
 using ClInitHasNoSideEffectsPredicate = std::function<bool(const DexType*)>;
 
 /**

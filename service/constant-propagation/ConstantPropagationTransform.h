@@ -47,6 +47,11 @@ class Transform final {
     bool to_int_lit8{true};
     bool to_int_lit16{false}; // Does not seem beneficial by default.
     const DexType* class_under_init{nullptr};
+    // Set instead of `class_under_init` in a constructor analyzed with
+    // ConstructorFieldAnalyzer, whose class is then the class under init. Its
+    // field values describe `this`, so a store to another instance is not
+    // redundant.
+    const ConstructorFieldAnalyzerState* constructor_fields{nullptr};
     // These methods are known pure, we can replace their results with constant
     // value.
     const ConcurrentSet<DexMethod*>* getter_methods_for_immutable_fields{
@@ -97,7 +102,11 @@ class Transform final {
   };
 
   explicit Transform(Config config, const NullCheckMethods& state)
-      : m_config(config), m_null_check_methods(state) {}
+      : m_config(config), m_null_check_methods(state) {
+    always_assert_log(config.class_under_init == nullptr ||
+                          config.constructor_fields == nullptr,
+                      "The constructor fields name the class under init");
+  }
 
   // Apply all available transformations on cfg
   // May run cfg.calculate_exit_block as a side-effect.

@@ -414,7 +414,13 @@ bool Transform::eliminate_redundant_put(
     // The ConstantEnvironment tells us the abstract value of a non-escaping
     // field at this particular program point.
     ConstantValue existing_val;
-    if (m_config.class_under_init == field->get_class()) {
+    if (m_config.constructor_fields != nullptr &&
+        m_config.constructor_fields->get_class() == field->get_class()) {
+      if (!m_config.constructor_fields->is_this_access(insn)) {
+        break;
+      }
+      existing_val = env.get(field);
+    } else if (m_config.class_under_init == field->get_class()) {
       existing_val = env.get(field);
     } else {
       existing_val = wps.get_field_value(field);

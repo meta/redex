@@ -5385,6 +5385,196 @@ TEST_F(OptimizeEnumsTest, constantCopiedToAnotherFieldIsBoxed) {
               ::testing::Not(::testing::Contains(OPCODE_NEW_INSTANCE)));
 }
 
+/* Add to `store` the interface
+
+  interface Shape {
+    int LIMIT = 4;
+    long BIG = 1L << 40;
+    Object OBJ = new Object();
+    int sides();
+    default String label() { return "shape"; }
+  }
+
+and make Bar implement it. */
+DexType* add_shape_interface(DexStore* store) {
+  auto* shape_type = DexType::make_type("LShape;");
+  ClassCreator sc(shape_type);
+  sc.set_super(type::java_lang_Object());
+  sc.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  for (const char* field :
+       {"LShape;.LIMIT:I", "LShape;.BIG:J", "LShape;.OBJ:Ljava/lang/Object;"}) {
+    auto* def = DexField::make_field(field)->make_concrete(
+        ACC_PUBLIC | ACC_STATIC | ACC_FINAL);
+    sc.add_field(def);
+  }
+  auto* sides = DexMethod::make_method("LShape;.sides:()I")
+                    ->make_concrete(ACC_PUBLIC | ACC_ABSTRACT,
+                                    std::unique_ptr<IRCode>(nullptr),
+                                    /* is_virtual */ true);
+  sc.add_method(sides);
+  sc.add_method(assembler::method_from_string(R"(
+    (method (public) "LShape;.label:()Ljava/lang/String;"
+      (
+        (load-param-object v0)
+        (const-string "shape")
+        (move-result-pseudo-object v1)
+        (return-object v1)
+      )
+    )
+  )"));
+  store->add_classes({sc.create()});
+  type_class(DexType::get_type("LBar;"))
+      ->set_interfaces(DexTypeList::make_type_list({shape_type}));
+  return shape_type;
+}
+
+// Shape[] shapes = {Bar.Y}; where Bar implements the interface Shape. The array
+// holds Y as a Shape, so a call such as shapes[0].sides() would reach the
+// boxed Integer.
+TEST_F(OptimizeEnumsTest, filledNewArrayInterfaceEscapeRejectsEnum) {
+  auto store = create_enum_store();
+  add_shape_interface(&store);
+  auto* bar_type = DexType::get_type("LBar;");
+
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  uc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LUser;.shapes:()[LShape;"
+      (
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v0)
+        (filled-new-array (v0) "[LShape;")
+        (move-result-object v1)
+        (return-object v1)
+      )
+    )
+  )"));
+  store.add_classes({uc.create()});
+  DexStoresVector stores({std::move(store)});
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](DexMethod*, IRCode& code) {
+    if (!code.cfg_built()) {
+      code.build_cfg();
+    }
+  });
+
+  optimize_enums::Config config(100);
+  config.candidate_enums.insert(bar_type);
+  EXPECT_EQ(rejection_reasons(scope, &config, bar_type),
+            std::set<optimize_enums::UnsafeType>{
+                optimize_enums::UnsafeType::kUsageCastFilledNewArray});
+  EXPECT_EQ(config.candidate_enums.count_unsafe(bar_type), 0u);
+}
+
+// Bar implements the interface Shape. Each case is a way code could use Y or
+// the members Bar inherits from Shape; none can be rewritten once Bar is boxed,
+// so Bar must stay an enum.
+struct InterfaceUseCase {
+  const char* name;
+  const char* proto;
+  const char* body;
+  optimize_enums::UnsafeType reason;
+};
+
+class OptimizeEnumsInterfaceUseTest
+    : public OptimizeEnumsTest,
+      public WithParamInterface<InterfaceUseCase> {};
+
+TEST_P(OptimizeEnumsInterfaceUseTest, keepsEnum) {
+  auto store = create_enum_store();
+  add_shape_interface(&store);
+  auto* bar_type = DexType::get_type("LBar;");
+
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  uc.add_method(assembler::method_from_string(
+      std::string("(method (public static) \"LUser;.f:") + GetParam().proto +
+      "\" (" + GetParam().body + "))"));
+  store.add_classes({uc.create()});
+  DexStoresVector stores({std::move(store)});
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](DexMethod*, IRCode& code) {
+    if (!code.cfg_built()) {
+      code.build_cfg();
+    }
+  });
+
+  optimize_enums::Config config(100);
+  config.candidate_enums.insert(bar_type);
+
+  EXPECT_EQ(rejection_reasons(scope, &config, bar_type),
+            std::set<optimize_enums::UnsafeType>{GetParam().reason});
+  EXPECT_EQ(config.candidate_enums.count_unsafe(bar_type), 0u);
+}
+
+#define BAR_Y_TO_V0 \
+  "(sget-object \"LBar;.Y:LBar;\") (move-result-pseudo-object v0) "
+
+INSTANTIATE_TEST_SUITE_P(
+    InterfaceUses,
+    OptimizeEnumsInterfaceUseTest,
+    Values(
+        InterfaceUseCase{"returned_as_interface", "()LShape;",
+                         BAR_Y_TO_V0 "(return-object v0)",
+                         optimize_enums::UnsafeType::kUsageCastWhenReturn},
+        InterfaceUseCase{"stored_in_instance_field", "(LUser;)V",
+                         "(load-param-object v1) " BAR_Y_TO_V0
+                         "(iput-object v0 v1 \"LUser;.s:LShape;\") "
+                         "(return-void)",
+                         optimize_enums::UnsafeType::kUsageCastISPutObject},
+        InterfaceUseCase{"stored_in_static_field", "()V",
+                         BAR_Y_TO_V0
+                         "(sput-object v0 \"LUser;.S:LShape;\") (return-void)",
+                         optimize_enums::UnsafeType::kUsageCastISPutObject},
+        InterfaceUseCase{"cast_to_interface", "()V",
+                         BAR_Y_TO_V0 "(check-cast v0 \"LShape;\") "
+                                     "(move-result-pseudo-object v0) "
+                                     "(return-void)",
+                         optimize_enums::UnsafeType::kUsageCastCheckCast},
+        InterfaceUseCase{"interface_call", "()I",
+                         BAR_Y_TO_V0
+                         "(invoke-interface (v0) \"LShape;.sides:()I\") "
+                         "(move-result v0) (return v0)",
+                         optimize_enums::UnsafeType::kUsageCastThisPointer},
+        InterfaceUseCase{"passed_as_interface", "()V",
+                         BAR_Y_TO_V0
+                         "(invoke-static (v0) \"LUser;.take:(LShape;)V\") "
+                         "(return-void)",
+                         optimize_enums::UnsafeType::kUsageCastParameter},
+        InterfaceUseCase{"stored_in_interface_array", "()V",
+                         BAR_Y_TO_V0
+                         "(const v1 1) (new-array v1 \"[LShape;\") "
+                         "(move-result-pseudo-object v2) (const v3 0) "
+                         "(aput-object v0 v2 v3) (return-void)",
+                         optimize_enums::UnsafeType::kUsageCastAputObject},
+        InterfaceUseCase{"tested_against_interface", "()Z",
+                         BAR_Y_TO_V0 "(instance-of v0 \"LShape;\") "
+                                     "(move-result-pseudo v1) (return v1)",
+                         optimize_enums::UnsafeType::kUsageUsedInInstanceOf},
+        InterfaceUseCase{
+            "inherited_default_method", "()Ljava/lang/String;",
+            BAR_Y_TO_V0
+            "(invoke-virtual (v0) \"LBar;.label:()Ljava/lang/String;\") "
+            "(move-result-object v0) (return-object v0)",
+            optimize_enums::UnsafeType::kUsageUnsafeInvocationOnCandidateEnum},
+        InterfaceUseCase{"inherited_int_constant", "()I",
+                         "(sget \"LBar;.LIMIT:I\") (move-result-pseudo v0) "
+                         "(return v0)",
+                         optimize_enums::UnsafeType::kUsageInheritedFieldRef},
+        InterfaceUseCase{"inherited_wide_constant", "()J",
+                         "(sget-wide \"LBar;.BIG:J\") "
+                         "(move-result-pseudo-wide v0) (return-wide v0)",
+                         optimize_enums::UnsafeType::kUsageInheritedFieldRef},
+        InterfaceUseCase{"inherited_object_constant", "()Ljava/lang/Object;",
+                         "(sget-object \"LBar;.OBJ:Ljava/lang/Object;\") "
+                         "(move-result-pseudo-object v0) (return-object v0)",
+                         optimize_enums::UnsafeType::kUsageInheritedFieldRef}),
+    [](const auto& info) { return info.param.name; });
+
+#undef BAR_Y_TO_V0
+
 // A switch-map class whose <clinit> fills a second table that it stores in no
 // field, as after RemoveUnusedFieldsPass removed the field of a table nothing
 // reads: no switch can read that table, so collecting the switch cases skips

@@ -58,6 +58,7 @@
 #include "DeterministicContainers.h"
 #include "DexUtil.h"
 #include "IROpcode.h"
+#include "MethodHandleRewriter.h"
 #include "MethodOverrideGraph.h"
 #include "PassManager.h"
 #include "Resolver.h"
@@ -210,9 +211,14 @@ PackagePrivatePreprocessorPass::Stats analyze_class(
     }
     package_private_accessed_classes->insert(resolved);
   };
+  // A field that `method_handle` gets or puts, if given, resolves as ART
+  // resolves the handle.
   auto visit_field = [&](DexFieldRef* field, FieldSearch fs,
-                         DexMethod* caller = nullptr) {
-    auto* resolved = resolve_field(field, fs);
+                         DexMethod* caller = nullptr,
+                         const DexMethodHandle* method_handle = nullptr) {
+    auto* resolved = method_handle != nullptr
+                         ? resolve_field_handle(method_handle)
+                         : resolve_field(field, fs);
     if (resolved == nullptr) {
       TRACE(PPP, 5, "[%s] unresolved field: %s", SHOW(cls), SHOW(resolved));
       stats.unresolved_fields++;
@@ -250,14 +256,17 @@ PackagePrivatePreprocessorPass::Stats analyze_class(
     }
     package_private_accessed_fields->insert(resolved);
   };
+  // A call that `method_handle` makes, if given, resolves as ART resolves the
+  // handle.
   auto visit_method = [&](DexMethodRef* method,
                           MethodSearch ms,
-                          DexMethod* caller = nullptr) {
+                          DexMethod* caller = nullptr,
+                          const DexMethodHandle* method_handle = nullptr) {
     if (type::is_array(method->get_class()) &&
         method->get_name()->str() == "clone") {
       return;
     }
-    auto* resolved = resolve_method_deprecated(method, ms, caller);
+    auto* resolved = resolve_call(ms, method, method_handle, caller);
     if ((resolved == nullptr) && ms == MethodSearch::Virtual) {
       resolved = resolve_method_deprecated(
           method, MethodSearch::InterfaceVirtual, caller);
@@ -306,6 +315,25 @@ PackagePrivatePreprocessorPass::Stats analyze_class(
     }
     package_private_accessed_methods->insert(resolved);
   };
+  // A method handle in a static field value or an annotation is resolved, and
+  // checked for access, in the class that declares the field or holds the
+  // annotation, like a method handle in code.
+  auto visit_method_handles = [&](const Gatherable& value) {
+    std::vector<DexMethodHandle*> method_handles;
+    value.gather_methodhandles(method_handles);
+    for (const auto* method_handle : method_handles) {
+      auto opcode = method_handle_opcode(method_handle);
+      if (opcode::is_a_method_invoke(opcode)) {
+        visit_method(method_handle->methodref(), opcode_to_search(opcode),
+                     /* caller */ nullptr, method_handle);
+      } else {
+        auto fs = opcode::is_an_sfield_op(opcode) ? FieldSearch::Static
+                                                  : FieldSearch::Instance;
+        visit_field(method_handle->fieldref(), fs, /* caller */ nullptr,
+                    method_handle);
+      }
+    }
+  };
   if (cls->get_super_class() != nullptr) {
     visit_type(cls->get_super_class());
   }
@@ -318,17 +346,27 @@ PackagePrivatePreprocessorPass::Stats analyze_class(
       [&](DexMethod* caller, IRInstruction* insn) {
         if (insn->has_type()) {
           visit_type(insn->get_type());
-        } else if (insn->has_field()) {
-          auto fs = opcode::is_an_sfield_op(insn->opcode())
-                        ? FieldSearch::Static
-                        : FieldSearch::Instance;
-          visit_field(insn->get_field(), fs, caller);
-        } else if (insn->has_method()) {
-          auto ms = opcode_to_search(insn->opcode());
-          visit_method(insn->get_method(), ms, caller);
         }
+        // A method handle is resolved, and checked for access, in the class
+        // of the code that holds it, like the instruction that it acts like.
+        for_each_field_access(insn, [&](IROpcode opcode, DexFieldRef* field,
+                                        const DexMethodHandle* method_handle) {
+          auto fs = opcode::is_an_sfield_op(opcode) ? FieldSearch::Static
+                                                    : FieldSearch::Instance;
+          visit_field(field, fs, caller, method_handle);
+        });
+        for_each_invoke(insn, [&](IROpcode opcode, DexMethodRef* method,
+                                  const DexMethodHandle* method_handle) {
+          visit_method(method, opcode_to_search(opcode), caller, method_handle);
+        });
       });
+  for (auto* field : cls->get_sfields()) {
+    if (auto* value = field->get_static_value()) {
+      visit_method_handles(*value);
+    }
+  }
   walk::annotations(std::vector<DexClass*>{cls}, [&](DexAnnotation* anno) {
+    visit_method_handles(*anno);
     std::vector<const DexType*> types;
     anno->gather_types(types);
     for (const auto* type : types) {
@@ -553,8 +591,36 @@ PackagePrivatePreprocessorPass::Stats transform(
     }
   }
 
+  // A method handle that calls a method to be renamed is replaced by one of
+  // the same kind and class that names the new name, which resolves to the
+  // renamed method as the invokes below do: resolution searches the
+  // superclasses of the class that a handle names, so the class can stay. A
+  // handle that names the renamed method itself follows the renaming.
+  MethodHandleRewriter method_handle_rewriter(
+      {.handle =
+           [&](const DexMethodHandle* method_handle,
+               const DexMethod* holder) -> std::optional<DexMethodHandle> {
+        if (!DexMethodHandle::isInvokeType(method_handle->type())) {
+          return std::nullopt;
+        }
+        auto it = new_names.find(
+            resolve_call(method_handle_opcode(method_handle),
+                         method_handle->methodref(), method_handle, holder));
+        if (it == new_names.end()) {
+          return std::nullopt;
+        }
+        auto* method = method_handle->methodref();
+        if (method == it->first) {
+          return std::nullopt;
+        }
+        return DexMethodHandle(method_handle->type(),
+                               DexMethod::make_method(method->get_class(),
+                                                      it->second,
+                                                      method->get_proto()));
+      }});
   ConcurrentMap<IRInstruction*, DexMethod*> insns_to_update;
-  walk::parallel::opcodes(scope, [&](DexMethod*, IRInstruction* insn) {
+  walk::parallel::opcodes(scope, [&](DexMethod* caller, IRInstruction* insn) {
+    method_handle_rewriter.rewrite(insn, caller);
     if (!insn->has_method()) {
       return;
     }
@@ -566,6 +632,7 @@ PackagePrivatePreprocessorPass::Stats transform(
     }
     insns_to_update.emplace(insn, resolved);
   });
+  method_handle_rewriter.rewrite(scope);
 
   auto ordered_methods_to_rename =
       unordered_to_ordered(methods_to_rename, compare_dexmethods);

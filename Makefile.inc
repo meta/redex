@@ -54,6 +54,7 @@ COMMON_INCLUDES = \
 	-I$(top_srcdir)/opt/optimize_resources \
 	-I$(top_srcdir)/opt/original_name \
 	-I$(top_srcdir)/opt/outliner \
+	-I$(top_srcdir)/opt/package-private-preprocessor \
 	-I$(top_srcdir)/opt/partial-application \
 	-I$(top_srcdir)/opt/peephole \
 	-I$(top_srcdir)/opt/print-members \

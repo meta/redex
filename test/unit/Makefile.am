@@ -168,6 +168,7 @@ check_PROGRAMS = \
     object_propagation_test \
     optimize_enums_test \
     outliner_type_analysis_test \
+    package_private_preprocessor_method_handle_test \
     partial_pass_test \
     pass_manager_feature_test \
     peephole_test \
@@ -584,6 +585,8 @@ optimize_enums_test_SOURCES = OptimizeEnumsTest.cpp $(top_srcdir)/test/common/Re
 optimize_enums_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 outliner_type_analysis_test_SOURCES = OutlinerTypeAnalysisTest.cpp
+
+package_private_preprocessor_method_handle_test_SOURCES = PackagePrivatePreprocessorMethodHandleTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 partial_pass_test_SOURCES = PartialPassTest.cpp
 

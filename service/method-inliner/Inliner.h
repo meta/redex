@@ -13,6 +13,7 @@
 
 #include "BaselineProfile.h"
 #include "CallSiteSummaries.h"
+#include "ConcurrentContainers.h"
 #include "DeterministicContainers.h"
 #include "DexUtil.h"
 #include "PriorityThreadPoolDAGScheduler.h"
@@ -947,6 +948,10 @@ class MultiMethodInliner {
   InliningInfo info;
 
   const std::vector<DexClass*>& m_scope;
+
+  // The methods that method handles name or can run, which are never made
+  // static (see `create_vmethod`).
+  const InsertOnlyConcurrentSet<const DexMethod*> m_method_handle_methods;
 
   const inliner::InlinerConfig& m_config;
 

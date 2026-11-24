@@ -5138,6 +5138,71 @@ TEST_F(MethodInlineTest, method_handle_of_private_method_is_not_inlined) {
   EXPECT_TRUE(is_private(DexMethod::get_method("LFoo;.helper:()V")->as_def()));
 }
 
+// Inlining `LFoo;.callee` into `LBar;` would make the private method
+// `helper`, which it calls, public and static, so a method handle of `helper`
+// elsewhere, here in a static field value, would no longer fit it. The callee
+// stays in its class.
+TEST_F(MethodInlineTest,
+       private_method_that_a_static_value_handle_names_is_not_made_static) {
+  EXPECT_FALSE(inlines_into_other_class(
+      conf,
+      R"((
+    (new-instance "LFoo;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0) "LFoo;.helper:()V")
+    (return-void)
+  ))",
+      [&](DexMethod* callee) {
+        auto* field =
+            DexField::make_field("LFoo;.HANDLE:Ljava/lang/invoke/MethodHandle;")
+                ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+                                std::make_unique<DexEncodedValueMethodHandle>(
+                                    redex::make_method_handle(
+                                        METHOD_HANDLE_TYPE_INVOKE_DIRECT,
+                                        "LFoo;.helper:()V")));
+        type_class(callee->get_class())->add_field(field);
+      }));
+  EXPECT_TRUE(is_private(DexMethod::get_method("LFoo;.helper:()V")->as_def()));
+}
+
+// The same holds for a handle of any kind in other code.
+TEST_F(MethodInlineTest,
+       private_method_that_a_handle_in_other_code_names_is_not_made_static) {
+  EXPECT_FALSE(inlines_into_other_class(
+      conf,
+      R"((
+    (new-instance "LFoo;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0) "LFoo;.helper:()V")
+    (return-void)
+  ))",
+      [&](DexMethod* callee) {
+        type_class(callee->get_class())
+            ->add_method(DexMethod::make_method("LFoo;.other:()V")
+                             ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                                             assembler::ircode_from_string(R"((
+                (const-method-handle invoke-instance "LFoo;.helper:()V")
+                (move-result-pseudo-object v0)
+                (return-void)
+              ))"),
+                                             /* is_virtual */ false));
+      }));
+  EXPECT_TRUE(is_private(DexMethod::get_method("LFoo;.helper:()V")->as_def()));
+}
+
+// Without method handles, inlining makes `helper` public and static.
+TEST_F(MethodInlineTest, private_method_without_handles_is_made_static) {
+  EXPECT_TRUE(inlines_into_other_class(conf, R"((
+    (new-instance "LFoo;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0) "LFoo;.helper:()V")
+    (return-void)
+  ))"));
+  auto* helper = DexMethod::get_method("LFoo;.helper:(LFoo;)V");
+  ASSERT_NE(helper, nullptr);
+  EXPECT_TRUE(is_static(helper->as_def()));
+}
+
 TEST_F(MethodInlineTest,
        call_site_method_handle_of_private_method_is_not_inlined) {
   EXPECT_FALSE(inlines_into_other_class(

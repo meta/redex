@@ -26,6 +26,7 @@
 #include "InlinerConfig.h"
 #include "LiveRange.h"
 #include "LoopInfo.h"
+#include "MethodUtil.h"
 #include "MonitorCount.h"
 #include "Mutators.h"
 #include "OptData.h"
@@ -192,6 +193,8 @@ MultiMethodInliner::MultiMethodInliner(
           },
           0),
       m_scope(scope),
+      m_method_handle_methods(
+          method::gather_methods_named_by_method_handles(scope)),
       m_config(config),
       m_mode(mode),
       m_inline_for_speed(inline_for_speed),
@@ -2309,7 +2312,7 @@ bool MultiMethodInliner::create_vmethod(IRInstruction* insn,
                                         const DexMethod* caller) {
   bool needs_vmethod = false;
   for_each_invoke(insn, [&](IROpcode opcode, DexMethodRef* method_ref,
-                            const DexMethodHandle* method_handle) {
+                            const DexMethodHandle* /* method_handle */) {
     if (needs_vmethod || opcode != OPCODE_INVOKE_DIRECT) {
       return;
     }
@@ -2334,9 +2337,9 @@ bool MultiMethodInliner::create_vmethod(IRInstruction* insn,
       return;
     }
     // Making the method static would change what kind of method a method
-    // handle of it must be, so code that holds an invoke-direct handle of a
-    // private method stays in its class.
-    if (method_handle != nullptr || !can_rename(method) ||
+    // handle of it must be, so code that calls a private method that a method
+    // handle names stays in its class.
+    if ((m_method_handle_methods.count(method) != 0u) || !can_rename(method) ||
         method->rstate.no_optimizations()) {
       info.need_vmethod++;
       needs_vmethod = true;

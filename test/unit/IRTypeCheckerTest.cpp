@@ -4589,3 +4589,101 @@ TEST_F(IRTypeCheckerMethodHandleAccessTest, privateMembersOfOwnClass) {
   ))");
   EXPECT_TRUE(checker->good()) << checker->what();
 }
+
+/*
+ * class Bar extends LibBase {}  // LibBase is not in the input
+ * static void sink(RuntimeException[] a) {}
+ * static void call(Bar[] b) { sink(b); }
+ *
+ * LibBase, a library class, may extend RuntimeException, so the call may be
+ * well typed.
+ */
+TEST_F(IRTypeCheckerTest, assignmentThroughUnknownSuperclassIsAllowed) {
+  ClassCreator exception_creator(type::java_lang_RuntimeException());
+  exception_creator.set_super(type::java_lang_Object());
+  exception_creator.set_external();
+  exception_creator.create();
+  ClassCreator bar_creator(DexType::make_type("LBar;"));
+  bar_creator.set_super(DexType::make_type("LLibBase;"));
+  bar_creator.create();
+
+  auto* method = DexMethod::make_method("LCaller;.call:([LBar;)V")
+                     ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  method->set_code(assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (invoke-static (v0) "LCaller;.sink:([Ljava/lang/RuntimeException;)V")
+      (return-void)
+    )
+  )"));
+
+  IRTypeChecker checker(method);
+  checker.run();
+  EXPECT_TRUE(checker.good()) << checker.what();
+}
+
+/*
+ * class Bar implements LibMarker {}  // LibMarker is not in the input
+ * static void sink(RuntimeException[] a) {}
+ * static void call(Bar[] b) { sink(b); }
+ *
+ * Bar extends Object, and an interface cannot lead to RuntimeException, so
+ * the call is ill typed.
+ */
+TEST_F(IRTypeCheckerTest, assignmentThroughUnknownInterfaceToAClassIsRejected) {
+  ClassCreator exception_creator(type::java_lang_RuntimeException());
+  exception_creator.set_super(type::java_lang_Object());
+  exception_creator.set_external();
+  exception_creator.create();
+  ClassCreator bar_creator(DexType::make_type("LBar;"));
+  bar_creator.set_super(type::java_lang_Object());
+  bar_creator.add_interface(DexType::make_type("LLibMarker;"));
+  bar_creator.create();
+
+  auto* method = DexMethod::make_method("LCaller;.call:([LBar;)V")
+                     ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  method->set_code(assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (invoke-static (v0) "LCaller;.sink:([Ljava/lang/RuntimeException;)V")
+      (return-void)
+    )
+  )"));
+
+  IRTypeChecker checker(method);
+  checker.run();
+  EXPECT_TRUE(checker.fail());
+}
+
+/*
+ * class Bar extends LibBase {}  // LibBase is not in the input
+ * static void sink(String[] a) {}
+ * static void call(Bar[] b) { sink(b); }
+ *
+ * String is final, so no class, LibBase included, extends it.
+ */
+TEST_F(IRTypeCheckerTest,
+       assignmentThroughUnknownSuperclassToAFinalClassIsRejected) {
+  ClassCreator string_creator(type::java_lang_String());
+  string_creator.set_super(type::java_lang_Object());
+  string_creator.set_access(ACC_PUBLIC | ACC_FINAL);
+  string_creator.set_external();
+  string_creator.create();
+  ClassCreator bar_creator(DexType::make_type("LBar;"));
+  bar_creator.set_super(DexType::make_type("LLibBase;"));
+  bar_creator.create();
+
+  auto* method = DexMethod::make_method("LCaller;.call:([LBar;)V")
+                     ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  method->set_code(assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (invoke-static (v0) "LCaller;.sink:([Ljava/lang/String;)V")
+      (return-void)
+    )
+  )"));
+
+  IRTypeChecker checker(method);
+  checker.run();
+  EXPECT_TRUE(checker.fail());
+}

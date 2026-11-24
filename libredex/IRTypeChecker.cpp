@@ -146,7 +146,11 @@ bool check_cast_helper(const DexType* from, const DexType* to) {
        (g_redex->pointers_cache().m_well_known_types.count(to) == 0u))) {
     return true;
   }
-  return type::check_cast(from, to);
+  // A class above `from` that Redex does not know is a library class, which
+  // may extend `to` if `to` is a library class too, and not a final one.
+  // (`to_cls` is not null here: a missing class returned true above.)
+  return type::is_instance_of_if_known(from, to).value_or(
+      to_cls->is_external() && !is_final(to_cls));
 }
 
 // Type assignment check between two reference types. We assume that both `from`

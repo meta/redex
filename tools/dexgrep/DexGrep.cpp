@@ -6,7 +6,6 @@
  */
 
 #include <cstdio>
-#include <cstdlib>
 #include <getopt.h> // @donotremove
 #include <regex>
 

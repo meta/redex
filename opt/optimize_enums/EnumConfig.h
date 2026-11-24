@@ -57,6 +57,11 @@ struct Config {
    */
   UnorderedSet<const DexType*> breaking_reference_equality_allowlist;
   SummaryMap param_summary_map;
+  /**
+   * The override graph of the scope, which the analysis of `<clinit>` needs
+   * to know which methods a virtual call may run.
+   */
+  const method_override_graph::Graph* override_graph{nullptr};
   ConcurrentSet<const DexType*> candidate_enums;
 
   explicit Config(uint32_t max_size) : max_enum_size(max_size) {}

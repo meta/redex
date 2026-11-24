@@ -307,33 +307,23 @@ UnorderedSet<const DexField*> unassigned_constants(
  */
 void add_constants_read(const IRInstruction* insn,
                         UnorderedSet<const DexField*>* reads) {
-  const DexClass* cls = nullptr;
-  if (insn->opcode() == OPCODE_SGET_OBJECT) {
-    const auto* field = resolve_field(insn->get_field(), FieldSearch::Static);
-    cls = field == nullptr ? nullptr : type_class(field->get_class());
-    if (cls == nullptr || !is_enum(cls)) {
-      return;
-    }
-    if (is_constant_of(cls, field)) {
-      reads->insert(field);
-      return;
-    }
-    if (!optimize_enums::is_enum_values_field(field)) {
-      return;
-    }
-  } else if (insn->has_method()) {
-    const auto* method = insn->get_method();
-    cls = type_class(method->get_class());
-    if (cls == nullptr || !is_enum(cls) ||
-        (!optimize_enums::is_enum_values(method) &&
-         !optimize_enums::is_enum_valueof(method))) {
-      return;
-    }
-  } else {
+  if (insn->opcode() != OPCODE_SGET_OBJECT) {
     return;
   }
-  // The values array and the methods that read it see every constant, so they
-  // run only once every one is assigned.
+  const auto* field = resolve_field(insn->get_field(), FieldSearch::Static);
+  const auto* cls = field == nullptr ? nullptr : type_class(field->get_class());
+  if (cls == nullptr || !is_enum(cls)) {
+    return;
+  }
+  if (is_constant_of(cls, field)) {
+    reads->insert(field);
+    return;
+  }
+  if (!optimize_enums::is_enum_values_field(field)) {
+    return;
+  }
+  // The values array holds every constant, so it exists only once every one
+  // is assigned.
   for (auto* constant : cls->get_sfields()) {
     if (is_constant_of(cls, constant)) {
       reads->insert(constant);
@@ -353,20 +343,29 @@ bool reads_unassigned_constant(
 }
 
 /**
- * Whether `insn` reads one of `cls`'s constants before `<clinit>` has assigned
- * it on every path, given the state `env` before `insn`. Such a read sees
- * null, as in `enum E { A(E.B == null), B(false); }`, but would see the boxed
- * constant once the enum is boxed.
+ * Whether `insn` may read one of `cls`'s constants before `<clinit>` has
+ * assigned it on every path, given the state `env` before `insn`, directly or
+ * in the code a call runs. Such a read sees null, as in
+ * `enum E { A(E.B == null), B(false); }`, but would see the boxed constant once
+ * the enum is boxed. `<clinit>` makes no `invoke-polymorphic` or
+ * `invoke-custom` call, as `analyze_enum_clinit` checks first. The class
+ * initializers that this code triggers are not followed: Redex may change when
+ * static initializers run (website/docs/fb/faq/specbreaker.md, Static
+ * Initializers), as FinalInlinePassV2 already does.
  */
-bool may_read_unassigned_constant(const DexClass* cls,
-                                  const IRInstruction* insn,
-                                  const ConstantEnvironment& env) {
-  if (env.is_bottom() ||
-      (insn->opcode() != OPCODE_SGET_OBJECT && !insn->has_method())) {
+bool may_read_unassigned_constant(
+    const DexClass* cls,
+    const IRInstruction* insn,
+    const ConstantEnvironment& env,
+    optimize_enums::ConstantReadSummaries* reads) {
+  const bool is_call = opcode::is_a_method_invoke(insn->opcode());
+  if (env.is_bottom() || (insn->opcode() != OPCODE_SGET_OBJECT && !is_call)) {
     return false;
   }
   const auto unassigned = unassigned_constants(cls, env);
-  return !unassigned.empty() && reads_unassigned_constant(insn, unassigned);
+  return !unassigned.empty() &&
+         (reads_unassigned_constant(insn, unassigned) ||
+          (is_call && reads->call_may_read(insn, unassigned)));
 }
 
 } // namespace
@@ -566,7 +565,8 @@ bool ConstantReadSummaries::call_may_read(
 }
 
 EnumAttributes analyze_enum_clinit(const DexClass* cls,
-                                   const bool support_kt_19_enum_entries) {
+                                   const bool support_kt_19_enum_entries,
+                                   ConstantReadSummaries* reads) {
   always_assert(is_enum(cls));
 
   auto* code = cls->get_clinit()->get_code();
@@ -596,7 +596,7 @@ EnumAttributes analyze_enum_clinit(const DexClass* cls,
     auto last_insn = b->get_last_insn();
     for (auto& mie : InstructionIterable(b)) {
       auto* insn = mie.insn;
-      if (may_read_unassigned_constant(cls, insn, env)) {
+      if (may_read_unassigned_constant(cls, insn, env, reads)) {
         TRACE(ENUM, 2, "\t%s may read a constant before assigning it: %s",
               SHOW(cls), SHOW(insn));
         return EnumAttributes();

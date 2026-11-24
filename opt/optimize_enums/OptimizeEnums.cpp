@@ -408,6 +408,7 @@ class OptimizeEnums {
                              UnorderedMap<UnsafeType, size_t>& unsafe_counts) {
     const bool support_kt_19_enum_entries = config.support_kt_19_enum_entries;
     const auto override_graph = method_override_graph::build_graph(m_scope);
+    config.override_graph = override_graph.get();
     calculate_param_summaries(m_scope, *override_graph,
                               &config.param_summary_map);
 

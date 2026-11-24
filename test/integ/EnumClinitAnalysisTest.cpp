@@ -6,6 +6,7 @@
  */
 
 #include "EnumClinitAnalysis.h"
+#include "MethodOverrideGraph.h"
 
 #include <gtest/gtest.h>
 
@@ -25,6 +26,20 @@ constexpr const char* ENUM_SAFE_VALUE =
 constexpr const char* ENUM_SAFE_IS_USEFUL =
     "Lcom/facebook/redextest/EnumSafe;.isUseful:Z";
 
+// Analyzes `cls`'s <clinit> with summaries built over every class the test
+// created.
+optimize_enums::EnumAttributes analyze_clinit(const DexClass* cls,
+                                              bool support_kt_19_enum_entries) {
+  Scope scope;
+  g_redex->walk_type_class([&](const DexType*, const DexClass* type_cls) {
+    scope.push_back(const_cast<DexClass*>(type_cls));
+  });
+  auto override_graph = method_override_graph::build_graph(scope);
+  optimize_enums::ConstantReadSummaries reads(*override_graph);
+  return optimize_enums::analyze_enum_clinit(cls, support_kt_19_enum_entries,
+                                             &reads);
+}
+
 class EnumClinitAnalysisTest : public RedexIntegrationTest {};
 
 /*
@@ -34,14 +49,12 @@ class EnumClinitAnalysisTest : public RedexIntegrationTest {};
 TEST_F(EnumClinitAnalysisTest, OrdinalAnalysis) {
   using namespace optimize_enums;
   ASSERT_TRUE(load_class_file(std::getenv("enum_class_file")));
-
   // EnumSafe
   auto* enum_cls = type_class(DexType::get_type(ENUM_SAFE));
   for (auto* m : enum_cls->get_dmethods()) {
     m->get_code()->build_cfg();
   }
-  auto attributes =
-      analyze_enum_clinit(enum_cls, /*support_kt_19_enum_entries*/ false);
+  auto attributes = analyze_clinit(enum_cls, false);
   auto& enum_constants = attributes.m_constants_map;
   auto& ifield_map = attributes.m_field_map;
 
@@ -77,14 +90,16 @@ TEST_F(EnumClinitAnalysisTest, OrdinalAnalysis) {
   EXPECT_EQ(ifield_map[ifield][1].primitive_value, 1);
 
   // These enums should not be optimized.
-  for (const char* enum_name : {"Lcom/facebook/redextest/EnumUnsafe1;",
-                                "Lcom/facebook/redextest/EnumUnsafe2;"}) {
+  for (const char* enum_name :
+       {"Lcom/facebook/redextest/EnumUnsafe1;",
+        "Lcom/facebook/redextest/EnumUnsafe2;",
+        "Lcom/facebook/redextest/EnumCalleeReadsLaterConstant;",
+        "Lcom/facebook/redextest/EnumConstructorReadsLaterConstant;"}) {
     enum_cls = type_class(DexType::get_type(enum_name));
     for (auto* m : enum_cls->get_dmethods()) {
       m->get_code()->build_cfg();
     }
-    attributes =
-        analyze_enum_clinit(enum_cls, /*support_kt_19_enum_entries*/ false);
+    attributes = analyze_clinit(enum_cls, false);
     EXPECT_TRUE(attributes.m_constants_map.empty());
     EXPECT_TRUE(attributes.m_field_map.empty());
   }

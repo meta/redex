@@ -132,6 +132,7 @@ class ConstantReadSummaries {
  * otherwise, return empty maps.
  */
 EnumAttributes analyze_enum_clinit(const DexClass* cls,
-                                   bool support_kt_19_enum_entries);
+                                   bool support_kt_19_enum_entries,
+                                   ConstantReadSummaries* reads);
 
 } // namespace optimize_enums

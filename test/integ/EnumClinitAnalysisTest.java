@@ -46,3 +46,40 @@ enum EnumUnsafe2 {
     this.name = str;
   }
 }
+
+/**
+ * FAST's argument calls code that reads SLOW, which is still null then. Once
+ * SLOW is boxed, `seen` would become true.
+ */
+enum EnumCalleeReadsLaterConstant {
+  FAST(slowReady()),
+  SLOW(true);
+
+  static boolean seen;
+
+  EnumCalleeReadsLaterConstant(boolean ready) {}
+
+  static boolean slowReady() {
+    seen = SLOW != null;
+    return true;
+  }
+}
+
+/**
+ * The constructor body, not a constant's argument, reads SLOW while it is
+ * still null. Once SLOW is boxed, `seen` would become true.
+ */
+enum EnumConstructorReadsLaterConstant {
+  FAST(true),
+  SLOW(false);
+
+  static boolean seen;
+
+  EnumConstructorReadsLaterConstant(boolean ready) {
+    record();
+  }
+
+  static void record() {
+    seen = SLOW != null;
+  }
+}

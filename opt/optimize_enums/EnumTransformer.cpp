@@ -1241,10 +1241,12 @@ class EnumTransformer final {
         m_int_objs(0),
         m_disable_violation_fixes(disable_violation_fixes) {
     m_enum_util = std::make_unique<EnumUtil>(config);
+    always_assert(config.override_graph != nullptr);
+    optimize_enums::ConstantReadSummaries reads(*config.override_graph);
     for (const auto& enum_type : UnorderedIterable(config.candidate_enums)) {
       auto* enum_cls = type_class(enum_type);
       auto attributes = optimize_enums::analyze_enum_clinit(
-          enum_cls, config.support_kt_19_enum_entries);
+          enum_cls, config.support_kt_19_enum_entries, &reads);
       size_t num_enum_constants = attributes.m_constants_map.size();
       if (num_enum_constants == 0) {
         TRACE(ENUM, 2, "\tCannot analyze enum %s : ord %zu sfields %zu",

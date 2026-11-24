@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include <boost/algorithm/string/replace.hpp>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -304,337 +305,18 @@ DexStore create_enum_store() {
   return store;
 }
 
-/* Direct tests of the read summaries, over the enum `LBar;` of
-`create_enum_store()` and the methods of a class `LReads;` the test adds. */
-class OptimizeEnumsReadSummaryTest : public OptimizeEnumsTest {
- protected:
-  using Summary = optimize_enums::ConstantReadSummaries::Summary;
-
-  // Adds `LReads;` with `methods`, and its subclass `LSubReads;` with
-  // `sub_methods`, and returns the summaries of the methods named `names`,
-  // which `num_threads` threads all ask for at once from the same summaries;
-  // every thread must get the same ones.
-  std::vector<Summary> summaries_of(
-      const std::vector<std::string>& methods,
-      const std::vector<std::string>& names,
-      size_t num_threads = 1,
-      const std::vector<std::string>& sub_methods = {}) {
-    auto store = create_enum_store();
-    ClassCreator cc(DexType::make_type("LReads;"));
-    cc.set_super(type::java_lang_Object());
-    cc.set_access(ACC_PUBLIC);
-    for (const auto& method : methods) {
-      cc.add_method(assembler::method_from_string(method));
-    }
-    ClassCreator sc(DexType::make_type("LSubReads;"));
-    sc.set_super(DexType::get_type("LReads;"));
-    sc.set_access(ACC_PUBLIC);
-    for (const auto& method : sub_methods) {
-      sc.add_method(assembler::method_from_string(method));
-    }
-    store.add_classes({cc.create(), sc.create()});
-    DexStoresVector stores({std::move(store)});
-    auto scope = build_class_scope(stores);
-    walk::code(scope, [](DexMethod*, IRCode& code) {
-      if (!code.cfg_built()) {
-        code.build_cfg();
-      }
-    });
-    auto override_graph = method_override_graph::build_graph(scope);
-    optimize_enums::ConstantReadSummaries reads(*override_graph);
-    std::vector<std::vector<Summary>> per_thread(num_threads);
-    std::vector<std::thread> threads;
-    threads.reserve(num_threads);
-    for (size_t t = 0; t < num_threads; ++t) {
-      threads.emplace_back([&, t] {
-        for (const auto& name : names) {
-          per_thread[t].push_back(
-              reads.of(DexMethod::get_method(name)->as_def()));
-        }
-      });
-    }
-    for (auto& thread : threads) {
-      thread.join();
-    }
-    for (size_t t = 1; t < num_threads; ++t) {
-      for (size_t i = 0; i < names.size(); ++i) {
-        const auto& a = per_thread[0][i];
-        const auto& b = per_thread[t][i];
-        EXPECT_EQ(a.has_value(), b.has_value()) << names[i];
-        if (a && b) {
-          EXPECT_EQ(a->size(), b->size()) << names[i];
-          EXPECT_TRUE(unordered_all_of(*b, [&](const DexField* f) {
-            return a->count(f) != 0u;
-          })) << names[i];
-        }
-      }
-    }
-    return per_thread[0];
-  }
-
-  // `ping()` calls `pong()`, which reads Bar.Y and calls `ping()`.
-  static std::vector<std::string> ping_pong_methods() {
-    return {R"(
-      (method (public static) "LReads;.ping:()V"
-        (
-          (invoke-static () "LReads;.pong:()V")
-          (return-void)
-        )
-      )
-    )",
-            R"(
-      (method (public static) "LReads;.pong:()V"
-        (
-          (sget-object "LBar;.Y:LBar;")
-          (move-result-pseudo-object v0)
-          (invoke-static () "LReads;.ping:()V")
-          (return-void)
-        )
-      )
-    )"};
-  }
-
-  Summary summary_of(const std::vector<std::string>& methods,
-                     const std::string& name) {
-    return summaries_of(methods, {name}).front();
-  }
-
-  // The summary of `LCaller;.call`, which calls `read()` on an `LReader;`, an
-  // interface with the abstract method `read()` that only `LReads;`
-  // implements, with `impl`. When `impl` is a method of `LSubReader;`
-  // instead, it is a default method of that sub-interface of `LReader;`, which
-  // `LReads;` implements without a `read()` of its own.
-  Summary interface_call_summary(const std::string& impl) {
-    auto store = create_enum_store();
-    ClassCreator ic(DexType::make_type("LReader;"));
-    ic.set_super(type::java_lang_Object());
-    ic.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
-    auto* read = DexMethod::make_method("LReader;.read:()V")
-                     ->make_concrete(ACC_PUBLIC | ACC_ABSTRACT,
-                                     /* is_virtual */ true);
-    ic.add_method(read);
-    auto* impl_method = assembler::method_from_string(impl);
-    ClassCreator rc(DexType::make_type("LReads;"));
-    rc.set_super(type::java_lang_Object());
-    rc.set_access(ACC_PUBLIC);
-    if (impl_method->get_class() == DexType::get_type("LReads;")) {
-      rc.add_interface(DexType::get_type("LReader;"));
-      rc.add_method(impl_method);
-    } else {
-      ClassCreator sc(DexType::make_type("LSubReader;"));
-      sc.set_super(type::java_lang_Object());
-      sc.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
-      sc.add_interface(DexType::get_type("LReader;"));
-      sc.add_method(impl_method);
-      store.add_classes({sc.create()});
-      rc.add_interface(DexType::get_type("LSubReader;"));
-    }
-    ClassCreator cc(DexType::make_type("LCaller;"));
-    cc.set_super(type::java_lang_Object());
-    cc.set_access(ACC_PUBLIC);
-    cc.add_method(assembler::method_from_string(R"(
-      (method (public static) "LCaller;.call:(LReader;)V"
-        (
-          (load-param-object v0)
-          (invoke-interface (v0) "LReader;.read:()V")
-          (return-void)
-        )
-      )
-    )"));
-    store.add_classes({ic.create(), rc.create(), cc.create()});
-    DexStoresVector stores({std::move(store)});
-    auto scope = build_class_scope(stores);
-    walk::code(scope, [](DexMethod*, IRCode& code) {
-      if (!code.cfg_built()) {
-        code.build_cfg();
-      }
-    });
-    auto override_graph = method_override_graph::build_graph(scope);
-    optimize_enums::ConstantReadSummaries reads(*override_graph);
-    return reads.of(
-        DexMethod::get_method("LCaller;.call:(LReader;)V")->as_def());
-  }
-
-  static const DexField* bar_y() {
-    return dynamic_cast<DexField*>(DexField::get_field("LBar;.Y:LBar;"));
-  }
-};
-
-// A method that reads no constant has an empty summary.
-TEST_F(OptimizeEnumsReadSummaryTest, readsNothing) {
-  auto summary = summary_of({R"(
-    (method (public static) "LReads;.nothing:()V"
-      ((return-void))
-    )
-  )"},
-                            "LReads;.nothing:()V");
-  ASSERT_TRUE(summary);
-  EXPECT_TRUE(summary->empty());
-}
-
-// A method that reads one constant has exactly that one in its summary.
-TEST_F(OptimizeEnumsReadSummaryTest, readsOneConstant) {
-  auto summary = summary_of({R"(
-    (method (public static) "LReads;.one:()Ljava/lang/Object;"
-      (
-        (sget-object "LBar;.Y:LBar;")
-        (move-result-pseudo-object v0)
-        (return-object v0)
-      )
-    )
-  )"},
-                            "LReads;.one:()Ljava/lang/Object;");
-  ASSERT_TRUE(summary);
-  EXPECT_EQ(summary->size(), 1);
-  EXPECT_EQ(summary->count(bar_y()), 1);
-}
-
-// An interface call runs one of the interface's implementations; the abstract
-// interface method itself runs nothing. The only implementation reads
-// nothing, so neither does the call.
-TEST_F(OptimizeEnumsReadSummaryTest, interfaceCallWithQuietImplementation) {
-  auto summary = interface_call_summary(R"(
-    (method (public) "LReads;.read:()V"
-      (
-        (load-param-object v0)
-        (return-void)
-      )
-    )
-  )");
-  ASSERT_TRUE(summary);
-  EXPECT_TRUE(summary->empty());
-}
-
-// The same call, whose only implementation reads a constant.
-TEST_F(OptimizeEnumsReadSummaryTest, interfaceCallReadsThroughImplementation) {
-  auto summary = interface_call_summary(R"(
-    (method (public) "LReads;.read:()V"
-      (
-        (load-param-object v0)
-        (sget-object "LBar;.Y:LBar;")
-        (move-result-pseudo-object v1)
-        (return-void)
-      )
-    )
-  )");
-  ASSERT_TRUE(summary);
-  EXPECT_EQ(summary->size(), 1);
-  EXPECT_EQ(summary->count(bar_y()), 1);
-}
-
-// The same call, where the only implementation is a default method of a
-// sub-interface, which reads a constant.
-TEST_F(OptimizeEnumsReadSummaryTest,
-       interfaceCallReadsThroughSubInterfaceDefaultMethod) {
-  auto summary = interface_call_summary(R"(
-    (method (public) "LSubReader;.read:()V"
-      (
-        (load-param-object v0)
-        (sget-object "LBar;.Y:LBar;")
-        (move-result-pseudo-object v1)
-        (return-void)
-      )
-    )
-  )");
-  ASSERT_TRUE(summary);
-  EXPECT_EQ(summary->size(), 1);
-  EXPECT_EQ(summary->count(bar_y()), 1);
-}
-
-// A static call of a trusted method that Redex has only a reference to, as a
-// Kotlin null check is when the Kotlin library is not in the input, runs
-// exactly that method, so the summary stays known.
-TEST_F(OptimizeEnumsReadSummaryTest, trustedReferenceOnlyCalleeIsKnown) {
-  auto summary = summary_of({R"(
-    (method (public static) "LReads;.check:(Ljava/lang/Object;)V"
-      (
-        (load-param-object v0)
-        (const-string "value")
-        (move-result-pseudo-object v1)
-        (invoke-static (v0 v1) "Lkotlin/jvm/internal/Intrinsics;.checkNotNullParameter:(Ljava/lang/Object;Ljava/lang/String;)V")
-        (return-void)
-      )
-    )
-  )"},
-                            "LReads;.check:(Ljava/lang/Object;)V");
-  ASSERT_TRUE(summary);
-  EXPECT_TRUE(summary->empty());
-}
-
-// A call of a method Redex has no code for may run anything, so the summary
-// is unknown.
-TEST_F(OptimizeEnumsReadSummaryTest, opaqueCallIsUnknown) {
-  auto summary = summary_of({R"(
-    (method (public static) "LReads;.opaque:()V"
-      (
-        (invoke-static () "LUnknown;.run:()V")
-        (return-void)
-      )
-    )
-  )"},
-                            "LReads;.opaque:()V");
-  EXPECT_FALSE(summary);
-}
-
-// A constant read in a method that two methods call each other through is in
-// the summary of both.
-TEST_F(OptimizeEnumsReadSummaryTest, readThroughCycle) {
-  auto summaries = summaries_of(ping_pong_methods(),
-                                {"LReads;.ping:()V", "LReads;.pong:()V"});
-  for (const auto& summary : summaries) {
-    ASSERT_TRUE(summary);
-    EXPECT_EQ(summary->count(bar_y()), 1);
-  }
-}
-
-// Threads that ask for the same summaries at once, as the analyses of several
-// enums do, get the same ones.
-TEST_F(OptimizeEnumsReadSummaryTest, concurrentQueriesAgree) {
-  auto summaries =
-      summaries_of(ping_pong_methods(),
-                   {"LReads;.ping:()V", "LReads;.pong:()V"}, /*num_threads=*/8);
-  for (const auto& summary : summaries) {
-    ASSERT_TRUE(summary);
-    EXPECT_EQ(summary->count(bar_y()), 1);
-  }
-}
-
-// A virtual call runs any override, so what an override reads is in the
-// caller's summary.
-TEST_F(OptimizeEnumsReadSummaryTest, overrideReadIsFollowed) {
-  const std::string base = R"(
-    (method (public) "LReads;.read:()V"
-      (
-        (load-param-object v0)
-        (return-void)
-      )
-    )
-  )";
-  const std::string caller = R"(
-    (method (public static) "LReads;.call:(LReads;)V"
-      (
-        (load-param-object v0)
-        (invoke-virtual (v0) "LReads;.read:()V")
-        (return-void)
-      )
-    )
-  )";
-  const std::string override = R"(
-    (method (public) "LSubReads;.read:()V"
-      (
-        (load-param-object v0)
-        (sget-object "LBar;.Y:LBar;")
-        (move-result-pseudo-object v1)
-        (return-void)
-      )
-    )
-  )";
-  auto summary = summaries_of({base, caller}, {"LReads;.call:(LReads;)V"},
-                              /*num_threads=*/1, {override})
-                     .front();
-  ASSERT_TRUE(summary);
-  EXPECT_EQ(summary->size(), 1);
-  EXPECT_EQ(summary->count(bar_y()), 1);
+// Analyzes `cls`'s <clinit> with summaries built over every class the test
+// created.
+optimize_enums::EnumAttributes analyze_clinit(const DexClass* cls,
+                                              bool support_kt_19_enum_entries) {
+  Scope scope;
+  g_redex->walk_type_class([&](const DexType*, const DexClass* type_cls) {
+    scope.push_back(const_cast<DexClass*>(type_cls));
+  });
+  auto override_graph = method_override_graph::build_graph(scope);
+  optimize_enums::ConstantReadSummaries reads(*override_graph);
+  return optimize_enums::analyze_enum_clinit(cls, support_kt_19_enum_entries,
+                                             &reads);
 }
 
 TEST_F(OptimizeEnumsTest, analyzeRConstMembers) {
@@ -1447,6 +1129,18 @@ TEST_F(OptimizeEnumsTest, constantWrittenOutsideClinitKeepsEnum) {
                 optimize_enums::UnsafeType::kUsageConstantSetOutsideClinit});
 }
 
+/* Build the CFGs of `cls` and of the stub `java.lang.Enum`, which the <clinit>
+analysis may follow calls into, as it can in a pass. */
+void build_cfgs_for_clinit_analysis(DexClass* cls) {
+  for (auto* c : {cls, type_class(type::java_lang_Enum())}) {
+    for (auto* m : c->get_all_methods()) {
+      if (m->get_code() != nullptr && !m->get_code()->cfg_built()) {
+        m->get_code()->build_cfg();
+      }
+    }
+  }
+}
+
 /* Create an enum with constants A and B whose <clinit> runs `clinit_prefix`
 and then passes the given ordinals to the constructor, like this hand-written
 Java-like code:
@@ -1506,9 +1200,7 @@ DexClass* create_two_constant_enum(const std::string& name,
     )
   )")));
   auto* cls = cc.create();
-  for (auto* m : cls->get_all_methods()) {
-    m->get_code()->build_cfg();
-  }
+  build_cfgs_for_clinit_analysis(cls);
   return cls;
 }
 
@@ -1517,9 +1209,7 @@ DexClass* create_two_constant_enum(const std::string& name,
 TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsOrdinalEqualToConstantCount) {
   auto store = create_enum_store();
   auto* cls = create_two_constant_enum("LOrdinalTooLarge;", 2);
-  auto attributes =
-      optimize_enums::analyze_enum_clinit(cls, /*support_kt_19_enum_entries*/
-                                          false);
+  auto attributes = analyze_clinit(cls, false);
   EXPECT_TRUE(attributes.m_constants_map.empty());
 }
 
@@ -1528,9 +1218,7 @@ TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsOrdinalEqualToConstantCount) {
 TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsNegativeOrdinal) {
   auto store = create_enum_store();
   auto* cls = create_two_constant_enum("LNegativeOrdinal;", -1);
-  auto attributes =
-      optimize_enums::analyze_enum_clinit(cls, /*support_kt_19_enum_entries*/
-                                          false);
+  auto attributes = analyze_clinit(cls, false);
   EXPECT_TRUE(attributes.m_constants_map.empty());
 }
 
@@ -1539,9 +1227,7 @@ TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsNegativeOrdinal) {
 TEST_F(OptimizeEnumsTest, clinitAnalysisAcceptsConsecutiveOrdinals) {
   auto store = create_enum_store();
   auto* cls = create_two_constant_enum("LConsecutiveOrdinals;", 1);
-  auto attributes =
-      optimize_enums::analyze_enum_clinit(cls, /*support_kt_19_enum_entries*/
-                                          false);
+  auto attributes = analyze_clinit(cls, false);
   EXPECT_EQ(attributes.m_constants_map.size(), 2);
 }
 
@@ -1558,9 +1244,7 @@ TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsMethodHandleCall) {
     (const v3 0)
     (invoke-polymorphic (v3) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
   )");
-  auto attributes =
-      optimize_enums::analyze_enum_clinit(cls, /*support_kt_19_enum_entries*/
-                                          false);
+  auto attributes = analyze_clinit(cls, false);
   EXPECT_TRUE(attributes.m_constants_map.empty());
 }
 
@@ -1580,9 +1264,7 @@ TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsCallSite) {
           ->set_callsite(redex::make_callsite("run", "()V"));
     }
   }
-  auto attributes =
-      optimize_enums::analyze_enum_clinit(cls, /*support_kt_19_enum_entries*/
-                                          false);
+  auto attributes = analyze_clinit(cls, false);
   EXPECT_TRUE(attributes.m_constants_map.empty());
 }
 
@@ -1607,7 +1289,7 @@ TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsConstructorMethodHandleCall) {
   ctor->get_code()->build_cfg();
   const auto before = show(ctor->get_code()->cfg());
   for (size_t run = 0; run < 2; ++run) {
-    const auto attributes = optimize_enums::analyze_enum_clinit(cls, false);
+    const auto attributes = analyze_clinit(cls, false);
     EXPECT_TRUE(attributes.m_constants_map.empty());
     EXPECT_EQ(show(ctor->get_code()->cfg()), before);
   }
@@ -1671,26 +1353,386 @@ TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsReadBeforeAssignment) {
     )
   )"));
   auto* cls = cc.create();
-  for (auto* m : cls->get_all_methods()) {
-    m->get_code()->build_cfg();
-  }
-  auto attributes =
-      optimize_enums::analyze_enum_clinit(cls, /*support_kt_19_enum_entries*/
-                                          false);
+  build_cfgs_for_clinit_analysis(cls);
+  auto attributes = analyze_clinit(cls, false);
   EXPECT_TRUE(attributes.m_constants_map.empty());
+}
+
+/* Direct tests of the read summaries, over the enum `LBar;` of
+`create_enum_store()` and the methods of a class `LReads;` the test adds. */
+class OptimizeEnumsReadSummaryTest : public OptimizeEnumsTest {
+ protected:
+  using Summary = optimize_enums::ConstantReadSummaries::Summary;
+
+  // Adds `LReads;` with `methods`, and its subclass `LSubReads;` with
+  // `sub_methods`, and returns the summaries of the methods named `names`,
+  // which `num_threads` threads all ask for at once from the same summaries;
+  // every thread must get the same ones.
+  std::vector<Summary> summaries_of(
+      const std::vector<std::string>& methods,
+      const std::vector<std::string>& names,
+      size_t num_threads = 1,
+      const std::vector<std::string>& sub_methods = {}) {
+    auto store = create_enum_store();
+    ClassCreator cc(DexType::make_type("LReads;"));
+    cc.set_super(type::java_lang_Object());
+    cc.set_access(ACC_PUBLIC);
+    for (const auto& method : methods) {
+      cc.add_method(assembler::method_from_string(method));
+    }
+    ClassCreator sc(DexType::make_type("LSubReads;"));
+    sc.set_super(DexType::get_type("LReads;"));
+    sc.set_access(ACC_PUBLIC);
+    for (const auto& method : sub_methods) {
+      sc.add_method(assembler::method_from_string(method));
+    }
+    store.add_classes({cc.create(), sc.create()});
+    DexStoresVector stores({std::move(store)});
+    auto scope = build_class_scope(stores);
+    walk::code(scope, [](DexMethod*, IRCode& code) {
+      if (!code.cfg_built()) {
+        code.build_cfg();
+      }
+    });
+    auto override_graph = method_override_graph::build_graph(scope);
+    optimize_enums::ConstantReadSummaries reads(*override_graph);
+    std::vector<std::vector<Summary>> per_thread(num_threads);
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads);
+    for (size_t t = 0; t < num_threads; ++t) {
+      threads.emplace_back([&, t] {
+        for (const auto& name : names) {
+          per_thread[t].push_back(
+              reads.of(DexMethod::get_method(name)->as_def()));
+        }
+      });
+    }
+    for (auto& thread : threads) {
+      thread.join();
+    }
+    for (size_t t = 1; t < num_threads; ++t) {
+      for (size_t i = 0; i < names.size(); ++i) {
+        const auto& a = per_thread[0][i];
+        const auto& b = per_thread[t][i];
+        EXPECT_EQ(a.has_value(), b.has_value()) << names[i];
+        if (a && b) {
+          EXPECT_EQ(a->size(), b->size()) << names[i];
+          EXPECT_TRUE(unordered_all_of(*b, [&](const DexField* f) {
+            return a->count(f) != 0u;
+          })) << names[i];
+        }
+      }
+    }
+    return per_thread[0];
+  }
+
+  // `ping()` calls `pong()`, which reads Bar.Y and calls `ping()`.
+  static std::vector<std::string> ping_pong_methods() {
+    return {R"(
+      (method (public static) "LReads;.ping:()V"
+        (
+          (invoke-static () "LReads;.pong:()V")
+          (return-void)
+        )
+      )
+    )",
+            R"(
+      (method (public static) "LReads;.pong:()V"
+        (
+          (sget-object "LBar;.Y:LBar;")
+          (move-result-pseudo-object v0)
+          (invoke-static () "LReads;.ping:()V")
+          (return-void)
+        )
+      )
+    )"};
+  }
+
+  Summary summary_of(const std::vector<std::string>& methods,
+                     const std::string& name) {
+    return summaries_of(methods, {name}).front();
+  }
+
+  // The summary of `LCaller;.call`, which calls `read()` on an `LReader;`, an
+  // interface with the abstract method `read()` that only `LReads;`
+  // implements, with `impl`. When `impl` is a method of `LSubReader;`
+  // instead, it is a default method of that sub-interface of `LReader;`, which
+  // `LReads;` implements without a `read()` of its own.
+  Summary interface_call_summary(const std::string& impl) {
+    auto store = create_enum_store();
+    ClassCreator ic(DexType::make_type("LReader;"));
+    ic.set_super(type::java_lang_Object());
+    ic.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+    auto* read = DexMethod::make_method("LReader;.read:()V")
+                     ->make_concrete(ACC_PUBLIC | ACC_ABSTRACT,
+                                     /* is_virtual */ true);
+    ic.add_method(read);
+    auto* impl_method = assembler::method_from_string(impl);
+    ClassCreator rc(DexType::make_type("LReads;"));
+    rc.set_super(type::java_lang_Object());
+    rc.set_access(ACC_PUBLIC);
+    if (impl_method->get_class() == DexType::get_type("LReads;")) {
+      rc.add_interface(DexType::get_type("LReader;"));
+      rc.add_method(impl_method);
+    } else {
+      ClassCreator sc(DexType::make_type("LSubReader;"));
+      sc.set_super(type::java_lang_Object());
+      sc.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+      sc.add_interface(DexType::get_type("LReader;"));
+      sc.add_method(impl_method);
+      store.add_classes({sc.create()});
+      rc.add_interface(DexType::get_type("LSubReader;"));
+    }
+    ClassCreator cc(DexType::make_type("LCaller;"));
+    cc.set_super(type::java_lang_Object());
+    cc.set_access(ACC_PUBLIC);
+    cc.add_method(assembler::method_from_string(R"(
+      (method (public static) "LCaller;.call:(LReader;)V"
+        (
+          (load-param-object v0)
+          (invoke-interface (v0) "LReader;.read:()V")
+          (return-void)
+        )
+      )
+    )"));
+    store.add_classes({ic.create(), rc.create(), cc.create()});
+    DexStoresVector stores({std::move(store)});
+    auto scope = build_class_scope(stores);
+    walk::code(scope, [](DexMethod*, IRCode& code) {
+      if (!code.cfg_built()) {
+        code.build_cfg();
+      }
+    });
+    auto override_graph = method_override_graph::build_graph(scope);
+    optimize_enums::ConstantReadSummaries reads(*override_graph);
+    return reads.of(
+        DexMethod::get_method("LCaller;.call:(LReader;)V")->as_def());
+  }
+
+  static const DexField* bar_y() {
+    return dynamic_cast<DexField*>(DexField::get_field("LBar;.Y:LBar;"));
+  }
+};
+
+// A method that reads no constant has an empty summary.
+TEST_F(OptimizeEnumsReadSummaryTest, readsNothing) {
+  auto summary = summary_of({R"(
+    (method (public static) "LReads;.nothing:()V"
+      ((return-void))
+    )
+  )"},
+                            "LReads;.nothing:()V");
+  ASSERT_TRUE(summary);
+  EXPECT_TRUE(summary->empty());
+}
+
+// A method that reads one constant has exactly that one in its summary.
+TEST_F(OptimizeEnumsReadSummaryTest, readsOneConstant) {
+  auto summary = summary_of({R"(
+    (method (public static) "LReads;.one:()Ljava/lang/Object;"
+      (
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v0)
+        (return-object v0)
+      )
+    )
+  )"},
+                            "LReads;.one:()Ljava/lang/Object;");
+  ASSERT_TRUE(summary);
+  EXPECT_EQ(summary->size(), 1);
+  EXPECT_EQ(summary->count(bar_y()), 1);
+}
+
+// An interface call runs one of the interface's implementations; the abstract
+// interface method itself runs nothing. The only implementation reads
+// nothing, so neither does the call.
+TEST_F(OptimizeEnumsReadSummaryTest, interfaceCallWithQuietImplementation) {
+  auto summary = interface_call_summary(R"(
+    (method (public) "LReads;.read:()V"
+      (
+        (load-param-object v0)
+        (return-void)
+      )
+    )
+  )");
+  ASSERT_TRUE(summary);
+  EXPECT_TRUE(summary->empty());
+}
+
+// The same call, whose only implementation reads a constant.
+TEST_F(OptimizeEnumsReadSummaryTest, interfaceCallReadsThroughImplementation) {
+  auto summary = interface_call_summary(R"(
+    (method (public) "LReads;.read:()V"
+      (
+        (load-param-object v0)
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v1)
+        (return-void)
+      )
+    )
+  )");
+  ASSERT_TRUE(summary);
+  EXPECT_EQ(summary->size(), 1);
+  EXPECT_EQ(summary->count(bar_y()), 1);
+}
+
+// The same call, where the only implementation is a default method of a
+// sub-interface, which reads a constant.
+TEST_F(OptimizeEnumsReadSummaryTest,
+       interfaceCallReadsThroughSubInterfaceDefaultMethod) {
+  auto summary = interface_call_summary(R"(
+    (method (public) "LSubReader;.read:()V"
+      (
+        (load-param-object v0)
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v1)
+        (return-void)
+      )
+    )
+  )");
+  ASSERT_TRUE(summary);
+  EXPECT_EQ(summary->size(), 1);
+  EXPECT_EQ(summary->count(bar_y()), 1);
+}
+
+// A static call of a trusted method that Redex has only a reference to, as a
+// Kotlin null check is when the Kotlin library is not in the input, runs
+// exactly that method, so the summary stays known.
+TEST_F(OptimizeEnumsReadSummaryTest, trustedReferenceOnlyCalleeIsKnown) {
+  auto summary = summary_of({R"(
+    (method (public static) "LReads;.check:(Ljava/lang/Object;)V"
+      (
+        (load-param-object v0)
+        (const-string "value")
+        (move-result-pseudo-object v1)
+        (invoke-static (v0 v1) "Lkotlin/jvm/internal/Intrinsics;.checkNotNullParameter:(Ljava/lang/Object;Ljava/lang/String;)V")
+        (return-void)
+      )
+    )
+  )"},
+                            "LReads;.check:(Ljava/lang/Object;)V");
+  ASSERT_TRUE(summary);
+  EXPECT_TRUE(summary->empty());
+}
+
+// A call of a method Redex has no code for may run anything, so the summary
+// is unknown.
+TEST_F(OptimizeEnumsReadSummaryTest, opaqueCallIsUnknown) {
+  auto summary = summary_of({R"(
+    (method (public static) "LReads;.opaque:()V"
+      (
+        (invoke-static () "LUnknown;.run:()V")
+        (return-void)
+      )
+    )
+  )"},
+                            "LReads;.opaque:()V");
+  EXPECT_FALSE(summary);
+}
+
+// A constant read in a method that two methods call each other through is in
+// the summary of both.
+TEST_F(OptimizeEnumsReadSummaryTest, readThroughCycle) {
+  auto summaries = summaries_of(ping_pong_methods(),
+                                {"LReads;.ping:()V", "LReads;.pong:()V"});
+  for (const auto& summary : summaries) {
+    ASSERT_TRUE(summary);
+    EXPECT_EQ(summary->count(bar_y()), 1);
+  }
+}
+
+// Threads that ask for the same summaries at once, as the analyses of several
+// enums do, get the same ones.
+TEST_F(OptimizeEnumsReadSummaryTest, concurrentQueriesAgree) {
+  auto summaries =
+      summaries_of(ping_pong_methods(),
+                   {"LReads;.ping:()V", "LReads;.pong:()V"}, /*num_threads=*/8);
+  for (const auto& summary : summaries) {
+    ASSERT_TRUE(summary);
+    EXPECT_EQ(summary->count(bar_y()), 1);
+  }
+}
+
+// A virtual call runs any override, so what an override reads is in the
+// caller's summary.
+TEST_F(OptimizeEnumsReadSummaryTest, overrideReadIsFollowed) {
+  const std::string base = R"(
+    (method (public) "LReads;.read:()V"
+      (
+        (load-param-object v0)
+        (return-void)
+      )
+    )
+  )";
+  const std::string caller = R"(
+    (method (public static) "LReads;.call:(LReads;)V"
+      (
+        (load-param-object v0)
+        (invoke-virtual (v0) "LReads;.read:()V")
+        (return-void)
+      )
+    )
+  )";
+  const std::string override = R"(
+    (method (public) "LSubReads;.read:()V"
+      (
+        (load-param-object v0)
+        (sget-object "LBar;.Y:LBar;")
+        (move-result-pseudo-object v1)
+        (return-void)
+      )
+    )
+  )";
+  auto summary = summaries_of({base, caller}, {"LReads;.call:(LReads;)V"},
+                              /*num_threads=*/1, {override})
+                     .front();
+  ASSERT_TRUE(summary);
+  EXPECT_EQ(summary->size(), 1);
+  EXPECT_EQ(summary->count(bar_y()), 1);
 }
 
 /* Create the enum `LMode;` with constants FAST and SLOW, its values array, a
 static fields `sink` and `ready` and the given extra `methods`, and analyze its
 <clinit>, which runs `middle` after assigning FAST and before creating SLOW, as
-code in SLOW's arguments does:
+code in SLOW's arguments does, once `edit` has changed the code:
 
 enum Mode { FAST, SLOW(middle); ... }
 
-Return the number of constants found, which is 0 when the enum is kept. */
+`java.lang.String` is an external final class with external `valueOf(Object)`
+and `toUpperCase()`, and `java.lang.Class` one with external `newInstance()`,
+as in an app. Return the number of constants found, which is 0 when the enum is
+kept. */
 size_t constants_with_code_before_slow(
-    const std::string& middle, const std::vector<std::string>& methods = {}) {
+    const std::string& middle,
+    const std::vector<std::string>& methods = {},
+    const std::function<void()>& edit = {}) {
   auto store = create_enum_store();
+  auto add_external_method = [](ClassCreator& creator, const char* name,
+                                DexAccessFlags access, bool is_virtual) {
+    auto* method = dynamic_cast<DexMethod*>(DexMethod::make_method(name));
+    method->set_access(access);
+    method->set_virtual(is_virtual);
+    method->set_external();
+    creator.add_method(method);
+  };
+  ClassCreator sc(type::java_lang_String());
+  sc.set_super(type::java_lang_Object());
+  sc.set_access(ACC_PUBLIC | ACC_FINAL);
+  add_external_method(
+      sc, "Ljava/lang/String;.valueOf:(Ljava/lang/Object;)Ljava/lang/String;",
+      ACC_PUBLIC | ACC_STATIC, /* is_virtual */ false);
+  add_external_method(sc, "Ljava/lang/String;.toUpperCase:()Ljava/lang/String;",
+                      ACC_PUBLIC, /* is_virtual */ true);
+  sc.set_external();
+  sc.create();
+  ClassCreator kc(type::java_lang_Class());
+  kc.set_super(type::java_lang_Object());
+  kc.set_access(ACC_PUBLIC | ACC_FINAL);
+  add_external_method(kc, "Ljava/lang/Class;.newInstance:()Ljava/lang/Object;",
+                      ACC_PUBLIC, /* is_virtual */ true);
+  kc.set_external();
+  kc.create();
+
   ClassCreator cc(DexType::make_type("LMode;"));
   cc.set_super(type::java_lang_Enum());
   cc.set_access(ACC_PUBLIC | ACC_FINAL | ACC_ENUM);
@@ -1741,13 +1783,213 @@ size_t constants_with_code_before_slow(
     )
   )"));
   auto* cls = cc.create();
-  for (auto* m : cls->get_all_methods()) {
-    m->get_code()->build_cfg();
+  build_cfgs_for_clinit_analysis(cls);
+  if (edit) {
+    edit();
   }
-  return optimize_enums::analyze_enum_clinit(cls,
-                                             /*support_kt_19_enum_entries*/
-                                             false)
-      .m_constants_map.size();
+  return analyze_clinit(cls, false).m_constants_map.size();
+}
+
+// enum Mode {
+//   FAST, SLOW(String.valueOf(FAST));
+//   @Override public String toString() { return SLOW == null ? "a" : "b"; }
+// }
+// `String.valueOf(Object)` calls the overridden `FAST.toString()`, which reads
+// SLOW before it is assigned.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsLibraryCallThatCallsBack) {
+  EXPECT_EQ(constants_with_code_before_slow(
+                R"(
+                  (sget-object "LMode;.FAST:LMode;")
+                  (move-result-pseudo-object v0)
+                  (invoke-static (v0) "Ljava/lang/String;.valueOf:(Ljava/lang/Object;)Ljava/lang/String;")
+                  (move-result-object v0)
+                  (sput-object v0 "LMode;.sink:Ljava/lang/Object;")
+                )",
+                {R"(
+                  (method (public) "LMode;.toString:()Ljava/lang/String;"
+                    (
+                      (load-param-object v0)
+                      (const-string "a")
+                      (move-result-pseudo-object v1)
+                      (sget-object "LMode;.SLOW:LMode;")
+                      (move-result-pseudo-object v2)
+                      (if-eqz v2 :unassigned)
+                      (const-string "b")
+                      (move-result-pseudo-object v1)
+                      (:unassigned)
+                      (return-object v1)
+                    )
+                  )
+                )"}),
+            0);
+}
+
+// enum Mode {
+//   FAST, SLOW(label(FAST));
+//   @Override public String toString() { return SLOW == null ? "a" : "b"; }
+//   static String label(Enum<?> e) { return e.toString(); }
+// }
+// `label` calls `Enum.toString()`, which Redex treats as pure, but the call
+// runs the override, which reads SLOW before it is assigned.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsCallOfOverriddenPureMethod) {
+  EXPECT_EQ(constants_with_code_before_slow(
+                R"(
+                  (sget-object "LMode;.FAST:LMode;")
+                  (move-result-pseudo-object v0)
+                  (invoke-static (v0) "LMode;.label:(Ljava/lang/Enum;)Ljava/lang/String;")
+                  (move-result-object v0)
+                  (sput-object v0 "LMode;.sink:Ljava/lang/Object;")
+                )",
+                {R"(
+                  (method (public) "LMode;.toString:()Ljava/lang/String;"
+                    (
+                      (load-param-object v0)
+                      (const-string "a")
+                      (move-result-pseudo-object v1)
+                      (sget-object "LMode;.SLOW:LMode;")
+                      (move-result-pseudo-object v2)
+                      (if-eqz v2 :unassigned)
+                      (const-string "b")
+                      (move-result-pseudo-object v1)
+                      (:unassigned)
+                      (return-object v1)
+                    )
+                  )
+                )",
+                 R"(
+                  (method (private static) "LMode;.label:(Ljava/lang/Enum;)Ljava/lang/String;"
+                    (
+                      (load-param-object v0)
+                      (invoke-virtual (v0) "Ljava/lang/Enum;.toString:()Ljava/lang/String;")
+                      (move-result-object v0)
+                      (return-object v0)
+                    )
+                  )
+                )"},
+                [] {
+                  // As in an app, `Enum.toString()` is defined outside it.
+                  auto* to_string =
+                      dynamic_cast<DexMethod*>(DexMethod::make_method(
+                          "Ljava/lang/Enum;.toString:()Ljava/lang/String;"));
+                  to_string->set_access(ACC_PUBLIC);
+                  to_string->set_virtual(true);
+                  to_string->set_external();
+                  type_class(type::java_lang_Enum())->add_method(to_string);
+                }),
+            0);
+}
+
+// `SLOW(new Probe().ready())` where `ready()` is a method of the non-final
+// class `Probe`: a subclass may override it with code that reads SLOW.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsCallThatMayReachOverride) {
+  ClassCreator pc(DexType::make_type("LProbe;"));
+  pc.set_super(type::java_lang_Object());
+  pc.set_access(ACC_PUBLIC);
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LProbe;.<init>:()V"
+      (
+        (load-param-object v0)
+        (return-void)
+      )
+    )
+  )");
+  auto* ready = assembler::method_from_string(R"(
+    (method (public) "LProbe;.ready:()Z"
+      (
+        (load-param-object v0)
+        (const v1 1)
+        (return v1)
+      )
+    )
+  )");
+  pc.add_method(ctor);
+  pc.add_method(ready);
+  pc.create();
+  ctor->get_code()->build_cfg();
+  ready->get_code()->build_cfg();
+  // A subclass overrides `ready()` with code that reads SLOW.
+  ClassCreator sc(DexType::make_type("LSlowProbe;"));
+  sc.set_super(DexType::get_type("LProbe;"));
+  sc.set_access(ACC_PUBLIC);
+  auto* overriding = assembler::method_from_string(R"(
+    (method (public) "LSlowProbe;.ready:()Z"
+      (
+        (load-param-object v0)
+        (sget-object "LMode;.SLOW:LMode;")
+        (move-result-pseudo-object v1)
+        (if-eqz v1 :unassigned)
+        (const v2 1)
+        (return v2)
+        (:unassigned)
+        (const v2 0)
+        (return v2)
+      )
+    )
+  )");
+  sc.add_method(overriding);
+  sc.create();
+  overriding->get_code()->build_cfg();
+  EXPECT_EQ(constants_with_code_before_slow(R"(
+              (new-instance "LProbe;")
+              (move-result-pseudo-object v0)
+              (invoke-direct (v0) "LProbe;.<init>:()V")
+              (invoke-virtual (v0) "LProbe;.ready:()Z")
+              (move-result v0)
+              (sput-boolean v0 "LMode;.ready:Z")
+            )"),
+            0);
+}
+
+// The same call where `Probe` has no subclass: the analysis follows the one
+// method the call can run, which reads no constant, so the enum is boxed.
+TEST_F(OptimizeEnumsTest, clinitAnalysisAcceptsCallOfSoleImplementation) {
+  ClassCreator pc(DexType::make_type("LProbe;"));
+  pc.set_super(type::java_lang_Object());
+  pc.set_access(ACC_PUBLIC);
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LProbe;.<init>:()V"
+      (
+        (load-param-object v0)
+        (return-void)
+      )
+    )
+  )");
+  auto* ready = assembler::method_from_string(R"(
+    (method (public) "LProbe;.ready:()Z"
+      (
+        (load-param-object v0)
+        (const v1 1)
+        (return v1)
+      )
+    )
+  )");
+  pc.add_method(ctor);
+  pc.add_method(ready);
+  pc.create();
+  ctor->get_code()->build_cfg();
+  ready->get_code()->build_cfg();
+  EXPECT_EQ(constants_with_code_before_slow(R"(
+              (new-instance "LProbe;")
+              (move-result-pseudo-object v0)
+              (invoke-direct (v0) "LProbe;.<init>:()V")
+              (invoke-virtual (v0) "LProbe;.ready:()Z")
+              (move-result v0)
+              (sput-boolean v0 "LMode;.ready:Z")
+            )"),
+            2);
+}
+
+// `SLOW("fast".toUpperCase())`: `String.toUpperCase()` is pure, so it runs no
+// app code.
+TEST_F(OptimizeEnumsTest, clinitAnalysisAcceptsPureLibraryCall) {
+  EXPECT_EQ(constants_with_code_before_slow(R"(
+              (const-string "fast")
+              (move-result-pseudo-object v0)
+              (invoke-virtual (v0) "Ljava/lang/String;.toUpperCase:()Ljava/lang/String;")
+              (move-result-object v0)
+              (sput-object v0 "LMode;.sink:Ljava/lang/Object;")
+            )"),
+            2);
 }
 
 /* `values()` and `valueOf(String)` of `LMode;`, as javac generates them. */
@@ -1779,6 +2021,256 @@ std::vector<std::string> mode_values_methods() {
               )
             )
           )"};
+}
+
+// `SLOW(new Tag())` with `class Tag { Tag() {} }`: the constructor only calls
+// `Object.<init>`, whose body is empty, so it runs no app code.
+TEST_F(OptimizeEnumsTest, clinitAnalysisAcceptsObjectConstructorCall) {
+  ClassCreator tc(DexType::make_type("LTag;"));
+  tc.set_super(type::java_lang_Object());
+  tc.set_access(ACC_PUBLIC | ACC_FINAL);
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LTag;.<init>:()V"
+      (
+        (load-param-object v0)
+        (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+        (return-void)
+      )
+    )
+  )");
+  tc.add_method(ctor);
+  tc.create();
+  ctor->get_code()->build_cfg();
+  EXPECT_EQ(constants_with_code_before_slow(
+                R"(
+                  (new-instance "LTag;")
+                  (move-result-pseudo-object v0)
+                  (invoke-direct (v0) "LTag;.<init>:()V")
+                  (sput-object v0 "LMode;.sink:Ljava/lang/Object;")
+                )",
+                {},
+                [] {
+                  // As in an app, `Object.<init>` is defined outside it.
+                  auto* object_ctor = dynamic_cast<DexMethod*>(
+                      DexMethod::get_method("Ljava/lang/Object;.<init>:()V"));
+                  object_ctor->set_access(ACC_PUBLIC | ACC_CONSTRUCTOR);
+                  object_ctor->set_external();
+                  type_class(type::java_lang_Object())->add_method(object_ctor);
+                }),
+            2);
+}
+
+// `SLOW(Tag(FAST))` with `class Tag(val value: Any)`, whose constructor passes
+// FAST to Kotlin's null assertion. The assertion only throws, through library
+// code, when its argument is null, so it runs no app code.
+TEST_F(OptimizeEnumsTest, clinitAnalysisAcceptsKotlinNullAssertion) {
+  ClassCreator ic(DexType::make_type("Lkotlin/jvm/internal/Intrinsics;"));
+  ic.set_super(type::java_lang_Object());
+  ic.set_access(ACC_PUBLIC | ACC_FINAL);
+  auto* check = assembler::method_from_string(R"(
+    (method (public static) "Lkotlin/jvm/internal/Intrinsics;.checkNotNullParameter:(Ljava/lang/Object;Ljava/lang/String;)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (if-nez v0 :not_null)
+        (new-instance "Ljava/lang/NullPointerException;")
+        (move-result-pseudo-object v2)
+        (invoke-direct (v2 v1) "Ljava/lang/NullPointerException;.<init>:(Ljava/lang/String;)V")
+        (throw v2)
+        (:not_null)
+        (return-void)
+      )
+    )
+  )");
+  ic.add_method(check);
+  ic.create();
+  check->get_code()->build_cfg();
+  ClassCreator tc(DexType::make_type("LTag;"));
+  tc.set_super(type::java_lang_Object());
+  tc.set_access(ACC_PUBLIC | ACC_FINAL);
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LTag;.<init>:(Ljava/lang/Object;)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (const-string "value")
+        (move-result-pseudo-object v2)
+        (invoke-static (v1 v2) "Lkotlin/jvm/internal/Intrinsics;.checkNotNullParameter:(Ljava/lang/Object;Ljava/lang/String;)V")
+        (return-void)
+      )
+    )
+  )");
+  tc.add_method(ctor);
+  tc.create();
+  ctor->get_code()->build_cfg();
+  EXPECT_EQ(constants_with_code_before_slow(R"(
+              (new-instance "LTag;")
+              (move-result-pseudo-object v0)
+              (sget-object "LMode;.FAST:LMode;")
+              (move-result-pseudo-object v5)
+              (invoke-direct (v0 v5) "LTag;.<init>:(Ljava/lang/Object;)V")
+              (sput-object v0 "LMode;.sink:Ljava/lang/Object;")
+            )"),
+            2);
+}
+
+// A wrapper that RemoveNullcheckStringArg made for a null check whose code is
+// marked `no_optimizations`: the code that runs may be anything, so the
+// wrapper is no more trusted than the check it calls.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsUntrustedKotlinNullAssertion) {
+  ClassCreator ic(DexType::make_type("Lkotlin/jvm/internal/Intrinsics;"));
+  ic.set_super(type::java_lang_Object());
+  ic.set_access(ACC_PUBLIC | ACC_FINAL);
+  auto* check = assembler::method_from_string(R"(
+    (method (public static) "Lkotlin/jvm/internal/Intrinsics;.checkNotNullParameter:(Ljava/lang/Object;Ljava/lang/String;)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (return-void)
+      )
+    )
+  )");
+  auto* wrapper = assembler::method_from_string(R"(
+    (method (public static) "Lkotlin/jvm/internal/Intrinsics;.$WrCheckParameter_V1_4:(Ljava/lang/Object;I)V"
+      (
+        (load-param-object v0)
+        (load-param v1)
+        (const-string "value")
+        (move-result-pseudo-object v2)
+        (invoke-static (v0 v2) "Lkotlin/jvm/internal/Intrinsics;.checkNotNullParameter:(Ljava/lang/Object;Ljava/lang/String;)V")
+        (return-void)
+      )
+    )
+  )");
+  ic.add_method(check);
+  ic.add_method(wrapper);
+  ic.create();
+  check->get_code()->build_cfg();
+  wrapper->get_code()->build_cfg();
+  check->rstate.set_no_optimizations();
+  EXPECT_EQ(constants_with_code_before_slow(R"(
+              (sget-object "LMode;.FAST:LMode;")
+              (move-result-pseudo-object v0)
+              (const v1 0)
+              (invoke-static (v0 v1) "Lkotlin/jvm/internal/Intrinsics;.$WrCheckParameter_V1_4:(Ljava/lang/Object;I)V")
+            )"),
+            0);
+}
+
+// Reading a static field of another class runs that class's initializer,
+// which here reads SLOW while it is still null:
+//
+//   class Registry { static final boolean SLOW_KNOWN = Mode.SLOW != null; }
+//   enum Mode { FAST, SLOW(record(Registry.SLOW_KNOWN)); ... }
+//
+// The enum is still boxed: Redex may change when static initializers run
+// (specbreaker.md, Static Initializers).
+TEST_F(OptimizeEnumsTest, clinitAnalysisIgnoresTriggeredClassInitializer) {
+  ClassCreator rc(DexType::make_type("LRegistry;"));
+  rc.set_super(type::java_lang_Object());
+  rc.set_access(ACC_PUBLIC | ACC_FINAL);
+  rc.add_field(DexField::make_field("LRegistry;.SLOW_KNOWN:Z")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL));
+  auto* clinit = assembler::method_from_string(R"(
+    (method (public static constructor) "LRegistry;.<clinit>:()V"
+      (
+        (sget-object "LMode;.SLOW:LMode;")
+        (move-result-pseudo-object v0)
+        (if-eqz v0 :unassigned)
+        (const v1 1)
+        (goto :store)
+        (:unassigned)
+        (const v1 0)
+        (:store)
+        (sput-boolean v1 "LRegistry;.SLOW_KNOWN:Z")
+        (return-void)
+      )
+    )
+  )");
+  rc.add_method(clinit);
+  rc.create();
+  clinit->get_code()->build_cfg();
+  EXPECT_EQ(constants_with_code_before_slow(R"(
+              (sget-boolean "LRegistry;.SLOW_KNOWN:Z")
+              (move-result-pseudo v0)
+              (sput-boolean v0 "LMode;.ready:Z")
+            )"),
+            2);
+}
+
+// A call into another class whose method reads SLOW: the analysis follows
+// callees wherever they are defined.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsReadInAnotherClass) {
+  ClassCreator rc(DexType::make_type("LReader;"));
+  rc.set_super(type::java_lang_Object());
+  rc.set_access(ACC_PUBLIC | ACC_FINAL);
+  auto* read = assembler::method_from_string(R"(
+    (method (public static) "LReader;.readsSlow:()Z"
+      (
+        (sget-object "LMode;.SLOW:LMode;")
+        (move-result-pseudo-object v0)
+        (if-eqz v0 :unassigned)
+        (const v1 1)
+        (return v1)
+        (:unassigned)
+        (const v1 0)
+        (return v1)
+      )
+    )
+  )");
+  rc.add_method(read);
+  rc.create();
+  read->get_code()->build_cfg();
+  EXPECT_EQ(constants_with_code_before_slow(R"(
+              (invoke-static () "LReader;.readsSlow:()Z")
+              (move-result v0)
+              (sput-boolean v0 "LMode;.ready:Z")
+            )"),
+            0);
+}
+
+// enum Mode { FAST, SLOW(probe()); ... }
+// static boolean probe() { Callback.class.newInstance(); return true; }
+// class Callback { Callback() { Mode.sink = Mode.SLOW; } }
+// `Class.newInstance()`, a library method, runs the app constructor
+// `Callback()`, which reads SLOW before it is assigned.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsClassNewInstance) {
+  ClassCreator cbc(DexType::make_type("LCallback;"));
+  cbc.set_super(type::java_lang_Object());
+  cbc.set_access(ACC_PUBLIC);
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LCallback;.<init>:()V"
+      (
+        (load-param-object v0)
+        (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+        (sget-object "LMode;.SLOW:LMode;")
+        (move-result-pseudo-object v1)
+        (sput-object v1 "LMode;.sink:Ljava/lang/Object;")
+        (return-void)
+      )
+    )
+  )");
+  cbc.add_method(ctor);
+  cbc.create();
+  ctor->get_code()->build_cfg();
+  EXPECT_EQ(constants_with_code_before_slow(R"(
+              (invoke-static () "LMode;.probe:()Z")
+              (move-result v0)
+              (sput-boolean v0 "LMode;.ready:Z")
+            )",
+                                            {R"(
+              (method (private static) "LMode;.probe:()Z"
+                (
+                  (const-class "LCallback;")
+                  (move-result-pseudo-object v0)
+                  (invoke-virtual (v0) "Ljava/lang/Class;.newInstance:()Ljava/lang/Object;")
+                  (move-result-object v0)
+                  (const v1 1)
+                  (return v1)
+                )
+              )
+            )"}),
+            0);
 }
 
 // Before SLOW is assigned, `values()` throws, as the values array is still
@@ -1815,6 +2307,197 @@ TEST_F(OptimizeEnumsTest,
               (sput-object v0 "LMode;.sink:Ljava/lang/Object;")
             )"),
             0);
+}
+
+// The code of a callee marked `no_optimizations` may not be what runs, so it
+// may read SLOW.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsNoOptimizationsCallee) {
+  EXPECT_EQ(constants_with_code_before_slow(
+                R"(
+                  (invoke-static () "LMode;.ready:()Z")
+                  (move-result v0)
+                  (sput-boolean v0 "LMode;.ready:Z")
+                )",
+                {R"(
+                  (method (private static) "LMode;.ready:()Z"
+                    (
+                      (const v0 1)
+                      (return v0)
+                    )
+                  )
+                )"},
+                [] {
+                  DexMethod::get_method("LMode;.ready:()Z")
+                      ->as_def()
+                      ->rstate.set_no_optimizations();
+                }),
+            0);
+}
+
+// A callee that reads a constant through a second method, which calls back
+// into the first: neither reads SLOW, so the enum is boxed.
+TEST_F(OptimizeEnumsTest, clinitAnalysisAcceptsMutuallyRecursiveCallees) {
+  EXPECT_EQ(constants_with_code_before_slow(
+                R"(
+                  (const v0 1)
+                  (invoke-static (v0) "LMode;.ping:(I)Z")
+                  (move-result v0)
+                  (sput-boolean v0 "LMode;.ready:Z")
+                )",
+                {R"(
+                  (method (private static) "LMode;.ping:(I)Z"
+                    (
+                      (load-param v0)
+                      (if-eqz v0 :done)
+                      (const v1 0)
+                      (invoke-static (v1) "LMode;.pong:(I)Z")
+                      (move-result v0)
+                      (return v0)
+                      (:done)
+                      (const v0 1)
+                      (return v0)
+                    )
+                  )
+                )",
+                 R"(
+                  (method (private static) "LMode;.pong:(I)Z"
+                    (
+                      (load-param v0)
+                      (invoke-static (v0) "LMode;.ping:(I)Z")
+                      (move-result v0)
+                      (return v0)
+                    )
+                  )
+                )"}),
+            2);
+}
+
+// The same two methods, where the second reads SLOW: the cycle does not hide
+// the read.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsReadThroughRecursiveCallees) {
+  EXPECT_EQ(constants_with_code_before_slow(
+                R"(
+                  (const v0 1)
+                  (invoke-static (v0) "LMode;.ping:(I)Z")
+                  (move-result v0)
+                  (sput-boolean v0 "LMode;.ready:Z")
+                )",
+                {R"(
+                  (method (private static) "LMode;.ping:(I)Z"
+                    (
+                      (load-param v0)
+                      (if-eqz v0 :done)
+                      (const v1 0)
+                      (invoke-static (v1) "LMode;.pong:(I)Z")
+                      (move-result v0)
+                      (return v0)
+                      (:done)
+                      (const v0 1)
+                      (return v0)
+                    )
+                  )
+                )",
+                 R"(
+                  (method (private static) "LMode;.pong:(I)Z"
+                    (
+                      (load-param v0)
+                      (sget-object "LMode;.SLOW:LMode;")
+                      (move-result-pseudo-object v1)
+                      (if-eqz v1 :unassigned)
+                      (invoke-static (v0) "LMode;.ping:(I)Z")
+                      (move-result v0)
+                      (return v0)
+                      (:unassigned)
+                      (const v0 0)
+                      (return v0)
+                    )
+                  )
+                )"}),
+            0);
+}
+
+/* `SLOW(Mode.viaHandle())` where `viaHandle()` makes the method handle call
+`handle_call`. */
+size_t constants_with_method_handle_call_before_slow(
+    const std::string& handle_call, const std::function<void()>& edit = {}) {
+  return constants_with_code_before_slow(
+      R"(
+        (invoke-static () "LMode;.viaHandle:()V")
+      )",
+      {R"(
+        (method (private static) "LMode;.viaHandle:()V"
+          (
+            (sget-object "LMode;.sink:Ljava/lang/Object;")
+            (move-result-pseudo-object v0)
+            (check-cast v0 "Ljava/lang/invoke/MethodHandle;")
+            (move-result-pseudo-object v0)
+      )" +
+       handle_call + R"(
+            (return-void)
+          )
+        )
+      )"},
+      edit);
+}
+
+// A method handle call may run any code, which may read SLOW.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsCalleeInvokingMethodHandle) {
+  EXPECT_EQ(constants_with_method_handle_call_before_slow(R"(
+              (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
+            )"),
+            0);
+}
+
+// Likewise a call site. S-expressions cannot spell `invoke-custom`, so it
+// replaces a placeholder call.
+TEST_F(OptimizeEnumsTest, clinitAnalysisRejectsCalleeInvokingCallSite) {
+  EXPECT_EQ(constants_with_method_handle_call_before_slow(
+                R"(
+            (invoke-static () "LMode;.placeholder:()V")
+          )",
+                [] {
+                  auto* via_handle =
+                      DexMethod::get_method("LMode;.viaHandle:()V")->as_def();
+                  for (auto& mie : cfg::InstructionIterable(
+                           via_handle->get_code()->cfg())) {
+                    if (mie.insn->has_method() &&
+                        mie.insn->get_method()->str() == "placeholder") {
+                      auto* call_site = new DexCallSite(
+                          nullptr, DexString::make_string("run"),
+                          DexProto::make_proto(type::_void(),
+                                               DexTypeList::make_type_list({})),
+                          {});
+                      mie.insn->set_opcode(OPCODE_INVOKE_CUSTOM)
+                          ->set_callsite(call_site);
+                    }
+                  }
+                }),
+            0);
+}
+
+// `SLOW(fastReady())` where `fastReady()` reads only FAST, which is assigned on
+// every path to the call.
+TEST_F(OptimizeEnumsTest, clinitAnalysisAcceptsCalleeReadingAssignedConstant) {
+  EXPECT_EQ(constants_with_code_before_slow(R"(
+              (invoke-static () "LMode;.fastReady:()Z")
+              (move-result v0)
+              (sput-boolean v0 "LMode;.ready:Z")
+            )",
+                                            {R"(
+              (method (private static) "LMode;.fastReady:()Z"
+                (
+                  (sget-object "LMode;.FAST:LMode;")
+                  (move-result-pseudo-object v0)
+                  (if-eqz v0 :unassigned)
+                  (const v1 1)
+                  (return v1)
+                  (:unassigned)
+                  (const v1 0)
+                  (return v1)
+                )
+              )
+            )"}),
+            2);
 }
 
 // A read of SLOW in code that never runs cannot see null.

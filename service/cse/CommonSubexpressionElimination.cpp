@@ -968,6 +968,15 @@ class Analyzer final : public BaseEdgeAwareIRAnalyzer<CseEnvironment> {
     case OPCODE_NEW_ARRAY:
     case OPCODE_NEW_INSTANCE:
     case OPCODE_FILLED_NEW_ARRAY:
+    // ART creates a new MethodHandle object each time it resolves a method
+    // handle, and the MethodType it caches for a prototype can be evicted and
+    // created again, so two loads of the same constant need not yield the same
+    // object.
+    case OPCODE_CONST_METHOD_HANDLE:
+    case OPCODE_CONST_METHOD_TYPE:
+    // Calls with unknown targets.
+    case OPCODE_INVOKE_CUSTOM:
+    case OPCODE_INVOKE_POLYMORPHIC:
       is_positional = true;
       break;
     case OPCODE_INVOKE_VIRTUAL: {

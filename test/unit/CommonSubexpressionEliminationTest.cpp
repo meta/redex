@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <functional>
+
 #include <gtest/gtest.h>
 
 #include "CommonSubexpressionElimination.h"
@@ -35,7 +37,8 @@ void test(const Scope& scope,
           bool is_init_or_clinit = false,
           DexType* declaring_type = nullptr,
           DexTypeList* args = DexTypeList::make_type_list({}),
-          const UnorderedSet<const DexString*>& finalish_field_names = {}) {
+          const UnorderedSet<const DexString*>& finalish_field_names = {},
+          const std::function<void(IRCode*)>& prepare = nullptr) {
   [[maybe_unused]] auto* field_a =
       DexField::make_field("LFoo;.a:I")->make_concrete(ACC_PUBLIC);
 
@@ -57,6 +60,9 @@ void test(const Scope& scope,
 
   auto code = assembler::ircode_from_string(code_str);
   auto expected = assembler::ircode_from_string(expected_str);
+  if (prepare) {
+    prepare(code.get());
+  }
 
   code->build_cfg();
   walk::code(scope, [&](DexMethod*, IRCode& code) { code.build_cfg(); });
@@ -2642,4 +2648,87 @@ TEST_F(CommonSubexpressionEliminationTest,
     )
   )";
   test(Scope{type_class(type::java_lang_Object()), cls}, code_str, code_str, 0);
+}
+
+// Each load of a method type constant is its own value, even of the same
+// prototype: ART may create a new MethodType object for it.
+TEST_F(CommonSubexpressionEliminationTest, distinctMethodTypeConstants) {
+  const auto* code_str = R"(
+    (
+      (const-method-type "(I)V")
+      (move-result-pseudo-object v0)
+      (const-method-type "(J)Z")
+      (move-result-pseudo-object v1)
+      (return-object v1)
+    )
+  )";
+  test(Scope{type_class(type::java_lang_Object())}, code_str, code_str, 0);
+}
+
+TEST_F(CommonSubexpressionEliminationTest, distinctMethodHandleConstants) {
+  const auto* code_str = R"(
+    (
+      (const-method-handle invoke-static "LBar;.a:()V")
+      (move-result-pseudo-object v0)
+      (const-method-handle invoke-static "LBar;.b:()V")
+      (move-result-pseudo-object v1)
+      (return-object v1)
+    )
+  )";
+  test(Scope{type_class(type::java_lang_Object())}, code_str, code_str, 0);
+}
+
+TEST_F(CommonSubexpressionEliminationTest, sameMethodTypeConstants) {
+  const auto* code_str = R"(
+    (
+      (const-method-type "(I)V")
+      (move-result-pseudo-object v0)
+      (const-method-type "(I)V")
+      (move-result-pseudo-object v1)
+      (if-eq v0 v1 :same)
+      (const v2 0)
+      (return v2)
+      (:same)
+      (const v2 1)
+      (return v2)
+    )
+  )";
+  test(Scope{type_class(type::java_lang_Object())}, code_str, code_str, 0);
+}
+
+// ART creates a new MethodHandle object each time it resolves a method handle,
+// so two loads of the same handle compare unequal. As in code loaded from DEX,
+// both instructions hold the same method handle object.
+TEST_F(CommonSubexpressionEliminationTest, sameMethodHandleConstants) {
+  const auto* code_str = R"(
+    (
+      (const-method-handle invoke-static "LBar;.a:()V")
+      (move-result-pseudo-object v0)
+      (const-method-handle invoke-static "LBar;.a:()V")
+      (move-result-pseudo-object v1)
+      (if-eq v0 v1 :same)
+      (const v2 0)
+      (return v2)
+      (:same)
+      (const v2 1)
+      (return v2)
+    )
+  )";
+  auto share_method_handle = [](IRCode* code) {
+    DexMethodHandle* method_handle = nullptr;
+    for (auto& mie : InstructionIterable(code)) {
+      if (!mie.insn->has_methodhandle()) {
+        continue;
+      }
+      if (method_handle == nullptr) {
+        method_handle = mie.insn->get_methodhandle();
+      } else {
+        mie.insn->set_methodhandle(method_handle);
+      }
+    }
+  };
+  test(Scope{type_class(type::java_lang_Object())}, code_str, code_str, 0,
+       /* is_static */ true, /* is_init_or_clinit */ false,
+       /* declaring_type */ nullptr, DexTypeList::make_type_list({}),
+       /* finalish_field_names */ {}, share_method_handle);
 }

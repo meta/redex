@@ -54,18 +54,28 @@ DexMethod* find_dollar_values(DexClass* cls) {
   return nullptr;
 }
 
-// Returns true if `method`'s code contains an invoke-static resolving to
-// `callee`.
-bool calls(DexMethod* method, DexMethod* callee) {
+// Whether `method`'s code calls `callee` through a method handle it holds,
+// or, unless `invokes_allowed`, with an invoke.
+bool calls_disallowed(DexMethod* method,
+                      DexMethod* callee,
+                      bool invokes_allowed) {
   auto* code = method->get_code();
   if (code == nullptr) {
     return false;
   }
   cfg::ScopedCFG cfg(code);
   for (auto& mie : cfg::InstructionIterable(*cfg)) {
-    auto* insn = mie.insn;
-    if (insn->opcode() == OPCODE_INVOKE_STATIC &&
-        resolve_method(insn->get_method(), MethodSearch::Static) == callee) {
+    bool found = false;
+    for_each_invoke(mie.insn, [&](IROpcode op, DexMethodRef* ref,
+                                  const DexMethodHandle* handle) {
+      if (found) {
+        return;
+      }
+      if (handle != nullptr || !invokes_allowed) {
+        found = resolve_call(op, ref, handle, method) == callee;
+      }
+    });
+    if (found) {
       return true;
     }
   }
@@ -87,15 +97,12 @@ Result run(DexClass* cls) {
     return Result::kIneligible;
   }
 
-  // `$values` is private, so only methods of this class can reference it. If
-  // anything other than `<clinit>` calls it, inlining + deleting is unsafe.
-  for (auto* dm : cls->get_dmethods()) {
-    if (dm != clinit && dm != dollar_values && calls(dm, dollar_values)) {
-      return Result::kIneligible;
-    }
-  }
-  for (auto* vm : cls->get_vmethods()) {
-    if (calls(vm, dollar_values)) {
+  // `$values` is private, so only code of this class can call it. Inlining and
+  // deleting it is safe only if `<clinit>` is its sole caller and calls it
+  // with invokes: a method handle would still name the deleted method.
+  for (auto* m : cls->get_all_methods()) {
+    if (calls_disallowed(m, dollar_values,
+                         /* invokes_allowed */ m == clinit)) {
       return Result::kIneligible;
     }
   }

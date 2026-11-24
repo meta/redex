@@ -11,7 +11,9 @@
 #include "ControlFlow.h"
 #include "Debug.h"
 #include "KotlinLambdaAnalyzer.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
+#include "Resolver.h"
 #include "Show.h"
 #include "SourceBlocks.h"
 #include "SourceBlocksUtils.h"
@@ -72,6 +74,16 @@ KotlinInstanceRewriter::Stats KotlinInstanceRewriter::remove_escaping_instance(
                   std::set<std::pair<IRInstruction*, DexMethod*>>>&
         concurrent_instance_map) {
   ConcurrentSet<DexFieldRef*> remove_list;
+  // A method handle that gets or puts INSTANCE cannot be rewritten into a new
+  // instance, and would name the removed field. Code, static field values and
+  // annotations can hold one.
+  const auto named_by_method_handles =
+      method::gather_fields_named_by_method_handles(scope);
+  for (const auto& [field, _] : UnorderedIterable(concurrent_instance_map)) {
+    if (named_by_method_handles.count(field->as_def()) != 0u) {
+      remove_list.insert(field);
+    }
+  }
   // Get all the single uses of the INSTANCE variables
   KotlinInstanceRewriter::Stats total_stats =
       walk::parallel::methods<KotlinInstanceRewriter::Stats>(
@@ -87,37 +99,36 @@ KotlinInstanceRewriter::Stats KotlinInstanceRewriter::remove_escaping_instance(
             auto iterable = cfg::InstructionIterable(cfg);
             for (auto it = iterable.begin(); it != iterable.end(); it++) {
               auto* insn = it->insn;
-
-              if (!opcode::is_an_sget(insn->opcode()) &&
-                  !opcode::is_an_sput(insn->opcode())) {
-                continue;
-              }
-
-              auto* field = insn->get_field();
-              if (concurrent_instance_map.count(field) == 0u) {
-                continue;
-              }
-              if (remove_list.count(field) != 0u) {
-                continue;
-              }
-              // If there is more SPUT otherthan the initial one.
-              if (opcode::is_an_sput(insn->opcode())) {
-                if (method::is_clinit(method) &&
-                    method->get_class() == field->get_type()) {
-                  continue;
+              for_each_field_access(insn, [&](IROpcode op, DexFieldRef* field,
+                                              const DexMethodHandle*) {
+                if (!opcode::is_an_sget(op) && !opcode::is_an_sput(op)) {
+                  return;
                 }
-                // Erase if the field is written elsewhere.
-                remove_list.insert(field);
-                continue;
-              }
+                if (concurrent_instance_map.count(field) == 0u) {
+                  return;
+                }
+                if (remove_list.count(field) != 0u) {
+                  return;
+                }
+                // If there is more SPUT otherthan the initial one.
+                if (opcode::is_an_sput(op)) {
+                  if (method::is_clinit(method) &&
+                      method->get_class() == field->get_type()) {
+                    return;
+                  }
+                  // Erase if the field is written elsewhere.
+                  remove_list.insert(field);
+                  return;
+                }
 
-              concurrent_instance_map.update(
-                  field,
-                  [&](DexFieldRef*,
-                      std::set<std::pair<IRInstruction*, DexMethod*>>& s,
-                      bool /* exists */) {
-                    s.insert(std::make_pair(insn, method));
-                  });
+                concurrent_instance_map.update(
+                    field,
+                    [&](DexFieldRef*,
+                        std::set<std::pair<IRInstruction*, DexMethod*>>& s,
+                        bool /* exists */) {
+                      s.insert(std::make_pair(insn, method));
+                    });
+              });
             }
             return stats;
           });

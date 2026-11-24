@@ -4412,6 +4412,32 @@ INSTANTIATE_TEST_SUITE_P(
                                (if-eq v0 v6 :done)
                                (:done))",
                             true, true},
+        EnumObservationCase{"MergedSameEnumComparisons",
+                            R"((if-eqz v5 :baz)
+                               (move-object v6 v0)
+                               (move-object v7 v1)
+                               (goto :compare)
+                               (:baz)
+                               (move-object v6 v2)
+                               (move-object v7 v2)
+                               (:compare)
+                               (if-ne v6 v7 :done)
+                               (:done))",
+                            true, true},
+        EnumObservationCase{"MergedComparisonAfterMoves",
+                            R"((if-eqz v5 :baz)
+                               (move-object v6 v0)
+                               (move-object v7 v1)
+                               (goto :compare)
+                               (:baz)
+                               (move-object v6 v2)
+                               (move-object v7 v2)
+                               (:compare)
+                               (move-object v8 v6)
+                               (move-object v9 v7)
+                               (if-ne v8 v9 :done)
+                               (:done))",
+                            true, true},
         EnumObservationCase{"NotEqualSameEnum", "(if-ne v0 v1 :done) (:done)",
                             true, true},
         EnumObservationCase{"EqualNull",
@@ -4469,6 +4495,40 @@ TEST_F(OptimizeEnumsTest, comparisonWithMethodHandleResultKeepsEnum) {
         (:same)
         (const v3 1)
         (return v3)
+      )
+    )
+  )"));
+  store.add_classes({uc.create()});
+  DexStoresVector stores({std::move(store)});
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+  auto* bar_type = DexType::get_type("LBar;");
+  optimize_enums::Config config(100);
+  config.candidate_enums.insert(bar_type);
+  EXPECT_EQ(rejection_reasons(scope, &config, bar_type),
+            std::set<optimize_enums::UnsafeType>{
+                optimize_enums::UnsafeType::kUsageComparedByIdentity});
+  EXPECT_EQ(config.candidate_enums.count(bar_type), 0u);
+}
+
+// The method entry is a path into the entry block even when a back edge
+// enters it too: there, `v1` is the `Object` parameter, compared with Bar.
+TEST_F(OptimizeEnumsTest, comparisonInEntryBlockWithBackEdgeKeepsEnum) {
+  auto store = create_enum_store();
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  uc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LUser;.loop:(LBar;Ljava/lang/Object;)V"
+      (
+        (:top)
+        (load-param-object v0)
+        (load-param-object v1)
+        (if-eq v0 v1 :out)
+        (move-object v1 v0)
+        (goto :top)
+        (:out)
+        (return-void)
       )
     )
   )"));

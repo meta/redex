@@ -131,6 +131,10 @@ class EnumUpcastDetector {
       }
       for (const auto& mie : InstructionIterable(block)) {
         engine.analyze_instruction(mie.insn, &env);
+        if (mie.insn->opcode() == OPCODE_IF_EQ ||
+            mie.insn->opcode() == OPCODE_IF_NE) {
+          process_identity_comparison(engine, cfg, block, mie.insn, env);
+        }
         process_instruction(mie.insn, &env);
       }
     }
@@ -181,10 +185,6 @@ class EnumUpcastDetector {
     case OPCODE_MONITOR_ENTER:
     case OPCODE_MONITOR_EXIT:
       reject(insn, env->get(insn->src(0)), UnsafeType::kUsageUsedInMonitor);
-      break;
-    case OPCODE_IF_EQ:
-    case OPCODE_IF_NE:
-      process_identity_comparison(insn, *env);
       break;
     case OPCODE_INVOKE_INTERFACE:
     case OPCODE_INVOKE_SUPER:
@@ -248,12 +248,46 @@ class EnumUpcastDetector {
    * hold one of its constants: a local upcast keeps the enum's type on the
    * register, and an upcast that lets a constant leave the method rejects the
    * enum, so a `String` or app-class operand keeps the result.
+   *
+   * The analysis joins the types that reach the comparison along different
+   * paths. Where the joined types would reject, the comparison is judged again
+   * on each path into its block, so that operands from different incoming
+   * edges are not paired: `a == A` and `b == B`, merged into one block, are not
+   * mistaken for `a == B`.
    */
-  void process_identity_comparison(const IRInstruction* insn,
+  void process_identity_comparison(const EnumFixpointIterator& engine,
+                                   const cfg::ControlFlowGraph& cfg,
+                                   const cfg::Block* block,
+                                   const IRInstruction* insn,
                                    const EnumTypeEnvironment& env) {
-    UnorderedSet<const DexType*> unsafe;
-    collect_identity_risks(insn, env, &unsafe);
-    reject(insn, unsafe, UnsafeType::kUsageComparedByIdentity);
+    UnorderedSet<const DexType*> joined;
+    collect_identity_risks(insn, env, &joined);
+    if (joined.empty()) {
+      return;
+    }
+    // Every execution enters the block along one edge, or at the method entry;
+    // joins in earlier blocks stay joined, which can only reject more.
+    UnorderedSet<const DexType*> on_paths;
+    auto judge_path = [&](EnumTypeEnvironment path_env) {
+      if (path_env.is_bottom()) {
+        return;
+      }
+      for (const auto& mie : InstructionIterable(block)) {
+        engine.analyze_instruction(mie.insn, &path_env);
+        if (mie.insn == insn) {
+          break;
+        }
+      }
+      collect_identity_risks(insn, path_env, &on_paths);
+    };
+    if (block == cfg.entry_block()) {
+      judge_path(EnumFixpointIterator::gen_env(m_method));
+    }
+    for (auto* edge : block->preds()) {
+      judge_path(
+          engine.analyze_edge(edge, engine.get_exit_state_at(edge->src())));
+    }
+    reject(insn, on_paths, UnsafeType::kUsageComparedByIdentity);
   }
 
   void collect_identity_risks(const IRInstruction* insn,

@@ -6,17 +6,22 @@
  */
 
 #include <algorithm>
+#include <set>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 #include "ClassHierarchy.h"
 #include "Creators.h"
+#include "DexAnnotation.h"
 #include "DexClass.h"
 #include "DexMethodHandle.h"
+#include "IRInstruction.h"
 #include "RedexTest.h"
 #include "RedexTestUtils.h"
 #include "Resolver.h"
+#include "Show.h"
 
 DexFieldRef* make_field_ref(DexType* cls, const char* name, DexType* type) {
   return DexField::make_field(cls, DexString::make_string(name), type);
@@ -948,4 +953,54 @@ TEST_F(ResolverTest, ResolveCallOfInvokeDirectHandleIsNamedMethod) {
       resolve_call(OPCODE_INVOKE_SUPER, handle->methodref(), handle, user),
       m_of("LA;"));
   EXPECT_EQ(resolve_method_handle(handle, user), nullptr);
+}
+
+namespace {
+
+std::set<std::string> indirectly_named_types(const IRInstruction* insn) {
+  std::set<std::string> types;
+  for_each_indirectly_named_type(
+      insn, [&](const DexType* type) { types.insert(show(type)); });
+  return types;
+}
+
+} // namespace
+
+TEST_F(ResolverTest, ForEachIndirectlyNamedType) {
+  using Types = std::set<std::string>;
+
+  IRInstruction handle(OPCODE_CONST_METHOD_HANDLE);
+  handle.set_methodhandle(redex::make_method_handle(
+      METHOD_HANDLE_TYPE_INVOKE_INSTANCE, "LA;.m:([[LB;)LC;"));
+  EXPECT_EQ(indirectly_named_types(&handle), (Types{"LA;", "[[LB;", "LC;"}));
+
+  IRInstruction field_handle(OPCODE_CONST_METHOD_HANDLE);
+  field_handle.set_methodhandle(
+      redex::make_method_handle(METHOD_HANDLE_TYPE_INSTANCE_GET, "LA;.f:LB;"));
+  EXPECT_EQ(indirectly_named_types(&field_handle), (Types{"LA;", "LB;"}));
+
+  IRInstruction method_type(OPCODE_CONST_METHOD_TYPE);
+  method_type.set_proto(DexProto::make_proto("(LD;)[LE;"));
+  EXPECT_EQ(indirectly_named_types(&method_type), (Types{"LD;", "[LE;"}));
+
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.push_back(
+      std::make_unique<DexEncodedValueType>(DexType::make_type("LF;")));
+  IRInstruction invoke_custom(OPCODE_INVOKE_CUSTOM);
+  invoke_custom.set_callsite(
+      redex::make_callsite("run", "(LG;)V", std::move(args)));
+  auto custom_types = indirectly_named_types(&invoke_custom);
+  EXPECT_TRUE(custom_types.contains("LF;"));
+  EXPECT_TRUE(custom_types.contains("LG;"));
+
+  // Type, field and method operands are not named indirectly.
+  IRInstruction const_class(OPCODE_CONST_CLASS);
+  const_class.set_type(DexType::make_type("LA;"));
+  EXPECT_TRUE(indirectly_named_types(&const_class).empty());
+  IRInstruction iget(OPCODE_IGET_OBJECT);
+  iget.set_field(DexField::make_field("LA;.f:LB;"));
+  EXPECT_TRUE(indirectly_named_types(&iget).empty());
+  IRInstruction invoke(OPCODE_INVOKE_STATIC);
+  invoke.set_method(DexMethod::make_method("LA;.s:(LB;)V"));
+  EXPECT_TRUE(indirectly_named_types(&invoke).empty());
 }

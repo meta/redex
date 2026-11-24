@@ -237,6 +237,29 @@ void for_each_field_access(const IRInstruction* insn, Fn&& f) {
 }
 
 /**
+ * Calls `f(type)` for every type that `insn` names inside a method handle, a
+ * call site or a prototype: the classes and the field types or prototypes of
+ * the members that its method handles name, the prototypes of its call site
+ * and of its method types, and the Class constants among its call site's
+ * bootstrap arguments; for invoke-polymorphic, its call-site prototype and the
+ * signature-polymorphic method it calls. A pass that rewrites the type, field
+ * and method operands of instructions does not rewrite these. An array type is
+ * reported as is.
+ */
+template <typename Fn>
+void for_each_indirectly_named_type(const IRInstruction* insn, Fn&& f) {
+  if (!insn->has_methodhandle() && !insn->has_callsite() &&
+      !insn->has_proto() && !insn->has_signature_polymorphic()) {
+    return;
+  }
+  std::vector<const DexType*> types;
+  insn->gather_types(types);
+  for (const auto* type : types) {
+    f(type);
+  }
+}
+
+/**
  * Given a scope defined by DexClass, a name and a proto look for a method
  * definition in scope.
  * The lookup is performed according to the search rules specified via

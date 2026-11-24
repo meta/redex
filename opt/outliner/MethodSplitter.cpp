@@ -881,6 +881,15 @@ SplitMethod SplitMethod::create(const SplittableClosure& splittable_closure,
       target_type, split_name, get_split_proto(splittable_closure, arg_types),
       std::move(split_code));
 
+  // The entry block runs whenever the split is called, as the launchpad that
+  // calls it does, so it carries the launchpad's source block. Without one,
+  // `source_blocks::is_not_cold` reads it as unprofiled, and the inliner then
+  // treats the whole split as not cold and refuses to fold cold callees into
+  // it.
+  if (auto sb = make_synthetic_sb(launchpad_template, split_method,
+                                  splittable_closure.hot_split_kind)) {
+    split_entry_block->insert_before(split_entry_block->end(), std::move(sb));
+  }
   // When splitting many cases out of a switch, we keep the positions of the
   // switch block, but not the source-block, so we insert a synthetic one here.
   if (dispatcher) {

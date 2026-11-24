@@ -265,6 +265,55 @@ TEST_F(MethodSplitterTest, ColdSuffixCopyDoesNotInheritHotJoinCounts) {
                   0.0f);
 }
 
+TEST_F(MethodSplitterTest, ColdSplitOfAProfiledMethodHasNoUnprofiledBlock) {
+  // A block without a source block reads as unprofiled, so the inliner would
+  // treat the whole split as not cold and refuse to fold cold callees into it.
+  for (bool group : {false, true}) {
+    auto [cls, method] = create("(I)I", R"((
+      (load-param v0)
+      (.src_block "LFoo;.bar:(I)I" 1 (10.0 100.0))
+      (switch v0 (:a :b :c))
+      (.src_block "LFoo;.bar:(I)I" 2 (10.0 100.0))
+      (add-int v0 v0 v0)
+      (return v0)
+      (:a 0)
+      (.src_block "LFoo;.bar:(I)I" 3 (0.0 0.0))
+      (add-int v0 v0 v0)
+      (return v0)
+      (:b 1)
+      (.src_block "LFoo;.bar:(I)I" 4 (0.0 0.0))
+      (add-int v0 v0 v0)
+      (return v0)
+      (:c 2)
+      (.src_block "LFoo;.bar:(I)I" 5 (0.0 0.0))
+      (add-int v0 v0 v0)
+      (return v0)
+    ))");
+    method->get_code()->build_cfg();
+    auto* dispatch = profile_block(method, 1);
+    auto* a = profile_block(method, 3);
+    auto* b = profile_block(method, 4);
+    ASSERT_NE(dispatch, nullptr);
+    ASSERT_NE(a, nullptr);
+    ASSERT_NE(b, nullptr);
+    auto* split = group ? make_source_block_copy(cls, method, {a, b}, dispatch)
+                        : make_source_block_copy(cls, method, {a});
+    ASSERT_NE(split, nullptr);
+    auto& split_cfg = split->get_code()->cfg();
+    split_cfg.remove_unreachable_blocks();
+    for (auto* block : split_cfg.blocks()) {
+      if (block == split_cfg.exit_block()) {
+        // The ghost exit block holds no code.
+        continue;
+      }
+      EXPECT_NE(source_blocks::get_first_source_block(block), nullptr)
+          << "B" << block->id() << " of " << show(split_cfg);
+      EXPECT_FALSE(source_blocks::is_not_cold(block))
+          << "B" << block->id() << " of " << show(split_cfg);
+    }
+  }
+}
+
 TEST_F(MethodSplitterTest, NothingToDo) {
   const auto* before = R"(
     (
@@ -804,6 +853,7 @@ TEST_F(MethodSplitterTest, SplitHotColdSwitch) {
   const auto* split0 = R"(
     (
       (load-param v0)
+      (.src_block "LFoo;.bar$split$hot_cold0:(I)I" 4294967295 (0.0 0.0))
       (.src_block "LFoo;.bar$split$hot_cold0:(I)I" 4294967295 (0.0 0.0))
       (switch v0 (:L0 :L1))
 

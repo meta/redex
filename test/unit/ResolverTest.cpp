@@ -722,3 +722,59 @@ TEST_F(ResolverTest, ResolveInterfaceMethodOfClass) {
   EXPECT_EQ(resolve_method(s, name, proto, MethodSearch::Interface), nullptr);
   EXPECT_EQ(resolve_interface_method(s, name, proto), nullptr);
 }
+
+namespace {
+
+// `LBase;` declares `x` of `base_access`, and its subclass `LChild;` declares
+// a field of the same name and type, `x` of `child_access`.
+void make_shadowing_fields(DexAccessFlags base_access,
+                           DexAccessFlags child_access) {
+  ClassCreator base(DexType::make_type("LBase;"));
+  base.set_super(type::java_lang_Object());
+  base.add_field(
+      DexField::make_field("LBase;.x:I")->make_concrete(base_access));
+  auto* base_cls = base.create();
+  ClassCreator child(DexType::make_type("LChild;"));
+  child.set_super(base_cls->get_type());
+  child.add_field(
+      DexField::make_field("LChild;.x:I")->make_concrete(child_access));
+  child.create();
+}
+
+DexField* resolve_handle_of_child_x(MethodHandleType type) {
+  return resolve_field_handle(redex::make_method_handle(type, "LChild;.x:I"));
+}
+
+} // namespace
+
+// A static handle of `LChild;.x` reaches the static `LBase;.x`, past the
+// instance field that `LChild;` declares.
+TEST_F(ResolverTest, ResolveFieldHandleSkipsInstanceFieldForStaticHandle) {
+  make_shadowing_fields(ACC_PUBLIC | ACC_STATIC, ACC_PUBLIC);
+  auto* base_x = DexField::get_field("LBase;.x:I")->as_def();
+  auto* child_x = DexField::get_field("LChild;.x:I")->as_def();
+  EXPECT_EQ(resolve_handle_of_child_x(METHOD_HANDLE_TYPE_STATIC_GET), base_x);
+  EXPECT_EQ(resolve_handle_of_child_x(METHOD_HANDLE_TYPE_STATIC_PUT), base_x);
+  EXPECT_EQ(resolve_handle_of_child_x(METHOD_HANDLE_TYPE_INSTANCE_GET),
+            child_x);
+  EXPECT_EQ(resolve_handle_of_child_x(METHOD_HANDLE_TYPE_INSTANCE_PUT),
+            child_x);
+}
+
+// An instance handle of `LChild;.x` reaches the instance field `LBase;.x`,
+// past the static field that `LChild;` declares.
+TEST_F(ResolverTest, ResolveFieldHandleSkipsStaticFieldForInstanceHandle) {
+  make_shadowing_fields(ACC_PUBLIC, ACC_PUBLIC | ACC_STATIC);
+  auto* base_x = DexField::get_field("LBase;.x:I")->as_def();
+  auto* child_x = DexField::get_field("LChild;.x:I")->as_def();
+  EXPECT_EQ(resolve_handle_of_child_x(METHOD_HANDLE_TYPE_INSTANCE_GET), base_x);
+  EXPECT_EQ(resolve_handle_of_child_x(METHOD_HANDLE_TYPE_INSTANCE_PUT), base_x);
+  EXPECT_EQ(resolve_handle_of_child_x(METHOD_HANDLE_TYPE_STATIC_GET), child_x);
+  EXPECT_EQ(resolve_handle_of_child_x(METHOD_HANDLE_TYPE_STATIC_PUT), child_x);
+}
+
+TEST_F(ResolverTest, ResolveFieldHandleOfMethodHandle) {
+  EXPECT_EQ(resolve_field_handle(redex::make_method_handle(
+                METHOD_HANDLE_TYPE_INVOKE_STATIC, "LA;.m:()V")),
+            nullptr);
+}

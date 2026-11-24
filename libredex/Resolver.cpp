@@ -512,6 +512,19 @@ DexMethod* resolve_invoke_method(const IRInstruction* insn,
                                     true);
 }
 
+DexField* resolve_field_handle(const DexMethodHandle* method_handle) {
+  auto type = method_handle->type();
+  if (DexMethodHandle::isInvokeType(type)) {
+    return nullptr;
+  }
+  const auto* field_ref = method_handle->fieldref();
+  bool is_static = type == METHOD_HANDLE_TYPE_STATIC_GET ||
+                   type == METHOD_HANDLE_TYPE_STATIC_PUT;
+  return resolve_field(field_ref->get_class(), field_ref->get_name(),
+                       field_ref->get_type(),
+                       is_static ? FieldSearch::Static : FieldSearch::Instance);
+}
+
 DexField* resolve_field(const DexType* owner,
                         const DexString* name,
                         const DexType* type,

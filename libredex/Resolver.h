@@ -13,6 +13,7 @@
 #include "ConcurrentContainers.h"
 #include "DeterministicContainers.h"
 #include "DexClass.h"
+#include "DexMethodHandle.h"
 #include "IRInstruction.h"
 #include "Show.h"
 
@@ -359,6 +360,16 @@ inline DexField* resolve_field(const DexFieldRef* field,
   return resolve_field(field->get_class(), field->get_name(), field->get_type(),
                        search);
 }
+
+/**
+ * The field that `method_handle` gets or puts, resolved as ART resolves it:
+ * from the class that the handle names, among the static fields for a
+ * static-get or static-put handle and among the instance fields for an
+ * instance-get or instance-put handle, even when the handle names a definition
+ * of the other kind. nullptr when the field is unknown, or when the handle
+ * calls a method.
+ */
+DexField* resolve_field_handle(const DexMethodHandle* method_handle);
 
 struct ConcurrentMethodResolverDeprecated {
   ConcurrentMethodRefCache concurrent_resolve_cache;

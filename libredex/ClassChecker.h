@@ -36,8 +36,8 @@ class ClassChecker {
 
  private:
   bool m_good;
-  bool m_external_check;
-  bool m_definition_check;
+  bool m_external_check{false};
+  bool m_definition_check{false};
   UnorderedSet<const DexType*> m_external_check_allowlist;
   UnorderedSet<const DexType*> m_definition_check_allowlist;
   UnorderedSet<std::string> m_external_check_allowlist_prefixes;

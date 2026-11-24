@@ -7,11 +7,14 @@
 
 #include "EnumUpcastAnalysis.h"
 
+#include <functional>
+#include <memory>
 #include <utility>
 #include <vector>
 
 #include "Debug.h"
 #include "EnumClinitAnalysis.h"
+#include "Lazy.h"
 #include "LiveRange.h"
 #include "Macros.h"
 #include "Resolver.h"
@@ -133,6 +136,11 @@ class EnumUpcastDetector {
 
   void run(const EnumFixpointIterator& engine,
            const cfg::ControlFlowGraph& cfg) {
+    if (m_config->support_kt_19_enum_entries && method::is_clinit(m_method) &&
+        m_candidate_enums->count_unsafe(m_method->get_class()) != 0u) {
+      m_clinit_chains.emplace(
+          [&cfg] { return std::make_unique<live_range::LazyLiveRanges>(cfg); });
+    }
     for (const auto& block : cfg.blocks()) {
       EnumTypeEnvironment env = engine.get_entry_state_at(block);
       if (env.is_bottom()) {
@@ -160,7 +168,10 @@ class EnumUpcastDetector {
       const auto* type = insn->get_type();
       // Assume the local upcast is safe and we only care about upcasting when
       // the value is escaping.
-      if (type != OBJECT_TYPE) {
+      if (type::is_enum_array(type)) {
+        process_enum_entries_input(insn, 0, env,
+                                   UnsafeType::kUsageCastCheckCast);
+      } else if (type != OBJECT_TYPE) {
         reject_if_inconsistent(insn, env->get(insn->src(0)), type,
                                UnsafeType::kUsageCastCheckCast);
       }
@@ -408,27 +419,137 @@ class EnumUpcastDetector {
     process_isput_object(insn, env);
   }
 
+  /**
+   * The transformation deletes `$ENTRIES` and the values array field, so no
+   * read of them may remain. It rewrites only `values()`, which is not
+   * analyzed, and the enum's own <clinit>. kotlinc reads `$ENTRIES` only in
+   * the `getEntries()` accessor; `<clinit>` reads it too once that accessor is
+   * inlined. `<clinit>` may read the values array field only to build
+   * `$ENTRIES` (see `process_enum_entries_input`).
+   */
   void process_sget_object(const IRInstruction* insn) const {
     DexFieldRef* field = insn->get_field();
-    // The transformation deletes the values array field and rewrites only
-    // `values()`, which is not analyzed, and the enum's own <clinit>.
-    if (is_enum_values_field(field) && !in_declaring_clinit(field)) {
+    if (is_enum_entries(field)) {
+      TRACE(ENUM, 5, "sget_object enum entries %s in %s", SHOW(field),
+            SHOW(m_method));
+      reject(insn, field->get_class(), UnsafeType::kUsageUsedEnumEntries);
+    } else if (is_enum_values_field(field) &&
+               (field->get_class() != m_method->get_class() ||
+                !only_used_by(insn, [this](const live_range::Use& use) {
+                  return builds_only_enum_entries(use, /*allow_cast=*/true);
+                }))) {
       TRACE(ENUM, 5, "sget_object values array %s in %s", SHOW(field),
             SHOW(m_method));
       reject(insn, field->get_class(), UnsafeType::kUsageUsedValuesField);
-      return;
     }
-    if (!is_enum_entries(field)) {
-      return;
+  }
+
+  /**
+   * A Kotlin enum's `<clinit>` builds `$ENTRIES` from its values array, which
+   * it upcasts to `Enum[]`:
+   *
+   *   $ENTRIES = EnumEntriesKt.enumEntries((Enum[]) $VALUES);
+   *   $ENTRIES = new EnumEntriesList($VALUES);  // the factory, inlined
+   *
+   * The transformation deletes the `$ENTRIES` store, and the code that only
+   * fed it becomes dead. The enum's own array may reach source `src` of
+   * `insn` as `Enum[]` only in this shape: any other code would receive the
+   * boxed integers.
+   */
+  void process_enum_entries_input(const IRInstruction* insn,
+                                  src_index_t src,
+                                  const EnumTypeEnvironment* env,
+                                  UnsafeType reason) const {
+    const bool builds_entries = builds_only_enum_entries(
+        live_range::Use{const_cast<IRInstruction*>(insn), src},
+        /*allow_cast=*/true);
+    for (const auto* type : env->get(insn->src(src)).elements()) {
+      if (!builds_entries ||
+          type::get_array_component_type(type) != m_method->get_class()) {
+        reject(insn, type, reason);
+      }
     }
-    auto* enum_cls = field->get_class();
-    auto* method_cls = m_method->get_class();
-    TRACE(ENUM, 5, "sget_object enum entries %s in %s", SHOW(field),
-          SHOW(m_method));
-    if (enum_cls == method_cls && method::is_clinit(m_method)) {
-      return;
+  }
+
+  /**
+   * Whether `use` of the candidate's values array only builds its `$ENTRIES`
+   * in `<clinit>`, in one of three shapes:
+   *
+   *   - a cast to `Enum[]` (allowed only when `allow_cast`) whose result is
+   *     used only by one of the next two;
+   *   - the argument of `enumEntries(Enum[])`, whose result is only stored in
+   *     the candidate's `$ENTRIES`;
+   *   - the argument of the `EnumEntriesList` constructor, whose object is
+   *     only stored in the candidate's `$ENTRIES`.
+   */
+  bool builds_only_enum_entries(const live_range::Use& use,
+                                bool allow_cast) const {
+    if (!m_clinit_chains) {
+      return false;
     }
-    reject(insn, enum_cls, UnsafeType::kUsageUsedEnumEntries);
+    const auto* insn = use.insn;
+    if (insn->opcode() == OPCODE_CHECK_CAST) {
+      return allow_cast && use.src_index == 0 &&
+             type::is_enum_array(insn->get_type()) &&
+             only_used_by(insn, [this](const live_range::Use& cast_use) {
+               return builds_only_enum_entries(cast_use,
+                                               /*allow_cast=*/false);
+             });
+    }
+    if (opcode::is_invoke_static(insn->opcode())) {
+      return use.src_index == 0 &&
+             is_kt_enum_entries_factory(insn->get_method()) &&
+             only_used_by(insn, [this](const live_range::Use& result_use) {
+               return is_own_enum_entries_store(result_use);
+             });
+    }
+    if (opcode::is_invoke_direct(insn->opcode())) {
+      if (use.src_index != 1 ||
+          !is_kt_enum_entries_list_ctor(insn->get_method())) {
+        return false;
+      }
+      const auto& use_defs = *(*m_clinit_chains)->use_def_chains;
+      auto defs_it = use_defs.find(live_range::Use{use.insn, 0});
+      if (defs_it == use_defs.end() || defs_it->second.empty()) {
+        return false;
+      }
+      return std::all_of(
+          defs_it->second.begin(), defs_it->second.end(),
+          [&](const IRInstruction* def) {
+            return def->opcode() == OPCODE_NEW_INSTANCE &&
+                   def->get_type() == insn->get_method()->get_class() &&
+                   only_used_by(def, [&](const live_range::Use& list_use) {
+                     return (list_use.insn == insn &&
+                             list_use.src_index == 0) ||
+                            is_own_enum_entries_store(list_use);
+                   });
+          });
+    }
+    return false;
+  }
+
+  // Whether every use of what `def` defines, other than a move, satisfies
+  // `pred`. False outside this candidate's `<clinit>`.
+  bool only_used_by(
+      const IRInstruction* def,
+      const std::function<bool(const live_range::Use&)>& pred) const {
+    if (!m_clinit_chains) {
+      return false;
+    }
+    const auto& def_uses = *(*m_clinit_chains)->def_use_chains;
+    auto it = def_uses.find(const_cast<IRInstruction*>(def));
+    if (it == def_uses.end()) {
+      return true;
+    }
+    return unordered_all_of(it->second, [&](const live_range::Use& use) {
+      return opcode::is_a_move(use.insn->opcode()) || pred(use);
+    });
+  }
+
+  bool is_own_enum_entries_store(const live_range::Use& use) const {
+    return use.insn->opcode() == OPCODE_SPUT_OBJECT && use.src_index == 0 &&
+           is_enum_entries(use.insn->get_field()) &&
+           use.insn->get_field()->get_class() == m_method->get_class();
   }
 
   /**
@@ -486,6 +607,10 @@ class EnumUpcastDetector {
                                  const EnumTypeEnvironment* env) const {
     always_assert(insn->opcode() == OPCODE_INVOKE_DIRECT);
     auto* invoked = insn->get_method();
+    if (m_clinit_chains && is_kt_enum_entries_list_ctor(invoked)) {
+      process_enum_entries_input(insn, 1, env, UnsafeType::kUsageCastParameter);
+      return;
+    }
     auto* container = invoked->get_class();
     if ((m_candidate_enums->count_unsafe(container) != 0u) &&
         method::is_init(invoked) && method::is_clinit(m_method)) {
@@ -510,6 +635,10 @@ class EnumUpcastDetector {
     if (method_ref == STRING_VALUEOF_METHOD) {
       EnumTypes types = env->get(insn->src(0));
       check_object_cast(types, insn);
+      return;
+    }
+    if (m_clinit_chains && is_kt_enum_entries_factory(method_ref)) {
+      process_enum_entries_input(insn, 0, env, UnsafeType::kUsageCastParameter);
       return;
     }
     auto* container = method_ref->get_class();
@@ -689,19 +818,6 @@ class EnumUpcastDetector {
       }
     } else {
       for (const auto* possible_type : types.elements()) {
-        auto* const possible_elem_type =
-            type::make_array_component_type(possible_type);
-        if (m_config->support_kt_19_enum_entries &&
-            method::is_clinit(m_method) &&
-            m_method->get_class() == possible_elem_type &&
-            type::is_enum_array(required_type)) {
-          // EnumEntries upcast in the clinit method of the same enum class.
-          TRACE(ENUM, 5,
-                "Skip upcasting of EnumEntries construction in clinit method. "
-                "%s %s",
-                SHOW(possible_elem_type), SHOW(m_method));
-          continue;
-        }
         reject(insn, possible_type, reason);
       }
     }
@@ -806,6 +922,9 @@ class EnumUpcastDetector {
   Config* m_config;
   const ConcurrentSet<const DexType*>* m_candidate_enums;
   const RejectFn& m_reject_fn;
+  // The chains of a candidate's `<clinit>`, where Kotlin builds `$ENTRIES`;
+  // absent elsewhere, and computed only when an instruction needs them.
+  mutable std::optional<Lazy<live_range::LazyLiveRanges>> m_clinit_chains;
   std::vector<std::pair<const DexType*, const DexType*>> m_compared_candidates;
 };
 
@@ -1257,6 +1376,34 @@ bool is_enum_values_field(const DexFieldRef* field_ref) {
   return check_required_access_flags(synth_access(), field->get_access()) &&
          type::get_array_component_type(field->get_type()) ==
              field->get_class();
+}
+
+namespace {
+
+// Whether the code that runs for the Kotlin library method `method` is
+// Kotlin's own: an app's copy marked `no_optimizations` may not be what runs.
+bool runs_kotlin_library_code(const DexMethodRef* method) {
+  const auto* def = method->as_def();
+  return def == nullptr || !def->rstate.no_optimizations();
+}
+
+} // namespace
+
+bool is_kt_enum_entries_factory(const DexMethodRef* method) {
+  const auto* factory = DexMethod::make_method(KT_ENUM_ENTRIES_FACTORY_METHOD);
+  const auto* rtype = method->get_proto()->get_rtype();
+  return method->get_class() == factory->get_class() &&
+         method->get_name() == factory->get_name() &&
+         method->get_proto()->get_args() == factory->get_proto()->get_args() &&
+         (rtype == factory->get_proto()->get_rtype() ||
+          rtype ==
+              DexMethod::make_method(KT_ENUM_ENTRIES_LIST_CTOR)->get_class()) &&
+         runs_kotlin_library_code(method);
+}
+
+bool is_kt_enum_entries_list_ctor(const DexMethodRef* method) {
+  return method == DexMethod::make_method(KT_ENUM_ENTRIES_LIST_CTOR) &&
+         runs_kotlin_library_code(method);
 }
 
 bool is_enum_entries(const DexFieldRef* field) {

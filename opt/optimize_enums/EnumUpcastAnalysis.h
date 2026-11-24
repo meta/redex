@@ -47,6 +47,30 @@ bool is_enum_values_field(const DexFieldRef* field_ref);
 constexpr const char* KT_ENUM_ENTRIES_TYPE = "Lkotlin/enums/EnumEntries;";
 constexpr const char* ENUM_VALUES_FIELD = "$VALUES";
 constexpr const char* ENUM_ENTRIES_FIELD = "$ENTRIES";
+constexpr const char* KT_ENUM_ENTRIES_FACTORY_METHOD =
+    "Lkotlin/enums/EnumEntriesKt;.enumEntries:([Ljava/lang/Enum;)Lkotlin/"
+    "enums/EnumEntries;";
+constexpr const char* KT_ENUM_ENTRIES_LIST_CTOR =
+    "Lkotlin/enums/EnumEntriesList;.<init>:([Ljava/lang/Enum;)V";
+
+/**
+ * Whether `method` is Kotlin's `EnumEntriesKt.enumEntries(Enum[])`, with
+ * which a Kotlin enum's `<clinit>` builds `$ENTRIES` from the values array.
+ * It returns `EnumEntries`, or the `EnumEntriesList` that it constructs once
+ * ResolveRefsPass has specialized the reference. A method with the same name
+ * and arguments that returns anything else is other code, about which nothing
+ * is known. OptimizeEnums relies on the factory only allocating, so an app's
+ * copy marked `no_optimizations`, whose code may not be what runs, does not
+ * count.
+ */
+bool is_kt_enum_entries_factory(const DexMethodRef* method);
+
+/**
+ * Whether `method` is `EnumEntriesList.<init>(Enum[])`, all the factory does.
+ * `<clinit>` calls it directly once MethodInlinePass has inlined the factory.
+ * As for the factory, a copy marked `no_optimizations` does not count.
+ */
+bool is_kt_enum_entries_list_ctor(const DexMethodRef* method);
 
 // Store possible types for a register although we only care about Object,
 // Enum and Enum's subtypes.

@@ -703,6 +703,307 @@ TEST_F(OptimizeEnumsTest, repeatedAllocationSiteKeepsEnum) {
       << show(count->get_code()->cfg());
 }
 
+namespace {
+
+// Creates a Kotlin enum `type` with constants A and B and the synthetic
+// `$VALUES` and `$ENTRIES` fields. Its `<clinit>` creates A in v3 and B in v4,
+// stores the values array in v0 to `$VALUES`, and then runs `clinit_tail`.
+DexClass* make_kotlin_enum(const std::string& type,
+                           const std::string& clinit_tail) {
+  DexType::make_type(optimize_enums::KT_ENUM_ENTRIES_TYPE);
+  DexType::make_type("Lkotlin/enums/EnumEntriesList;");
+  ClassCreator cc(DexType::make_type(type));
+  cc.set_super(type::java_lang_Enum());
+  cc.set_access(ACC_PUBLIC | ACC_FINAL | ACC_ENUM);
+  for (const auto& name :
+       {".$VALUES:[" + type,
+        std::string(".$ENTRIES:Lkotlin/enums/EnumEntries;")}) {
+    auto* synth = dynamic_cast<DexField*>(DexField::make_field(type + name));
+    synth->make_concrete(ACC_PRIVATE | ACC_STATIC | ACC_FINAL | ACC_SYNTHETIC);
+    cc.add_field(synth);
+  }
+  for (const auto* name : {".A:", ".B:"}) {
+    auto* constant =
+        dynamic_cast<DexField*>(DexField::make_field(type + name + type));
+    constant->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL | ACC_ENUM);
+    cc.add_field(constant);
+  }
+  const auto ctor = "\"" + type + ".<init>:(Ljava/lang/String;I)V\"";
+  cc.add_method(assembler::method_from_string(R"(
+    (method (private constructor) )" + ctor + R"(
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (load-param v2)
+        (invoke-direct (v0 v1 v2) "Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V")
+        (return-void)
+      )
+    )
+  )"));
+  cc.add_method(assembler::method_from_string(R"(
+    (method (public static) ")" + type + R"(.<clinit>:()V"
+     (
+      (const-string "A")
+      (move-result-pseudo-object v1)
+      (const v2 0)
+      (new-instance ")" + type + R"(")
+      (move-result-pseudo-object v3)
+      (invoke-direct (v3 v1 v2) )" + ctor + R"()
+      (sput-object v3 ")" + type + ".A:" + type +
+                                              R"(")
+      (const-string "B")
+      (move-result-pseudo-object v1)
+      (const v2 1)
+      (new-instance ")" + type + R"(")
+      (move-result-pseudo-object v4)
+      (invoke-direct (v4 v1 v2) )" + ctor + R"()
+      (sput-object v4 ")" + type + ".B:" + type +
+                                              R"(")
+      (const v2 2)
+      (new-array v2 "[)" + type + R"(")
+      (move-result-pseudo-object v0)
+      (const v2 0)
+      (aput-object v3 v0 v2)
+      (const v2 1)
+      (aput-object v4 v0 v2)
+      (sput-object v0 ")" + type + ".$VALUES:[" +
+                                              type + R"(")
+      )" + clinit_tail + R"(
+     )
+    )
+  )"));
+  auto* cls = cc.create();
+  for (auto* m : cls->get_all_methods()) {
+    m->get_code()->build_cfg();
+  }
+  return cls;
+}
+
+void run_optimize_enums_with_entries(DexStoresVector& stores) {
+  optimize_enums::OptimizeEnumsPass pass;
+  Json::Value conf_obj;
+  conf_obj["OptimizeEnumsPass"]["support_kt_19_enum_entries"] = true;
+  ConfigFiles conf(conf_obj);
+  conf.parse_global_config();
+  PassManager manager({&pass}, conf, RedexOptions{});
+  manager.run_passes(stores, conf);
+}
+
+} // namespace
+
+// Only Kotlin's factory, whose return type ResolveRefsPass may specialize to
+// `EnumEntriesList`, builds `$ENTRIES`. A method with the same name and
+// arguments but another return type is other code, which the cleanup of
+// `<clinit>` must not take to be free of side effects.
+TEST_F(OptimizeEnumsTest, enumEntriesFactoryIsMatchedByItsReturnType) {
+  EXPECT_TRUE(optimize_enums::is_kt_enum_entries_factory(DexMethod::make_method(
+      "Lkotlin/enums/EnumEntriesKt;.enumEntries:([Ljava/lang/Enum;)Lkotlin/"
+      "enums/EnumEntries;")));
+  EXPECT_TRUE(optimize_enums::is_kt_enum_entries_factory(DexMethod::make_method(
+      "Lkotlin/enums/EnumEntriesKt;.enumEntries:([Ljava/lang/Enum;)Lkotlin/"
+      "enums/EnumEntriesList;")));
+  EXPECT_FALSE(
+      optimize_enums::is_kt_enum_entries_factory(DexMethod::make_method(
+          "Lkotlin/enums/EnumEntriesKt;.enumEntries:([Ljava/lang/Enum;)I")));
+}
+
+// A Kotlin enum whose `<clinit>` reads `$VALUES` back, casts it to `Enum[]`
+// and passes it to the `enumEntries` factory, as kotlinc emits it, is boxed.
+TEST_F(OptimizeEnumsTest, kotlincEnumEntriesFactoryIsRemoved) {
+  DexStoresVector stores({create_enum_store()});
+  auto* mode = make_kotlin_enum("LMode;", R"(
+      (sget-object "LMode;.$VALUES:[LMode;")
+      (move-result-pseudo-object v5)
+      (check-cast v5 "[Ljava/lang/Enum;")
+      (move-result-pseudo-object v5)
+      (invoke-static (v5) "Lkotlin/enums/EnumEntriesKt;.enumEntries:([Ljava/lang/Enum;)Lkotlin/enums/EnumEntries;")
+      (move-result-object v5)
+      (sput-object v5 "LMode;.$ENTRIES:Lkotlin/enums/EnumEntries;")
+      (return-void)
+  )");
+  stores[0].add_classes({mode});
+  run_optimize_enums_with_entries(stores);
+
+  EXPECT_EQ(mode->get_super_class(), type::java_lang_Object());
+}
+
+// The same enum keeps its `$ENTRIES` when the app's copy of the factory is
+// marked `no_optimizations`: its code may not be what runs, so it may do more
+// than allocate, and deleting the call could drop that.
+TEST_F(OptimizeEnumsTest, untrustedEnumEntriesFactoryKeepsEnum) {
+  DexStoresVector stores({create_enum_store()});
+  ClassCreator kc(DexType::make_type("Lkotlin/enums/EnumEntriesKt;"));
+  kc.set_super(type::java_lang_Object());
+  kc.set_access(ACC_PUBLIC | ACC_FINAL);
+  auto* factory = assembler::method_from_string(R"(
+    (method (public static) "Lkotlin/enums/EnumEntriesKt;.enumEntries:([Ljava/lang/Enum;)Lkotlin/enums/EnumEntries;"
+      (
+        (load-param-object v0)
+        (sget "Lkotlin/enums/EnumEntriesKt;.calls:I")
+        (move-result-pseudo v1)
+        (add-int/lit v1 v1 1)
+        (sput v1 "Lkotlin/enums/EnumEntriesKt;.calls:I")
+        (const v1 0)
+        (return-object v1)
+      )
+    )
+  )");
+  factory->rstate.set_no_optimizations();
+  kc.add_method(factory);
+  auto* calls = dynamic_cast<DexField*>(
+      DexField::make_field("Lkotlin/enums/EnumEntriesKt;.calls:I"));
+  calls->make_concrete(ACC_PUBLIC | ACC_STATIC);
+  kc.add_field(calls);
+  factory->get_code()->build_cfg();
+  auto* mode = make_kotlin_enum("LMode;", R"(
+      (sget-object "LMode;.$VALUES:[LMode;")
+      (move-result-pseudo-object v5)
+      (check-cast v5 "[Ljava/lang/Enum;")
+      (move-result-pseudo-object v5)
+      (invoke-static (v5) "Lkotlin/enums/EnumEntriesKt;.enumEntries:([Ljava/lang/Enum;)Lkotlin/enums/EnumEntries;")
+      (move-result-object v5)
+      (sput-object v5 "LMode;.$ENTRIES:Lkotlin/enums/EnumEntries;")
+      (return-void)
+  )");
+  stores[0].add_classes({kc.create(), mode});
+  run_optimize_enums_with_entries(stores);
+
+  EXPECT_EQ(mode->get_super_class(), type::java_lang_Enum());
+}
+
+// A Kotlin enum whose `<clinit>` calls the `enumEntries` factory through a
+// reference with a specialized return type, as ResolveRefsPass leaves it, is
+// boxed, and the factory call goes away with the `$ENTRIES` field it fed.
+TEST_F(OptimizeEnumsTest, specializedEnumEntriesFactoryIsRemoved) {
+  DexStoresVector stores({create_enum_store()});
+  auto* mode = make_kotlin_enum("LMode;", R"(
+      (invoke-static (v0) "Lkotlin/enums/EnumEntriesKt;.enumEntries:([Ljava/lang/Enum;)Lkotlin/enums/EnumEntriesList;")
+      (move-result-object v5)
+      (sput-object v5 "LMode;.$ENTRIES:Lkotlin/enums/EnumEntries;")
+      (return-void)
+  )");
+  stores[0].add_classes({mode});
+  run_optimize_enums_with_entries(stores);
+
+  EXPECT_EQ(mode->get_super_class(), type::java_lang_Object());
+  auto* clinit = mode->get_clinit();
+  if (clinit != nullptr) {
+    for (const auto& mie :
+         cfg::InstructionIterable(clinit->get_code()->cfg())) {
+      EXPECT_FALSE(mie.insn->has_method() &&
+                   mie.insn->get_method()->str() == "enumEntries")
+          << show(mie.insn);
+    }
+  }
+}
+
+// A Kotlin enum whose companion object reads `entries`, like
+//
+//   enum class Tab { HOME, SEARCH; companion object { val COUNT = entries.size
+//   } }
+//
+// reads `$ENTRIES` in `<clinit>` once MethodInlinePass has inlined the
+// `getEntries()` accessor. The read would outlive the deleted field, so the
+// enum is not boxed.
+TEST_F(OptimizeEnumsTest, enumEntriesReadInClinitKeepsEnum) {
+  DexStoresVector stores({create_enum_store()});
+  auto* tab = make_kotlin_enum("LTab;", R"(
+      (invoke-static (v0) "Lkotlin/enums/EnumEntriesKt;.enumEntries:([Ljava/lang/Enum;)Lkotlin/enums/EnumEntries;")
+      (move-result-object v5)
+      (sput-object v5 "LTab;.$ENTRIES:Lkotlin/enums/EnumEntries;")
+      (sget-object "LTab;.$ENTRIES:Lkotlin/enums/EnumEntries;")
+      (move-result-pseudo-object v6)
+      (invoke-interface (v6) "Lkotlin/enums/EnumEntries;.size:()I")
+      (move-result v7)
+      (sput v7 "LTabCompanion;.COUNT:I")
+      (return-void)
+  )");
+  stores[0].add_classes({tab});
+  run_optimize_enums_with_entries(stores);
+
+  EXPECT_EQ(tab->get_super_class(), type::java_lang_Enum());
+}
+
+// A read of the values array field in `<clinit>` that does not build
+// `$ENTRIES` would outlive the deleted field, so the enum is not boxed.
+// Defensive: kotlinc and javac read the field there only for `$ENTRIES`.
+TEST_F(OptimizeEnumsTest, valuesFieldReadInClinitKeepsEnum) {
+  DexStoresVector stores({create_enum_store()});
+  auto* tab = make_kotlin_enum("LTab;", R"(
+      (sget-object "LTab;.$VALUES:[LTab;")
+      (move-result-pseudo-object v5)
+      (array-length v5)
+      (move-result-pseudo v6)
+      (sput v6 "LTabCompanion;.COUNT:I")
+      (return-void)
+  )");
+  stores[0].add_classes({tab});
+  run_optimize_enums_with_entries(stores);
+
+  EXPECT_EQ(tab->get_super_class(), type::java_lang_Enum());
+}
+
+// The values array passed as `Enum[]` to anything but the `enumEntries`
+// factory or the `EnumEntriesList` constructor would receive boxed integers,
+// so the enum is not boxed. Defensive: kotlinc passes it only to the factory.
+TEST_F(OptimizeEnumsTest, valuesArrayPassedAsEnumArrayKeepsEnum) {
+  DexStoresVector stores({create_enum_store()});
+  auto* reg = make_kotlin_enum("LReg;", R"(
+      (invoke-static (v0) "LRegistry;.register:([Ljava/lang/Enum;)V")
+      (return-void)
+  )");
+  stores[0].add_classes({reg});
+  run_optimize_enums_with_entries(stores);
+
+  EXPECT_EQ(reg->get_super_class(), type::java_lang_Enum());
+}
+
+// An `EnumEntries` that the factory builds from the values array and that
+// `<clinit>` stores anywhere but in `$ENTRIES` stays alive and would wrap
+// boxed integers, so the enum is not boxed. Defensive: kotlinc stores it only
+// in `$ENTRIES`.
+TEST_F(OptimizeEnumsTest, escapingEnumEntriesKeepsEnum) {
+  DexStoresVector stores({create_enum_store()});
+  auto* mode = make_kotlin_enum("LMode;", R"(
+      (invoke-static (v0) "Lkotlin/enums/EnumEntriesKt;.enumEntries:([Ljava/lang/Enum;)Lkotlin/enums/EnumEntries;")
+      (move-result-object v5)
+      (sput-object v5 "LMode;.$ENTRIES:Lkotlin/enums/EnumEntries;")
+      (sput-object v5 "LHolder;.ENTRIES:Lkotlin/enums/EnumEntries;")
+      (return-void)
+  )");
+  stores[0].add_classes({mode});
+  run_optimize_enums_with_entries(stores);
+
+  EXPECT_EQ(mode->get_super_class(), type::java_lang_Enum());
+}
+
+// A Kotlin enum whose `<clinit>` has the `enumEntries` factory inlined, as
+// MethodInlinePass leaves it, is boxed, and the `EnumEntriesList` goes away
+// with the `$ENTRIES` field it fed.
+TEST_F(OptimizeEnumsTest, inlinedEnumEntriesFactoryIsRemoved) {
+  DexStoresVector stores({create_enum_store()});
+  auto* mode = make_kotlin_enum("LMode;", R"(
+      (new-instance "Lkotlin/enums/EnumEntriesList;")
+      (move-result-pseudo-object v5)
+      (invoke-direct (v5 v0) "Lkotlin/enums/EnumEntriesList;.<init>:([Ljava/lang/Enum;)V")
+      (sput-object v5 "LMode;.$ENTRIES:Lkotlin/enums/EnumEntries;")
+      (return-void)
+  )");
+  stores[0].add_classes({mode});
+  run_optimize_enums_with_entries(stores);
+
+  EXPECT_EQ(mode->get_super_class(), type::java_lang_Object());
+  auto* clinit = mode->get_clinit();
+  if (clinit != nullptr) {
+    for (const auto& mie :
+         cfg::InstructionIterable(clinit->get_code()->cfg())) {
+      EXPECT_FALSE(mie.insn->has_type() && mie.insn->get_type()->str() ==
+                                               "Lkotlin/enums/EnumEntriesList;")
+          << show(mie.insn);
+    }
+  }
+}
+
 // When a candidate enum is unsafe for several reasons across different methods,
 // every reason must be recorded -- not just whichever one a worker thread
 // happened to observe first. `reject_unsafe_enums` runs the usage analysis in
@@ -1295,6 +1596,37 @@ TEST_F(OptimizeEnumsTest, valuesArrayReadOutsideValuesKeepsEnum) {
       )
     )
   )"),
+            std::set<optimize_enums::UnsafeType>{
+                optimize_enums::UnsafeType::kUsageUsedValuesField});
+}
+
+// `User.first()` reads `Bar.$VALUES`, as `Bar.values()` inlined into another
+// class leaves it. Boxing deletes `$VALUES`, so the enum is kept.
+TEST_F(OptimizeEnumsTest, valuesArrayReadInAnotherClassKeepsEnum) {
+  auto store = create_enum_store();
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  uc.add_method(assembler::method_from_string(R"(
+    (method (public static) "LUser;.first:()LBar;"
+      (
+        (sget-object "LBar;.$VALUES:[LBar;")
+        (move-result-pseudo-object v0)
+        (const v1 0)
+        (aget-object v0 v1)
+        (move-result-pseudo-object v0)
+        (return-object v0)
+      )
+    )
+  )"));
+  store.add_classes({uc.create()});
+  DexStoresVector stores({std::move(store)});
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+  auto* bar_type = DexType::get_type("LBar;");
+  optimize_enums::Config config(100);
+  config.candidate_enums.insert(bar_type);
+  EXPECT_EQ(rejection_reasons(scope, &config, bar_type),
             std::set<optimize_enums::UnsafeType>{
                 optimize_enums::UnsafeType::kUsageUsedValuesField});
 }

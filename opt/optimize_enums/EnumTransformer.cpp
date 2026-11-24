@@ -151,9 +151,6 @@ struct EnumUtil {
       "Ljava/lang/IllegalArgumentException;.<init>:(Ljava/lang/String;)V");
   DexMethodRef* STRING_EQ_METHOD =
       DexMethod::make_method("Ljava/lang/String;.equals:(Ljava/lang/Object;)Z");
-  DexMethodRef* KT_ENUM_ENTRIES_FACTORY_METHOD = DexMethod::make_method(
-      "Lkotlin/enums/EnumEntriesKt;.enumEntries:([Ljava/lang/Enum;)Lkotlin/"
-      "enums/EnumEntries;");
 
   InsertOnlyConcurrentMap<DexClass*, DexMethod*>
       m_user_defined_tostring_method_cache;
@@ -1858,8 +1855,7 @@ class EnumTransformer final {
     // Delete <init>, values() and valueOf(String) methods, and clean <clinit>.
     std::erase_if(dmethods, [&, this](auto* method) {
       if (method::is_clinit(method)) {
-        clean_clinit(enum_constants, m_enum_util->m_config, enum_cls, method,
-                     synth_fields, m_enum_util->KT_ENUM_ENTRIES_FACTORY_METHOD);
+        clean_clinit(enum_constants, enum_cls, method, synth_fields);
         return empty(method->get_code());
       }
       return this->is_generated_enum_method(method);
@@ -1891,11 +1887,9 @@ class EnumTransformer final {
    * ... // register v0 may be used.
    */
   static void clean_clinit(const EnumConstantsMap& enum_constants,
-                           const Config& config,
                            DexClass* enum_cls,
                            DexMethod* clinit,
-                           const UnorderedSet<DexField*>& synth_fields,
-                           DexMethodRef* kt_enum_entries_factory) {
+                           const UnorderedSet<DexField*>& synth_fields) {
     auto* code = clinit->get_code();
     auto ctors = enum_cls->get_ctors();
     auto* ctor = only(ctors);
@@ -1916,13 +1910,16 @@ class EnumTransformer final {
         } else if (synth_fields.count(field) != 0u) {
           m.remove(it);
         }
-      } else if (opcode::is_invoke_direct(insn->opcode()) &&
-                 insn->get_method() == ctor) {
+      } else if ((opcode::is_invoke_direct(insn->opcode()) &&
+                  insn->get_method() == ctor) ||
+                 (opcode::is_invoke_static(insn->opcode()) &&
+                  is_kt_enum_entries_factory(insn->get_method())) ||
+                 (opcode::is_invoke_direct(insn->opcode()) &&
+                  is_kt_enum_entries_list_ctor(insn->get_method()))) {
+        // The enum constructor is side-effect free (see is_safe_enum), and
+        // `enumEntries`, or its inlined body, only wraps an array for
+        // `$ENTRIES`.
         summaries.emplace(insn, side_effects::Summary());
-      } else if (opcode::is_invoke_static(insn->opcode()) &&
-                 insn->get_method() == kt_enum_entries_factory) {
-        summaries.emplace(insn, side_effects::Summary());
-        always_assert(config.support_kt_19_enum_entries);
       }
     }
     m.flush();

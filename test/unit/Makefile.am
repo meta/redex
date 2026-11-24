@@ -254,6 +254,7 @@ check_PROGRAMS = \
     typed_nonreturning_methods_test \
     uninitialized_objects_test \
     unique_method_tracker_test \
+    unknown_virtuals_test \
     up_code_motion_test \
     used_vars_test \
     vertical_merging_method_handle_test \
@@ -788,6 +789,8 @@ uninitialized_objects_test_SOURCES = UninitializedObjectsTest.cpp
 
 unique_method_tracker_test_SOURCES = UniqueMethodTrackerTest.cpp
 unique_method_tracker_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
+
+unknown_virtuals_test_SOURCES = UnknownVirtualsTest.cpp
 
 up_code_motion_test_SOURCES = UpCodeMotionTest.cpp
 up_code_motion_test_LDADD = $(COMMON_MOCK_TEST_LIBS)

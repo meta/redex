@@ -5,8 +5,9 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <algorithm>
 #include <array>
-#include <vector>
+#include <string_view>
 
 #include "UnknownVirtuals.h"
 
@@ -14,37 +15,15 @@ namespace {
 
 // add any type on which an access is allowed and safe without accessibility
 // issues
-constexpr std::array<const char*, 10> safe_types_on_refs{
+constexpr std::array<std::string_view, 10> safe_types_on_refs{
     "Ljava/lang/Object;",        "Ljava/lang/String;",  "Ljava/lang/Enum;",
     "Ljava/lang/StringBuilder;", "Ljava/lang/Boolean;", "Ljava/lang/Class;",
     "Ljava/lang/Long;",          "Ljava/lang/Integer;", "Landroid/os/Bundle;",
     "Ljava/nio/ByteBuffer;"};
 
-/**
- * Use this cache once the optimization is invoked to make sure
- * all caches are filled and usable.
- */
-struct DexTypeCache {
-  std::vector<const DexType*> cache;
-
-  DexTypeCache() {
-    for (const auto* const safe_type : safe_types_on_refs) {
-      auto* type = DexType::get_type(safe_type);
-      if (type != nullptr) {
-        cache.push_back(type);
-      }
-    }
-  }
-
-  bool has_type(const DexType* type) {
-    for (const auto* cached_type : cache) {
-      if (cached_type == type) {
-        return true;
-      }
-    }
-    return false;
-  }
-};
+// The checks below compare type names, not DexType pointers: a DexType belongs
+// to one RedexContext, and a pointer kept from an earlier one no longer names
+// the type it was kept for.
 
 /**
  * If the type is a known final type or a well known type with no protected
@@ -54,9 +33,12 @@ struct DexTypeCache {
  * protected. When public the optimization holds otherwise it's not always
  * possible to optimize and we conservatively give up.
  */
-bool static type_ok(const DexType* type) {
-  static DexTypeCache* cache = new DexTypeCache();
-  return cache->has_type(type);
+bool type_ok(const DexType* type) {
+  if (type == nullptr) {
+    return false;
+  }
+  return std::find(safe_types_on_refs.begin(), safe_types_on_refs.end(),
+                   type->str()) != safe_types_on_refs.end();
 }
 
 /**
@@ -67,53 +49,31 @@ bool static type_ok(const DexType* type) {
  */
 bool is_method_known_to_be_public_helper(const DexType* type,
                                          DexMethodRef* meth) {
-  const auto* meth_name = meth->get_name()->c_str();
-  static auto* view = DexType::get_type("Landroid/view/View;");
-  if (view == type) {
-    if (strcmp(meth_name, "getContext") == 0) {
-      return true;
-    }
-    if (strcmp(meth_name, "findViewById") == 0) {
-      return true;
-    }
-    if (strcmp(meth_name, "setVisibility") == 0) {
-      return true;
-    }
+  if (type == nullptr) {
     return false;
   }
-  static auto* il =
-      DexType::get_type("Lcom/google/common/collect/ImmutableList;");
-  static auto* al = DexType::get_type("Ljava/util/ArrayList;");
-  if (il == type || al == type) {
-    if (strcmp(meth_name, "get") == 0) {
-      return true;
-    }
-    if (strcmp(meth_name, "isEmpty") == 0) {
-      return true;
-    }
-    if (strcmp(meth_name, "size") == 0) {
-      return true;
-    }
-    if (strcmp(meth_name, "add") == 0) {
-      return true;
-    }
-    return false;
+  auto type_name = type->str();
+  auto meth_name = meth->get_name()->str();
+  if (type_name == "Landroid/view/View;") {
+    return meth_name == "getContext" || meth_name == "findViewById" ||
+           meth_name == "setVisibility";
   }
-  static auto* ctx = DexType::get_type("Landroid/content/Context;");
-  if (ctx == type) {
-    return strcmp(meth_name, "getResources") == 0;
+  if (type_name == "Lcom/google/common/collect/ImmutableList;" ||
+      type_name == "Ljava/util/ArrayList;") {
+    return meth_name == "get" || meth_name == "isEmpty" ||
+           meth_name == "size" || meth_name == "add";
   }
-  static auto* resrc = DexType::get_type("Landroid/content/res/Resources;");
-  if (resrc == type) {
-    return strcmp(meth_name, "getString") == 0;
+  if (type_name == "Landroid/content/Context;") {
+    return meth_name == "getResources";
   }
-  static auto* linf = DexType::get_type("Landroid/view/LayoutInflater;");
-  if (linf == type) {
-    return strcmp(meth_name, "inflate") == 0;
+  if (type_name == "Landroid/content/res/Resources;") {
+    return meth_name == "getString";
   }
-  static auto* vg = DexType::get_type("Landroid/view/ViewGroup;");
-  if (vg == type) {
-    return strcmp(meth_name, "getContext") == 0;
+  if (type_name == "Landroid/view/LayoutInflater;") {
+    return meth_name == "inflate";
+  }
+  if (type_name == "Landroid/view/ViewGroup;") {
+    return meth_name == "getContext";
   }
   return false;
 }

@@ -15,6 +15,7 @@
 #include "Creators.h"
 #include "DexStore.h"
 #include "IRAssembler.h"
+#include "RedexTestUtils.h"
 #include "SourceBlocks.h"
 
 using ::testing::AnyNumber;
@@ -2171,6 +2172,44 @@ TEST_F(ConstantPropagationTest, NoForwardingWithUnavailableMethodHandleResult) {
 
   forward_targets_in_static_method(
       code.get(), "(Ljava/lang/invoke/MethodHandle;I)LUnavailable;");
+
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+// The same holds for a value returned by invoke-custom.
+TEST_F(ConstantPropagationTest, NoForwardingWithUnavailableCallSiteResult) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (load-param v1)
+      (.try_start a)
+      (invoke-static (v0) "LFoo;.placeholder:(Ljava/lang/Object;)LUnavailable;")
+      (move-result-object v2)
+      (.try_end a)
+      (if-eqz v1 :L1)
+      (const v3 1)
+      (goto :L2)
+      (:L1)
+      (const v3 0)
+      (:L2)
+      (if-eqz v3 :L3)
+      (const v4 0)
+      (:L3)
+      (return-object v2)
+      (.catch (a))
+      (const v2 0)
+      (return-object v2)
+    )
+  )");
+  redex::make_invoke_custom(code.get(), "run",
+                            "(Ljava/lang/Object;)LUnavailable;");
+  auto expected_code = std::make_unique<IRCode>(*code);
+  // Only the round trip through the CFG.
+  expected_code->build_cfg();
+  expected_code->clear_cfg();
+
+  forward_targets_in_static_method(code.get(),
+                                   "(Ljava/lang/Object;I)LUnavailable;");
 
   EXPECT_CODE_EQ(code.get(), expected_code.get());
 }

@@ -458,7 +458,7 @@ interprocedural_constant_propagation_test_SOURCES = constant-propagation/IPConst
 
 ipcp_stringbuilder_append_chain_test_SOURCES = constant-propagation/IPCPStringBuilderAppendChainTest.cpp
 
-intraprocedural_constant_propagation_test_SOURCES = constant-propagation/ConstantPropagationTest.cpp
+intraprocedural_constant_propagation_test_SOURCES = constant-propagation/ConstantPropagationTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 intraprocedural_constant_propagation_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 ir_assembler_test_SOURCES = IRAssemblerTest.cpp

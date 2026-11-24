@@ -1549,9 +1549,9 @@ bool Transform::has_problematic_return(cfg::ControlFlowGraph& cfg,
 
   auto is_relevant_def = [](auto* insn) {
     auto op = insn->opcode();
-    return insn->has_type() || insn->has_method() ||
-           insn->has_signature_polymorphic() || op == OPCODE_IGET_OBJECT ||
-           op == OPCODE_SGET_OBJECT || op == OPCODE_AGET_OBJECT;
+    return insn->has_type() || opcode::is_an_invoke(op) ||
+           op == OPCODE_IGET_OBJECT || op == OPCODE_SGET_OBJECT ||
+           op == OPCODE_AGET_OBJECT;
   };
   auto ii = InstructionIterable(cfg);
   auto has_relevant_def = std::any_of(ii.begin(), ii.end(), [&](auto& mie) {
@@ -1608,13 +1608,7 @@ bool Transform::has_problematic_return(cfg::ControlFlowGraph& cfg,
             if (is_problematic_return_type(def->get_type(), def)) {
               return true;
             }
-          } else if (def->has_method()) {
-            always_assert(opcode::is_a_method_invoke(op));
-            if (is_problematic_return_type(
-                    def->get_method()->get_proto()->get_rtype(), def)) {
-              return true;
-            }
-          } else if (def->has_signature_polymorphic()) {
+          } else if (opcode::is_an_invoke(op)) {
             if (is_problematic_return_type(
                     def->get_callsite_proto()->get_rtype(), def)) {
               return true;

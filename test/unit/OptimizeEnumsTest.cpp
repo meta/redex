@@ -3905,3 +3905,201 @@ TEST_F(OptimizeEnumsTest, constructorWritingAnotherObjectKeepsEnum) {
   // Bar, whose constructor writes only its own field, is still boxed.
   EXPECT_FALSE(is_enum(type_class(DexType::get_type("LBar;"))));
 }
+/* Create an enum whose int and long constructors delegate to each other, like
+this hand-written Java-like code (javac and kotlinc reject recursive
+constructor invocation, so only hand-written bytecode has this shape):
+
+enum Cycle {
+  A;
+  Cycle() { super(); }
+  Cycle(int i) { this(0L); }
+  Cycle(long l) { this(0); }
+}
+*/
+DexClass* create_ctor_cycle_enum(const std::string& name) {
+  auto with_name = [&](std::string s_expr) {
+    boost::replace_all(s_expr, "LE;", name);
+    return s_expr;
+  };
+  ClassCreator cc(DexType::make_type(name));
+  cc.set_super(type::java_lang_Enum());
+  cc.set_access(ACC_PUBLIC | ACC_FINAL | ACC_ENUM);
+  cc.add_field(DexField::make_field(with_name("LE;.A:LE;"))
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_ENUM));
+  cc.add_field(DexField::make_field(with_name("LE;.$VALUES:[LE;"))
+                   ->make_concrete(ACC_PRIVATE | ACC_STATIC | ACC_FINAL |
+                                   ACC_SYNTHETIC));
+  cc.add_method(assembler::method_from_string(with_name(R"(
+    (method (private constructor) "LE;.<init>:(Ljava/lang/String;I)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (load-param v2)
+        (invoke-direct (v0 v1 v2) "Ljava/lang/Enum;.<init>:(Ljava/lang/String;I)V")
+        (return-void)
+      )
+    )
+  )")));
+  cc.add_method(assembler::method_from_string(with_name(R"(
+    (method (private constructor) "LE;.<init>:(Ljava/lang/String;II)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (load-param v2)
+        (load-param v3)
+        (const-wide v4 0)
+        (invoke-direct (v0 v1 v2 v4) "LE;.<init>:(Ljava/lang/String;IJ)V")
+        (return-void)
+      )
+    )
+  )")));
+  cc.add_method(assembler::method_from_string(with_name(R"(
+    (method (private constructor) "LE;.<init>:(Ljava/lang/String;IJ)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (load-param v2)
+        (load-param-wide v3)
+        (const v5 0)
+        (invoke-direct (v0 v1 v2 v5) "LE;.<init>:(Ljava/lang/String;II)V")
+        (return-void)
+      )
+    )
+  )")));
+  cc.add_method(assembler::method_from_string(with_name(R"(
+    (method (public static) "LE;.<clinit>:()V"
+      (
+        (const-string "A")
+        (move-result-pseudo-object v0)
+        (const v1 0)
+        (new-instance "LE;")
+        (move-result-pseudo-object v2)
+        (invoke-direct (v2 v0 v1) "LE;.<init>:(Ljava/lang/String;I)V")
+        (sput-object v2 "LE;.A:LE;")
+        (const v3 1)
+        (new-array v3 "[LE;")
+        (move-result-pseudo-object v4)
+        (aput-object v2 v4 v1)
+        (sput-object v4 "LE;.$VALUES:[LE;")
+        (return-void)
+      )
+    )
+  )")));
+  auto* cls = cc.create();
+  for (auto* m : cls->get_all_methods()) {
+    m->get_code()->build_cfg();
+  }
+  return cls;
+}
+
+int64_t get_metric(const PassManager& manager,
+                   const Pass& pass,
+                   const std::string& key) {
+  for (const auto& info : manager.get_pass_info()) {
+    if (info.pass == &pass) {
+      auto it = info.metrics.find(key);
+      return it == info.metrics.end() ? 0 : it->second;
+    }
+  }
+  ADD_FAILURE() << "OptimizeEnumsPass did not run";
+  return -1;
+}
+
+/* Create an enum whose only constructor calls `delegate` where it would call
+`Enum.<init>`, like this hand-written Java-like code:
+
+enum E {
+  A;
+  E() { delegate(); }
+}
+*/
+DexClass* create_enum_with_ctor_delegating_to(const std::string& name,
+                                              const std::string& delegate) {
+  auto with_name = [&](std::string s_expr) {
+    boost::replace_all(s_expr, "LE;", name);
+    boost::replace_all(s_expr, "DELEGATE", delegate);
+    return s_expr;
+  };
+  ClassCreator cc(DexType::make_type(name));
+  cc.set_super(type::java_lang_Enum());
+  cc.set_access(ACC_PUBLIC | ACC_FINAL | ACC_ENUM);
+  cc.add_field(DexField::make_field(with_name("LE;.A:LE;"))
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_ENUM));
+  cc.add_method(assembler::method_from_string(with_name(R"(
+    (method (private constructor) "LE;.<init>:(Ljava/lang/String;I)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (load-param v2)
+        (invoke-direct (v0 v1 v2) "DELEGATE")
+        (return-void)
+      )
+    )
+  )")));
+  cc.add_method(assembler::method_from_string(with_name(R"(
+    (method (public static) "LE;.<clinit>:()V"
+      (
+        (const-string "A")
+        (move-result-pseudo-object v0)
+        (const v1 0)
+        (new-instance "LE;")
+        (move-result-pseudo-object v2)
+        (invoke-direct (v2 v0 v1) "LE;.<init>:(Ljava/lang/String;I)V")
+        (sput-object v2 "LE;.A:LE;")
+        (return-void)
+      )
+    )
+  )")));
+  auto* cls = cc.create();
+  for (auto* m : cls->get_all_methods()) {
+    m->get_code()->build_cfg();
+  }
+  return cls;
+}
+
+// Defensive: a constructor whose delegating call names a constructor its class
+// does not define has no known ordinal parameter, so the ordinal analysis
+// leaves the enum unanalyzed.
+TEST_F(OptimizeEnumsTest, ctorDelegatingToUndefinedCtorLeavesEnumUnoptimized) {
+  auto store = create_enum_store();
+  auto* undefined = create_enum_with_ctor_delegating_to(
+      "LDelegatesToUndefined;",
+      "LDelegatesToUndefined;.<init>:(Ljava/lang/String;Z)V");
+  store.add_classes({undefined});
+  DexStoresVector stores({std::move(store)});
+
+  optimize_enums::OptimizeEnumsPass pass;
+  PassManager manager({&pass});
+  Json::Value conf_obj = Json::nullValue;
+  ConfigFiles dummy_config(conf_obj);
+  dummy_config.parse_global_config();
+
+  manager.run_passes(stores, dummy_config);
+
+  EXPECT_EQ(undefined->get_super_class(), type::java_lang_Enum());
+  EXPECT_EQ(get_metric(manager, pass, "num_ordinal_bail_non_unique_delegate"),
+            1);
+}
+
+// The ordinal analysis runs for every enum, candidate or not. A cycle of
+// delegating constructors never reaches `Enum.<init>`, so it must leave the
+// enum unanalyzed instead of following the cycle forever.
+TEST_F(OptimizeEnumsTest, ctorDelegationCycleLeavesEnumUnoptimized) {
+  auto store = create_enum_store();
+  auto* cycle = create_ctor_cycle_enum("LCtorCycle;");
+  store.add_classes({cycle});
+  DexStoresVector stores({std::move(store)});
+
+  optimize_enums::OptimizeEnumsPass pass;
+  PassManager manager({&pass});
+  Json::Value conf_obj = Json::nullValue;
+  ConfigFiles dummy_config(conf_obj);
+  dummy_config.parse_global_config();
+
+  manager.run_passes(stores, dummy_config);
+
+  EXPECT_EQ(cycle->get_super_class(), type::java_lang_Enum());
+  EXPECT_TRUE(is_enum(cycle));
+  EXPECT_EQ(get_metric(manager, pass, "num_ordinal_bail_ctor_delegation_cycle"),
+            1);
+}

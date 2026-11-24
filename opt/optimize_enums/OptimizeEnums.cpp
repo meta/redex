@@ -13,6 +13,8 @@
 #include <set>
 #include <sstream>
 
+#include <sparta/WeakTopologicalOrdering.h>
+
 #include "ConfigFiles.h"
 #include "ControlFlow.h"
 #include "Debug.h"
@@ -96,6 +98,7 @@ enum class CtorAnalysisResult {
   CtorNoCode,
   NonUniqueDelegate,
   NoUniqueOrdinalParam,
+  DelegationCycle,
 };
 
 CtorAnalysisResult analyze_enum_ctors(
@@ -107,17 +110,24 @@ CtorAnalysisResult analyze_enum_ctors(
     DexMethod* ctor;
     cfg::ControlFlowGraph& cfg;
     IRInstruction* invoke;
+    const DexMethod* delegate;
 
     DelegatingCall(DexMethod* ctor,
                    cfg::ControlFlowGraph& cfg,
                    IRInstruction* invoke)
-        : ctor{ctor}, cfg{cfg}, invoke{invoke} {}
+        : ctor{ctor},
+          cfg{cfg},
+          invoke{invoke},
+          delegate{invoke->get_method()->as_def()} {}
   };
 
-  std::queue<DelegatingCall> delegating_calls;
-  { // Find delegate constructor calls and queue them up to be processed.  The
+  std::vector<DelegatingCall> delegating_calls;
+  UnorderedMap<const DexMethod*, size_t> ctor_to_delegating_call;
+  { // Find delegate constructor calls and collect them to be processed.  The
     // call might be to `Enum.<init>(String;I)` or to a difference constructor
-    // of the same class.
+    // of the same class. A direct search looks only in the class the call
+    // names, so a call it resolves names that very definition, and the
+    // delegate of every call found is one of these two.
     mf::flow_t f;
     auto inv = f.insn(m::invoke_direct_(m::has_method(m::resolve_method(
         MethodSearch::Direct,
@@ -133,7 +143,8 @@ CtorAnalysisResult analyze_enum_ctors(
 
       auto res = f.find(code->cfg(), inv);
       if (auto* inv_insn = res.matching(inv).unique()) {
-        delegating_calls.emplace(ctor, code->cfg(), inv_insn);
+        ctor_to_delegating_call.emplace(ctor, delegating_calls.size());
+        delegating_calls.emplace_back(ctor, code->cfg(), inv_insn);
       } else {
         return CtorAnalysisResult::NonUniqueDelegate;
       }
@@ -144,23 +155,48 @@ CtorAnalysisResult analyze_enum_ctors(
   // details: https://developer.android.com/reference/java/lang/Enum.html
   ctor_to_arg_ordinal[java_enum_ctor] = 2;
 
-  // TODO: We could order them instead of looping ...
-  for (; !delegating_calls.empty(); delegating_calls.pop()) {
-    auto dc = delegating_calls.front();
-
-    auto* delegate = resolve_method_deprecated(dc.invoke->get_method(),
-                                               MethodSearch::Direct);
-
-    uint32_t delegate_ordinal;
-    { // Only proceed if the delegate constructor has already been processed.
-      auto it = ctor_to_arg_ordinal.find(delegate);
-      if (it == ctor_to_arg_ordinal.end()) {
-        delegating_calls.emplace(dc);
-        continue;
-      } else {
-        delegate_ordinal = it->second;
-      }
+  // A constructor's ordinal param is found from its delegate's, so analyze the
+  // calls in a weak topological order of the graph whose edges go from each
+  // delegate to the constructors delegating to it. A root (null) leads to
+  // `Enum.<init>` and to every constructor, so that the order reaches each of
+  // them. A strongly connected component is a cycle of constructors that
+  // delegate to each other. javac and kotlinc reject such a recursive
+  // constructor invocation, so only hand-written bytecode has it; the enum is
+  // then left unanalyzed.
+  std::vector<const DexMethod*> roots{java_enum_ctor};
+  UnorderedMap<const DexMethod*, std::vector<const DexMethod*>> delegators;
+  for (const auto& dc : delegating_calls) {
+    always_assert_log(dc.delegate == java_enum_ctor ||
+                          ctor_to_delegating_call.count(dc.delegate) != 0,
+                      "Delegate %s of %s is neither Enum.<init> nor a "
+                      "constructor of its class",
+                      SHOW(dc.delegate), SHOW(dc.ctor));
+    roots.push_back(dc.ctor);
+    delegators[dc.delegate].push_back(dc.ctor);
+  }
+  sparta::WeakTopologicalOrdering<const DexMethod*> wto(
+      nullptr, [&](const DexMethod* const& method) {
+        if (method == nullptr) {
+          return roots;
+        }
+        auto it = delegators.find(method);
+        return it == delegators.end() ? std::vector<const DexMethod*>()
+                                      : it->second;
+      });
+  std::vector<const DelegatingCall*> ordered_calls;
+  for (const auto& component : wto) {
+    if (component.is_scc()) {
+      return CtorAnalysisResult::DelegationCycle;
     }
+    auto it = ctor_to_delegating_call.find(component.head_node());
+    if (it != ctor_to_delegating_call.end()) {
+      ordered_calls.push_back(&delegating_calls.at(it->second));
+    }
+  }
+
+  for (const auto* ordered_call : ordered_calls) {
+    const auto& dc = *ordered_call;
+    uint32_t delegate_ordinal = ctor_to_arg_ordinal.at(dc.delegate);
 
     // Track which param in dc.ctor flows into the ordinal arg of the delegate.
     mf::flow_t f;
@@ -394,6 +430,8 @@ class OptimizeEnums {
            m_stats.num_ordinal_bail_non_unique_delegate);
     report("num_ordinal_bail_no_unique_param",
            m_stats.num_ordinal_bail_no_unique_param);
+    report("num_ordinal_bail_ctor_delegation_cycle",
+           m_stats.num_ordinal_bail_ctor_delegation_cycle);
     report("num_ordinal_bail_sfield_unknown",
            m_stats.num_ordinal_bail_sfield_unknown);
     report("num_ordinal_bail_unknown_ctor_arg",
@@ -848,6 +886,9 @@ class OptimizeEnums {
     case CtorAnalysisResult::NoUniqueOrdinalParam:
       ++m_stats.num_ordinal_bail_no_unique_param;
       return;
+    case CtorAnalysisResult::DelegationCycle:
+      ++m_stats.num_ordinal_bail_ctor_delegation_cycle;
+      return;
     }
 
     optimize_enums::OptimizeEnumsAnalysis analysis(cls, ctor_to_arg_ordinal);
@@ -993,6 +1034,7 @@ class OptimizeEnums {
     size_t num_ordinal_bail_ctor_no_code{0};
     size_t num_ordinal_bail_non_unique_delegate{0};
     size_t num_ordinal_bail_no_unique_param{0};
+    size_t num_ordinal_bail_ctor_delegation_cycle{0};
     size_t num_ordinal_bail_sfield_unknown{0};
     // Sub-counter of num_ordinal_bail_sfield_unknown: the bail was caused
     // (at least in part) by an invoke-direct to an enum ctor whose ordinal

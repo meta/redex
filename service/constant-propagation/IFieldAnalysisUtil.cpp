@@ -161,11 +161,6 @@ bool get_ifields_read(const UnorderedSet<std::string>& allowlist_method_names,
   }
   visited->emplace(method);
   if (method != nullptr) {
-    if (method::is_init(method) &&
-        (parent_intf_set.count(method->get_class()) != 0u)) {
-      // For call on its parent's ctor, no need to proceed.
-      return true;
-    }
     for (const auto& name : UnorderedIterable(allowlist_method_names)) {
       // Allowed methods name from config, ignore.
       // We have this allowlist so that we can ignore some methods that
@@ -317,7 +312,10 @@ ConcurrentSet<DexField*> get_ifields_read_in_callees(
         check_this::ThisObjectAnalysis fixpoint(
             &cfg, ctor, cfg.get_first_param_instruction()->dest());
         fixpoint.run(check_this::ThisEnvironment());
-        // Only check on methods called with this object as arguments.
+        // Only check on methods called with this object as arguments. They
+        // include the superclass constructor and any constructor that gets
+        // this as an argument: each can run code that reads this object's
+        // fields.
         auto check_methods = fixpoint.collect_method_called_on_this();
         if (!check_methods) {
           // This object escaped to heap, blocklist all.

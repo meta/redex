@@ -37,6 +37,10 @@ struct FinalInlineTest : public RedexTest {
     return field;
   }
 
+  void add_instance_field(const char* name) {
+    m_cc->add_field(DexField::make_field(name)->make_concrete(ACC_PRIVATE));
+  }
+
   static void run(const Scope& scope,
                   const XStoreRefs* xstores,
                   bool create_init_class_insns = false) {
@@ -1504,4 +1508,185 @@ TEST_F(FinalInlineTest, clinitCycleThroughMethodHandle) {
   EXPECT_NE(bar->get_clinit(), nullptr);
   EXPECT_EQ(y->get_static_value()->value(), 0);
   EXPECT_EQ(x->get_static_value()->value(), 0);
+}
+
+TEST_F(FinalInlineTest, passingThisToConstructorOfSameClassBlocksInference) {
+  add_instance_field("LFoo;.x:I");
+  // Java:
+  //   Foo(Object o) {
+  //     if (o == null) { new Foo(this); } else { observe(o); }
+  //     x = 1;
+  //   }
+  //   static void observe(Object o) { Log.v(((Foo) o).x); }
+  // `new Foo(null)` makes the inner Foo observe the outer one, whose x is still
+  // 0. Constructors of the class itself were never checked, so the read in
+  // observe() was folded to 1.
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:(Ljava/lang/Object;)V"
+     (
+      (load-param-object v0)
+      (load-param-object v1)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (if-nez v1 :else)
+      (new-instance "LFoo;")
+      (move-result-pseudo-object v2)
+      (invoke-direct (v2 v0) "LFoo;.<init>:(Ljava/lang/Object;)V")
+      (goto :join)
+      (:else)
+      (invoke-static (v1) "LFoo;.observe:(Ljava/lang/Object;)V")
+      (:join)
+      (const v3 1)
+      (iput v3 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* observe = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.observe:(Ljava/lang/Object;)V"
+     (
+      (load-param-object v0)
+      (check-cast v0 "LFoo;")
+      (move-result-pseudo-object v1)
+      (iget v1 "LFoo;.x:I")
+      (move-result-pseudo v2)
+      (invoke-static (v2) "LLog;.v:(I)V")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(observe);
+  auto* cls = m_cc->create();
+  auto expected =
+      assembler::ircode_from_string(assembler::to_string(observe->get_code()));
+
+  run({cls}, nullptr);
+
+  EXPECT_CODE_EQ(observe->get_code(), expected.get());
+}
+
+TEST_F(FinalInlineTest, passingThisToConstructorOfSuperclassBlocksInference) {
+  // Java:
+  //   class Base { Base(Object o) { if (o != null) Foo.observe(o); } }
+  //   class Foo extends Base {
+  //     int x;
+  //     Foo() { super(null); new Base(this); x = 1; }
+  //     static void observe(Object o) { Log.v(((Foo) o).x); }
+  //   }
+  // `new Base(this)` observes this Foo while its x is still 0. Constructors of
+  // a superclass were never checked, so the read was folded to 1.
+  ClassCreator base_creator(DexType::make_type("LBase;"));
+  base_creator.set_super(type::java_lang_Object());
+  base_creator.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LBase;.<init>:(Ljava/lang/Object;)V"
+     (
+      (load-param-object v0)
+      (load-param-object v1)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (if-eqz v1 :done)
+      (invoke-static (v1) "LFoo;.observe:(Ljava/lang/Object;)V")
+      (:done)
+      (return-void)
+     )
+    )
+  )"));
+  auto* base = base_creator.create();
+
+  m_cc->set_super(base->get_type());
+  add_instance_field("LFoo;.x:I");
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (const v1 0)
+      (invoke-direct (v0 v1) "LBase;.<init>:(Ljava/lang/Object;)V")
+      (new-instance "LBase;")
+      (move-result-pseudo-object v2)
+      (invoke-direct (v2 v0) "LBase;.<init>:(Ljava/lang/Object;)V")
+      (const v3 1)
+      (iput v3 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* observe = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.observe:(Ljava/lang/Object;)V"
+     (
+      (load-param-object v0)
+      (check-cast v0 "LFoo;")
+      (move-result-pseudo-object v1)
+      (iget v1 "LFoo;.x:I")
+      (move-result-pseudo v2)
+      (invoke-static (v2) "LLog;.v:(I)V")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(observe);
+  auto* cls = m_cc->create();
+  auto expected =
+      assembler::ircode_from_string(assembler::to_string(observe->get_code()));
+
+  run({base, cls}, nullptr);
+
+  EXPECT_CODE_EQ(observe->get_code(), expected.get());
+}
+
+TEST_F(FinalInlineTest, superclassConstructorPassingThisOnBlocksInference) {
+  // Java:
+  //   class Base { Base() { Foo.observe(this); } }
+  //   class Foo extends Base {
+  //     int x;
+  //     Foo() { super(); x = 1; }
+  //     static void observe(Object o) { Log.v(((Foo) o).x); }
+  //   }
+  // observe() runs before x is written and logs 0. The superclass constructor
+  // was never checked, so its read was folded to 1.
+  ClassCreator base_creator(DexType::make_type("LBase;"));
+  base_creator.set_super(type::java_lang_Object());
+  base_creator.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LBase;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (invoke-static (v0) "LFoo;.observe:(Ljava/lang/Object;)V")
+      (return-void)
+     )
+    )
+  )"));
+  auto* base = base_creator.create();
+
+  m_cc->set_super(base->get_type());
+  add_instance_field("LFoo;.x:I");
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "LBase;.<init>:()V")
+      (const v1 1)
+      (iput v1 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* observe = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.observe:(Ljava/lang/Object;)V"
+     (
+      (load-param-object v0)
+      (check-cast v0 "LFoo;")
+      (move-result-pseudo-object v1)
+      (iget v1 "LFoo;.x:I")
+      (move-result-pseudo v2)
+      (invoke-static (v2) "LLog;.v:(I)V")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(observe);
+  auto* cls = m_cc->create();
+  auto expected =
+      assembler::ircode_from_string(assembler::to_string(observe->get_code()));
+
+  run({base, cls}, nullptr);
+
+  EXPECT_CODE_EQ(observe->get_code(), expected.get());
 }

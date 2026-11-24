@@ -110,6 +110,18 @@ void EnumAnalyzeGeneratedMethods::process_instruction(
   case OPCODE_INVOKE_INTERFACE:
     process_invocation(insn, env);
     break;
+  case OPCODE_INVOKE_CUSTOM:
+  case OPCODE_INVOKE_POLYMORPHIC:
+    // The call site or method handle decides at run time which code receives
+    // the arguments.
+    for (auto src : insn->srcs()) {
+      reject_if_unsafe(type::java_lang_Object(), env->get(src), insn);
+    }
+    keep_linked_generated_methods(insn);
+    break;
+  case OPCODE_CONST_METHOD_HANDLE:
+    keep_linked_generated_methods(insn);
+    break;
   case OPCODE_CHECK_CAST:
   case OPCODE_CONST_CLASS: {
     const auto* type = type::make_element_type_if_array(insn->get_type());
@@ -205,20 +217,10 @@ void EnumAnalyzeGeneratedMethods::process_invocation(
       }
     }
   } break;
-  case OPCODE_INVOKE_STATIC: {
-    auto* callee = resolve_method_deprecated(callee_ref, MethodSearch::Static);
-    if (m_candidate_methods.count(callee) != 0u) {
-      if (is_enum_valueof(callee)) {
-        // Enum.valueOf() calls Enum.values() and so we reject the whole type
-        DexType* callee_type = callee->get_class();
-        TRACE(ENUM, 4, "reject enum %s for calling valueOf", SHOW(callee_type));
-        m_candidate_types.erase(callee_type);
-      } else { // `SubEnum.values()`
-        TRACE(ENUM, 4, "reject generated enum method %s", SHOW(callee));
-        m_candidate_methods.erase(callee);
-      }
-    }
-  } break;
+  case OPCODE_INVOKE_STATIC:
+    keep_generated_method(
+        resolve_method_deprecated(callee_ref, MethodSearch::Static));
+    break;
   default:
     break;
   }
@@ -235,5 +237,33 @@ void EnumAnalyzeGeneratedMethods::reject_if_unsafe(
             SHOW(expected_type), SHOW(insn));
       m_candidate_types.erase(type);
     }
+  }
+}
+
+void EnumAnalyzeGeneratedMethods::keep_generated_method(
+    const DexMethod* method) {
+  if (m_candidate_methods.count(method) == 0u) {
+    return;
+  }
+  if (is_enum_valueof(method)) {
+    // Enum.valueOf() calls Enum.values() and so we reject the whole type
+    DexType* type = method->get_class();
+    TRACE(ENUM, 4, "reject enum %s for calling valueOf", SHOW(type));
+    m_candidate_types.erase(type);
+  } else { // `SubEnum.values()`
+    TRACE(ENUM, 4, "reject generated enum method %s", SHOW(method));
+    m_candidate_methods.erase(method);
+  }
+}
+
+// A call site or method handle may call the generated methods it names, such
+// as a method handle to `Bar.values` among the bootstrap arguments of a call
+// site.
+void EnumAnalyzeGeneratedMethods::keep_linked_generated_methods(
+    const IRInstruction* insn) {
+  std::vector<DexMethodRef*> methods;
+  insn->gather_methods(methods);
+  for (auto* method : methods) {
+    keep_generated_method(method->as_def());
   }
 }

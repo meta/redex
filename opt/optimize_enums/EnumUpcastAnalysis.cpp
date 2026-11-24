@@ -124,6 +124,20 @@ class EnumUpcastDetector {
     case OPCODE_INSTANCE_OF:
       reject(insn, insn->get_type(), UnsafeType::kUsageUsedInInstanceOf);
       break;
+    case OPCODE_INVOKE_CUSTOM:
+    case OPCODE_INVOKE_POLYMORPHIC:
+      // The call site or method handle decides at run time which code
+      // receives the arguments.
+      for (size_t i = 0; i < insn->srcs_size(); ++i) {
+        reject(insn, env->get(insn->src(i)),
+               UnsafeType::kUsagePassedToCallSiteOrMethodHandle);
+      }
+      reject_linkage_types(insn);
+      break;
+    case OPCODE_CONST_METHOD_HANDLE:
+    case OPCODE_CONST_METHOD_TYPE:
+      reject_linkage_types(insn);
+      break;
     case OPCODE_INVOKE_INTERFACE:
     case OPCODE_INVOKE_SUPER:
       process_general_invocation(insn, env);
@@ -513,6 +527,17 @@ class EnumUpcastDetector {
     }
   }
 
+  // The transform does not rewrite the call sites, method handles and method
+  // types that name an enum: a boxed enum named there would no longer match
+  // what the call site or method handle links to.
+  void reject_linkage_types(const IRInstruction* insn) const {
+    std::vector<const DexType*> types;
+    insn->gather_types(types);
+    for (const auto* type : types) {
+      reject(insn, type, UnsafeType::kUsageNamedByCallSiteOrMethodHandle);
+    }
+  }
+
   void reject(const IRInstruction* insn,
               const UnorderedSet<const DexType*>& types,
               UnsafeType reason = UnsafeType::kUsage) const {
@@ -623,6 +648,10 @@ void EnumFixpointIterator::analyze_instruction(const IRInstruction* insn,
     case OPCODE_INVOKE_INTERFACE:
     case OPCODE_INVOKE_VIRTUAL:
       env->set(dest, EnumTypes(insn->get_method()->get_proto()->get_rtype()));
+      break;
+    case OPCODE_INVOKE_CUSTOM:
+    case OPCODE_INVOKE_POLYMORPHIC:
+      env->set(dest, EnumTypes(insn->get_callsite_proto()->get_rtype()));
       break;
     case OPCODE_CONST_CLASS:
       env->set(dest, EnumTypes(type::java_lang_Class()));

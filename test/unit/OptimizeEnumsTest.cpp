@@ -1705,6 +1705,198 @@ TEST_F(OptimizeEnumsTest, rowStoredByFilledNewArrayLetsEnumBeBoxed) {
 
 namespace {
 
+// Run the usage analysis over the Bar store plus `LUser;` with `methods`, and
+// return the reasons Bar was rejected for.
+std::set<optimize_enums::UnsafeType> bar_rejection_reasons(
+    const std::vector<DexMethod*>& methods) {
+  auto store = create_enum_store();
+  ClassCreator uc(DexType::make_type("LUser;"));
+  uc.set_super(type::java_lang_Object());
+  uc.set_access(ACC_PUBLIC);
+  for (auto* method : methods) {
+    uc.add_method(method);
+  }
+  store.add_classes({uc.create()});
+  DexStoresVector stores({std::move(store)});
+  auto scope = build_class_scope(stores);
+  walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
+  auto* bar_type = DexType::get_type("LBar;");
+  optimize_enums::Config config(100);
+  config.candidate_enums.insert(bar_type);
+  std::mutex reasons_mutex;
+  std::set<optimize_enums::UnsafeType> reasons;
+  optimize_enums::reject_unsafe_enums(
+      scope, &config,
+      [&](const DexType* type, optimize_enums::UnsafeType reason) {
+        if (type == bar_type) {
+          std::lock_guard<std::mutex> lock(reasons_mutex);
+          reasons.insert(reason);
+        }
+      });
+  EXPECT_EQ(config.candidate_enums.count_unsafe(bar_type) == 0u,
+            !reasons.empty());
+  return reasons;
+}
+
+} // namespace
+
+TEST_F(OptimizeEnumsTest, enumPassedToMethodHandleCallIsRejected) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.call:(Ljava/lang/invoke/MethodHandle;)V"
+     (
+      (load-param-object v0)
+      (sget-object "LBar;.Y:LBar;")
+      (move-result-pseudo-object v1)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;" "(Ljava/lang/Object;)V")
+      (return-void)
+     )
+    )
+  )");
+  EXPECT_EQ(
+      bar_rejection_reasons({method}),
+      std::set<optimize_enums::UnsafeType>{
+          optimize_enums::UnsafeType::kUsagePassedToCallSiteOrMethodHandle});
+}
+
+TEST_F(OptimizeEnumsTest, enumNamedByMethodHandleCallPrototypeIsRejected) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.callTyped:(Ljava/lang/invoke/MethodHandle;)V"
+     (
+      (load-param-object v0)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()LBar;")
+      (return-void)
+     )
+    )
+  )");
+  EXPECT_EQ(
+      bar_rejection_reasons({method}),
+      std::set<optimize_enums::UnsafeType>{
+          optimize_enums::UnsafeType::kUsageNamedByCallSiteOrMethodHandle});
+}
+
+TEST_F(OptimizeEnumsTest, enumPassedToCallSiteIsRejected) {
+  // The `invoke-static` becomes an `invoke-custom`.
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.link:()V"
+     (
+      (sget-object "LBar;.Y:LBar;")
+      (move-result-pseudo-object v0)
+      (invoke-static (v0) "LUser;.placeholder:(Ljava/lang/Object;)V")
+      (return-void)
+     )
+    )
+  )");
+  redex::make_invoke_custom(method->get_code(), "run", "(Ljava/lang/Object;)V");
+  EXPECT_EQ(
+      bar_rejection_reasons({method}),
+      std::set<optimize_enums::UnsafeType>{
+          optimize_enums::UnsafeType::kUsagePassedToCallSiteOrMethodHandle});
+}
+
+TEST_F(OptimizeEnumsTest, enumNamedByCallSiteMethodHandleIsRejected) {
+  // A tool-generated call site with an app-defined bootstrap method, whose
+  // bootstrap arguments include a method handle to `User.take(Bar)`.
+  auto* take = assembler::method_from_string(R"(
+    (method (public static) "LUser;.take:(LBar;)V"
+     (
+      (load-param-object v0)
+      (return-void)
+     )
+    )
+  )");
+  // The `invoke-static` becomes an `invoke-custom`.
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.lambda:()V"
+     (
+      (invoke-static () "LUser;.placeholder:()Ljava/util/function/Consumer;")
+      (return-void)
+     )
+    )
+  )");
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.push_back(
+      std::make_unique<DexEncodedValueMethodHandle>(redex::make_method_handle(
+          METHOD_HANDLE_TYPE_INVOKE_STATIC, "LUser;.take:(LBar;)V")));
+  redex::make_invoke_custom(method->get_code(), "accept",
+                            "()Ljava/util/function/Consumer;", std::move(args));
+  EXPECT_EQ(
+      bar_rejection_reasons({take, method}),
+      std::set<optimize_enums::UnsafeType>{
+          optimize_enums::UnsafeType::kUsageNamedByCallSiteOrMethodHandle});
+}
+
+TEST_F(OptimizeEnumsTest, enumNamedByCallSiteMethodTypeIsRejected) {
+  // A tool-generated call site with an app-defined bootstrap method, whose
+  // bootstrap arguments include the method type `(LBar;)V`.
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.lambda:()V"
+     (
+      (invoke-static () "LUser;.placeholder:()Ljava/util/function/Consumer;")
+      (return-void)
+     )
+    )
+  )");
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.push_back(std::make_unique<DexEncodedValueMethodType>(
+      DexProto::make_proto("(LBar;)V")));
+  redex::make_invoke_custom(method->get_code(), "accept",
+                            "()Ljava/util/function/Consumer;", std::move(args));
+  EXPECT_EQ(
+      bar_rejection_reasons({method}),
+      std::set<optimize_enums::UnsafeType>{
+          optimize_enums::UnsafeType::kUsageNamedByCallSiteOrMethodHandle});
+}
+
+TEST_F(OptimizeEnumsTest, enumNamedByConstMethodTypeIsRejected) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.type:()V"
+     (
+      (const-method-type "(LBar;)V")
+      (move-result-pseudo-object v0)
+      (return-void)
+     )
+    )
+  )");
+  EXPECT_EQ(
+      bar_rejection_reasons({method}),
+      std::set<optimize_enums::UnsafeType>{
+          optimize_enums::UnsafeType::kUsageNamedByCallSiteOrMethodHandle});
+}
+
+TEST_F(OptimizeEnumsTest, enumFieldTypeOfConstMethodHandleIsRejected) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.handle:()V"
+     (
+      (const-method-handle static-get "LUser;.f:LBar;")
+      (move-result-pseudo-object v0)
+      (return-void)
+     )
+    )
+  )");
+  EXPECT_EQ(
+      bar_rejection_reasons({method}),
+      std::set<optimize_enums::UnsafeType>{
+          optimize_enums::UnsafeType::kUsageNamedByCallSiteOrMethodHandle});
+}
+
+TEST_F(OptimizeEnumsTest, enumInMethodOfConstMethodHandleIsRejected) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LUser;.handle:()V"
+     (
+      (const-method-handle invoke-static "LUser;.take:(LBar;)V")
+      (move-result-pseudo-object v0)
+      (return-void)
+     )
+    )
+  )");
+  EXPECT_EQ(
+      bar_rejection_reasons({method}),
+      std::set<optimize_enums::UnsafeType>{
+          optimize_enums::UnsafeType::kUsageNamedByCallSiteOrMethodHandle});
+}
+
+namespace {
+
 // Adds the generated `values` and `valueOf` to `bar` and returns them.
 std::pair<DexMethod*, DexMethod*> add_generated_methods(DexClass* bar) {
   auto* values = assembler::method_from_string(R"(
@@ -1830,4 +2022,92 @@ TEST_F(OptimizeEnumsTest, allowedCallWithoutSdkLetsGeneratedMethodsGo) {
     EXPECT_EQ(std::find(dmethods.begin(), dmethods.end(), value_of),
               dmethods.end());
   }
+}
+
+// A method handle to `values` keeps it.
+TEST_F(OptimizeEnumsTest, methodHandleToValuesKeepsIt) {
+  auto* caller = assembler::method_from_string(R"(
+    (method (public static) "LUser;.handle:()Ljava/lang/invoke/MethodHandle;"
+     (
+      (const-method-handle invoke-static "LBar;.values:()[LBar;")
+      (move-result-pseudo-object v0)
+      (return-object v0)
+     )
+    )
+  )");
+  EXPECT_EQ(generated_methods_kept(caller), std::set<std::string>{"values"});
+}
+
+// A method handle to `valueOf` keeps it, and `values`, which it calls.
+TEST_F(OptimizeEnumsTest, methodHandleToValueOfKeepsBoth) {
+  auto* caller = assembler::method_from_string(R"(
+    (method (public static) "LUser;.handle:()Ljava/lang/invoke/MethodHandle;"
+     (
+      (const-method-handle invoke-static "LBar;.valueOf:(Ljava/lang/String;)LBar;")
+      (move-result-pseudo-object v0)
+      (return-object v0)
+     )
+    )
+  )");
+  EXPECT_EQ(generated_methods_kept(caller),
+            (std::set<std::string>{"valueOf", "values"}));
+}
+
+// A tool-generated call site with an app-defined bootstrap method, whose
+// bootstrap arguments include a method handle to `Bar.values`, keeps `values`.
+TEST_F(OptimizeEnumsTest, callSiteNamingValuesKeepsIt) {
+  // The `invoke-static` becomes an `invoke-custom`.
+  auto* caller = assembler::method_from_string(R"(
+    (method (public static) "LUser;.supplier:()Ljava/util/function/Supplier;"
+     (
+      (invoke-static () "LUser;.placeholder:()Ljava/util/function/Supplier;")
+      (move-result-object v0)
+      (return-object v0)
+     )
+    )
+  )");
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.push_back(
+      std::make_unique<DexEncodedValueMethodHandle>(redex::make_method_handle(
+          METHOD_HANDLE_TYPE_INVOKE_STATIC, "LBar;.values:()[LBar;")));
+  redex::make_invoke_custom(caller->get_code(), "get",
+                            "()Ljava/util/function/Supplier;", std::move(args));
+  EXPECT_EQ(generated_methods_kept(caller), std::set<std::string>{"values"});
+}
+
+// An enum passed to a method handle call may reach code that calls `valueOf`
+// or `values` on its class, so both are kept.
+TEST_F(OptimizeEnumsTest, enumPassedToMethodHandleCallKeepsBoth) {
+  auto* caller = assembler::method_from_string(R"(
+    (method (public static) "LUser;.call:(Ljava/lang/invoke/MethodHandle;)V"
+     (
+      (load-param-object v0)
+      (sget-object "LBar;.Y:LBar;")
+      (move-result-pseudo-object v1)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(Ljava/lang/Object;)V")
+      (return-void)
+     )
+    )
+  )");
+  EXPECT_EQ(generated_methods_kept(caller),
+            (std::set<std::string>{"valueOf", "values"}));
+}
+
+// `Bar bar = (Bar) handle.invokeExact(); bar.getClass();` exposes Bar's class,
+// through which code can call `values` reflectively, so both are kept.
+TEST_F(OptimizeEnumsTest, classOfEnumReturnedByMethodHandleCallKeepsBoth) {
+  auto* caller = assembler::method_from_string(R"(
+    (method (public static) "LUser;.call:(Ljava/lang/invoke/MethodHandle;)Ljava/lang/Class;"
+     (
+      (load-param-object v0)
+      (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()LBar;")
+      (move-result-object v1)
+      (invoke-virtual (v1) "Ljava/lang/Object;.getClass:()Ljava/lang/Class;")
+      (move-result-object v2)
+      (return-object v2)
+     )
+    )
+  )");
+  EXPECT_EQ(generated_methods_kept(caller),
+            (std::set<std::string>{"valueOf", "values"}));
 }

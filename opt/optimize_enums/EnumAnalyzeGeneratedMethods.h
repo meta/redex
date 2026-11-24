@@ -85,6 +85,12 @@ class EnumAnalyzeGeneratedMethods {
   void process_invocation(const IRInstruction* insn,
                           const EnumTypeEnvironment* env);
 
+  // Keeps a generated method that is called, and with `valueOf` its whole
+  // type.
+  void keep_generated_method(const DexMethod* method);
+
+  void keep_linked_generated_methods(const IRInstruction* insn);
+
   /**
    * Rejects an enum if it could be upcasted to some other type. Types in
    * `possible_types` could be upcasted to `expected_type`.

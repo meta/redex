@@ -47,6 +47,8 @@ enum class UnsafeType {
   kUsageNoOptimizationsMethod,
   kUsageUsedValuesField,
   kUsageConstantSetOutsideClinit,
+  kUsagePassedToCallSiteOrMethodHandle,
+  kUsageNamedByCallSiteOrMethodHandle,
 };
 
 inline std::ostream& operator<<(std::ostream& os, const UnsafeType& u) {
@@ -143,6 +145,12 @@ inline std::ostream& operator<<(std::ostream& os, const UnsafeType& u) {
     break;
   case UnsafeType::kUsageConstantSetOutsideClinit:
     os << "UsageConstantSetOutsideClinit";
+    break;
+  case UnsafeType::kUsagePassedToCallSiteOrMethodHandle:
+    os << "UsagePassedToCallSiteOrMethodHandle";
+    break;
+  case UnsafeType::kUsageNamedByCallSiteOrMethodHandle:
+    os << "UsageNamedByCallSiteOrMethodHandle";
     break;
   }
   return os;

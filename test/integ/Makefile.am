@@ -119,7 +119,7 @@ TESTS += \
 endif
 
 app_module_usage_test_SOURCES = AppModuleUsageTest.cpp
-EXTRA_app_module_usage_test_DEPNDENCIES = uses_app_module_annotation-class.dex app_module_usage_test-class.dex app_module_usage_test_other-class.dex app_module_usage_test_third-class.dex
+EXTRA_app_module_usage_test_DEPENDENCIES = uses_app_module_annotation-class.dex app_module_usage_test-class.dex app_module_usage_test_other-class.dex app_module_usage_test_third-class.dex
 
 call_graph_test_SOURCES = CallGraphTest.cpp
 EXTRA_call_graph_test_DEPENDENCIES = call_graph_test-class.dex

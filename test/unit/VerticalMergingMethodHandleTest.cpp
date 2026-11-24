@@ -470,3 +470,58 @@ TEST_F(VerticalMergingMethodHandleTest, classesWithoutHandlesMerge) {
 
   EXPECT_EQ(run_pass(base, impl), 2);
 }
+
+namespace {
+
+std::unique_ptr<DexAnnotationSet> make_annotation_set(
+    std::unique_ptr<DexEncodedValue> value) {
+  auto annotation = std::make_unique<DexAnnotation>(
+      DexType::make_type("LAnno;"), DAV_RUNTIME);
+  annotation->add_element("value", std::move(value));
+  auto annotation_set = std::make_unique<DexAnnotationSet>();
+  annotation_set->add_annotation(std::move(annotation));
+  return annotation_set;
+}
+
+} // namespace
+
+// Like the types that the values of static fields and annotations name, the
+// classes that their method handles name stay.
+TEST_F(VerticalMergingMethodHandleTest,
+       staticFieldValueHandleKeepsMergedSuper) {
+  auto* base = make_base(ACC_PUBLIC | ACC_ABSTRACT);
+  auto* impl = make_impl();
+  make_user(kNewImpl);
+  auto* field =
+      DexField::make_field("LUser;.HANDLE:Ljava/lang/invoke/MethodHandle;")
+          ->make_concrete(
+              ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+              std::make_unique<DexEncodedValueMethodHandle>(
+                  redex::make_method_handle(METHOD_HANDLE_TYPE_INVOKE_INSTANCE,
+                                            "LBase;.run:()V")));
+  m_user->add_field(field);
+
+  EXPECT_EQ(run_pass(base, impl), 3);
+  EXPECT_EQ(redex::encoded_value_as<DexEncodedValueMethodHandle>(
+                field->get_static_value())
+                ->methodhandle()
+                ->methodref(),
+            DexMethod::get_method("LBase;.run:()V"));
+}
+
+TEST_F(VerticalMergingMethodHandleTest, annotationHandleKeepsMergedSubclass) {
+  auto* base = make_base(ACC_PUBLIC);
+  auto* impl = make_impl();
+  make_user(R"((
+    (new-instance "LBase;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0) "LBase;.<init>:()V")
+    (return-void)
+  ))");
+  ASSERT_TRUE(m_user->attach_annotation_set(make_annotation_set(
+      std::make_unique<DexEncodedValueMethodHandle>(redex::make_method_handle(
+          METHOD_HANDLE_TYPE_INVOKE_INSTANCE, "LImpl;.run:()V")))));
+
+  EXPECT_EQ(run_pass(base, impl), 3);
+  EXPECT_NE(DexMethod::get_method("LImpl;.run:()V"), nullptr);
+}

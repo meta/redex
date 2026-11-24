@@ -429,6 +429,18 @@ void record_method_handle_value(const DexMethodHandle* method_handle,
   }
 }
 
+// Like a type that the values of static fields and annotations name, a method
+// handle among them keeps the classes it names from being merged.
+void record_method_handle_values(const Gatherable& value,
+                                 DontMergeStatus* dont_merge_status) {
+  std::vector<DexMethodHandle*> method_handles;
+  value.gather_methodhandles(method_handles);
+  for (const auto* method_handle : method_handles) {
+    record_method_handle_value(method_handle, /* holder */ nullptr,
+                               dont_merge_status);
+  }
+}
+
 size_t record_annotation(const Scope& scope,
                          bool record_type_like_string_refs,
                          DontMergeStatus* dont_merge_status) {
@@ -437,6 +449,7 @@ size_t record_annotation(const Scope& scope,
     for (const auto& elem : anno->anno_elems()) {
       record_class_literals(*elem.encoded_value, dont_merge_status);
     }
+    record_method_handle_values(*anno, dont_merge_status);
     if (anno->type() == type::dalvik_annotation_Signature() ||
         anno->type()->str() == "Lkotlin/Metadata;") {
       return;
@@ -794,6 +807,7 @@ size_t record_field_reference(const Scope& scope,
       value->gather_strings(strings);
       type_like_string_refs += record_type_like_strings(
           strings, record_type_like_string_refs, dont_merge_status);
+      record_method_handle_values(*value, dont_merge_status);
     }
     if (!can_rename(field)) {
       record_dont_merge_state(field->get_type(), kConditional,

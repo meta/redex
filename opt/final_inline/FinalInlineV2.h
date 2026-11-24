@@ -77,6 +77,7 @@ class FinalInlinePassV2 : public Pass {
           init_classes_with_side_effects,
       const XStoreRefs*,
       const constant_propagation::EligibleIfields& eligible_ifields,
+      const UnorderedSet<const DexField*>& constructor_only_ifields,
       const constant_propagation::NullCheckMethods& null_check_methods,
       const Config& config = Config(),
       std::optional<DexStoresVector*> stores = std::nullopt);

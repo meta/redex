@@ -6,6 +6,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <sstream>
 
 #include "Creators.h"
 #include "DexAccess.h"
@@ -16,6 +17,7 @@
 #include "IRCode.h"
 #include "RedexTest.h"
 #include "RedexTestUtils.h"
+#include "Show.h"
 #include "Walkers.h"
 
 struct FinalInlineTest : public RedexTest {
@@ -53,15 +55,15 @@ struct FinalInlineTest : public RedexTest {
     FinalInlinePassV2::run(scope, conf, min_sdk, init_classes_with_side_effects,
                            xstores, state);
 
+    const auto constructor_only_ifields =
+        constant_propagation::gather_constructor_only_ifields(
+            scope, local_pointers::analyze_constructors(scope, {}));
     auto eligible_ifields =
         constant_propagation::gather_safely_inferable_ifield_candidates(
-            scope,
-            constant_propagation::gather_constructor_only_ifields(
-                scope, local_pointers::analyze_constructors(scope, {})),
-            {});
-    FinalInlinePassV2::run_inline_ifields(scope, conf, min_sdk,
-                                          init_classes_with_side_effects,
-                                          xstores, eligible_ifields, state);
+            scope, constructor_only_ifields, {});
+    FinalInlinePassV2::run_inline_ifields(
+        scope, conf, min_sdk, init_classes_with_side_effects, xstores,
+        eligible_ifields, constructor_only_ifields, state);
     walk::code(scope, [&](DexMethod*, IRCode& code) { code.clear_cfg(); });
   }
 
@@ -124,6 +126,389 @@ TEST_F(FinalInlineTest, storeOfExcludedConstructorIsNotConstructorOnly) {
           .count(count),
       0u);
   walk::code(scope, [](DexMethod*, IRCode& code) { code.clear_cfg(); });
+}
+
+// FinalInlineV2 skips a class whose single constructor takes its own type, so
+// the read that the superclass constructor's callback makes before `count` is
+// set stays.
+TEST_F(FinalInlineTest, ownTypeArgumentKeepsSuperclassCallbackRead) {
+  ClassCreator base_cc(DexType::make_type("LBase;"));
+  base_cc.set_super(type::java_lang_Object());
+  base_cc.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LBase;.<init>:()V"
+      ((load-param-object v0)
+       (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+       (invoke-virtual (v0) "LBase;.hook:()V") (return-void)))
+  )"));
+  base_cc.add_method(assembler::method_from_string(R"(
+    (method (public) "LBase;.hook:()V"
+      ((load-param-object v0) (return-void)))
+  )"));
+  auto* base = base_cc.create();
+  m_cc->set_super(base->get_type());
+  auto* count = DexField::make_field("LFoo;.count:I")
+                    ->make_concrete(ACC_PUBLIC | ACC_FINAL);
+  m_cc->add_field(count);
+  create_field_with_zero_value("LFoo;.observed:I", m_cc.get());
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:(LFoo;)V"
+      ((load-param-object v0) (load-param-object v1)
+       (invoke-direct (v0) "LBase;.<init>:()V")
+       (const v2 7) (iput v2 v0 "LFoo;.count:I") (return-void)))
+  )"));
+  auto* hook = assembler::method_from_string(R"(
+    (method (public) "LFoo;.hook:()V"
+      ((load-param-object v0)
+       (iget v0 "LFoo;.count:I") (move-result-pseudo v1)
+       (sput v1 "LFoo;.observed:I") (return-void)))
+  )");
+  m_cc->add_method(hook);
+  run({base, m_cc->create()}, nullptr);
+  const auto output = assembler::to_string(hook->get_code());
+  EXPECT_NE(output.find("iget"), std::string::npos) << output;
+}
+
+TEST_F(FinalInlineTest, constructorReadsOtherInstance) {
+  auto* depth = DexField::make_field("LFoo;.depth:I")
+                    ->make_concrete(ACC_PUBLIC | ACC_FINAL);
+  m_cc->add_field(depth);
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:(Ljava/lang/Object;)V"
+     (
+      (load-param-object v0)
+      (load-param-object v1)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (instance-of v1 "LFoo;")
+      (move-result-pseudo v2)
+      (if-eqz v2 :root)
+      (check-cast v1 "LFoo;")
+      (move-result-pseudo-object v3)
+      (iget v3 "LFoo;.depth:I")
+      (move-result-pseudo v4)
+      (add-int/lit v4 v4 1)
+      (iput v4 v0 "LFoo;.depth:I")
+      (return-void)
+      (:root)
+      (const v4 0)
+      (iput v4 v0 "LFoo;.depth:I")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(ctor);
+
+  run({m_cc->create()}, /* xstores */ nullptr);
+
+  bool reads_parent_depth = false;
+  for (auto& mie : InstructionIterable(ctor->get_code())) {
+    if (mie.insn->opcode() == OPCODE_IGET && mie.insn->get_field() == depth) {
+      reads_parent_depth = true;
+    }
+  }
+  EXPECT_TRUE(reads_parent_depth) << show(ctor->get_code());
+}
+
+TEST_F(FinalInlineTest, constructorRetainsOtherInstanceZeroWrite) {
+  m_cc->add_field(
+      DexField::make_field("LFoo;.count:I")->make_concrete(ACC_PUBLIC));
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (invoke-static () "LRegistry;.current:()LFoo;")
+      (move-result-object v2)
+      (const v3 0)
+      (iput v3 v2 "LFoo;.count:I")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(ctor);
+  auto original = assembler::to_s_expr(ctor->get_code());
+
+  run({m_cc->create()}, /* xstores */ nullptr);
+
+  EXPECT_EQ(assembler::to_s_expr(ctor->get_code()), original);
+}
+
+TEST_F(FinalInlineTest, constructorTracksThisAliases) {
+  m_cc->add_field(DexField::make_field("LFoo;.count:I")
+                      ->make_concrete(ACC_PUBLIC | ACC_FINAL));
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:(Ljava/lang/Object;Z)V"
+     (
+      (load-param-object v0)
+      (load-param-object v1)
+      (load-param v2)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (if-eqz v2 :other_path)
+      (move-object v3 v0)
+      (goto :join)
+      (:other_path)
+      (move-object v3 v0)
+      (:join)
+      (check-cast v3 "LFoo;")
+      (move-result-pseudo-object v3)
+      (const v4 7)
+      (iput v4 v3 "LFoo;.count:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* reader = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.getCount:(LFoo;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.count:I")
+      (move-result-pseudo v0)
+      (return v0)
+     )
+    )
+  )");
+  m_cc->add_method(reader);
+
+  run({m_cc->create()}, /* xstores */ nullptr);
+
+  auto expected = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (const v0 7)
+      (return v0)
+    )
+  )");
+  EXPECT_CODE_EQ(reader->get_code(), expected.get());
+}
+
+TEST_F(FinalInlineTest, constructorReassignsThisRegister) {
+  m_cc->add_field(
+      DexField::make_field("LFoo;.count:I")->make_concrete(ACC_PUBLIC));
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:(Ljava/lang/Object;)V"
+     (
+      (load-param-object v0)
+      (load-param-object v1)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (check-cast v1 "LFoo;")
+      (move-result-pseudo-object v0)
+      (const v2 0)
+      (iput v2 v0 "LFoo;.count:I")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(ctor);
+  auto original = assembler::to_s_expr(ctor->get_code());
+
+  run({m_cc->create()}, /* xstores */ nullptr);
+
+  EXPECT_EQ(assembler::to_s_expr(ctor->get_code()), original);
+}
+
+TEST_F(FinalInlineTest, constructorReadAfterThisEscapes) {
+  auto* x = DexField::make_field("LFoo;.x:I")->make_concrete(ACC_PUBLIC);
+  m_cc->add_field(x);
+  create_field_with_zero_value("LFoo;.sObserved:I", m_cc.get());
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (const v1 1)
+      (iput v1 v0 "LFoo;.x:I")
+      (invoke-static (v0) "LHelper;.mutate:(LFoo;)V")
+      (iget v0 "LFoo;.x:I")
+      (move-result-pseudo v2)
+      (sput v2 "LFoo;.sObserved:I")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(ctor);
+  // Another method writes x, so the helper may change it.
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public) "LFoo;.set:(I)V"
+     ((load-param-object v0) (load-param v1)
+      (iput v1 v0 "LFoo;.x:I") (return-void)))
+  )"));
+
+  run({m_cc->create()}, /* xstores */ nullptr);
+
+  bool reads_x = false;
+  for (auto& mie : InstructionIterable(ctor->get_code())) {
+    if (mie.insn->opcode() == OPCODE_IGET && mie.insn->get_field() == x) {
+      reads_x = true;
+    }
+  }
+  EXPECT_TRUE(reads_x) << show(ctor->get_code());
+}
+
+TEST_F(FinalInlineTest, constructorReadAfterThisEscapesOfConstructorOnlyField) {
+  auto* x = DexField::make_field("LFoo;.x:I")->make_concrete(ACC_PUBLIC);
+  m_cc->add_field(x);
+  create_field_with_zero_value("LFoo;.sObserved:I", m_cc.get());
+  m_cc->add_field(DexField::make_field("LFoo;.sInstance:LFoo;")
+                      ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  // Only this constructor writes x. Publishing `this` keeps x from being
+  // inlined into other code, which may read it before the store, but no
+  // code can change x.
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (const v1 1)
+      (iput v1 v0 "LFoo;.x:I")
+      (sput-object v0 "LFoo;.sInstance:LFoo;")
+      (iget v0 "LFoo;.x:I")
+      (move-result-pseudo v2)
+      (sput v2 "LFoo;.sObserved:I")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(ctor);
+
+  run({m_cc->create()}, /* xstores */ nullptr);
+
+  bool reads_x = false;
+  for (auto& mie : InstructionIterable(ctor->get_code())) {
+    if (mie.insn->opcode() == OPCODE_IGET && mie.insn->get_field() == x) {
+      reads_x = true;
+    }
+  }
+  EXPECT_FALSE(reads_x) << show(ctor->get_code());
+}
+
+TEST_F(FinalInlineTest, constructorKeepsFieldAfterSuperclassConstructor) {
+  ClassCreator base_creator(DexType::make_type("LBase;"));
+  base_creator.set_super(type::java_lang_Object());
+  base_creator.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LBase;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (return-void)
+     )
+    )
+  )"));
+  auto* base = base_creator.create();
+  m_cc->set_super(base->get_type());
+  m_cc->add_field(DexField::make_field("LFoo;.count:I")
+                      ->make_concrete(ACC_PUBLIC | ACC_FINAL));
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "LBase;.<init>:()V")
+      (const v1 7)
+      (iput v1 v0 "LFoo;.count:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* reader = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.getCount:(LFoo;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.count:I")
+      (move-result-pseudo v0)
+      (return v0)
+     )
+    )
+  )");
+  m_cc->add_method(reader);
+
+  run({base, m_cc->create()}, /* xstores */ nullptr);
+
+  auto expected = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (const v0 7)
+      (return v0)
+    )
+  )");
+  EXPECT_CODE_EQ(reader->get_code(), expected.get());
+}
+
+TEST_F(FinalInlineTest, constructorCallOnSameObjectCanOverwriteField) {
+  auto* count =
+      DexField::make_field("LFoo;.count:I")->make_concrete(ACC_PUBLIC);
+  m_cc->add_field(count);
+  create_field_with_zero_value("LFoo;.observed:I", m_cc.get());
+  // Generated DEX: the constructor calls itself on the same uninitialized
+  // object, and the inner call stores 7 before the outer one reads count.
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:(I)V"
+     (
+      (load-param-object v0)
+      (load-param v1)
+      (const v2 1)
+      (iput v2 v0 "LFoo;.count:I")
+      (if-eqz v1 :base)
+      (const v3 0)
+      (invoke-direct (v0 v3) "LFoo;.<init>:(I)V")
+      (iget v0 "LFoo;.count:I")
+      (move-result-pseudo v2)
+      (sput v2 "LFoo;.observed:I")
+      (return-void)
+      (:base)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (const v2 7)
+      (iput v2 v0 "LFoo;.count:I")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(ctor);
+
+  run({m_cc->create()}, /* xstores */ nullptr);
+
+  bool reads_count = false;
+  for (auto& mie : InstructionIterable(ctor->get_code())) {
+    if (mie.insn->opcode() == OPCODE_IGET && mie.insn->get_field() == count) {
+      reads_count = true;
+    }
+  }
+  EXPECT_TRUE(reads_count) << show(ctor->get_code());
+}
+
+TEST_F(FinalInlineTest, constructorCallOnSameObjectStartsWithStoredField) {
+  auto* count =
+      DexField::make_field("LFoo;.count:I")->make_concrete(ACC_PUBLIC);
+  m_cc->add_field(count);
+  // Generated DEX: the outer call stores 1 and then calls the constructor
+  // again on the same object, whose store of 0 replaces that 1.
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:(I)V"
+     (
+      (load-param-object v0)
+      (load-param v1)
+      (if-eqz v1 :base)
+      (const v2 1)
+      (iput v2 v0 "LFoo;.count:I")
+      (const v3 0)
+      (invoke-direct (v0 v3) "LFoo;.<init>:(I)V")
+      (return-void)
+      (:base)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (const v2 0)
+      (iput v2 v0 "LFoo;.count:I")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(ctor);
+
+  run({m_cc->create()}, /* xstores */ nullptr);
+
+  size_t stores = 0;
+  for (auto& mie : InstructionIterable(ctor->get_code())) {
+    if (mie.insn->opcode() == OPCODE_IPUT && mie.insn->get_field() == count) {
+      ++stores;
+    }
+  }
+  EXPECT_EQ(stores, 2u) << show(ctor->get_code());
 }
 
 TEST_F(FinalInlineTest, constructorWritesOtherInstance) {
@@ -2054,4 +2439,303 @@ TEST_F(FinalInlineTest, defaultMethodOfSubclassInterfaceBlocksInference) {
   run({i_cls, j_cls, cls, sub}, nullptr);
 
   EXPECT_CODE_EQ(j_m->get_code(), expected.get());
+}
+
+TEST_F(FinalInlineTest, readOfOwnFieldOfOtherObjectBlocksInference) {
+  m_cc->add_field(DexField::make_field("LFoo;.x:I")->make_concrete(ACC_PUBLIC));
+  m_cc->add_field(DexField::make_field("LFoo;.y:I")->make_concrete(ACC_PUBLIC));
+  // Java: Foo(Holder h) { y = h.foo.x; x = 1; }
+  // The read is of another Foo's x, which is 1 for any fully constructed Foo,
+  // not of this.x, which is still 0.
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:(LHolder;)V"
+     (
+      (load-param-object v0)
+      (load-param-object v1)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (iget-object v1 "LHolder;.foo:LFoo;")
+      (move-result-pseudo-object v2)
+      (iget v2 "LFoo;.x:I")
+      (move-result-pseudo v4)
+      (iput v4 v0 "LFoo;.y:I")
+      (const v3 1)
+      (iput v3 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* reader = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.getY:(LFoo;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.y:I")
+      (move-result-pseudo v0)
+      (return v0)
+     )
+    )
+  )");
+  m_cc->add_method(reader);
+  auto* cls = m_cc->create();
+  auto expected =
+      assembler::ircode_from_string(assembler::to_string(reader->get_code()));
+
+  run({cls}, nullptr);
+
+  EXPECT_CODE_EQ(reader->get_code(), expected.get());
+}
+
+TEST_F(FinalInlineTest, writeToOwnFieldOfOtherObjectIsKept) {
+  m_cc->add_field(DexField::make_field("LFoo;.x:I")->make_concrete(ACC_PUBLIC));
+  // Java: Foo(Holder h) { x = 1; h.foo.x = 1; }
+  // The second store goes to another Foo, so it is not a repeated store to
+  // this.x.
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:(LHolder;)V"
+     (
+      (load-param-object v0)
+      (load-param-object v1)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (const v3 1)
+      (iput v3 v0 "LFoo;.x:I")
+      (iget-object v1 "LHolder;.foo:LFoo;")
+      (move-result-pseudo-object v2)
+      (iput v3 v2 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(ctor);
+  auto* cls = m_cc->create();
+  auto expected =
+      assembler::ircode_from_string(assembler::to_string(ctor->get_code()));
+
+  run({cls}, nullptr);
+
+  EXPECT_CODE_EQ(ctor->get_code(), expected.get());
+}
+
+TEST_F(FinalInlineTest, fieldOfOtherClassOnOtherObjectAllowsInference) {
+  // Java:
+  //   class Holder { int count; }
+  //   class Foo { int x; Foo(Holder h) { h.count = 2; x = 1; } }
+  // Only the class's own fields on other objects block inference.
+  ClassCreator holder_creator(DexType::make_type("LHolder;"));
+  holder_creator.set_super(type::java_lang_Object());
+  holder_creator.add_field(
+      DexField::make_field("LHolder;.count:I")->make_concrete(ACC_PUBLIC));
+  auto* holder = holder_creator.create();
+
+  m_cc->add_field(DexField::make_field("LFoo;.x:I")->make_concrete(ACC_PUBLIC));
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:(LHolder;)V"
+     (
+      (load-param-object v0)
+      (load-param-object v1)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (const v2 2)
+      (iput v2 v1 "LHolder;.count:I")
+      (const v3 1)
+      (iput v3 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* reader = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.getX:(LFoo;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.x:I")
+      (move-result-pseudo v0)
+      (return v0)
+     )
+    )
+  )");
+  m_cc->add_method(reader);
+  auto* cls = m_cc->create();
+
+  run({holder, cls}, nullptr);
+
+  auto expected = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (const v0 1)
+      (return v0)
+    )
+  )");
+  EXPECT_CODE_EQ(reader->get_code(), expected.get());
+}
+
+TEST_F(FinalInlineTest, innerConstructorWritingOuterObjectBlocksInference) {
+  // Java:
+  //   class Foo {
+  //     static Holder HOLDER;  // HOLDER.foo is the Foo under construction
+  //     int x;
+  //     Foo(Holder h) {
+  //       x = 1;
+  //       if (h != null) new Foo(null); else HOLDER.foo.x = 2;
+  //     }
+  //   }
+  // `new Foo(HOLDER)` ends with x == 2, so getX() must not be folded.
+  m_cc->add_field(DexField::make_field("LFoo;.x:I")->make_concrete(ACC_PUBLIC));
+  m_cc->add_field(DexField::make_field("LFoo;.HOLDER:LHolder;")
+                      ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:(LHolder;)V"
+     (
+      (load-param-object v0)
+      (load-param-object v1)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (const v2 1)
+      (iput v2 v0 "LFoo;.x:I")
+      (if-eqz v1 :else)
+      (new-instance "LFoo;")
+      (move-result-pseudo-object v3)
+      (const v4 0)
+      (invoke-direct (v3 v4) "LFoo;.<init>:(LHolder;)V")
+      (:join)
+      (return-void)
+      (:else)
+      (sget-object "LFoo;.HOLDER:LHolder;")
+      (move-result-pseudo-object v5)
+      (iget-object v5 "LHolder;.foo:LFoo;")
+      (move-result-pseudo-object v6)
+      (const v7 2)
+      (iput v7 v6 "LFoo;.x:I")
+      (goto :join)
+     )
+    )
+  )"));
+  auto* reader = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.getX:(LFoo;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.x:I")
+      (move-result-pseudo v0)
+      (return v0)
+     )
+    )
+  )");
+  m_cc->add_method(reader);
+  auto* cls = m_cc->create();
+  auto expected_reader =
+      assembler::ircode_from_string(assembler::to_string(reader->get_code()));
+
+  run({cls}, nullptr);
+
+  EXPECT_CODE_EQ(reader->get_code(), expected_reader.get());
+}
+
+TEST_F(FinalInlineTest, callReceivingThisKeepsStoreOfFieldWrittenElsewhere) {
+  // Java:
+  //   class Foo { int x; Foo() { x = 1; Util.reset(this); x = 1; } }
+  //   class Util { static void reset(Foo f) { f.x = 0; } }
+  // reset() changes x, so the second store is not redundant.
+  ClassCreator util_creator(DexType::make_type("LUtil;"));
+  util_creator.set_super(type::java_lang_Object());
+  util_creator.add_method(assembler::method_from_string(R"(
+    (method (public static) "LUtil;.reset:(LFoo;)V"
+     (
+      (load-param-object v0)
+      (const v1 0)
+      (iput v1 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* util = util_creator.create();
+
+  m_cc->add_field(DexField::make_field("LFoo;.x:I")->make_concrete(ACC_PUBLIC));
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (const v1 1)
+      (iput v1 v0 "LFoo;.x:I")
+      (invoke-static (v0) "LUtil;.reset:(LFoo;)V")
+      (iput v1 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(ctor);
+  auto* cls = m_cc->create();
+  auto expected =
+      assembler::ircode_from_string(assembler::to_string(ctor->get_code()));
+
+  run({cls, util}, nullptr);
+
+  EXPECT_CODE_EQ(ctor->get_code(), expected.get());
+}
+
+TEST_F(FinalInlineTest,
+       callReachingSavedThisKeepsStoreOfFieldWrittenElsewhere) {
+  // Java:
+  //   class Base { Base() { Registry.last = this; } }
+  //   class Foo extends Base {
+  //     int x;
+  //     Foo() { super(); x = 1; Registry.reset(); x = 1; }
+  //   }
+  //   class Registry {
+  //     static Base last;
+  //     static void reset() { ((Foo) last).x = 0; }
+  //   }
+  // reset() takes no arguments but reaches this through Registry.last, so the
+  // second store is not redundant.
+  ClassCreator registry_creator(DexType::make_type("LRegistry;"));
+  registry_creator.set_super(type::java_lang_Object());
+  registry_creator.add_field(DexField::make_field("LRegistry;.last:LBase;")
+                                 ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  registry_creator.add_method(assembler::method_from_string(R"(
+    (method (public static) "LRegistry;.reset:()V"
+     (
+      (sget-object "LRegistry;.last:LBase;")
+      (move-result-pseudo-object v0)
+      (check-cast v0 "LFoo;")
+      (move-result-pseudo-object v1)
+      (const v2 0)
+      (iput v2 v1 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* registry = registry_creator.create();
+
+  ClassCreator base_creator(DexType::make_type("LBase;"));
+  base_creator.set_super(type::java_lang_Object());
+  base_creator.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LBase;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (sput-object v0 "LRegistry;.last:LBase;")
+      (return-void)
+     )
+    )
+  )"));
+  auto* base = base_creator.create();
+
+  m_cc->set_super(base->get_type());
+  m_cc->add_field(DexField::make_field("LFoo;.x:I")->make_concrete(ACC_PUBLIC));
+  auto* ctor = assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "LBase;.<init>:()V")
+      (const v1 1)
+      (iput v1 v0 "LFoo;.x:I")
+      (invoke-static () "LRegistry;.reset:()V")
+      (iput v1 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(ctor);
+  auto* cls = m_cc->create();
+  auto expected =
+      assembler::ircode_from_string(assembler::to_string(ctor->get_code()));
+
+  run({registry, base, cls}, nullptr);
+
+  EXPECT_CODE_EQ(ctor->get_code(), expected.get());
 }

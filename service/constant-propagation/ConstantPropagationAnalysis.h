@@ -304,21 +304,14 @@ class StaticFinalFieldAnalyzer final
 };
 
 /*
- * Handle instance fields in <init> methods.
+ * Forgets the instance fields of the class under construction when an <init>
+ * method calls a method of that class.
  */
 class InitFieldAnalyzer final
     : public InstructionAnalyzerBase<InitFieldAnalyzer,
                                      ConstantEnvironment,
                                      DexType* /* class_under_init */> {
  public:
-  static bool analyze_iget(const DexType* class_under_init,
-                           const IRInstruction* insn,
-                           ConstantEnvironment* env);
-
-  static bool analyze_iput(const DexType* class_under_init,
-                           const IRInstruction* insn,
-                           ConstantEnvironment* env);
-
   static bool analyze_invoke(const DexType* class_under_init,
                              const IRInstruction* insn,
                              ConstantEnvironment* env);

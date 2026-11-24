@@ -55,7 +55,8 @@ using CombinedAnalyzer =
                                 cp::PrimitiveAnalyzer>;
 
 using CombinedInitAnalyzer =
-    InstructionAnalyzerCombiner<cp::InitFieldAnalyzer,
+    InstructionAnalyzerCombiner<cp::ConstructorFieldAnalyzer,
+                                cp::InitFieldAnalyzer,
                                 cp::WholeProgramAwareAnalyzer,
                                 cp::StringAnalyzer,
                                 cp::ConstantClassObjectAnalyzer,
@@ -476,9 +477,12 @@ cp::WholeProgramState analyze_and_simplify_inits(
     const XStoreRefs* xstores,
     const UnorderedSet<const DexType*>& blocklist_types,
     const cp::EligibleIfields& eligible_ifields,
+    const UnorderedSet<const DexField*>& constructor_only_ifields,
     const cp::NullCheckMethods& null_check_methods,
     size_t& possible_cycles) {
   const UnorderedSet<DexMethodRef*> pure_methods = get_pure_methods();
+  UnorderedSet<const DexField*> eligible_fields;
+  insert_unordered_iterable(eligible_fields, eligible_ifields);
   cp::WholeProgramState wps(blocklist_types);
   for (DexClass* cls : reverse_tsort_by_init_deps(scope, possible_cycles)) {
     if (cls->is_external()) {
@@ -511,15 +515,22 @@ cp::WholeProgramState analyze_and_simplify_inits(
       if (ctor->rstate.no_optimizations()) {
         continue;
       }
-      cp::set_ifield_values(cls, eligible_ifields, &env);
       auto* code = ctor->get_code();
       auto& cfg = code->cfg();
       cfg.calculate_exit_block();
       constant_propagation::WholeProgramStateAccessor wps_accessor(wps);
+      // Only constructor-only fields are inlined, and they stay tracked when
+      // `this` escapes, so no constructor needs to be known to keep it.
+      const auto class_fields =
+          cp::ClassConstructorFields::create(cls, {}, constructor_only_ifields);
+      // The constructor may call itself on `this` after storing to a field.
+      class_fields.initialize_fields(ctor, eligible_fields, &env);
+      const auto& constructor_fields = class_fields.constructors.at(ctor);
       cp::intraprocedural::FixpointIterator intra_cp(
           cfg,
-          CombinedInitAnalyzer(cls->get_type(), &wps_accessor, nullptr, nullptr,
-                               nullptr, nullptr),
+          CombinedInitAnalyzer(&constructor_fields, cls->get_type(),
+                               &wps_accessor, nullptr, nullptr, nullptr,
+                               nullptr),
           cp::intraprocedural::make_default_no_throw_analyzer(
               &null_check_methods));
       intra_cp.run(env);
@@ -527,7 +538,7 @@ cp::WholeProgramState analyze_and_simplify_inits(
 
       // Remove redundant iputs in inits
       cp::Transform::Config transform_config;
-      transform_config.class_under_init = cls->get_type();
+      transform_config.constructor_fields = &constructor_fields;
       cp::Transform(transform_config, null_check_methods)
           .legacy_apply_constants_and_prune_unreachable(
               intra_cp, wps, cfg, xstores, cls->get_type());
@@ -664,13 +675,15 @@ FinalInlinePassV2::Stats FinalInlinePassV2::run_inline_ifields(
         init_classes_with_side_effects,
     const XStoreRefs* xstores,
     const cp::EligibleIfields& eligible_ifields,
+    const UnorderedSet<const DexField*>& constructor_only_ifields,
     const cp::NullCheckMethods& null_check_methods,
     const Config& config,
     std::optional<DexStoresVector*> stores) {
   size_t possible_cycles = 0;
   auto wps = final_inline::analyze_and_simplify_inits(
       scope, init_classes_with_side_effects, xstores, config.blocklist_types,
-      eligible_ifields, null_check_methods, possible_cycles);
+      eligible_ifields, constructor_only_ifields, null_check_methods,
+      possible_cycles);
   auto ret = inline_final_gets(stores, scope, conf, min_sdk,
                                init_classes_with_side_effects, xstores, wps,
                                config.blocklist_types, cp::FieldType::INSTANCE);
@@ -695,15 +708,15 @@ void FinalInlinePassV2::run_pass(DexStoresVector& stores,
                           &xstores, null_check_methods, m_config, &stores);
   FinalInlinePassV2::Stats ifield_stats{};
   if (m_config.inline_instance_field) {
+    const auto constructor_only_ifields = cp::gather_constructor_only_ifields(
+        scope, local_pointers::analyze_constructors(scope, {}));
     cp::EligibleIfields eligible_ifields =
         cp::gather_safely_inferable_ifield_candidates(
-            scope,
-            cp::gather_constructor_only_ifields(
-                scope, local_pointers::analyze_constructors(scope, {})),
-            m_config.allowlist_method_names);
-    ifield_stats = run_inline_ifields(
-        scope, conf, min_sdk, init_classes_with_side_effects, &xstores,
-        eligible_ifields, null_check_methods, m_config, &stores);
+            scope, constructor_only_ifields, m_config.allowlist_method_names);
+    ifield_stats =
+        run_inline_ifields(scope, conf, min_sdk, init_classes_with_side_effects,
+                           &xstores, eligible_ifields, constructor_only_ifields,
+                           null_check_methods, m_config, &stores);
     always_assert(ifield_stats.init_classes == 0);
   }
   mgr.incr_metric("num_static_finals_inlined", sfield_stats.inlined_count);

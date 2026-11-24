@@ -238,32 +238,13 @@ const DexType* get_type_demand(DexType* method_rtype, const Use& use) {
   case OPCODE_FILLED_NEW_ARRAY:
     return type::make_array_component_type(use.insn->get_type());
   case OPCODE_INVOKE_POLYMORPHIC:
-    // The call site's prototype decides what the arguments must be; the
-    // sources are not mapped to it here, so the demand is unknown.
-    return nullptr;
-  case OPCODE_INVOKE_CUSTOM: {
-    // The verifier requires one argument per source; anything else is not
-    // understood.
-    const auto* args = use.insn->get_callsite()->method_type()->get_args();
-    return use.src_index < args->size() ? args->at(use.src_index) : nullptr;
-  }
+  case OPCODE_INVOKE_CUSTOM:
   case OPCODE_INVOKE_VIRTUAL:
   case OPCODE_INVOKE_SUPER:
   case OPCODE_INVOKE_DIRECT:
   case OPCODE_INVOKE_STATIC:
-  case OPCODE_INVOKE_INTERFACE: {
-    DexMethodRef* dex_method = use.insn->get_method();
-    auto src_index = use.src_index;
-    if (use.insn->opcode() != OPCODE_INVOKE_STATIC) {
-      // The first argument is a reference to the object instance on which the
-      // method is invoked.
-      if (src_index-- == 0) {
-        return dex_method->get_class();
-      }
-    }
-    const auto* arg_types = dex_method->get_proto()->get_args();
-    return arg_types->at(src_index);
-  }
+  case OPCODE_INVOKE_INTERFACE:
+    return use.insn->get_invoke_src_type(use.src_index);
   default:
     if (opcode::is_a_conditional_branch(use.insn->opcode())) {
       return type::java_lang_Object();

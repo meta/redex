@@ -13,6 +13,7 @@
 #include "FrameworkApi.h"
 #include "IRAssembler.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 
 struct CheckCastAnalysisTest : public RedexTest {
   CheckCastAnalysisTest() {
@@ -572,3 +573,75 @@ INSTANTIATE_TEST_SUITE_P(SDKCombinations,
                          [](const auto& info) {
                            return std::get<0>(info.param);
                          });
+
+// A method handle call needs its argument to have the type that the call
+// site's prototype gives it, so the cast stays.
+TEST_F(CheckCastAnalysisTest, method_handle_call_argument) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar:(Ljava/lang/invoke/MethodHandle;Ljava/lang/Object;)V"
+      (
+        (load-param-object v0)
+        (load-param-object v1)
+        (check-cast v1 "LBar;")
+        (move-result-pseudo-object v2)
+        (invoke-polymorphic (v0 v2) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LBar;)V")
+        (return-void)
+      )
+    )
+  )");
+  method->get_code()->build_cfg();
+  check_casts::CheckCastConfig config;
+  auto api = create_empty_sdk();
+  auto analysis =
+      check_casts::impl::CheckCastAnalysis::forMethod(config, method, api);
+  EXPECT_TRUE(analysis.collect_redundant_checks_replacement().empty());
+  method->get_code()->clear_cfg();
+}
+
+// A method handle call needs its receiver to be a `MethodHandle`, so the cast
+// stays.
+TEST_F(CheckCastAnalysisTest, method_handle_call_receiver) {
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar:(Ljava/lang/Object;)V"
+      (
+        (load-param-object v0)
+        (check-cast v0 "Ljava/lang/invoke/MethodHandle;")
+        (move-result-pseudo-object v1)
+        (invoke-polymorphic (v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
+        (return-void)
+      )
+    )
+  )");
+  method->get_code()->build_cfg();
+  check_casts::CheckCastConfig config;
+  auto api = create_empty_sdk();
+  auto analysis =
+      check_casts::impl::CheckCastAnalysis::forMethod(config, method, api);
+  EXPECT_TRUE(analysis.collect_redundant_checks_replacement().empty());
+  method->get_code()->clear_cfg();
+}
+
+// A call through a call site needs its argument to have the type that the call
+// site's method type gives it, so the cast stays.
+TEST_F(CheckCastAnalysisTest, call_site_argument) {
+  // The `invoke-static` becomes an `invoke-custom`.
+  auto* method = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.bar:(Ljava/lang/Object;)V"
+      (
+        (load-param-object v1)
+        (check-cast v1 "LBar;")
+        (move-result-pseudo-object v2)
+        (invoke-static (v2) "LFoo;.placeholder:(LBar;)V")
+        (return-void)
+      )
+    )
+  )");
+  redex::make_invoke_custom(method->get_code(), "run", "(LBar;)V");
+  method->get_code()->build_cfg();
+  check_casts::CheckCastConfig config;
+  auto api = create_empty_sdk();
+  auto analysis =
+      check_casts::impl::CheckCastAnalysis::forMethod(config, method, api);
+  EXPECT_TRUE(analysis.collect_redundant_checks_replacement().empty());
+  method->get_code()->clear_cfg();
+}

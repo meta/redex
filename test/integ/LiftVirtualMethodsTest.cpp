@@ -401,8 +401,10 @@ TEST_F(LiftVirtualMethodsTest, rejects_references_illegal_in_primary_dex) {
   EXPECT_EQ(stats.lifted_methods, 0);
 }
 
-// `MethodHandle.invoke(this)` in Java: the call site's prototype decides what
-// type the receiver must have, and that demand is not modeled.
+// `MethodHandle.invoke(this)` in Java: the call site's prototype lets the
+// receiver be any object, but this test has no definition of
+// `MethodHandle.invoke`, so the call's reference cannot be checked and the
+// method does not move.
 TEST_F(LiftVirtualMethodsTest, rejects_receiver_passed_to_invoke_polymorphic) {
   prepare();
   for (const auto* cls :
@@ -421,7 +423,7 @@ TEST_F(LiftVirtualMethodsTest, rejects_receiver_passed_to_invoke_polymorphic) {
   }
   auto stats = run_lift();
   EXPECT_FALSE(declares_m("Lcom/facebook/redextest/UBase;"));
-  EXPECT_EQ(rejections(stats, Rejection::kReceiverType), 1);
+  EXPECT_EQ(rejections(stats, Rejection::kCrossStore), 1);
 }
 
 // After LBase takes LA's m, the group of LA's subclasses targets LA, which no

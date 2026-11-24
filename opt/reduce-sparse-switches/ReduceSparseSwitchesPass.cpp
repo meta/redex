@@ -909,15 +909,9 @@ bool can_use_integer_arithmetic(const ArithmeticSwitch& plan,
           return false;
         }
       }
-      if (opcode::is_a_method_invoke(op)) {
-        const size_t offset = opcode::is_invoke_static(op) ? 0 : 1;
-        const auto* args = use->get_method()->get_proto()->get_args();
-        if (src >= offset) {
-          always_assert(src - offset < args->size());
-          if (is_narrow(args->at(src - offset))) {
-            return false;
-          }
-        }
+      if (opcode::is_an_invoke(op) &&
+          is_narrow(use->get_invoke_src_type(src))) {
+        return false;
       }
       if (op == OPCODE_FILLED_NEW_ARRAY) {
         const auto* component = type::get_array_component_type(use->get_type());

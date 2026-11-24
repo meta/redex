@@ -1062,7 +1062,16 @@ TEST_F(ReduceSparseSwitchesTest,
        true},
       {R"((filled-new-array (v1) "[I")(move-result-object v2)
            (invoke-static (v2) "LConsumer;.varargs:([I)V"))",
-       true}};
+       true},
+      // The call-site prototype types the arguments of invoke-polymorphic.
+      {R"((invoke-polymorphic (v5 v1)
+           "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;"
+           "(I)V"))",
+       true},
+      {R"((invoke-polymorphic (v5 v1)
+           "Ljava/lang/invoke/MethodHandle;.invoke:([Ljava/lang/Object;)Ljava/lang/Object;"
+           "(B)V"))",
+       false}};
   size_t index = 0;
   for (const auto& [call, accepted] : calls) {
     auto* method = assembler::method_from_string(

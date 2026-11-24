@@ -75,6 +75,7 @@ check_PROGRAMS = \
     concurrent_hashtable_test \
     configurable_test \
     config_files_test \
+    constant_uses_test \
     constructor_accesses_test \
     constructor_analysis_test \
     control_flow_test \
@@ -315,7 +316,7 @@ chrome_trace_writer_test_SOURCES = ChromeTraceWriterTest.cpp
 
 check_breadcrumbs_test_SOURCES = CheckBreadCrumbsTest.cpp
 
-check_cast_analysis_test_SOURCES = CheckCastAnalysisTest.cpp
+check_cast_analysis_test_SOURCES = CheckCastAnalysisTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 class_order_sample_test_SOURCES = ClassOrderSampleTest.cpp
 
@@ -348,6 +349,9 @@ configurable_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 config_files_test_SOURCES = ConfigFilesTest.cpp
 EXTRA_config_files_test_DEPENDENCIES = config_files_test.env
 $(eval $(call make_env,config_files_test,class_frequencies_path=$(srcdir)/class_frequencies.txt))
+
+constant_uses_test_SOURCES = ConstantUsesTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
+constant_uses_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 
 constructor_accesses_test_SOURCES = ConstructorAccessesTest.cpp
 

@@ -17,6 +17,7 @@
 #include <string_view>
 #include <vector>
 
+#include "Debug.h"
 #include "DexAnnotation.h"
 #include "DexDefs.h"
 
@@ -103,4 +104,12 @@ DexCallSite* make_invoke_custom(
     std::string_view method_name,
     std::string_view method_type,
     std::vector<std::unique_ptr<DexEncodedValue>> args = {});
+
+// `value` as the subclass `T` of `DexEncodedValue` that it must be.
+template <typename T>
+const T* encoded_value_as(const DexEncodedValue* value) {
+  const auto* result = dynamic_cast<const T*>(value);
+  always_assert(result != nullptr);
+  return result;
+}
 } // namespace redex

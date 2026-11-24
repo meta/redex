@@ -190,6 +190,7 @@ libredex_la_SOURCES = \
 	libredex/MatchFlowDetail.cpp \
 	libredex/MethodDevirtualizer.cpp \
 	libredex/MethodFixup.cpp \
+	libredex/MethodHandleRewriter.cpp \
 	libredex/MethodOverrideGraph.cpp \
 	libredex/MethodProfiles.cpp \
 	libredex/MethodSimilarityCompressionConsciousOrderer.cpp \

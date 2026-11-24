@@ -683,6 +683,16 @@ void EnumFixpointIterator::analyze_instruction(const IRInstruction* insn,
     case OPCODE_INVOKE_POLYMORPHIC:
       env->set(dest, EnumTypes(insn->get_callsite_proto()->get_rtype()));
       break;
+
+    // These dex 038 and 039 instructions cannot reach OptimizeEnumsPass, which
+    // supports dex 035 (`pass_support_dex_version()` is 35): PassManager aborts
+    // before running it on input that has them. Their results are objects all
+    // the same, never null, so an identity comparison with one cannot be judged
+    // as one with null.
+    case OPCODE_CONST_METHOD_HANDLE:
+    case OPCODE_CONST_METHOD_TYPE:
+      env->set(dest, EnumTypes(OBJECT_TYPE));
+      break;
     case OPCODE_CONST_CLASS:
       env->set(dest, EnumTypes(type::java_lang_Class()));
       break;

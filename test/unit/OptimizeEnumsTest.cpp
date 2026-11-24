@@ -4349,6 +4349,28 @@ INSTANTIATE_TEST_SUITE_P(
 
 } // namespace
 
+// `const-method-handle` and `const-method-type` cannot reach
+// OptimizeEnumsPass, but the analysis takes each of their results to be an
+// object, never null, even where a register held a candidate before.
+TEST_F(OptimizeEnumsTest, methodHandleConstantsHaveObjectTypes) {
+  auto code = assembler::ircode_from_string("((return-void))");
+  code->build_cfg();
+  optimize_enums::Config config(100);
+  optimize_enums::EnumFixpointIterator analysis(code->cfg(), config);
+  auto check = [&](const IRInstruction& insn) {
+    optimize_enums::EnumTypeEnvironment env;
+    env.set(RESULT_REGISTER,
+            optimize_enums::EnumTypes(DexType::make_type("LBar;")));
+    analysis.analyze_instruction(&insn, &env);
+    EXPECT_EQ(env.get(RESULT_REGISTER),
+              optimize_enums::EnumTypes(type::java_lang_Object()))
+        << show(&insn);
+  };
+  IRInstruction handle(OPCODE_CONST_METHOD_HANDLE);
+  check(handle);
+  IRInstruction method_type(OPCODE_CONST_METHOD_TYPE);
+  check(method_type);
+}
 TEST_F(OptimizeEnumsTest, objectParameterObservationsAreUnsafe) {
   struct ObservationCase {
     std::string instructions;

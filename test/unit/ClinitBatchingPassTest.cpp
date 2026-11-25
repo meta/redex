@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <fstream>
+
 #include <gtest/gtest.h>
 
 #include "ClinitBatchingPass.h"
@@ -23,6 +25,7 @@ class ClinitBatchingPassTest : public RedexTest {
  protected:
   DexStoresVector stores;
   redex::TempDir m_apk_dir;
+  redex::TempDir m_profile_dir;
 
   void SetUp() override {
     DexStore root_store("classes");
@@ -102,7 +105,9 @@ class ClinitBatchingPassTest : public RedexTest {
     stores = {root_store};
   }
 
-  void run_pass(const Json::Value& config = Json::nullValue) {
+  // Runs the pass and returns its metrics.
+  UnorderedMap<std::string, int64_t> run_pass(
+      const Json::Value& config = Json::nullValue) {
     Json::Value cfg = config.isNull() ? Json::Value(Json::objectValue) : config;
 
     // Set up apk_dir with the binary AndroidManifest.xml test fixture.
@@ -119,6 +124,46 @@ class ClinitBatchingPassTest : public RedexTest {
     std::vector<Pass*> passes{&pass};
     PassManager manager(passes, conf);
     manager.run_passes(stores, conf);
+    return manager.get_pass_info()[0].metrics;
+  }
+
+  // Runs the pass on `classes`, with the methods `hot_methods` hot at cold
+  // start, and returns the pass's metrics.
+  UnorderedMap<std::string, int64_t> run_pass_with_hot_methods(
+      const std::vector<DexClass*>& classes,
+      const std::vector<std::string>& hot_methods) {
+    if (type_class(type::java_lang_Object()) == nullptr) {
+      create_object_class();
+    }
+    m_profile_dir = redex::make_tmp_dir("clinit_batching_profile_%%%%%%%%");
+    auto profile_path = m_profile_dir.path + "/method_profiles.csv";
+    {
+      std::ofstream profile(profile_path);
+      profile << "interaction,appear#\nColdStart,100\n"
+              << "index,name,appear100,appear#,avg_call,avg_order,"
+                 "avg_rank100,min_api_level\n";
+      int index = 1;
+      for (const auto& method : hot_methods) {
+        profile << index++ << "," << method
+                << ",99.0000,99,2.0000,0.0000,0.000000,29\n";
+      }
+    }
+    Json::Value cfg(Json::objectValue);
+    cfg["agg_method_stats_files"].append(profile_path);
+    auto& interaction = cfg["baseline_profile"]["default"]
+                           ["deep_data_interaction_config"]["ColdStart"];
+    interaction["name"] = "ColdStart";
+    interaction["call_threshold"] = 1;
+    interaction["classes"] = true;
+    interaction["post_startup"] = false;
+    interaction["startup"] = true;
+    interaction["threshold"] = 20;
+    cfg["baseline_profile"]["default"]["oxygen_modules"] = false;
+    cfg["baseline_profile"]["default"]["strip_classes"] = false;
+    cfg["baseline_profile"]["default"]["use_redex_generated_profile"] = false;
+    cfg["ClinitBatchingPass"]["interaction_pattern"] = "ColdStart";
+    stores[0].add_classes(classes);
+    return run_pass(cfg);
   }
 
   // Runs the early class loads analysis with `attach_code` as the body of
@@ -314,4 +359,37 @@ TEST_F(ClinitBatchingPassTest, EarlyClassLoadsReportInvokeWithArguments) {
   ASSERT_FALSE(result.error_message) << *result.error_message;
   ASSERT_NE(result.unknown_early_call, nullptr);
   EXPECT_EQ(result.unknown_early_call->get_method(), invoke_with_arguments);
+}
+
+// A method handle call can run any method, which can load any class, so a
+// static initializer that reaches one is not batched. Here the call sits in
+// a method that the side-effect filter skips because of its name, `append`.
+TEST_F(ClinitBatchingPassTest, ClinitReachingMethodHandleCallIsNotBatched) {
+  auto* batched = assembler::class_from_string(R"(
+    (class (public) "LBatched;"
+      (field (public static) "LBatched;.f:I")
+      (method (public static constructor) "LBatched;.<clinit>:()V"
+        ((const v0 1)
+         (sput v0 "LBatched;.f:I")
+         (invoke-static () "LBatched;.append:()V")
+         (return-void)))
+      (method (public static) "LBatched;.append:()V"
+        ((const-method-handle invoke-static "LBatched;.touch:()V")
+         (move-result-pseudo-object v0)
+         (invoke-polymorphic (v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
+         (return-void)))
+      (method (public static) "LBatched;.touch:()V"
+        ((return-void)))
+    )
+  )");
+  auto metrics =
+      run_pass_with_hot_methods({batched}, {"LBatched;.<clinit>:()V"});
+
+  auto metric = [&](const char* key) {
+    auto it = metrics.find(key);
+    return it == metrics.end() ? -1 : it->second;
+  };
+  EXPECT_EQ(metric("candidate_clinits_count"), 1);
+  EXPECT_EQ(metric("analysis_candidates"), 0);
+  EXPECT_EQ(metric("rejected_unknown_target_call"), 1);
 }

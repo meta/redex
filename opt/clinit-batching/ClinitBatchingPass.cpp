@@ -52,6 +52,7 @@ enum class BatchingRejection {
   HasTooManyInterfaceOverrides,
   HasUnresolvedInternalCall,
   HasExternalCall,
+  HasUnknownTargetCall,
   DepthExceeded,
 };
 
@@ -260,6 +261,11 @@ SafetyResult check_batching_safety_impl(
     if (opcode::is_throw(op)) {
       return cache_and_return(
           SafetyResult::reject(BatchingRejection::HasThrow));
+    }
+    // A call that can run any method can load any class.
+    if (opcode::is_an_invoke(op) && method::has_unknown_target(insn)) {
+      return cache_and_return(
+          SafetyResult::reject(BatchingRejection::HasUnknownTargetCall));
     }
     // invoke-super: resolve via manual superclass walk from the caller's class.
     // resolve_method(ref, Super) without a caller falls back to a Virtual
@@ -954,6 +960,7 @@ void ClinitBatchingPass::run_pass(DexStoresVector& stores,
   size_t rejected_too_many_interface_overrides = 0;
   size_t rejected_unresolved_internal = 0;
   size_t rejected_external_call = 0;
+  size_t rejected_unknown_target_call = 0;
   size_t rejected_depth_exceeded = 0;
   size_t benign_virtual_calls = 0;
   size_t depth_exceeded_events = 0;
@@ -1022,6 +1029,9 @@ void ClinitBatchingPass::run_pass(DexStoresVector& stores,
     case BatchingRejection::HasExternalCall:
       rejected_external_call++;
       break;
+    case BatchingRejection::HasUnknownTargetCall:
+      rejected_unknown_target_call++;
+      break;
     case BatchingRejection::DepthExceeded:
       rejected_depth_exceeded++;
       break;
@@ -1045,6 +1055,7 @@ void ClinitBatchingPass::run_pass(DexStoresVector& stores,
                  rejected_too_many_interface_overrides);
   mgr.set_metric("rejected_unresolved_internal", rejected_unresolved_internal);
   mgr.set_metric("rejected_external_call", rejected_external_call);
+  mgr.set_metric("rejected_unknown_target_call", rejected_unknown_target_call);
   mgr.set_metric("benign_virtual_calls", benign_virtual_calls);
   mgr.set_metric("rejected_depth_exceeded", rejected_depth_exceeded);
   mgr.set_metric("depth_exceeded_events", depth_exceeded_events);

@@ -24,6 +24,7 @@
 #include "IRCode.h"
 #include "IRInstruction.h"
 #include "MethodSplitter.h"
+#include "MethodSplittingTestUtil.h"
 #include "Show.h"
 #include "SplitNetSaving.h"
 
@@ -197,13 +198,11 @@ SplitResult run_splitter(std::string_view sig,
   }
   // A null `min_sdk_api` leaves every EXTERNAL type failing the loadability
   // check, which is the conservative default the harness wants.
-  method_splitting_impl::StoreRefCheckers store_ref_checkers(
-      stores, /* normal_primary_dex */ false, /* min_sdk_api */ nullptr);
-  method_splitting_impl::split_methods_in_stores(
-      stores, /* min_sdk */ 0, cfg, store_ref_checkers,
-      /* create_init_class_insns */ false,
-      /* reserved_mrefs */ 0, /* reserved_trefs */ 0, &stats,
-      /* name_infix */ "", &hot_methods);
+  auto env = method_splitting_test::split_environment(
+      stores, /* normal_primary_dex */ false);
+  method_splitting_impl::split_methods_in_stores(stores, env, cfg, &stats,
+                                                 /* name_infix */ "",
+                                                 &hot_methods);
   SplitResult res;
   res.main_method = m;
   for (const auto& [out, kind] : stats.added_methods) {

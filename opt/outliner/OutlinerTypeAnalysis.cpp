@@ -817,6 +817,10 @@ const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
     const CandidateAdapter* ca,
     const UnorderedSet<const IRInstruction*>& const_insns) {
   always_assert(!const_insns.empty());
+  // `get_type_of_defs` classifies `IOPCODE_UNREACHABLE` (a synthetic undefined
+  // value) separately and never routes it here: it carries no literal, so both
+  // the constant-uses analysis and the literal-range checks below would assert
+  // on it. Only real `const`/`const-wide` defs reach this point.
   // 1. Let's see if we can get something out of the constant-uses analysis.
   constant_uses::TypeDemand type_demand{constant_uses::TypeDemand::None};
   for (const auto* insn : UnorderedIterable(const_insns)) {
@@ -964,6 +968,7 @@ const DexType* OutlinerTypeAnalysis::get_type_of_defs(
     types.insert(optional_extra_type);
   }
   UnorderedSet<const IRInstruction*> const_insns;
+  bool any_unreachable = false;
   for (const auto* def : UnorderedIterable(defs)) {
     always_assert(!opcode::is_a_move(def->opcode()) &&
                   !opcode::is_move_result_any(def->opcode()));
@@ -998,9 +1003,17 @@ const DexType* OutlinerTypeAnalysis::get_type_of_defs(
           }
         }
         return false;
+      case IOPCODE_UNREACHABLE:
+        // A synthetic undefined value carries no literal and no type demand.
+        // Keep it out of `const_insns`: the constant-uses analysis and the
+        // literal-range checks (`any_outside*`) below both call
+        // `get_literal()`, which asserts on it. Its only effect is that, if
+        // nothing else contributes a type, the result is undeterminable
+        // (handled below where `types` is empty).
+        any_unreachable = true;
+        return false;
       case OPCODE_CONST:
       case OPCODE_CONST_WIDE:
-      case IOPCODE_UNREACHABLE:
         const_insns.insert(def);
         return false;
       default:
@@ -1024,7 +1037,12 @@ const DexType* OutlinerTypeAnalysis::get_type_of_defs(
   }
 
   if (types.empty()) {
-    always_assert(!const_insns.empty());
+    if (const_insns.empty()) {
+      // Only undefined (unreachable) defs contributed; with no real const or
+      // typed producer, the type is undeterminable.
+      always_assert(any_unreachable);
+      return nullptr;
+    }
     return get_const_insns_type_demand(ca, const_insns);
   }
 

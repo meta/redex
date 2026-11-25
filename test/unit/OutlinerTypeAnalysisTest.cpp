@@ -120,6 +120,30 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_primitive) {
   }
 }
 
+TEST_F(OutlinerTypeAnalysisTest, get_result_type_unreachable) {
+  // Regression: a def fed by IOPCODE_UNREACHABLE (a synthetic undefined value
+  // that the type analysis groups with consts) must not crash
+  // get_const_insns_type_demand -- the constant-uses analysis only handles
+  // OPCODE_CONST/OPCODE_CONST_WIDE. Its type is undeterminable -> nullptr.
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:()V" (
+        (const v0 0)
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  auto& cfg = foo_method->get_code()->cfg();
+  auto* unreachable = new IRInstruction(IOPCODE_UNREACHABLE);
+  unreachable->set_dest(0);
+  auto ii = InstructionIterable(cfg);
+  cfg.insert_before(ii.begin(), unreachable);
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+
+  const auto* result_type =
+      ota.get_result_type(nullptr, {unreachable}, /* optional_extra_type */
+                          nullptr);
+  EXPECT_EQ(result_type, nullptr);
+}
+
 TEST_F(OutlinerTypeAnalysisTest, get_result_type_object) {
   ClassCreator object_creator(type::java_lang_Object());
   ClassCreator foo_creator(DexType::make_type("LFoo;"));

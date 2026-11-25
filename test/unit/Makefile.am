@@ -298,7 +298,7 @@ art_profile_writer_pass_test_SOURCES = ArtProfileWriterPassTest.cpp
 
 assert_test_SOURCES = AssertTest.cpp
 
-atomic_field_updater_lowering_test_SOURCES = AtomicFieldUpdaterLoweringTest.cpp
+atomic_field_updater_lowering_test_SOURCES = AtomicFieldUpdaterLoweringTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 atomic_stat_counter_test_SOURCES = AtomicStatCounterTest.cpp
 

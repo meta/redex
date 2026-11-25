@@ -165,6 +165,7 @@ class UpdaterOperations {
 std::vector<UpdaterInfo> find_updaters(
     const Scope& scope,
     const UnorderedMap<const DexType*, Kind>& kinds,
+    const InsertOnlyConcurrentSet<const DexField*>& named_by_method_handles,
     KindCounts& per_kind) {
   std::vector<UpdaterInfo> result;
   per_kind.fill(0);
@@ -188,7 +189,8 @@ std::vector<UpdaterInfo> find_updaters(
     UnorderedMap<DexField*, Kind> candidates;
     for (auto* f : cls->get_sfields()) {
       auto kit = kinds.find(f->get_type());
-      if (kit != kinds.end() && is_final(f)) {
+      if (kit != kinds.end() && is_final(f) &&
+          named_by_method_handles.count(f) == 0) {
         candidates.emplace(f, kit->second);
       }
     }
@@ -2309,8 +2311,15 @@ void AtomicFieldUpdaterLoweringPass::run_pass(DexStoresVector& stores,
     }
   }
 
+  // An updater field that a method handle names is left alone: a get handle
+  // reads it where `cleanup_redundant_fields` does not look, and a put handle
+  // writes it outside the <clinit> that recognition reads. Any store can hold
+  // such a handle, so the whole scope is searched.
+  const auto named_by_method_handles =
+      method::gather_fields_named_by_method_handles(scope);
   KindCounts per_kind{};
-  auto updaters = find_updaters(root_scope, ops.kinds(), per_kind);
+  auto updaters =
+      find_updaters(root_scope, ops.kinds(), named_by_method_handles, per_kind);
   // Report every flavor, including any absent from the program: a metric that
   // vanishes at zero is indistinguishable from the pass not running.
   for (auto kind : atomic_field_updaters::all_kinds()) {

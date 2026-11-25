@@ -15,6 +15,7 @@
 #include "ConfigFiles.h"
 #include "ControlFlow.h"
 #include "Creators.h"
+#include "DexAnnotation.h"
 #include "DexClass.h"
 #include "IRAssembler.h"
 #include "IRCode.h"
@@ -23,6 +24,7 @@
 #include "MethodProfiles.h"
 #include "PassManager.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "ScopedCFG.h"
 #include "TypeUtil.h"
 
@@ -78,6 +80,8 @@ class AtomicFieldUpdaterLoweringTest : public RedexTest {
   int min_sdk{24};
   // The method profiles `run()` hands the pass, read back after it.
   method_profiles::MethodProfiles profiles;
+  // Classes that `run()` puts in a second store, after the root store.
+  std::vector<DexClass*> second_store;
 
   // `Class.name` of every method `method` invokes, one entry per call. The
   // pass manager tears the CFGs down after the last pass, hence the rebuild.
@@ -169,6 +173,11 @@ class AtomicFieldUpdaterLoweringTest : public RedexTest {
     store.add_classes(in_store);
     std::vector<DexStore> stores;
     stores.emplace_back(std::move(store));
+    if (!second_store.empty()) {
+      DexStore other("other");
+      other.add_classes(second_store);
+      stores.emplace_back(std::move(other));
+    }
     manager.run_passes(stores, config);
     profiles = std::move(config.get_method_profiles());
     capture(manager);
@@ -185,6 +194,15 @@ class AtomicFieldUpdaterLoweringTest : public RedexTest {
         }
       }
     }
+  }
+
+  // Whether `cls_name` still declares its updater field `U`.
+  static bool declares_updater(const std::string& cls_name) {
+    const auto& sfields =
+        type_class(DexType::get_type(cls_name))->get_sfields();
+    return std::any_of(sfields.begin(), sfields.end(), [](const DexField* f) {
+      return f->get_name()->str() == "U";
+    });
   }
 
   int64_t metric(const std::string& key) const {
@@ -459,6 +477,107 @@ TEST_F(AtomicFieldUpdaterLoweringTest, keptUpdaterFieldIsNotRemoved) {
     }
   }
   EXPECT_EQ(updater_fields, 1u) << "a kept field must survive cleanup";
+}
+
+// A method handle that gets the updater field reads it without a field
+// instruction. The updater is left alone rather than lowered, so the field
+// that the handle names survives.
+TEST_F(AtomicFieldUpdaterLoweringTest, updaterNamedByMethodHandleIsNotLowered) {
+  static constexpr const char* kGet = R"((
+    (load-param-object v0)
+    (sget-object "LHandled;.U:$UPD")
+    (move-result-pseudo-object v1)
+    (invoke-virtual (v1 v0) "$UPD.get:(Ljava/lang/Object;)Ljava/lang/Object;")
+    (move-result-object v2)
+    (return-void)
+  ))";
+  static constexpr const char* kHandle = R"((
+    (const-method-handle static-get "LHandled;.U:$UPD")
+    (move-result-pseudo-object v0)
+    (return-object v0)
+  ))";
+  auto* read = DexMethod::make_method("LHandled;.read:(LHandled;)V")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  read->set_code(
+      assembler::ircode_from_string(ir(kGet, {{"$UPD", REFERENCE_DESC}})));
+  auto* handle = DexMethod::make_method(
+                     "LHandled;.handle:()Ljava/lang/invoke/MethodHandle;")
+                     ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  handle->set_code(
+      assembler::ircode_from_string(ir(kHandle, {{"$UPD", REFERENCE_DESC}})));
+
+  run("LHandled;", REFERENCE_DESC, "next", "Ljava/lang/Object;",
+      {read, handle});
+  EXPECT_EQ(metric("updaters_recognized"), 0);
+  EXPECT_TRUE(declares_updater("LHandled;"));
+}
+
+// The same for a method handle that no code holds: the value of a static field
+// of another class.
+TEST_F(AtomicFieldUpdaterLoweringTest,
+       updaterNamedByEncodedMethodHandleIsNotLowered) {
+  static constexpr const char* kGet = R"((
+    (load-param-object v0)
+    (sget-object "LStored;.U:$UPD")
+    (move-result-pseudo-object v1)
+    (invoke-virtual (v1 v0) "$UPD.get:(Ljava/lang/Object;)Ljava/lang/Object;")
+    (move-result-object v2)
+    (return-void)
+  ))";
+  auto* read = DexMethod::make_method("LStored;.read:(LStored;)V")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  read->set_code(
+      assembler::ircode_from_string(ir(kGet, {{"$UPD", REFERENCE_DESC}})));
+  ClassCreator other(DexType::make_type("LHandleHolder;"));
+  other.set_super(type::java_lang_Object());
+  other.add_field(
+      DexField::make_field(
+          "LHandleHolder;.HANDLE:Ljava/lang/invoke/MethodHandle;")
+          ->make_concrete(
+              ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+              std::make_unique<DexEncodedValueMethodHandle>(
+                  redex::make_method_handle(
+                      METHOD_HANDLE_TYPE_STATIC_GET,
+                      std::string("LStored;.U:") + REFERENCE_DESC))));
+
+  run("LStored;", REFERENCE_DESC, "next", "Ljava/lang/Object;", {read},
+      {other.create()});
+  EXPECT_EQ(metric("updaters_recognized"), 0);
+  EXPECT_TRUE(declares_updater("LStored;"));
+}
+
+// The same for a method handle in a store other than the root store, where
+// recognition does not look but cleanup does.
+TEST_F(AtomicFieldUpdaterLoweringTest,
+       updaterNamedByMethodHandleInOtherStoreIsNotLowered) {
+  static constexpr const char* kGet = R"((
+    (load-param-object v0)
+    (sget-object "LShared;.U:$UPD")
+    (move-result-pseudo-object v1)
+    (invoke-virtual (v1 v0) "$UPD.get:(Ljava/lang/Object;)Ljava/lang/Object;")
+    (move-result-object v2)
+    (return-void)
+  ))";
+  auto* read = DexMethod::make_method("LShared;.read:(LShared;)V")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  read->set_code(
+      assembler::ircode_from_string(ir(kGet, {{"$UPD", REFERENCE_DESC}})));
+  ClassCreator other(DexType::make_type("LOtherStoreHolder;"));
+  other.set_super(type::java_lang_Object());
+  other.add_field(
+      DexField::make_field(
+          "LOtherStoreHolder;.HANDLE:Ljava/lang/invoke/MethodHandle;")
+          ->make_concrete(
+              ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+              std::make_unique<DexEncodedValueMethodHandle>(
+                  redex::make_method_handle(
+                      METHOD_HANDLE_TYPE_STATIC_GET,
+                      std::string("LShared;.U:") + REFERENCE_DESC))));
+  second_store = {other.create()};
+
+  run("LShared;", REFERENCE_DESC, "next", "Ljava/lang/Object;", {read});
+  EXPECT_EQ(metric("updaters_recognized"), 0);
+  EXPECT_TRUE(declares_updater("LShared;"));
 }
 
 // An updater initialized inside a try region is left alone by cleanup. Removing

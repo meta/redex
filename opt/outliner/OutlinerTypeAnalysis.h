@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <functional>
 #include <optional>
 
 #include "ConstantUses.h"
@@ -14,6 +15,7 @@
 #include "IRInstruction.h"
 #include "Lazy.h"
 #include "LiveRange.h"
+#include "PartialCandidates.h"
 #include "ReachingDefinitions.h"
 #include "TypeInference.h"
 
@@ -25,20 +27,88 @@ using TypeEnvironments =
 using ReachingDefsEnvironments =
     UnorderedMap<const IRInstruction*, reaching_defs::Environment>;
 
-class PartialCandidateAdapter;
-class ReducedCFGClosureAdapter;
+// Outlined code declares a type for every value that crosses its boundary.
+// That type must be at or above what reaches the register and at or below
+// what its uses accept. `art::Value` models what reaches the register, a join
+// over its definitions. `art::Demand` models what its uses accept, a meet over
+// its uses. `OutlinerTypeAnalysis` computes both, and the role policies below
+// pick the declared type.
+namespace art {
 
-class CandidateAdapter {
+// What ART's verifier may hold in a register: the type of every producer and
+// every constant that reaches it. `join` keeps each contribution; `upper()`
+// resolves them into one type.
+class Value {
  public:
-  virtual const type_inference::TypeEnvironment& get_type_env() const = 0;
-  virtual const reaching_defs::Environment& get_rdef_env() const = 0;
-  virtual void gather_type_demands(
-      UnorderedSet<reg_t> regs_to_track,
-      const std::function<bool(IRInstruction*, src_index_t)>& follow,
-      UnorderedSet<const DexType*>* type_demands) const = 0;
-  virtual bool contains(IRInstruction* insn) const = 0;
-  virtual ~CandidateAdapter() {}
+  // No value reaches the register.
+  Value() = default;
+  static Value unknown();
+  // A value of type `t`, the result type of its producer; unknown for nullptr.
+  static Value of_type(const DexType* t);
+  // The value of a `const` or `const-wide`.
+  static Value constant(const IRInstruction* insn);
+
+  void join_with(const Value& other);
+
+  // Whether constants contribute and nothing else does: no producer gives
+  // the register a type.
+  bool is_constant() const;
+  // The type of the register, at or above every contribution; nullptr when
+  // a contribution is unknown, no type holds them all, or only constants
+  // contribute.
+  const DexType* upper() const;
+
+ private:
+  bool m_unknown{false};
+  // Bit k: a value of the k-th of `boolean`, `byte`, `short`, `char`, `int`.
+  uint8_t m_integral{0};
+  // Bit k: a value of the k-th of `float`, `long`, `double`.
+  uint8_t m_primitives{0};
+  // The other types contributing: classes and arrays.
+  UnorderedSet<const DexType*> m_references;
+  bool m_has_constants{false};
+  // Bit k is set when the k-th of `boolean`, `byte`, `short`, `char` holds
+  // every contributing constant.
+  uint8_t m_constants_held_by{0xf};
 };
+
+// What the uses of a register require of it: the type each use demands.
+// `meet_with` keeps each demand; `widest()` resolves them into one type.
+class Demand {
+ public:
+  // No use demands anything.
+  Demand() = default;
+  static Demand unknown();
+  // A use requiring `t`; unknown for nullptr.
+  static Demand of_use(const DexType* t);
+
+  void meet_with(const Demand& other);
+
+  bool is_none() const;
+  // The widest type every use accepts; nullptr when a demand is unknown, there
+  // is no use, or the demands name more than one type.
+  const DexType* widest() const;
+
+ private:
+  bool m_unknown{false};
+  uint8_t m_integral{0};
+  uint8_t m_primitives{0};
+  UnorderedSet<const DexType*> m_references;
+};
+
+// The type of a value passed into outlined code. The widest type every use
+// accepts keeps the signature independent of what one caller holds; when the
+// uses do not determine it, the type of the value `supply` gives.
+const DexType* declare_parameter(const Demand& uses,
+                                 const std::function<Value()>& supply);
+
+// The type of a value outlined code gives back.
+const DexType* declare_result(const Value& returned);
+
+} // namespace art
+
+// Instructions of a method that a candidate covers.
+using Membership = std::function<bool(IRInstruction*)>;
 
 class OutlinerTypeAnalysis {
  public:
@@ -47,25 +117,39 @@ class OutlinerTypeAnalysis {
   OutlinerTypeAnalysis& operator=(const OutlinerTypeAnalysis&) = delete;
   explicit OutlinerTypeAnalysis(DexMethod* method);
 
-  // Infer permissible result type of a set of instructions with a destination,
-  // and possibly another incoming type. The return value nullptr indicates that
-  // the result type could not be determined.
-  const DexType* get_result_type(
-      const CandidateAdapter* ca,
-      const UnorderedSet<const IRInstruction*>& insns,
-      const DexType* optional_extra_type);
+  // The value of a register that `assignments` write, joined with
+  // `incoming`, the value it holds on a path through none of them. A move or
+  // move-result stands for the definitions of what it copies; when those are
+  // unknown, the value is `incoming` alone. A register that only constants
+  // define is typed by the uses of the constants outside `candidate`.
+  art::Value value_of_assignments(
+      const UnorderedSet<const IRInstruction*>& assignments,
+      const std::optional<art::Value>& incoming,
+      const Membership& candidate = {});
 
-  // Infer type demand imposed on a register anywhere in a partial candidate.
-  // If there's no useful type demand, we fall back to type inference to see
-  // what we can assume about the type.
-  // The return value nullptr indicates that no useful type could be determined.
-  const DexType* get_type_demand(const CandidateAdapter& ca, reg_t reg);
+  // The value of `reg` where `anchor` reads it.
+  art::Value value_at(const IRInstruction* anchor, reg_t reg);
 
-  // Infer type of a register at a particular instruction.
-  // If we cannot get enough detail from type inference, go back to
-  // reaching definitions.
-  // The return value nullptr indicates that a type could not be inferred.
-  const DexType* get_inferred_type(const CandidateAdapter& ca, reg_t reg);
+  // What the instructions of `pc` require of `reg`, the value it holds on
+  // entry. `result` is the register the candidate gives back and its declared
+  // type.
+  art::Demand demand_in_candidate(
+      const PartialCandidate& pc,
+      reg_t reg,
+      const std::optional<std::pair<reg_t, const DexType*>>& result);
+
+  // What the uses within `scope` require of the values `seeds` define, through
+  // moves and the bitwise operations that can keep a boolean.
+  art::Demand demand_of_uses(
+      const sparta::PatriciaTreeSet<IRInstruction*>& seeds,
+      const Membership& scope);
+
+  // The definitions of `reg` that reach `anchor`, through moves.
+  sparta::PatriciaTreeSet<IRInstruction*> defs_at(const IRInstruction* anchor,
+                                                  reg_t reg);
+  // The definitions of `reg` that reach `anchor`; a move is a definition.
+  sparta::PatriciaTreeSet<IRInstruction*> immediate_defs_at(
+      const IRInstruction* anchor, reg_t reg);
 
  private:
   DexMethod* m_method;
@@ -76,14 +160,11 @@ class OutlinerTypeAnalysis {
   Lazy<TypeEnvironments> m_type_environments;
   Lazy<constant_uses::ConstantUses> m_constant_uses;
 
-  const DexType* narrow_type_demands(UnorderedSet<const DexType*> type_demands);
+  art::Demand demand_of_use(IRInstruction* use, src_index_t src_index);
 
   size_t get_load_param_index(const IRInstruction* load_param_insn);
 
   const DexType* get_result_type_helper(const IRInstruction* insn);
-
-  const DexType* get_type_of_reaching_defs(const CandidateAdapter& ca,
-                                           reg_t reg);
 
   const DexType* get_if_insn_type_demand(IRInstruction* insn);
 
@@ -92,21 +173,13 @@ class OutlinerTypeAnalysis {
   std::optional<UnorderedSet<const IRInstruction*>> get_defs(
       const UnorderedSet<const IRInstruction*>& insns);
 
-  void get_type_demand_helper(const CandidateAdapter& ca,
-                              UnorderedSet<reg_t> regs_to_track,
-                              UnorderedSet<const DexType*>* type_demands);
-
   const DexType* get_const_insns_type_demand(
-      const CandidateAdapter* ca,
+      const Membership& candidate,
       const UnorderedSet<const IRInstruction*>& const_insns);
 
-  const DexType* get_type_of_defs(
-      const CandidateAdapter* ca,
-      const UnorderedSet<const IRInstruction*>& defs,
-      const DexType* optional_extra_type);
-
-  friend PartialCandidateAdapter;
-  friend ReducedCFGClosureAdapter;
+  art::Value value_of_defs(const UnorderedSet<const IRInstruction*>& defs,
+                           art::Value value,
+                           const Membership& candidate);
 }; // class OutlinerTypeAnalysis
 
 } // namespace outliner_impl

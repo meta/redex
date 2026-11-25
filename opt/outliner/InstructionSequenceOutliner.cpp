@@ -98,7 +98,6 @@
 #include "OutlinedMethods.h"
 #include "OutlinerTypeAnalysis.h"
 #include "OutliningProfileGuidanceImpl.h"
-#include "PartialCandidateAdapter.h"
 #include "PartialCandidates.h"
 #include "PassManager.h"
 #include "ReachingInitializeds.h"
@@ -484,30 +483,52 @@ static Candidate normalize(
   };
   walk(pc.root, &c.root, nullptr);
   always_assert(next_temp == pc.temp_regs);
-  PartialCandidateAdapter pca(type_analysis, pc);
+  always_assert(!pc.root.insns.empty());
+  auto* anchor = pc.root.insns.front();
+  Lazy<UnorderedSet<IRInstruction*>> candidate_insns([&pc]() {
+    auto res = std::make_unique<UnorderedSet<IRInstruction*>>();
+    std::function<void(const PartialCandidateNode&)> gather_insns;
+    gather_insns = [&](const PartialCandidateNode& pcn) {
+      res->insert(pcn.insns.begin(), pcn.insns.end());
+      for (const auto& p : pcn.succs) {
+        gather_insns(*p.second);
+      }
+    };
+    gather_insns(pc.root);
+    return res;
+  });
+  auto in_candidate = [&candidate_insns](IRInstruction* insn) {
+    return candidate_insns->count(insn) != 0u;
+  };
   if (out_reg) {
     always_assert(!out_reg_assignment_insns.empty());
     bool unknown_candidate_type_skip{false};
+    std::optional<art::Value> incoming;
     if (out_reg_assignment_insns.count(nullptr) != 0u) {
       // There is a control-flow path where the out-reg is not assigned;
-      // fall-back to type inference at the beginning of the partial candidate.
-      c.res_type = type_analysis.get_inferred_type(pca, out_reg->first);
-      // If we still don't know the type after get_inferred_type, we be
-      // conservative and skip this candidate.
+      // fall-back to its value at the beginning of the partial candidate.
+      c.res_type =
+          art::declare_result(type_analysis.value_at(anchor, out_reg->first));
+      // If we still don't know the type, we be conservative and skip this
+      // candidate.
       unknown_candidate_type_skip = (c.res_type == nullptr);
+      incoming = art::Value::of_type(c.res_type);
       out_reg_assignment_insns.erase(nullptr);
     }
     if (!unknown_candidate_type_skip && !out_reg_assignment_insns.empty()) {
-      c.res_type = type_analysis.get_result_type(&pca, out_reg_assignment_insns,
-                                                 c.res_type);
+      c.res_type = art::declare_result(type_analysis.value_of_assignments(
+          out_reg_assignment_insns, incoming, in_candidate));
     }
   }
-  pca.set_result(out_reg ? std::optional<reg_t>(out_reg->first) : std::nullopt,
-                 c.res_type);
+  std::optional<std::pair<reg_t, const DexType*>> result;
+  if (out_reg) {
+    result.emplace(out_reg->first, c.res_type);
+  }
   c.arg_types.reserve(arg_regs.size());
   for (auto reg : arg_regs) {
-    const auto* type = type_analysis.get_type_demand(pca, reg);
-    c.arg_types.push_back(type);
+    c.arg_types.push_back(art::declare_parameter(
+        type_analysis.demand_in_candidate(pc, reg, result),
+        [&]() { return type_analysis.value_at(anchor, reg); }));
   }
   return c;
 }

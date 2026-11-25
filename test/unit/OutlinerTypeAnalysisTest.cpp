@@ -10,11 +10,52 @@
 #include "Creators.h"
 #include "Debug.h"
 #include "IRAssembler.h"
+#include "Lazy.h"
 #include "OutlinerTypeAnalysis.h"
-#include "PartialCandidateAdapter.h"
 #include "RedexTest.h"
+#include "ReducedControlFlow.h"
 
 class OutlinerTypeAnalysisTest : public RedexTest {};
+
+using method_splitting_impl::ReducedBlock;
+using method_splitting_impl::ReducedControlFlowGraph;
+
+using outliner_impl::OutlinerTypeAnalysis;
+namespace art = outliner_impl::art;
+
+// The result type the outliner declares for a register that `insns` assign,
+// with `optional_extra_type` its type on a path through none of them.
+static const DexType* get_result_type(
+    OutlinerTypeAnalysis& ota,
+    const UnorderedSet<const IRInstruction*>& insns,
+    const DexType* optional_extra_type) {
+  std::optional<art::Value> incoming;
+  if (optional_extra_type != nullptr) {
+    incoming = art::Value::of_type(optional_extra_type);
+  }
+  return art::declare_result(ota.value_of_assignments(insns, incoming));
+}
+
+namespace {
+
+struct Candidate {
+  OutlinerTypeAnalysis& ota;
+  outliner_impl::PartialCandidate pc;
+  std::optional<std::pair<reg_t, const DexType*>> result;
+
+  void set_result(reg_t reg, const DexType* type) { result.emplace(reg, type); }
+};
+
+} // namespace
+
+// The parameter type the outliner declares for `reg` in `candidate`.
+static const DexType* get_type_demand(const Candidate& candidate, reg_t reg) {
+  return art::declare_parameter(
+      candidate.ota.demand_in_candidate(candidate.pc, reg, candidate.result),
+      [&]() {
+        return candidate.ota.value_at(candidate.pc.root.insns.front(), reg);
+      });
+}
 
 static IRInstruction* find_insn(
     DexMethod* method,
@@ -56,7 +97,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_primitive) {
     // result type of 'add-int' is int
     auto* insn = find_insn(foo_method, OPCODE_ADD_INT);
     const auto* result_type =
-        ota.get_result_type(nullptr, {insn}, /* optional_extra_type */ nullptr);
+        get_result_type(ota, {insn}, /* optional_extra_type */ nullptr);
     EXPECT_EQ(result_type, type::_int());
   }
 
@@ -64,7 +105,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_primitive) {
     // result type of 'move' of 'add-int' is int
     auto* insn = find_insn(foo_method, OPCODE_MOVE);
     const auto* result_type =
-        ota.get_result_type(nullptr, {insn}, /* optional_extra_type */ nullptr);
+        get_result_type(ota, {insn}, /* optional_extra_type */ nullptr);
     EXPECT_EQ(result_type, type::_int());
   }
 
@@ -72,7 +113,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_primitive) {
     // result type of 'or-int' of 'move' of 'add-int' is int
     auto* insn = find_insn(foo_method, OPCODE_OR_INT);
     const auto* result_type =
-        ota.get_result_type(nullptr, {insn}, /* optional_extra_type */ nullptr);
+        get_result_type(ota, {insn}, /* optional_extra_type */ nullptr);
     EXPECT_EQ(result_type, type::_int());
   }
 
@@ -80,7 +121,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_primitive) {
     // result type of first 'load-param' is int due to method signature
     auto* insn = find_insn(foo_method, IOPCODE_LOAD_PARAM);
     const auto* result_type =
-        ota.get_result_type(nullptr, {insn}, /* optional_extra_type */ nullptr);
+        get_result_type(ota, {insn}, /* optional_extra_type */ nullptr);
     EXPECT_EQ(result_type, type::_int());
   }
 
@@ -88,7 +129,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_primitive) {
     // result type of second 'load-param' is boolean due to method signature
     auto* insn = find_insn(foo_method, IOPCODE_LOAD_PARAM, 2);
     const auto* result_type =
-        ota.get_result_type(nullptr, {insn}, /* optional_extra_type */ nullptr);
+        get_result_type(ota, {insn}, /* optional_extra_type */ nullptr);
     EXPECT_EQ(result_type, type::_boolean());
   }
 
@@ -96,7 +137,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_primitive) {
     // result type of 'xor-int' of boolean 'load-param' is boolean
     auto* insn = find_insn(foo_method, OPCODE_XOR_INT);
     const auto* result_type =
-        ota.get_result_type(nullptr, {insn}, /* optional_extra_type */ nullptr);
+        get_result_type(ota, {insn}, /* optional_extra_type */ nullptr);
     EXPECT_EQ(result_type, type::_boolean());
   }
 
@@ -105,8 +146,8 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_primitive) {
     auto* insn1 = find_insn(foo_method, IOPCODE_LOAD_PARAM);
     auto* insn2 = find_insn(foo_method, IOPCODE_LOAD_PARAM, 2);
     const auto* result_type =
-        ota.get_result_type(nullptr, {insn1, insn2},
-                            /* optional_extra_type */ nullptr);
+        get_result_type(ota, {insn1, insn2},
+                        /* optional_extra_type */ nullptr);
     EXPECT_EQ(result_type, type::_int());
   }
 
@@ -114,8 +155,8 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_primitive) {
     // the combined result type of boolean and the optional_extra_type int is
     // int
     auto* insn = find_insn(foo_method, IOPCODE_LOAD_PARAM);
-    const auto* result_type = ota.get_result_type(
-        nullptr, {insn}, /* optional_extra_type */ type::_int());
+    const auto* result_type =
+        get_result_type(ota, {insn}, /* optional_extra_type */ type::_int());
     EXPECT_EQ(result_type, type::_int());
   }
 }
@@ -139,8 +180,8 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_unreachable) {
   outliner_impl::OutlinerTypeAnalysis ota(foo_method);
 
   const auto* result_type =
-      ota.get_result_type(nullptr, {unreachable}, /* optional_extra_type */
-                          nullptr);
+      get_result_type(ota, {unreachable}, /* optional_extra_type */
+                      nullptr);
   EXPECT_EQ(result_type, nullptr);
 }
 
@@ -169,8 +210,8 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_object) {
     // result type of first 'load-param-object' is Foo
     auto* insn = find_insn(foo_method, IOPCODE_LOAD_PARAM_OBJECT);
     const auto* result_type =
-        ota.get_result_type(nullptr, {insn},
-                            /* optional_extra_type */ nullptr);
+        get_result_type(ota, {insn},
+                        /* optional_extra_type */ nullptr);
     EXPECT_EQ(result_type, foo_type);
   }
 
@@ -178,7 +219,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_object) {
     // result type of second 'load-param-object' is Object
     auto* insn = find_insn(foo_method, IOPCODE_LOAD_PARAM_OBJECT, 2);
     const auto* result_type =
-        ota.get_result_type(nullptr, {insn}, /* optional_extra_type */ nullptr);
+        get_result_type(ota, {insn}, /* optional_extra_type */ nullptr);
     EXPECT_EQ(result_type, type::java_lang_Object());
   }
 
@@ -186,7 +227,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_object) {
     // result type of third 'load-param-object' is Bar
     auto* insn = find_insn(foo_method, IOPCODE_LOAD_PARAM_OBJECT, 3);
     const auto* result_type =
-        ota.get_result_type(nullptr, {insn}, /* optional_extra_type */ nullptr);
+        get_result_type(ota, {insn}, /* optional_extra_type */ nullptr);
     EXPECT_EQ(result_type, bar_type);
   }
 
@@ -195,8 +236,8 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_object) {
     auto* insn1 = find_insn(foo_method, IOPCODE_LOAD_PARAM_OBJECT);
     auto* insn2 = find_insn(foo_method, IOPCODE_LOAD_PARAM_OBJECT, 2);
     const auto* result_type =
-        ota.get_result_type(nullptr, {insn1, insn2},
-                            /* optional_extra_type */ nullptr);
+        get_result_type(ota, {insn1, insn2},
+                        /* optional_extra_type */ nullptr);
     EXPECT_EQ(result_type, type::java_lang_Object());
   }
 
@@ -205,8 +246,8 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_object) {
     auto* insn1 = find_insn(foo_method, IOPCODE_LOAD_PARAM_OBJECT, 1);
     auto* insn2 = find_insn(foo_method, IOPCODE_LOAD_PARAM_OBJECT, 3);
     const auto* result_type =
-        ota.get_result_type(nullptr, {insn1, insn2},
-                            /* optional_extra_type */ nullptr);
+        get_result_type(ota, {insn1, insn2},
+                        /* optional_extra_type */ nullptr);
     EXPECT_EQ(result_type, type::java_lang_Object());
   }
 }
@@ -248,7 +289,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_object_with_interfaces) {
     // result type of first 'load-param-object' is Foo
     auto* insn = find_insn(foo_method, IOPCODE_LOAD_PARAM_OBJECT, 1);
     const auto* result_type =
-        ota.get_result_type(nullptr, {insn}, /* optional_extra_type */ nullptr);
+        get_result_type(ota, {insn}, /* optional_extra_type */ nullptr);
     EXPECT_EQ(result_type, foo_type);
   }
 
@@ -256,7 +297,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_object_with_interfaces) {
     // result type of second 'load-param-object' is Bar
     auto* insn = find_insn(foo_method, IOPCODE_LOAD_PARAM_OBJECT, 2);
     const auto* result_type =
-        ota.get_result_type(nullptr, {insn}, /* optional_extra_type */ nullptr);
+        get_result_type(ota, {insn}, /* optional_extra_type */ nullptr);
     EXPECT_EQ(result_type, bar_type);
   }
 
@@ -266,8 +307,8 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_object_with_interfaces) {
     auto* insn1 = find_insn(foo_method, IOPCODE_LOAD_PARAM_OBJECT, 1);
     auto* insn2 = find_insn(foo_method, IOPCODE_LOAD_PARAM_OBJECT, 2);
     const auto* result_type =
-        ota.get_result_type(nullptr, {insn1, insn2},
-                            /* optional_extra_type */ nullptr);
+        get_result_type(ota, {insn1, insn2},
+                        /* optional_extra_type */ nullptr);
     EXPECT_EQ(result_type, nullptr);
   }
 }
@@ -282,11 +323,11 @@ static std::shared_ptr<outliner_impl::PartialCandidateNode> create_node(
           std::move(insns), {}, std::move(succs)});
 }
 
-static outliner_impl::PartialCandidateAdapter create_candidate(
+static Candidate create_candidate(
     outliner_impl::OutlinerTypeAnalysis& ota,
     const std::shared_ptr<outliner_impl::PartialCandidateNode>& root) {
   outliner_impl::PartialCandidate pc{{}, *root};
-  return outliner_impl::PartialCandidateAdapter(ota, std::move(pc));
+  return Candidate{ota, std::move(pc), std::nullopt};
 }
 
 TEST_F(OutlinerTypeAnalysisTest, get_type_demand_primitive) {
@@ -309,7 +350,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_type_demand_primitive) {
     auto* insn = find_insn(foo_method, OPCODE_ADD_INT);
     auto root = create_node({insn});
     auto candidate = create_candidate(ota, root);
-    const auto* result_type = ota.get_type_demand(candidate, insn->src(0));
+    const auto* result_type = get_type_demand(candidate, insn->src(0));
     EXPECT_EQ(result_type, type::_int());
   }
 
@@ -318,7 +359,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_type_demand_primitive) {
     auto* insn = find_insn(foo_method, OPCODE_RETURN);
     auto root = create_node({insn});
     auto candidate = create_candidate(ota, root);
-    const auto* result_type = ota.get_type_demand(candidate, insn->src(0));
+    const auto* result_type = get_type_demand(candidate, insn->src(0));
     EXPECT_EQ(result_type, type::_boolean());
   }
 
@@ -328,7 +369,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_type_demand_primitive) {
     auto root = create_node({insn});
     auto candidate = create_candidate(ota, root);
     candidate.set_result(insn->dest(), type::_boolean());
-    const auto* result_type = ota.get_type_demand(candidate, insn->src(0));
+    const auto* result_type = get_type_demand(candidate, insn->src(0));
     EXPECT_EQ(result_type, type::_boolean());
   }
 
@@ -338,7 +379,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_type_demand_primitive) {
     auto* insn2 = find_insn(foo_method, OPCODE_SUB_INT);
     auto root = create_node({insn1, insn2});
     auto candidate = create_candidate(ota, root);
-    const auto* result_type = ota.get_type_demand(candidate, insn1->src(0));
+    const auto* result_type = get_type_demand(candidate, insn1->src(0));
     EXPECT_EQ(result_type, type::_int());
   }
 }
@@ -360,7 +401,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_type_demand_sputs_of_zero) {
     auto* insn2 = find_insn(foo_method, OPCODE_SPUT_OBJECT, 2);
     auto root = create_node({insn1, insn2});
     auto candidate = create_candidate(ota, root);
-    const auto* result_type = ota.get_type_demand(candidate, insn1->src(0));
+    const auto* result_type = get_type_demand(candidate, insn1->src(0));
     EXPECT_EQ(result_type, nullptr);
   }
 }
@@ -388,7 +429,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_type_demand_if_of_zero) {
     auto* insn = find_insn(foo_method, OPCODE_IF_EQ);
     auto root = create_node({insn});
     auto candidate = create_candidate(ota, root);
-    const auto* result_type = ota.get_type_demand(candidate, insn->src(0));
+    const auto* result_type = get_type_demand(candidate, insn->src(0));
     EXPECT_EQ(result_type, nullptr);
   }
 }
@@ -414,7 +455,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_type_demand_if_of_nonzero) {
     auto* insn = find_insn(foo_method, OPCODE_IF_EQ);
     auto root = create_node({insn});
     auto candidate = create_candidate(ota, root);
-    const auto* result_type = ota.get_type_demand(candidate, insn->src(0));
+    const auto* result_type = get_type_demand(candidate, insn->src(0));
     EXPECT_EQ(result_type, type::_int());
   }
 }
@@ -442,9 +483,9 @@ TEST_F(OutlinerTypeAnalysisTest, get_type_demand_if_of_large_constants) {
     auto* insn = find_insn(foo_method, OPCODE_IF_EQ);
     auto root = create_node({insn});
     auto candidate = create_candidate(ota, root);
-    const auto* result_type0 = ota.get_type_demand(candidate, insn->src(0));
+    const auto* result_type0 = get_type_demand(candidate, insn->src(0));
     EXPECT_EQ(result_type0, type::_short());
-    const auto* result_type1 = ota.get_type_demand(candidate, insn->src(1));
+    const auto* result_type1 = get_type_demand(candidate, insn->src(1));
     EXPECT_EQ(result_type1, type::_char());
   }
 }
@@ -473,7 +514,7 @@ TEST_F(OutlinerTypeAnalysisTest, get_type_demand_primitive_narrow) {
     auto* insn3 = find_insn(foo_method, OPCODE_IPUT);
     auto root = create_node({insn1, insn2, insn3});
     auto candidate = create_candidate(ota, root);
-    const auto* result_type = ota.get_type_demand(candidate, insn1->src(0));
+    const auto* result_type = get_type_demand(candidate, insn1->src(0));
     EXPECT_EQ(result_type, type::_byte());
   }
 }
@@ -499,8 +540,8 @@ TEST_F(OutlinerTypeAnalysisTest, get_type_demand_aput_object) {
     auto* insn = find_insn(foo_method, OPCODE_APUT_OBJECT);
     auto root = create_node({insn});
     auto candidate = create_candidate(ota, root);
-    const auto* type0 = ota.get_type_demand(candidate, insn->src(0));
-    const auto* type1 = ota.get_type_demand(candidate, insn->src(1));
+    const auto* type0 = get_type_demand(candidate, insn->src(0));
+    const auto* type1 = get_type_demand(candidate, insn->src(1));
     EXPECT_EQ(type0, type::java_lang_Object());
     EXPECT_EQ(type1, DexType::make_type("[Ljava/lang/Object;"));
   }
@@ -545,7 +586,131 @@ TEST_F(OutlinerTypeAnalysisTest, get_type_demand_inference) {
     auto* insn2 = find_insn(foo_method, OPCODE_IPUT_OBJECT, 2);
     auto root = create_node({insn1, insn2});
     auto candidate = create_candidate(ota, root);
-    const auto* result_type = ota.get_type_demand(candidate, insn1->src(0));
+    const auto* result_type = get_type_demand(candidate, insn1->src(0));
     EXPECT_EQ(result_type, bar_type);
+  }
+}
+
+namespace {
+
+IRInstruction* find_invoke_of(DexMethod* method, std::string_view name) {
+  for (const auto& mie : InstructionIterable(method->get_code()->cfg())) {
+    if (mie.insn->has_method() && mie.insn->get_method()->str() == name) {
+      return mie.insn;
+    }
+  }
+  not_reached();
+}
+
+cfg::Block* block_of(cfg::ControlFlowGraph& cfg, const IRInstruction* insn) {
+  for (auto* block : cfg.blocks()) {
+    for (const auto& mie : InstructionIterable(block)) {
+      if (mie.insn == insn) {
+        return block;
+      }
+    }
+  }
+  not_reached();
+}
+
+// `LB;` extends `LA;`. `foo` receives an `LA;`. Inside a loop, it uses the
+// value as an `LA;` and then overwrites it with an `LB;`. That overwrite is a
+// definition INSIDE the loop body that still reaches the loop header, along the
+// back edge. So a closure rooted at the header covers one of the definitions
+// that reach its own entry. Excluding in-cover seed definitions guards against
+// exactly this case.
+DexMethod* create_back_edge_method() {
+  ClassCreator object_creator(type::java_lang_Object());
+  object_creator.create();
+  ClassCreator a_creator(DexType::make_type("LA;"));
+  a_creator.set_super(type::java_lang_Object());
+  auto* a_type = a_creator.create()->get_type();
+  ClassCreator b_creator(DexType::make_type("LB;"));
+  b_creator.set_super(a_type);
+  b_creator.create();
+
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(LA;Z)V" (
+        (load-param-object v0)
+        (load-param v1)
+        (:loop)
+        (invoke-static (v0) "LFoo;.inspect:(LA;)V")
+        (invoke-static () "LFoo;.makeB:()LB;")
+        (move-result-object v0)
+        (invoke-static (v0) "LFoo;.useB:(LB;)V")
+        (if-nez v1 :loop)
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  ClassCreator foo_creator(DexType::make_type("LFoo;"));
+  foo_creator.set_super(type::java_lang_Object());
+  foo_creator.add_method(foo_method);
+  foo_creator.create();
+  return foo_method;
+}
+
+} // namespace
+
+// A split's parameter type is the MEET of its live-in's use demands. It must
+// never be narrower than the type the caller actually passes. Seeding the walk
+// from every reaching definition breaks that: a definition inside the cover
+// adds the demands of its own uses. Here `useB` demands `LB;`, a strict subtype
+// of the `LA;` the caller passes. The test asserts both seedings, so it fails
+// if the in-cover exclusion stops making a difference in either direction.
+TEST_F(OutlinerTypeAnalysisTest, in_cover_seed_defs_do_not_narrow_live_in) {
+  auto* foo_method = create_back_edge_method();
+  auto& cfg = foo_method->get_code()->cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+  ReducedControlFlowGraph rcfg(cfg);
+
+  Lazy<UnorderedMap<IRInstruction*, const ReducedBlock*>> insns([&rcfg] {
+    auto res =
+        std::make_unique<UnorderedMap<IRInstruction*, const ReducedBlock*>>();
+    for (const auto* reduced_block : rcfg.blocks()) {
+      for (const auto* block : UnorderedIterable(reduced_block->blocks)) {
+        for (const auto& mie : InstructionIterable(block)) {
+          res->emplace(mie.insn, reduced_block);
+        }
+      }
+    }
+    return res;
+  });
+  auto* first_insn = find_invoke_of(foo_method, "inspect");
+  auto reg = first_insn->src(0);
+  // The loop is a strongly-connected component, so it collapses to a single
+  // reduced block, and that block alone is the closure's cover.
+  UnorderedSet<const ReducedBlock*> cover{
+      rcfg.get_reduced_block(block_of(cfg, first_insn))};
+
+  const auto* a_type = DexType::get_type("LA;");
+  const auto* b_type = DexType::get_type("LB;");
+  ASSERT_NE(a_type, nullptr);
+  ASSERT_NE(b_type, nullptr);
+
+  auto in_cover = [&insns, &cover](IRInstruction* insn) {
+    auto it = insns->find(insn);
+    return it != insns->end() && cover.count(it->second) != 0u;
+  };
+  auto parameter_type =
+      [&](const sparta::PatriciaTreeSet<IRInstruction*>& seeds) {
+        return art::declare_parameter(
+            ota.demand_of_uses(seeds, in_cover),
+            [&]() { return ota.value_at(first_insn, reg); });
+      };
+
+  {
+    // Seeding from every reaching def: `move-result-object` lies inside the
+    // cover, so `useB`'s `LB;` demand joins the meet and wins. The split would
+    // be typed against a subtype its caller never passes, and the host fails
+    // verification handing it an `LA;`.
+    EXPECT_EQ(parameter_type(ota.immediate_defs_at(first_insn, reg)), b_type);
+  }
+
+  {
+    // With in-cover seed defs excluded, only the caller's `load-param-object`
+    // seeds the walk, and the meet stays at the incoming `LA;`.
+    auto seeds = ota.immediate_defs_at(first_insn, reg);
+    seeds.filter([&](IRInstruction* def) { return !in_cover(def); });
+    EXPECT_EQ(parameter_type(seeds), a_type);
   }
 }

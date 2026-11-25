@@ -12,6 +12,7 @@
 #include <boost/range/sub_range.hpp>
 #include <functional>
 #include <iosfwd>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
@@ -986,7 +987,7 @@ class InstructionIteratorImpl {
 
  public:
   using difference_type = long;
-  using value_type = Mie&;
+  using value_type = MethodItemEntry;
   using pointer = Mie*;
   using reference = Mie&;
   using iterator_category = std::bidirectional_iterator_tag;
@@ -1088,6 +1089,12 @@ class InstructionIterableImpl {
 
   InstructionIteratorImpl<is_const> end() const {
     return InstructionIteratorImpl<is_const>(m_end, m_end);
+  }
+
+  // The same instructions, last to first.
+  auto reversed() const {
+    return boost::make_iterator_range(std::make_reverse_iterator(end()),
+                                      std::make_reverse_iterator(begin()));
   }
 
   bool empty() const { return begin() == end(); }

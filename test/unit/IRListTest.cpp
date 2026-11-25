@@ -6,6 +6,8 @@
  */
 
 #include <gtest/gtest.h>
+#include <utility>
+#include <vector>
 
 #include "Debug.h"
 #include "DexInstruction.h"
@@ -248,4 +250,34 @@ TEST_F(IRListTest, keep_valid_regs) {
 
   EXPECT_EQ(assembler::to_string(expected_code.get()),
             assembler::to_string(code.get()));
+}
+
+TEST_F(IRListTest, reversed_instruction_iterable) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (.pos "LFoo;.m:()V" "Foo.java" 1)
+      (load-param v0)
+      (.dbg DBG_SET_PROLOGUE_END)
+      (const v1 1)
+      (return-void)
+      (.pos "LFoo;.m:()V" "Foo.java" 2)
+    )
+  )");
+  const std::vector<IROpcode> expected{OPCODE_RETURN_VOID, OPCODE_CONST,
+                                       IOPCODE_LOAD_PARAM};
+
+  std::vector<IROpcode> reversed;
+  for (auto& mie : InstructionIterable(*code).reversed()) {
+    reversed.push_back(mie.insn->opcode());
+  }
+  EXPECT_EQ(reversed, expected);
+
+  std::vector<IROpcode> const_reversed;
+  for (const auto& mie : InstructionIterable(std::as_const(*code)).reversed()) {
+    const_reversed.push_back(mie.insn->opcode());
+  }
+  EXPECT_EQ(const_reversed, expected);
+
+  IRList empty;
+  EXPECT_TRUE(InstructionIterable(empty).reversed().empty());
 }

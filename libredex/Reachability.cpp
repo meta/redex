@@ -706,8 +706,9 @@ void gather_dynamic_references(const MethodItemEntry* item,
   }
   auto* insn = item->insn;
   // Matches any stringref that name-aliases a type.
-  if (insn->has_string()) {
-    const DexString* dsclzref = insn->get_string();
+  std::vector<const DexString*> strings;
+  insn->gather_strings(strings);
+  for (const auto* dsclzref : strings) {
     auto* cls = type_class(get_dextype_from_dotname(dsclzref->str()));
     if (cls != nullptr) {
       references->classes_dynamically_referenced.insert(cls);

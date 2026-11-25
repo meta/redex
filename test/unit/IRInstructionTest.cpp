@@ -9,10 +9,12 @@
 
 #include <set>
 
+#include "DexAnnotation.h"
 #include "DexAsm.h"
 #include "DexCallSite.h"
 #include "DexClass.h"
 #include "DexInstruction.h"
+#include "IRAssembler.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
 #include "InstructionLowering.h"
@@ -784,6 +786,53 @@ TEST_F(IRInstructionTest, GatherTypesOfMethodTypesMethodHandlesAndCallSites) {
           "Ljava/lang/String;", "Ljava/lang/invoke/MethodType;",
           "Ljava/lang/invoke/MethodHandle;", "Ljava/lang/invoke/CallSite;",
           "LI;", "V", "LJ;"}));
+}
+
+// Before lowering, an instruction reports the strings that its lowered form
+// reports and that the writer puts in the string table: a call site's name, the
+// shorty of its method type and the strings among its bootstrap arguments, and
+// the shorty of a method type, whether a constant or the call-site prototype of
+// a method handle call.
+TEST_F(IRInstructionTest, GatherStringsMatchesLoweredForm) {
+  auto* method = DexMethod::make_method("LFoo;.strings:()V")
+                     ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                                     assembler::ircode_from_string(R"(
+    (
+      (const-string "s")
+      (move-result-pseudo-object v0)
+      (const-method-type "(LA;I)J")
+      (move-result-pseudo-object v1)
+      (const-method-handle invoke-static "LC;.m:(LD;)V")
+      (move-result-pseudo-object v2)
+      (invoke-polymorphic (v2 v0) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(Ljava/lang/String;)F")
+      (invoke-static (v0) "LFoo;.placeholder:(Ljava/lang/String;)V")
+      (return-void)
+    )
+  )"),
+                                     /* is_virtual */ false);
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.emplace_back(new DexEncodedValueString(DexString::make_string("arg")));
+  args.emplace_back(
+      new DexEncodedValueMethodType(DexProto::make_proto("(S)Z")));
+  args.emplace_back(new DexEncodedValueMethodHandle(redex::make_method_handle(
+      METHOD_HANDLE_TYPE_INVOKE_STATIC, "LE;.n:()V")));
+  redex::make_invoke_custom(method->get_code(), "run", "(Ljava/lang/String;)V",
+                            std::move(args));
+
+  auto strings_of_code = [&]() {
+    std::vector<const DexString*> strings;
+    method->get_code()->gather_strings(strings);
+    std::set<std::string> result;
+    for (const auto* string : strings) {
+      result.insert(string->str_copy());
+    }
+    return result;
+  };
+  auto before_lowering = strings_of_code();
+  EXPECT_EQ(before_lowering, (std::set<std::string>{"s", "JLI", "FL", "run",
+                                                    "VL", "arg", "ZS"}));
+  instruction_lowering::lower(method);
+  EXPECT_EQ(strings_of_code(), before_lowering);
 }
 
 // Both dynamic invokes write the result register, which a following

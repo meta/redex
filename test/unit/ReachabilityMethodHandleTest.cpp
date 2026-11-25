@@ -118,6 +118,24 @@ std::pair<bool, bool> is_live(const Scope& scope, const DexMethod* target) {
   return res;
 }
 
+// What reachability marks in `scope`, with the default settings apart from
+// `relaxed_keep_class_members`.
+std::unique_ptr<reachability::ReachableObjects> compute_reachables(
+    const Scope& scope, bool relaxed_keep_class_members = false) {
+  walk::code(scope, [](auto*, IRCode& code) {
+    if (!code.cfg_built()) {
+      code.build_cfg();
+    }
+  });
+  auto graph = method_override_graph::build_graph(scope);
+  int num_ignore_check_strings = 0;
+  reachability::IgnoreSets ig_sets;
+  reachability::ReachableAspects aspects;
+  return reachability::compute_reachable_objects(
+      scope, *graph, ig_sets, &num_ignore_check_strings, &aspects,
+      /* record_reachability */ false, relaxed_keep_class_members);
+}
+
 } // namespace
 
 class ReachabilityMethodHandleTest : public RedexTest {
@@ -412,4 +430,58 @@ TEST_F(ReachabilityMethodHandleTest,
     (return-void)
   ))");
   EXPECT_EQ(is_live(scope, helper_h), std::make_pair(true, true));
+}
+
+// Reachability keeps a class whose name the code spells out in a string, since
+// the code may load the class by that name. A string that a call site passes to
+// its bootstrap method is one of the code's strings, like that of a
+// const-string.
+TEST_F(ReachabilityMethodHandleTest, CallSiteStringArgumentKeepsNamedClass) {
+  Scope scope;
+  auto* by_const_string = make_class("Lcom/example/ByConstString;");
+  auto* by_call_site = make_class("Lcom/example/ByCallSite;");
+  scope.push_back(by_const_string);
+  scope.push_back(by_call_site);
+  auto* main = add_root_main(scope, R"((
+    (const-string "com.example.ByConstString")
+    (move-result-pseudo-object v0)
+    (invoke-static () "LMain;.placeholder:()V")
+    (return-void)
+  ))");
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.emplace_back(new DexEncodedValueString(
+      DexString::make_string("com.example.ByCallSite")));
+  redex::make_invoke_custom(main->get_code(), "run", "()V", std::move(args));
+
+  auto reachables = compute_reachables(scope);
+  EXPECT_TRUE(reachables->marked_unsafe(by_const_string));
+  EXPECT_TRUE(reachables->marked_unsafe(by_call_site));
+}
+
+// With relaxed keep rules, a -keepclassmembers member is kept only while its
+// class is referenced in a way that can reach it by reflection, such as by
+// name. A string that a call site passes to its bootstrap method names the
+// class like that of a const-string.
+TEST_F(ReachabilityMethodHandleTest,
+       CallSiteStringArgumentKeepsMembersOfNamedClass) {
+  Scope scope;
+  auto* named = make_class("Lcom/example/Named;");
+  scope.push_back(named);
+  auto* kept_member =
+      add_method(named, "Lcom/example/Named;.helper:()V",
+                 ACC_PUBLIC | ACC_STATIC, false, "((return-void))");
+  kept_member->rstate.set_root();
+  auto* main = add_root_main(scope, R"((
+    (invoke-static () "LMain;.placeholder:()V")
+    (return-void)
+  ))");
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.emplace_back(
+      new DexEncodedValueString(DexString::make_string("com.example.Named")));
+  redex::make_invoke_custom(main->get_code(), "run", "()V", std::move(args));
+
+  auto reachables =
+      compute_reachables(scope, /* relaxed_keep_class_members */ true);
+  EXPECT_TRUE(reachables->marked_unsafe(named));
+  EXPECT_TRUE(reachables->marked_unsafe(kept_member));
 }

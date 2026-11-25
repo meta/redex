@@ -252,6 +252,7 @@ class DexOpcodeSignaturePolymorphic : public DexOpcodeMethod {
  public:
   size_t size() const override;
   void encode(DexOutputIdx* dodx, uint16_t*& insns) const override;
+  void gather_strings(std::vector<const DexString*>& lstring) const override;
   void gather_protos(std::vector<DexProto*>& lproto) const override;
   DexOpcodeSignaturePolymorphic* clone() const override {
     return new DexOpcodeSignaturePolymorphic(*this);

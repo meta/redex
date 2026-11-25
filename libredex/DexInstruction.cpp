@@ -726,6 +726,11 @@ void DexOpcodeSignaturePolymorphic::encode(DexOutputIdx* dodx,
   *insns++ = dodx->protoidx(m_callsite_proto);
 }
 
+void DexOpcodeSignaturePolymorphic::gather_strings(
+    std::vector<const DexString*>& lstring) const {
+  m_callsite_proto->gather_strings(lstring);
+}
+
 void DexOpcodeSignaturePolymorphic::gather_protos(
     std::vector<DexProto*>& lproto) const {
   lproto.push_back(m_callsite_proto);

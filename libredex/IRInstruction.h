@@ -442,11 +442,12 @@ class IRInstruction final {
     return this;
   }
 
-  void gather_strings(std::vector<const DexString*>& lstring) const {
-    if (has_string()) {
-      lstring.push_back(m_string);
-    }
-  }
+  // The strings the instruction holds, the same as its lowered form reports:
+  // a const-string's string, a call site's strings, and the shorty of a method
+  // type, whether a const-method-type's or the call-site prototype of an
+  // invoke-polymorphic. The strings of the methods, fields and types it refers
+  // to are not reported here.
+  void gather_strings(std::vector<const DexString*>& lstring) const;
 
   void gather_types(std::vector<const DexType*>& ltype) const;
 

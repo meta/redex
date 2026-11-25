@@ -547,6 +547,21 @@ void IRInstruction::gather_init_classes(
   }
 }
 
+void IRInstruction::gather_strings(
+    std::vector<const DexString*>& lstring) const {
+  if (has_string()) {
+    lstring.push_back(m_string);
+  }
+  if (has_callsite()) {
+    m_callsite->gather_strings(lstring);
+  }
+  if (has_proto()) {
+    m_proto->gather_strings(lstring);
+  } else if (has_signature_polymorphic()) {
+    get_callsite_proto()->gather_strings(lstring);
+  }
+}
+
 void IRInstruction::gather_types(std::vector<const DexType*>& ltype) const {
   switch (opcode::ref(opcode())) {
   case opcode::Ref::None:

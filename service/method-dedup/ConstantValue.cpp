@@ -7,7 +7,10 @@
 
 #include "ConstantValue.h"
 
+#include <charconv>
+#include <limits>
 #include <optional>
+#include <string_view>
 
 #include <boost/algorithm/string.hpp>
 
@@ -23,6 +26,41 @@ using namespace dex_asm;
 namespace {
 
 constexpr uint64_t MAX_NUM_CONST_VALUE = 10;
+
+// Parses an int constant from @MethodMeta: decimal or 0x hex, with an
+// optional minus sign. Positive values up to 2^32 - 1 are bit patterns, the
+// way generated code prints unsigned type tags.
+std::optional<int32_t> parse_int_constant(std::string_view str) {
+  const bool negative = str.starts_with('-');
+  if (negative) {
+    str.remove_prefix(1);
+  }
+  int base = 10;
+  if (str.starts_with("0x") || str.starts_with("0X")) {
+    base = 16;
+    str.remove_prefix(2);
+  }
+  if (str.empty()) {
+    return std::nullopt;
+  }
+  uint64_t magnitude = 0;
+  const auto* first = &str.front();
+  const auto* last = first + str.size();
+  auto [ptr, ec] = std::from_chars(first, last, magnitude, base);
+  if (ec != std::errc() || ptr != last) {
+    return std::nullopt;
+  }
+  if (negative) {
+    if (magnitude > uint64_t{1} << 31) {
+      return std::nullopt;
+    }
+    return static_cast<int32_t>(-static_cast<int64_t>(magnitude));
+  }
+  if (magnitude > std::numeric_limits<uint32_t>::max()) {
+    return std::nullopt;
+  }
+  return static_cast<int32_t>(static_cast<uint32_t>(magnitude));
+}
 
 std::vector<IRInstruction*> make_string_const(reg_t dest,
                                               const std::string& val) {
@@ -42,13 +80,19 @@ ConstantValue::ConstantValue(const TypeTags* type_tags,
                              reg_t param_reg)
     : m_param_reg(param_reg) {
   if (kind_str == "I") {
-    m_kind = ConstantKind::INT;
-    m_int_val = std::stoll(val_str);
+    auto int_val = parse_int_constant(val_str);
+    if (int_val) {
+      m_kind = ConstantKind::INT;
+      m_int_val = *int_val;
+    } else {
+      TRACE(METH_DEDUP, 9, "const value: cannot parse int %s", val_str.c_str());
+      m_kind = ConstantKind::INVALID;
+    }
   } else if (kind_str == "T") {
     auto* type_val = DexType::get_type(val_str);
     if (type_val != nullptr && type_tags->has_type_tag(type_val)) {
       m_kind = ConstantKind::TYPE;
-      m_int_val = type_tags->get_type_tag(type_val);
+      m_int_val = static_cast<int32_t>(type_tags->get_type_tag(type_val));
       if (m_int_val == 0) {
         TRACE(METH_DEDUP, 9, "const value: skipping type tag value of 0");
         m_kind = ConstantKind::INVALID;
@@ -89,12 +133,7 @@ ConstantValue::collect_constant_loads_in(
   for (auto it = ii.begin(); it != ii.end(); ++it) {
     auto* insn = it->insn;
     if (is_int_value() && insn->opcode() == OPCODE_CONST) {
-      int64_t literal = insn->get_literal();
-      // Special handling for type tags to avoid sign extensionon on int64_t.
-      if (m_kind == ConstantKind::TYPE) {
-        literal = static_cast<uint32_t>(literal);
-      }
-      if (literal == m_int_val && uses->accepts_any_int(insn)) {
+      if (insn->get_literal() == m_int_val && uses->accepts_any_int(insn)) {
         res.emplace_back(it, insn->dest());
       }
     } else if (is_str_value() && insn->opcode() == OPCODE_CONST_STRING) {
@@ -254,7 +293,7 @@ DexMethod* ConstantValues::create_stub_method(DexMethod* callee) {
     }
     auto loc = mc.make_local(cval.get_constant_type());
     if (cval.is_int_value()) {
-      mb->load_const(loc, static_cast<int32_t>(cval.get_int_value()));
+      mb->load_const(loc, cval.get_int_value());
     } else {
       mb->load_const(loc, DexString::make_string(cval.get_str_value()));
     }

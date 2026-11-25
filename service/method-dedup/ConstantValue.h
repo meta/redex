@@ -23,7 +23,8 @@ class ConstantValue {
   // The kind of constant value emitted in the @MethodMeta annotation.
   //
   // INT: @MethodMeta(constantTypes = "I", constantValues = "42")
-  //       A 64 bit integer constant like an offset or hash code.
+  //       A 32-bit int constant like an offset or hash code, written in
+  //       decimal (signed or unsigned) or as 0x hex.
   // TYPE: @MethodMeta(constantTypes = "T",
   //                   constantValues = "Lcom/facebook/CommentModels$ModelA;")
   //       The constant in the annotated method is a reference to a mergeable
@@ -58,7 +59,7 @@ class ConstantValue {
     return m_kind == ConstantKind::INT || m_kind == ConstantKind::TYPE;
   }
   bool is_str_value() const { return m_kind == ConstantKind::STRING; }
-  int64_t get_int_value() {
+  int32_t get_int_value() {
     always_assert(is_int_value());
     return m_int_val;
   }
@@ -100,7 +101,7 @@ class ConstantValue {
 
  private:
   ConstantKind m_kind;
-  int64_t m_int_val;
+  int32_t m_int_val;
   std::string m_str_val;
   // The allocated param reg holding the original value of the constant.
   reg_t m_param_reg;

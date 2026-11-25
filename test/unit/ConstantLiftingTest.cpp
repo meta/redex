@@ -26,8 +26,10 @@ DexMethod* make_meta_method(const char* cls_name,
                             const char* kinds,
                             const char* vals,
                             const char* body) {
-  ClassCreator object_creator(type::java_lang_Object());
-  object_creator.create();
+  if (type_class(type::java_lang_Object()) == nullptr) {
+    ClassCreator object_creator(type::java_lang_Object());
+    object_creator.create();
+  }
   ClassCreator creator(DexType::make_type(cls_name));
   creator.set_super(type::java_lang_Object());
   auto* cls = creator.create();
@@ -157,4 +159,35 @@ TEST_F(ConstantLiftingTest, intZeroReplacesEveryIntUseNextToInvalidType) {
   EXPECT_EQ(count_opcode(method, OPCODE_CONST), 0u)
       << show(method->get_code()->cfg());
   EXPECT_EQ(type_check(method), "") << show(method->get_code()->cfg());
+}
+
+// Generated code writes int constants in decimal, as unsigned decimal for
+// values with the top bit set, and as 0x hex; each denotes the 32-bit int of
+// the `const` literal.
+TEST_F(ConstantLiftingTest, intConstantNotationsMatchTheirLiteral) {
+  int i = 0;
+  for (const char* val : {"-1", "4294967295", "0xffffffff", "0XFFFFFFFF"}) {
+    auto cls = "LC7_" + std::to_string(i++) + ";";
+    auto sig = cls + ".m:()V";
+    auto body = "((const v0 -1) (invoke-static (v0) \"" + cls +
+                ".use:(I)V\") (return-void))";
+    auto* method =
+        make_meta_method(cls.c_str(), sig.c_str(), "I", val, body.c_str());
+    EXPECT_EQ(lift(method), 1u) << val;
+    EXPECT_EQ(count_opcode(method, OPCODE_CONST), 0u) << val;
+  }
+}
+
+// A value that is not a 32-bit int is not lifted.
+TEST_F(ConstantLiftingTest, unparsableIntConstantIsNotLifted) {
+  int i = 0;
+  for (const char* val : {"7abc", "", "4294967296", "-2147483649", "0x"}) {
+    auto cls = "LC8_" + std::to_string(i++) + ";";
+    auto sig = cls + ".m:()V";
+    auto body = "((const v0 7) (invoke-static (v0) \"" + cls +
+                ".use:(I)V\") (return-void))";
+    auto* method =
+        make_meta_method(cls.c_str(), sig.c_str(), "I", val, body.c_str());
+    EXPECT_EQ(lift(method), 0u) << val;
+  }
 }

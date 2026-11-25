@@ -104,14 +104,23 @@ struct NetSavingInput {
   // The dex code units of the constant definitions the split recreates at its
   // entry instead of taking them as arguments.
   size_t recreated_defs;
+  // The copies of the host's code that run compiled: the host itself, or each
+  // copy of a small host that ART inlines into its compiled callers. Every
+  // copy loses the evicted code and gains the launchpad.
+  size_t compiled_copies{1};
+  // Whether the split itself is compiled, as a Hot split is: the evicted code
+  // then stays compiled once, in the split.
+  bool split_compiled{false};
 };
 
 // The quantities of the net cost model, in code units:
 // net = W * (saved - added_ccuc) - dex_added.
 struct ClosureNetTerms {
-  // Code that leaves a compiled host; 0 for an uncompiled host.
+  // Code that leaves the compiled copies of the host; 0 for an uncompiled
+  // host.
   int64_t saved{0};
-  // Code the launchpad adds back to a compiled host; 0 for an uncompiled host.
+  // Code the launchpad adds back to the compiled copies of the host; 0 for an
+  // uncompiled host.
   int64_t added_ccuc{0};
   // Dex growth: the launchpad, the split's metadata and body overhead, its
   // copy of a taken switch (with that copy's dummy default value), and the

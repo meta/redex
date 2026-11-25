@@ -5,7 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-#include "MethodSplitterRegionTestFixture.h"
+#include "MethodSplitterTestFixture.h"
 
 #include <algorithm>
 #include <atomic>
@@ -23,7 +23,7 @@
 #include "MethodSplitter.h"
 #include "Show.h"
 
-namespace method_splitting_region_test {
+namespace method_splitting_test {
 
 namespace {
 
@@ -58,23 +58,12 @@ std::string nonMergeableRejoin() {
   return "(add-int v0 v0 v0)";
 }
 
-std::string coldBodySputs(size_t n_instrs) {
-  static const char* kFieldChars = "abcdefghijklmnopqrstuvwxyz";
+std::string sputChain(size_t n_instrs, std::string_view field_prefix) {
   std::ostringstream oss;
   for (size_t i = 0; i < n_instrs; ++i) {
-    char ch = kFieldChars[i % 26];
-    oss << "(sput v0 \"LFoo;." << ch << "_" << i << ":I\")\n";
+    oss << "(sput v0 \"LFoo;." << field_prefix << "_" << i << ":I\")\n";
   }
   return oss.str();
-}
-
-std::string coldBodyOfSize(size_t n_instrs, ColdBodyKind kind) {
-  switch (kind) {
-  case ColdBodyKind::kSputChain:
-    return coldBodySputs(n_instrs);
-  }
-  redex_assert(false);
-  return "";
 }
 
 std::string hotColdHotCfg(std::string_view cold_body, std::string_view sig) {
@@ -116,17 +105,46 @@ std::string multiBlockHammockCfg(std::string_view body_a,
   return oss.str();
 }
 
-std::string make_k_body(std::string_view producer_sexpr, size_t count) {
-  std::ostringstream oss;
-  for (size_t i = 0; i < count; ++i) {
-    oss << "  " << producer_sexpr << "\n";
+// See the header: only instructions reachable from the entry count, and the
+// marker must be a chain's whole prefix.
+size_t countFieldRefs(DexMethod* m, std::string_view marker) {
+  auto* code = m->get_code();
+  if (code == nullptr) {
+    return 0;
   }
-  return oss.str();
+  always_assert(code->cfg_built());
+  auto& cfg = code->cfg();
+  UnorderedSet<cfg::Block*> seen;
+  std::vector<cfg::Block*> work{cfg.entry_block()};
+  seen.insert(cfg.entry_block());
+  size_t n = 0;
+  while (!work.empty()) {
+    auto* b = work.back();
+    work.pop_back();
+    for (auto& mie : ir_list::InstructionIterable(b)) {
+      auto* insn = mie.insn;
+      if (!insn->has_field()) {
+        continue;
+      }
+      // The name must continue with `_` after the marker: `starts_with` alone
+      // would let `bd` count `bd1_*` through `bd4_*`.
+      const auto& name = insn->get_field()->get_name()->str();
+      if (name.size() > marker.size() && name.starts_with(marker) &&
+          name[marker.size()] == '_') {
+        n++;
+      }
+    }
+    for (auto* e : b->succs()) {
+      if (seen.insert(e->target()).second) {
+        work.push_back(e->target());
+      }
+    }
+  }
+  return n;
 }
 
-method_splitting_impl::Config regionTestConfig() {
+method_splitting_impl::Config splitterTestConfig() {
   method_splitting_impl::Config c;
-  c.enable_region_splitting = true;
   c.min_original_size = 1;
   c.min_original_size_hot_method = 1;
   c.min_original_size_too_large_for_inlining = 1;
@@ -142,10 +160,16 @@ method_splitting_impl::Config regionTestConfig() {
   return c;
 }
 
-RegionResult runRegionSplitter(std::string_view sig,
-                               std::string_view code_sexpr,
-                               const method_splitting_impl::Config& cfg,
-                               std::string_view class_prefix) {
+method_splitting_impl::Config regionTestConfig() {
+  auto c = splitterTestConfig();
+  c.enable_region_splitting = true;
+  return c;
+}
+
+SplitResult runSplitter(std::string_view sig,
+                        std::string_view code_sexpr,
+                        const method_splitting_impl::Config& cfg,
+                        std::string_view class_prefix) {
   auto [cls, m] = make_test_class(sig, code_sexpr, class_prefix);
   DexStoresVector stores;
   stores.emplace_back("test_store");
@@ -159,7 +183,7 @@ RegionResult runRegionSplitter(std::string_view sig,
       stores, /* min_sdk */ 0, cfg, store_ref_checkers,
       /* create_init_class_insns */ false,
       /* reserved_mrefs */ 0, /* reserved_trefs */ 0, &stats);
-  RegionResult res;
+  SplitResult res;
   for (const auto& [out, kind] : stats.added_methods) {
     if (kind == method_splitting_impl::SplitKind::Region) {
       res.region_splits.push_back(out);
@@ -205,7 +229,7 @@ std::vector<std::string> reachableFieldNames(DexMethod* m) {
 // `base$split$<kind>$region<index>` -- a function of kind and an emission
 // counter only, so a permutation of the closures produces an identical
 // multiset.
-std::string splitSignature(const RegionResult& res) {
+std::string splitSignature(const SplitResult& res) {
   std::vector<std::string> per_split;
   auto add = [&](DexMethod* m, std::string_view kind) {
     auto names = reachableFieldNames(m);
@@ -233,17 +257,17 @@ std::string splitSignature(const RegionResult& res) {
 }
 
 std::pair<std::string, std::string> runTwiceAndSignatures(
-    const std::function<RegionResult(std::string_view class_prefix)>&
+    const std::function<SplitResult(std::string_view class_prefix)>&
         builder_fn) {
   return {splitSignature(builder_fn("LDetA")),
           splitSignature(builder_fn("LDetB"))};
 }
 
 bool runTwiceAndCompare(
-    const std::function<RegionResult(std::string_view class_prefix)>&
+    const std::function<SplitResult(std::string_view class_prefix)>&
         builder_fn) {
   auto [a, b] = runTwiceAndSignatures(builder_fn);
   return a == b;
 }
 
-} // namespace method_splitting_region_test
+} // namespace method_splitting_test

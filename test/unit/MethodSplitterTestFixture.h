@@ -7,9 +7,8 @@
 
 #pragma once
 
-// Test-fixture helpers for the cold-region outlining feature in
-// MethodSplittingPass. Provides builders that produce canonical CFG
-// shapes (hot-cold-hot, multi-block hammock, etc.) so individual
+// Test-fixture helpers for MethodSplittingPass. Provides builders that produce
+// canonical CFG shapes (hot-cold-hot, multi-block hammock, etc.) so individual
 // tests don't re-spell long S-expression bodies, and a few utility
 // functions for running the splitter and collecting results.
 //
@@ -18,8 +17,8 @@
 //   - hammock -- single-entry single-exit cold subgraph
 //   - rejoin -- the post-dominator block where execution rejoins the
 //     hot path after the region invoke; must contain at least one
-//     non-return instruction or `reduce_cfg` will merge it into the
-//     cold predecessor
+//     non-return instruction or `normalize_cfg_for_splitting` will merge
+//     it into the cold predecessor
 //   - k -- number of live-out registers from the region body
 //
 
@@ -40,7 +39,7 @@
 #include "MethodSplitter.h"
 #include "MethodSplittingConfig.h"
 
-namespace method_splitting_region_test {
+namespace method_splitting_test {
 
 // Source-block weight strings used by the builders. Hot blocks get
 // `kHotWeights` in their `.src_block` directive; cold blocks get
@@ -49,24 +48,22 @@ inline constexpr std::string_view kHotWeights = "(1.0 1.0)";
 inline constexpr std::string_view kColdWeights = "(0.0 0.0)";
 
 // A non-return instruction suitable for placing first in a rejoin
-// block to keep `reduce_cfg` from merging the rejoin into the cold
-// predecessor. Returns a single S-expression instruction.
+// block to keep `normalize_cfg_for_splitting` from merging the rejoin into
+// the cold predecessor. Returns a single S-expression instruction.
 std::string nonMergeableRejoin();
 
-// Build a cold-body S-expression of approximately `n_instrs`
-// instructions using `sput` to distinct static fields on `LFoo;`.
-// Each sput is 2 code units; tune `n_instrs` so the resulting cold
-// body exceeds the net-model overhead floor (~35 code units) when net
-// admission matters.
-std::string coldBodySputs(size_t n_instrs);
+// Build a chain of `n_instrs` `sput` instructions to distinct static
+// fields on `LFoo;`, each 2 code units. Block hotness comes from the
+// enclosing `.src_block`, not from this chain, so the same primitive
+// serves hot filler and cold bodies alike. `field_prefix` keeps two
+// chains in one method writing distinct fields.
+//
+// Names are exactly `<field_prefix>_<i>`, with nothing else in the name, so
+// `countFieldRefs` with that prefix counts this chain and no other.
+std::string sputChain(size_t n_instrs, std::string_view field_prefix = "f");
 
-// Build a single-block cold-body S-expression of approximately
-// `n_instrs` instructions. Default kind is sput-chain.
-enum class ColdBodyKind {
-  kSputChain,
-};
-std::string coldBodyOfSize(size_t n_instrs,
-                           ColdBodyKind kind = ColdBodyKind::kSputChain);
+// A `sput` to a static int field is 2 code units.
+inline constexpr size_t kSputCodeUnits = 2;
 
 // Build a hot-cold-hot CFG template: hot prefix -> if-eqz -> (cold body
 // | hot rejoin) -> return-void. The cold body is exactly `cold_body`
@@ -93,20 +90,35 @@ std::string multiBlockHammockCfg(std::string_view body_a,
                                  std::string_view body_b,
                                  std::string_view body_c);
 
-// Build a k-style cold body of `count` copies of `producer_sexpr`
-// (a single instruction producing a value into `v0`). Used by k=1
-// tests to vary the producer opcode (`add-int`, `move-object`, etc.).
-std::string make_k_body(std::string_view producer_sexpr, size_t count);
+// Count instructions reachable from the entry of `m` that reference a field
+// named `<marker>_<i>`, to tell which emitted method a `sputChain` body ended
+// up in.
+//
+// `marker` must be exactly the `field_prefix` the chain was built with: the
+// name must continue with `_`, so the marker `bd` does not count the chains
+// `bd1` to `bd4`. A marker that names no chain counts 0, which an
+// `EXPECT_EQ(count, 0u)` cannot tell from a correct placement, so pair such a
+// check with a positive count of the same chain elsewhere. A chain built with
+// the empty prefix is uncounted padding by convention: its names `_<i>` match
+// only the empty marker.
+//
+// Only reachable instructions count: a split is built by deep-copying the
+// host, so blocks outside the split survive in its CFG, unreachable, until a
+// later `simplify()` drops them.
+size_t countFieldRefs(DexMethod* m, std::string_view marker);
 
-// Default Config for region-splitter unit tests: enables region
-// splitting and lowers `min_*_split_size` thresholds and raises
-// `split_block_size` so test-sized CFGs aren't gated.
+// Default Config for splitter unit tests: lowers the `min_*` size thresholds
+// and raises `split_block_size` so test-sized CFGs aren't gated. Thresholds
+// only; every capability stays at its C++ default.
+method_splitting_impl::Config splitterTestConfig();
+
+// `splitterTestConfig()` with region splitting enabled.
 method_splitting_impl::Config regionTestConfig();
 
 // One-call splitter invocation result; tests filter by `SplitKind`
 // enum rather than by name substring (avoids the `$hot$` vs
 // `$hot_cold$` overlap trap).
-struct RegionResult {
+struct SplitResult {
   std::vector<DexMethod*> region_splits;
   std::vector<DexMethod*> suffix_splits;
   method_splitting_impl::StatsSnapshot stats;
@@ -115,10 +127,10 @@ struct RegionResult {
 // Construct a class with a single method `bar` from the given IR
 // S-expression and signature, run `split_methods_in_stores` on it,
 // and return the result by value.
-RegionResult runRegionSplitter(
+SplitResult runSplitter(
     std::string_view sig,
     std::string_view code_sexpr,
-    const method_splitting_impl::Config& cfg = regionTestConfig(),
+    const method_splitting_impl::Config& cfg = splitterTestConfig(),
     std::string_view class_prefix = "LFoo");
 
 // The field markers a split can reach, sorted. This is the part of
@@ -135,18 +147,20 @@ std::vector<std::string> reachableFieldNames(DexMethod* m);
 //    such runs is trivially equal. A fixture that can legitimately split
 //    nothing must assert that separately; equality here is not evidence.
 //  - splits that reach no field markers contribute name-only entries, which is
-//    exactly as weak as the name comparison this replaced. Fixtures should
-//    carry per-index-distinct markers (see `coldBodySputs`) for the signature
-//    to discriminate placement.
-std::string splitSignature(const RegionResult& res);
+//    no stronger than comparing split names. Fixtures should
+//    carry per-index-distinct markers for the signature to discriminate
+//    placement -- built with `sputChain` under a prefix of their own, NOT with
+//    the empty prefix, whose names are padding `countFieldRefs` does not
+//    count.
+std::string splitSignature(const SplitResult& res);
 
 // Same two runs as runTwiceAndCompare, but returns both signatures so a failing
 // test can print WHICH split moved instead of just "false".
 std::pair<std::string, std::string> runTwiceAndSignatures(
-    const std::function<RegionResult(std::string_view class_prefix)>&
+    const std::function<SplitResult(std::string_view class_prefix)>&
         builder_fn);
 
-// Run `runRegionSplitter` twice on equivalent fixtures and assert their
+// Run `runSplitter` twice on equivalent fixtures and assert their
 // `splitSignature`s match, so a run that splits the same shape in different
 // PLACES is caught and not just one that renames a split. The test passes a
 // builder that produces a run for a given class-name prefix, and the two
@@ -158,7 +172,7 @@ std::pair<std::string, std::string> runTwiceAndSignatures(
 // `runTwiceAndSignatures` instead when the failure message should say WHICH
 // split moved.
 bool runTwiceAndCompare(
-    const std::function<RegionResult(std::string_view class_prefix)>&
+    const std::function<SplitResult(std::string_view class_prefix)>&
         builder_fn);
 
-} // namespace method_splitting_region_test
+} // namespace method_splitting_test

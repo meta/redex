@@ -5,7 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-// Meta-tests for the cold-region splitter test fixture library.
+// Meta-tests for the splitter test fixture library.
 // These tests validate the fixture builders themselves before any
 // production test depends on them.
 
@@ -14,35 +14,34 @@
 #include "ControlFlow.h"
 #include "DexClass.h"
 #include "IRAssembler.h"
-#include "MethodSplitterRegionTestFixture.h"
+#include "MethodSplitterTestFixture.h"
 #include "RedexTest.h"
 #include "SourceBlocks.h"
 
-namespace mt = method_splitting_region_test;
+namespace mt = method_splitting_test;
 
-class MethodSplitterRegionTestFixtureTest : public RedexTest {};
+class MethodSplitterTestFixtureTest : public RedexTest {};
 
-TEST_F(MethodSplitterRegionTestFixtureTest, FixtureSmoke_HotColdHotCfgParses) {
+TEST_F(MethodSplitterTestFixtureTest, FixtureSmoke_HotColdHotCfgParses) {
   auto code = assembler::ircode_from_string(
-      mt::hotColdHotCfg(mt::coldBodySputs(20), "(I)V"));
+      mt::hotColdHotCfg(mt::sputChain(20, ""), "(I)V"));
   ASSERT_NE(code, nullptr);
   code->build_cfg();
   EXPECT_GE(code->cfg().num_blocks(), 3u);
 }
 
-TEST_F(MethodSplitterRegionTestFixtureTest,
-       FixtureSmoke_MultiBlockHammockCfgParses) {
+TEST_F(MethodSplitterTestFixtureTest, FixtureSmoke_MultiBlockHammockCfgParses) {
   auto code = assembler::ircode_from_string(mt::multiBlockHammockCfg(
-      mt::coldBodySputs(5), mt::coldBodySputs(5), mt::coldBodySputs(5)));
+      mt::sputChain(5, ""), mt::sputChain(5, ""), mt::sputChain(5, "")));
   ASSERT_NE(code, nullptr);
   code->build_cfg();
   EXPECT_GE(code->cfg().num_blocks(), 5u);
 }
 
-TEST_F(MethodSplitterRegionTestFixtureTest,
+TEST_F(MethodSplitterTestFixtureTest,
        FixtureSmoke_TemplatesHaveNoThrowEdgesOnColdBoundary) {
   auto code = assembler::ircode_from_string(
-      mt::hotColdHotCfg(mt::coldBodySputs(20), "(I)V"));
+      mt::hotColdHotCfg(mt::sputChain(20, ""), "(I)V"));
   code->build_cfg();
   for (auto* b : code->cfg().blocks()) {
     for (const auto* e : b->preds()) {
@@ -54,12 +53,12 @@ TEST_F(MethodSplitterRegionTestFixtureTest,
   }
 }
 
-TEST_F(MethodSplitterRegionTestFixtureTest,
+TEST_F(MethodSplitterTestFixtureTest,
        FixtureSmoke_HotnessConstantsClassifyExpectedBlocks) {
   // Hot constants -> at least one block classifies as hot; cold
   // constants -> at least one block classifies as cold.
   auto code = assembler::ircode_from_string(
-      mt::hotColdHotCfg(mt::coldBodySputs(20), "(I)V"));
+      mt::hotColdHotCfg(mt::sputChain(20, ""), "(I)V"));
   code->build_cfg();
   // Named for what it computes: `foreach_val_early` stops at the first
   // positive val, so this is ANY-val, not all-vals. The fixtures emit uniformly
@@ -98,7 +97,7 @@ TEST_F(MethodSplitterRegionTestFixtureTest,
 // what every region test silently depends on, so they are pinned here: if one
 // drifts back toward production, this fails in one obvious place instead of
 // turning a dozen unrelated fixtures un-splittable for no visible reason.
-TEST_F(MethodSplitterRegionTestFixtureTest,
+TEST_F(MethodSplitterTestFixtureTest,
        FixtureSmoke_RegionTestConfigLowersProductionFloors) {
   auto cfg = mt::regionTestConfig();
   method_splitting_impl::Config prod;
@@ -116,26 +115,26 @@ TEST_F(MethodSplitterRegionTestFixtureTest,
   EXPECT_GT(cfg.split_block_size, prod.split_block_size);
 }
 
-TEST_F(MethodSplitterRegionTestFixtureTest,
+TEST_F(MethodSplitterTestFixtureTest,
        FixtureSmoke_RunRegionSplitterEmitsOnlySuffixSplits) {
-  // Region discovery is not implemented yet, so with the flag on every
-  // emitted split must still be a suffix split. The fixture is large enough
+  // With region splitting on but no region discovered, every emitted split
+  // must be a suffix split. The fixture is large enough
   // for the suffix splitter to extract something, so the absence of
   // SplitKind::Region is meaningful rather than vacuous.
-  auto res =
-      mt::runRegionSplitter("(I)V", mt::hotColdHotCfg(mt::coldBodySputs(100)));
+  auto res = mt::runSplitter("(I)V",
+                             mt::hotColdHotCfg(mt::sputChain(100, "")),
+                             mt::regionTestConfig());
   EXPECT_EQ(res.region_splits.size(), 0u);
 }
 
-TEST_F(MethodSplitterRegionTestFixtureTest,
+TEST_F(MethodSplitterTestFixtureTest,
        FixtureSmoke_DeterminismHarnessRunsTwiceCleanly) {
   // The harness itself should run without crashing on a fixture that
   // produces no region splits. Both runs see zero region splits, so
   // the comparison passes vacuously.
   bool ok = mt::runTwiceAndCompare([](std::string_view prefix) {
-    return mt::runRegionSplitter("(I)V",
-                                 mt::hotColdHotCfg(mt::coldBodySputs(20)),
-                                 mt::regionTestConfig(), prefix);
+    return mt::runSplitter("(I)V", mt::hotColdHotCfg(mt::sputChain(20, "")),
+                           mt::regionTestConfig(), prefix);
   });
   EXPECT_TRUE(ok);
 }

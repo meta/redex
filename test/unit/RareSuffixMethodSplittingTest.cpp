@@ -407,25 +407,32 @@ TEST_F(RareSuffixMethodSplittingTest, reportsTheTopSplitMethods) {
             0);
 }
 
+// The block counts of the three parts of `lazy_get`, one `(val appear100)` per
+// interaction; empty for no source blocks.
+struct LazyCounts {
+  std::string entry;
+  std::string cached;
+  std::string compute;
+};
+
 // A lazily initialized value: the method returns the cached value nearly every
 // time, and computes it on its first call. The block counts say how often each
 // part runs.
-std::string lazy_get(bool with_counts, bool ran) {
+std::string lazy_get(const LazyCounts& counts) {
   const std::string sb = "LFoo;.get:()Ljava/lang/Object;";
-  auto counts = [&](int id, const char* val) {
-    return with_counts ? "(.src_block \"" + sb + "\" " + std::to_string(id) +
-                             (ran ? std::string(" (") + val + " 1.0))"
-                                  : std::string(" (0.0 0.0))"))
-                       : std::string();
+  auto src_block = [&](int id, const std::string& vals) {
+    return vals.empty() ? std::string()
+                        : "(.src_block \"" + sb + "\" " + std::to_string(id) +
+                              " " + vals + ")";
   };
   return "((sget-object \"LFoo;.cached:Ljava/lang/Object;\")" +
-         counts(0, "1000.0") +
+         src_block(0, counts.entry) +
          "(move-result-pseudo-object v0)"
          "(if-eqz v0 :compute)" +
-         counts(1, "999.0") +
+         src_block(1, counts.cached) +
          "(return-object v0)"
          "(:compute)" +
-         counts(2, "1.0") +
+         src_block(2, counts.compute) +
          "(new-instance \"Ljava/lang/Object;\")"
          "(move-result-pseudo-object v0)"
          "(invoke-direct (v0) \"Ljava/lang/Object;.<init>:()V\")"
@@ -437,10 +444,19 @@ class RareSuffixMethodSplittingReturningTest
     : public RareSuffixMethodSplittingTest {
  public:
   DexMethod* add_lazy_get(bool with_counts, bool ran = true) {
+    if (!with_counts) {
+      return add_lazy_get(LazyCounts{});
+    }
+    if (!ran) {
+      return add_lazy_get(LazyCounts{"(0.0 0.0)", "(0.0 0.0)", "(0.0 0.0)"});
+    }
+    return add_lazy_get(LazyCounts{"(1000.0 1.0)", "(999.0 1.0)", "(1.0 1.0)"});
+  }
+
+  DexMethod* add_lazy_get(const LazyCounts& counts) {
     m_cls->add_field(DexField::make_field("LFoo;.cached:Ljava/lang/Object;")
                          ->make_concrete(ACC_PUBLIC | ACC_STATIC));
-    auto* get =
-        add_method("get:()Ljava/lang/Object;", lazy_get(with_counts, ran));
+    auto* get = add_method("get:()Ljava/lang/Object;", lazy_get(counts));
     // The part that computes the value runs, so its split stays compiled: it
     // pays only with more compiled copies than the launchpads cost.
     for (int i = 0; i < 4; i++) {
@@ -484,6 +500,33 @@ TEST_F(RareSuffixMethodSplittingReturningTest, leavesASuffixThatRunsTooOften) {
   auto metrics = run();
   EXPECT_EQ(any_split(get), nullptr);
   EXPECT_EQ(metrics["returning_suffixes"], 0);
+}
+
+TEST_F(RareSuffixMethodSplittingReturningTest,
+       leavesASuffixThatRunsOftenInOneInteraction) {
+  // The method runs 1000 times in the first interaction and computes the
+  // value once. In the second, where the cache is cleared between calls, it
+  // runs 10 times and computes the value 9 times. The computing part is rare
+  // in the first interaction only: 9 is at most 1% of the 1000 calls of the
+  // first interaction, but not of the 10 calls of the second.
+  auto* get =
+      add_lazy_get(LazyCounts{"(1000.0 1.0) (10.0 1.0)",
+                              "(999.0 1.0) (1.0 1.0)", "(1.0 1.0) (9.0 1.0)"});
+  m_max_returning_suffix_ratio = 0.01;
+  auto metrics = run();
+  EXPECT_EQ(any_split(get), nullptr);
+  EXPECT_EQ(metrics["returning_suffixes"], 0);
+}
+
+TEST_F(RareSuffixMethodSplittingReturningTest,
+       splitsASuffixThatRunsRarelyInEveryInteraction) {
+  auto* get =
+      add_lazy_get(LazyCounts{"(1000.0 1.0) (100.0 1.0)",
+                              "(999.0 1.0) (99.0 1.0)", "(1.0 1.0) (1.0 1.0)"});
+  m_max_returning_suffix_ratio = 0.01;
+  auto metrics = run();
+  EXPECT_NE(any_split(get), nullptr);
+  EXPECT_EQ(metrics["returning_suffixes"], 1);
 }
 
 TEST_F(RareSuffixMethodSplittingReturningTest,

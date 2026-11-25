@@ -128,20 +128,31 @@ TypeSet MergeabilityChecker::exclude_unsupported_bytecode_refs_for(
     return non_mergeables;
   }
 
+  // We find and exclude classes of which instances are created via
+  // new-instance, but then the associated constructor call invokes a
+  // constructor of a super type, and not the exact instantiated type.
+  // TODO T184662680: Fully support such scenario, e.g. by synthesizing a
+  // corresponding constructor on the instantiated class, and not just exclude.
+  auto relaxed_inits = constructor_analysis::find_relaxed_inits(
+      method, [&](const DexType* type) {
+        return m_spec.merging_targets.count(type) != 0u;
+      });
+  for (const auto& relaxed_init : relaxed_inits) {
+    TRACE(CLMG, 5,
+          "[non mergeable] new-instance %s associated with invoke init %s "
+          "defined in other type in %s",
+          SHOW(relaxed_init.new_instance), SHOW(relaxed_init.invoke),
+          SHOW(method));
+    non_mergeables.insert(relaxed_init.new_instance->get_type());
+  }
+
   bool has_type_tag = m_spec.has_type_tag();
   std::vector<std::pair<IRInstruction*, const DexType*>>
       const_classes_to_verify;
   UnorderedSet<const IRInstruction*> const_classes_to_verify_set;
-  bool has_new_instances_to_verify = false;
   auto& cfg = code->cfg();
   for (const auto& mie : InstructionIterable(cfg)) {
     auto* insn = mie.insn;
-
-    if (opcode::is_new_instance(insn->opcode()) &&
-        (m_spec.merging_targets.count(insn->get_type()) != 0u)) {
-      has_new_instances_to_verify = true;
-      continue;
-    }
 
     // If we have a pure method ref on a mergeable type (the class component is
     // mergeable), we do not merge the type.
@@ -262,26 +273,6 @@ TypeSet MergeabilityChecker::exclude_unsupported_bytecode_refs_for(
           const_classes_to_verify_set.insert(insn);
         }
       }
-    }
-  }
-
-  // We find and exclude classes of which instances are created via
-  // new-instance, but then the associated constructor call invokes a
-  // constructor of a super type, and not the exact instantiated type.
-  // TODO T184662680: Fully support such scenario, e.g. by synthesizing a
-  // corresponding constructor on the instantiated class, and not just exclude.
-  if (has_new_instances_to_verify) {
-    auto relaxed_inits = constructor_analysis::find_relaxed_inits(
-        method, [&](const DexType* type) {
-          return m_spec.merging_targets.count(type) != 0u;
-        });
-    for (const auto& relaxed_init : relaxed_inits) {
-      TRACE(CLMG, 5,
-            "[non mergeable] new-instance %s associated with invoke init %s "
-            "defined in other type in %s",
-            SHOW(relaxed_init.new_instance), SHOW(relaxed_init.invoke),
-            SHOW(method));
-      non_mergeables.insert(relaxed_init.new_instance->get_type());
     }
   }
 

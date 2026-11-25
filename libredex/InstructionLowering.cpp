@@ -89,11 +89,9 @@ DexOpcode select_move_opcode(const IRInstruction* insn) {
   }
 }
 
-DexOpcode select_const_opcode(const IRInstruction* insn) {
-  auto op = insn->opcode();
-  auto dest_width = required_bit_width(insn->dest());
-  always_assert(dest_width <= 8);
-  auto literal = insn->get_literal();
+DexOpcode select_const_opcode(IROpcode op,
+                              int64_t literal,
+                              bit_width_t dest_width) {
   switch (op) {
   case OPCODE_CONST:
     if (dest_width <= 4 && signed_int_fits<4>(literal)) {
@@ -119,6 +117,12 @@ DexOpcode select_const_opcode(const IRInstruction* insn) {
   default:
     not_reached();
   }
+}
+
+DexOpcode select_const_opcode(const IRInstruction* insn) {
+  auto dest_width = required_bit_width(insn->dest());
+  always_assert(dest_width <= 8);
+  return select_const_opcode(insn->opcode(), insn->get_literal(), dest_width);
 }
 
 DexOpcode select_binop_lit_opcode(const IRInstruction* insn) {
@@ -210,6 +214,12 @@ bool try_2addr_conversion(MethodItemEntry* mie) {
 }
 
 } // namespace impl
+
+size_t const_code_units(IROpcode op, int64_t literal) {
+  return DexInstruction(
+             impl::select_const_opcode(op, literal, /*dest_width=*/4))
+      .size();
+}
 
 using namespace impl;
 

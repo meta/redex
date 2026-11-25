@@ -55,6 +55,32 @@ struct Config {
   // Master switch for cold-region outlining. When false,
   // MethodSplittingPass runs suffix splitting only.
   bool enable_region_splitting{false};
+
+  // ---- Net cost-model aggregates (tunable) ----------------------------------
+  // Code-unit costs of the net cost model (`split_net_saving`,
+  // SplitNetSaving.cpp) that no single instruction's size determines; a single
+  // opcode costs its dex size where the model uses it. Unit tests build their
+  // config from these defaults rather than from a refig, so a configuration
+  // that departs from a default runs a cost model the suite does not check.
+  //
+  // Per split: its encoded method, method id, proto and name in the dex
+  // tables, amortized.
+  size_t net_cu_method_metadata{28};
+  // Per argument the split takes. Its `load-param` lowers to no instruction;
+  // what the argument costs around the invoke depends on register allocation.
+  size_t net_cu_load_param{1};
+  // Per argument register when the invoke needs the /range form (more than
+  // five argument registers). Whether a register needs a move, and which form
+  // it takes, depends on register allocation.
+  size_t net_cu_range_spill_per_reg{1};
+  // The weight W in net saving = W * (saved - added_ccuc) - dex_added. `saved`
+  // is the compiled cold code a split takes out of the host, and `added_ccuc`
+  // the compiled code its launchpad adds back. W is how many code units of DEX
+  // growth a split may spend per code unit of compiled cold code it takes out.
+  //
+  // A DEX code unit is 2 bytes, so weighing OAT and DEX bytes equally breaks
+  // even at W = (OAT bytes per compiled cold code unit) / 2.
+  float net_oat_weight{4.0f};
 };
 
 } // namespace method_splitting_impl

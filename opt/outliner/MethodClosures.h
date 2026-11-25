@@ -14,6 +14,7 @@
 #include <string_view>
 #include <vector>
 
+#include "Debug.h"
 #include "DeterministicContainers.h"
 #include "ReducedControlFlow.h"
 
@@ -80,6 +81,34 @@ static_assert(
 
 inline std::string_view describe(CandidateFate fate) {
   return kCandidateFateNames[static_cast<size_t>(fate)].name;
+}
+
+// How emission edits the host's switch. `None` makes no switch edit: the
+// split takes one block's predecessors. `DeleteGrouped` serves a split that
+// takes several cases: it deletes the grouped case keys and, when the default
+// edge is grouped too, points that edge at the launchpad.
+enum class HostSwitchEdit : uint8_t { None, DeleteGrouped };
+
+// What a host switch edit does to one of the switch's edges.
+enum class SwitchEdgeEdit : uint8_t { Keep, Delete, ToLaunchpad };
+
+// What `edit` does to one edge of the host switch. `into_taken_head` says
+// whether the edge enters a head the split takes, and `is_default` whether it
+// is the switch's default edge. The net saving and emission both ask this.
+inline SwitchEdgeEdit host_switch_edge_edit(HostSwitchEdit edit,
+                                            bool into_taken_head,
+                                            bool is_default) {
+  if (!into_taken_head) {
+    return SwitchEdgeEdit::Keep;
+  }
+  switch (edit) {
+  case HostSwitchEdit::None:
+    return SwitchEdgeEdit::Keep;
+  case HostSwitchEdit::DeleteGrouped:
+    // A deleted case key falls through to the default edge.
+    return is_default ? SwitchEdgeEdit::ToLaunchpad : SwitchEdgeEdit::Delete;
+  }
+  not_reached();
 }
 
 // A "closure" here represents the transitive closure of all blocks reachable

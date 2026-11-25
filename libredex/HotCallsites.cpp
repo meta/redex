@@ -224,6 +224,7 @@ HotCallsites::HotCallsites(
           .follow_forwarder = [](const DexMethod*) { return true; },
       },
       [&](cfg::Block* block, DexMethod* callee, bool) {
+        callsite_counts.fetch_add(callee, 1);
         if (is_sufficiently_hot(block, callee)) {
           hot_callsite_counts.fetch_add(callee, 1);
         } else {
@@ -234,18 +235,24 @@ HotCallsites::HotCallsites(
   callers_too_many_registers = counts.callers_too_many_registers;
 }
 
-NeverInlineVerdict decide_never_inline(IRCode& code,
-                                       bool already_never_inline,
-                                       bool has_cold_callsite,
-                                       size_t hot_callsites,
-                                       const NeverInlineCriteria& criteria) {
+namespace {
+
+// `decide_never_inline` on a body whose `code_units` and `eligibility` are
+// read only when the decision needs them.
+template <typename CodeUnits, typename Eligibility>
+NeverInlineVerdict decide(bool already_never_inline,
+                          bool has_cold_callsite,
+                          size_t hot_callsites,
+                          const NeverInlineCriteria& criteria,
+                          const CodeUnits& code_units,
+                          const Eligibility& eligibility) {
   if (already_never_inline) {
     return {.decision = NeverInlineDecision::kAlreadyNeverInline};
   }
 
   bool min_hot_callsites_rule_met =
       hot_callsites >= criteria.min_hot_callsites &&
-      code.estimate_code_units() >= criteria.min_hot_callsites_min_code_units;
+      code_units() >= criteria.min_hot_callsites_min_code_units;
 
   if (!has_cold_callsite && !min_hot_callsites_rule_met) {
     return {.decision = NeverInlineDecision::kNoCandidate};
@@ -255,14 +262,43 @@ NeverInlineVerdict decide_never_inline(IRCode& code,
     return {.decision = NeverInlineDecision::kTooHot};
   }
 
-  const auto ineligibility = never_inline_eligibility(
-      code, criteria.max_callee_code_units, criteria.min_callee_instructions);
+  const auto ineligibility = eligibility();
   if (ineligibility != Ineligibility::kEligible) {
     return {.decision = NeverInlineDecision::kIneligible,
             .ineligibility = ineligibility};
   }
   return {.decision = NeverInlineDecision::kAnnotate,
           .min_hot_callsites_rule_met = min_hot_callsites_rule_met};
+}
+
+} // namespace
+
+NeverInlineVerdict decide_never_inline(IRCode& code,
+                                       bool already_never_inline,
+                                       bool has_cold_callsite,
+                                       size_t hot_callsites,
+                                       const NeverInlineCriteria& criteria) {
+  return decide(
+      already_never_inline, has_cold_callsite, hot_callsites, criteria,
+      [&] { return code.estimate_code_units(); },
+      [&] {
+        return never_inline_eligibility(code, criteria.max_callee_code_units,
+                                        criteria.min_callee_instructions);
+      });
+}
+
+NeverInlineVerdict decide_never_inline(const CalleeShape& shape,
+                                       bool already_never_inline,
+                                       bool has_cold_callsite,
+                                       size_t hot_callsites,
+                                       const NeverInlineCriteria& criteria) {
+  return decide(
+      already_never_inline, has_cold_callsite, hot_callsites, criteria,
+      [&] { return shape.code_units; },
+      [&] {
+        return never_inline_eligibility(shape, criteria.max_callee_code_units,
+                                        criteria.min_callee_instructions);
+      });
 }
 
 } // namespace never_inline_analysis

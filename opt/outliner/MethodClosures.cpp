@@ -132,8 +132,8 @@ void split_blocks(DexMethod* method,
 
 namespace method_splitting_impl {
 
-std::shared_ptr<const ReducedControlFlowGraph> reduce_cfg(
-    DexMethod* method, std::optional<uint64_t> split_block_size) {
+void normalize_cfg_for_splitting(DexMethod* method,
+                                 std::optional<uint64_t> split_block_size) {
   auto* code = method->get_code();
   auto& cfg = code->cfg();
   // The loop below merges any return-only successor block into its sole
@@ -187,7 +187,26 @@ std::shared_ptr<const ReducedControlFlowGraph> reduce_cfg(
   if (split_block_size) {
     split_blocks(method, cfg, *split_block_size);
   }
+}
 
+std::shared_ptr<const ReducedControlFlowGraph> reduce_cfg(DexMethod* method) {
+  auto& cfg = method->get_code()->cfg();
+  // Precondition: the CFG has been normalized. An unnormalized CFG still has
+  // return-only successors, and reducing over one yields a graph whose block
+  // shapes disagree with what the splitter later sees -- wrong quietly, rather
+  // than broken loudly. Cheap to check, so check it.
+  for (auto* block : cfg.blocks()) {
+    auto* goes_to = block->goes_to_only_edge();
+    if (goes_to == nullptr) {
+      continue;
+    }
+    auto first = goes_to->get_first_insn();
+    always_assert_log(first == goes_to->end() ||
+                          !opcode::is_a_return(first->insn->opcode()),
+                      "reduce_cfg: CFG not normalized -- call "
+                      "normalize_cfg_for_splitting first (%s)",
+                      SHOW(method));
+  }
   return std::make_shared<const ReducedControlFlowGraph>(cfg);
 }
 

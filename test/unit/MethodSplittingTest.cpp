@@ -956,8 +956,10 @@ TEST_F(MethodSplitterTest, DontSplitLoadParamChains) {
   auto [cls, m] = create("(IIIIIIIIII)I", code_str);
   m->get_code()->build_cfg();
   auto config = defaultConfig();
-  method_splitting_impl::discover_closures(
-      m, method_splitting_impl::reduce_cfg(m, config.split_block_size));
+  method_splitting_impl::normalize_cfg_for_splitting(m,
+                                                     config.split_block_size);
+  const auto reduced = method_splitting_impl::reduce_cfg(m);
+  method_splitting_impl::discover_closures(m, reduced);
   ASSERT_EQ(m->get_code()->cfg().blocks().size(), 1);
   m->get_code()->clear_cfg();
 }
@@ -981,7 +983,8 @@ TEST_F(MethodSplitterTest, DuplicateSourceBlocksWithReturn) {
       source_blocks::insert_source_blocks(m, &m->get_code()->cfg(), profile,
                                           /*serialize=*/true);
   auto config = defaultConfig();
-  method_splitting_impl::reduce_cfg(m, config.split_block_size);
+  method_splitting_impl::normalize_cfg_for_splitting(m,
+                                                     config.split_block_size);
   auto blocks = m->get_code()->cfg().blocks();
   ASSERT_TRUE(blocks.size() >= 3);
   auto source_blocks = source_blocks::gather_source_blocks(blocks[1]);

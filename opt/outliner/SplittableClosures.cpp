@@ -634,7 +634,8 @@ select_splittable_closures_based_on_costs(
   ConcurrentMap<DexType*, std::vector<SplittableClosure>>
       concurrent_splittable_closures;
   auto concurrent_process_method = [&](DexMethod* method) {
-    auto rcfg = reduce_cfg(method, config.split_block_size);
+    normalize_cfg_for_splitting(method, config.split_block_size);
+    auto rcfg = reduce_cfg(method);
     auto is_sufficiently_large = [&]() {
       if (rcfg->code_size() >= config.min_original_size) {
         return true;
@@ -715,6 +716,7 @@ select_splittable_closures_from_top_level_switch_cases(
     }
 
     auto& cfg = method->get_code()->cfg();
+    normalize_cfg_for_splitting(method);
     auto rcfg = reduce_cfg(method);
 
     auto mcs = discover_closures(method, std::move(rcfg));

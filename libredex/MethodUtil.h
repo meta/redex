@@ -74,6 +74,14 @@ bool can_change_signature(const DexMethod* method);
 bool runs_method_handle_target(const DexMethodRef* method);
 
 /**
+ * Whether the invoke `insn` can run any method: a dynamic invoke
+ * (invoke-polymorphic or invoke-custom), which does not name the method it
+ * runs, or a call that runs a method handle's target
+ * (`runs_method_handle_target`).
+ */
+bool has_unknown_target(const IRInstruction* insn);
+
+/**
  * The methods whose prototypes the method handles in `scope` fix: for every
  * method handle that code (const-method-handle, or the bootstrap method or a
  * bootstrap argument of a call site), a static field value or an annotation in

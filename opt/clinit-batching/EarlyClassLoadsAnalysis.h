@@ -13,6 +13,7 @@
 
 #include "DeterministicContainers.h"
 #include "DexClass.h"
+#include "IRInstruction.h"
 #include "MethodOverrideGraph.h"
 
 struct ConfigFiles;
@@ -35,11 +36,13 @@ struct EarlyClassLoadsResult {
   // Error message if the analysis failed
   std::optional<std::string> error_message;
 
-  // A virtual or interface call reachable before the orchestrator whose target
-  // is unknown (the resolver returns nullptr, e.g. because a type in the
-  // hierarchy has no definition). The classes it loads are then unknown too,
-  // so `early_loaded_classes` is incomplete and must not be used for batching.
-  const DexMethodRef* unknown_early_call{nullptr};
+  // A call reachable before the orchestrator whose target is unknown: a
+  // virtual or interface call that the resolver cannot resolve (e.g. because
+  // a type in the hierarchy has no definition), a dynamic invoke, or a library
+  // call that runs a method handle's target. The classes it loads are then
+  // unknown too, so `early_loaded_classes` is incomplete and must not be used
+  // for batching.
+  const IRInstruction* unknown_early_call{nullptr};
 };
 
 /**

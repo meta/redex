@@ -888,8 +888,8 @@ void ClinitBatchingPass::run_pass(DexStoresVector& stores,
   if (early_result.unknown_early_call != nullptr) {
     TRACE(CLINIT_BATCHING,
           1,
-          "ClinitBatchingPass: not batching: the target of the early call to "
-          "%s is unknown",
+          "ClinitBatchingPass: not batching: the target of the early call %s "
+          "is unknown",
           SHOW(early_result.unknown_early_call));
     mgr.set_metric("skipped_unknown_early_call", 1);
     return;

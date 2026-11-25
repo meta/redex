@@ -552,6 +552,12 @@ bool runs_method_handle_target(const DexMethodRef* method) {
          method->get_name()->str() == "invokeWithArguments";
 }
 
+bool has_unknown_target(const IRInstruction* insn) {
+  always_assert(opcode::is_an_invoke(insn->opcode()));
+  return !opcode::is_a_method_invoke(insn->opcode()) ||
+         runs_method_handle_target(insn->get_method());
+}
+
 namespace {
 
 // Calls `f(method_handle, caller)`, in parallel, for every method handle that

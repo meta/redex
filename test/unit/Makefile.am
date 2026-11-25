@@ -341,7 +341,7 @@ check_cast_analysis_test_SOURCES = CheckCastAnalysisTest.cpp $(top_srcdir)/test/
 
 class_order_sample_test_SOURCES = ClassOrderSampleTest.cpp
 
-clinit_batching_pass_test_SOURCES = ClinitBatchingPassTest.cpp
+clinit_batching_pass_test_SOURCES = ClinitBatchingPassTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 EXTRA_clinit_batching_pass_test_DEPENDENCIES = clinit_batching_pass_test.env
 $(eval $(call make_env,clinit_batching_pass_test,manifest=$(srcdir)/../integ/ClinitBatchingTestManifest.xml))
 

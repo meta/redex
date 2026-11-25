@@ -219,5 +219,99 @@ TEST_F(ClinitBatchingPassTest, EarlyClassLoadsReportUnknownEarlyCallTarget) {
   )");
 
   ASSERT_FALSE(result.error_message) << *result.error_message;
-  EXPECT_EQ(result.unknown_early_call, DexMethod::get_method("LI;.go:()V"));
+  ASSERT_NE(result.unknown_early_call, nullptr);
+  EXPECT_EQ(result.unknown_early_call->get_method(),
+            DexMethod::get_method("LI;.go:()V"));
+}
+
+// A method handle call can run any method, so a dynamic invoke before the
+// orchestrator is an early call whose target, and the classes it loads, are
+// unknown. Here the handle calls `Early.touch()`, which initializes `Early`.
+TEST_F(ClinitBatchingPassTest, EarlyClassLoadsReportInvokePolymorphic) {
+  auto* early = assembler::class_from_string(R"(
+    (class (public) "LEarly;"
+      (field (public static) "LEarly;.f:I")
+      (method (public static) "LEarly;.touch:()V"
+        ((return-void)))
+    )
+  )");
+  auto result = run_early_class_loads_analysis({early}, R"(
+    ((load-param-object v0)
+     (load-param-object v1)
+     (const-method-handle invoke-static "LEarly;.touch:()V")
+     (move-result-pseudo-object v2)
+     (invoke-polymorphic (v2) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "()V")
+     (invoke-static () "Lcom/facebook/test/ClinitBatchingOrchestrator;.initAllStatics:()V")
+     (return-void))
+  )");
+
+  ASSERT_FALSE(result.error_message) << *result.error_message;
+  ASSERT_NE(result.unknown_early_call, nullptr);
+  EXPECT_EQ(result.unknown_early_call->opcode(), OPCODE_INVOKE_POLYMORPHIC);
+}
+
+// An invoke-custom runs its bootstrap method and then the target that the
+// bootstrap method links, which can be any method.
+TEST_F(ClinitBatchingPassTest, EarlyClassLoadsReportInvokeCustom) {
+  auto* user = assembler::class_from_string(R"(
+    (class (public) "LUser;"
+      (method (public static) "LUser;.run:()V"
+        ((invoke-static () "LUser;.placeholder:()V")
+         (return-void)))
+    )
+  )");
+  redex::make_invoke_custom(
+      DexMethod::get_method("LUser;.run:()V")->as_def()->get_code(), "run",
+      "()V");
+  auto result = run_early_class_loads_analysis({user}, R"(
+    ((load-param-object v0)
+     (load-param-object v1)
+     (invoke-static () "LUser;.run:()V")
+     (invoke-static () "Lcom/facebook/test/ClinitBatchingOrchestrator;.initAllStatics:()V")
+     (return-void))
+  )");
+
+  ASSERT_FALSE(result.error_message) << *result.error_message;
+  ASSERT_NE(result.unknown_early_call, nullptr);
+  EXPECT_EQ(result.unknown_early_call->opcode(), OPCODE_INVOKE_CUSTOM);
+}
+
+// The library method `MethodHandle.invokeWithArguments` runs the handle's
+// target, so it is an early call of unknown code too, although it resolves.
+TEST_F(ClinitBatchingPassTest, EarlyClassLoadsReportInvokeWithArguments) {
+  ClassCreator method_handle(
+      DexType::make_type("Ljava/lang/invoke/MethodHandle;"));
+  method_handle.set_super(type::java_lang_Object());
+  method_handle.set_access(ACC_PUBLIC | ACC_ABSTRACT);
+  method_handle.set_external();
+  auto* invoke_with_arguments =
+      DexMethod::make_method(
+          "Ljava/lang/invoke/MethodHandle;.invokeWithArguments:([Ljava/lang/"
+          "Object;)Ljava/lang/Object;")
+          ->make_concrete(ACC_PUBLIC | ACC_VARARGS, /* is_virtual */ true);
+  method_handle.add_method(invoke_with_arguments);
+  method_handle.create();
+  auto* early = assembler::class_from_string(R"(
+    (class (public) "LEarly;"
+      (field (public static) "LEarly;.f:I")
+      (method (public static) "LEarly;.touch:()V"
+        ((return-void)))
+    )
+  )");
+  auto result = run_early_class_loads_analysis({early}, R"(
+    ((load-param-object v0)
+     (load-param-object v1)
+     (const-method-handle invoke-static "LEarly;.touch:()V")
+     (move-result-pseudo-object v2)
+     (const v3 0)
+     (new-array v3 "[Ljava/lang/Object;")
+     (move-result-pseudo-object v3)
+     (invoke-virtual (v2 v3) "Ljava/lang/invoke/MethodHandle;.invokeWithArguments:([Ljava/lang/Object;)Ljava/lang/Object;")
+     (invoke-static () "Lcom/facebook/test/ClinitBatchingOrchestrator;.initAllStatics:()V")
+     (return-void))
+  )");
+
+  ASSERT_FALSE(result.error_message) << *result.error_message;
+  ASSERT_NE(result.unknown_early_call, nullptr);
+  EXPECT_EQ(result.unknown_early_call->get_method(), invoke_with_arguments);
 }

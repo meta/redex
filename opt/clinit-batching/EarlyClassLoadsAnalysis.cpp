@@ -592,7 +592,14 @@ void EarlyClassLoadsAnalysis::walk_callgraph(
     // Processes callees from a single instruction, adding them to the worklist.
     auto process_callees = [&](IRInstruction* insn) {
       auto opcode = insn->opcode();
-      if (!opcode::is_a_method_invoke(opcode)) {
+      if (!opcode::is_an_invoke(opcode)) {
+        return;
+      }
+      // What a call that can run any method loads is unknown.
+      if (method::has_unknown_target(insn)) {
+        if (result.unknown_early_call == nullptr) {
+          result.unknown_early_call = insn;
+        }
         return;
       }
 
@@ -644,7 +651,7 @@ void EarlyClassLoadsAnalysis::walk_callgraph(
         auto* base_callee = resolve_method(callee_ref, search);
         if (base_callee == nullptr) {
           if (result.unknown_early_call == nullptr) {
-            result.unknown_early_call = callee_ref;
+            result.unknown_early_call = insn;
           }
           return;
         }

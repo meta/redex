@@ -418,10 +418,11 @@ cp::WholeProgramState analyze_and_simplify_clinits(
                              &wps_accessor, nullptr, nullptr, nullptr, nullptr),
             cp::intraprocedural::make_default_no_throw_analyzer(
                 &null_check_methods));
-        intra_cp.run(env);
+        const ConstantEnvironment entry_env = env;
+        intra_cp.run(entry_env);
         env = intra_cp.get_exit_state_at(cfg.exit_block());
 
-        // Generate the new encoded_values and re-run the analysis.
+        // Generate the new encoded_values and, if needed, re-run the analysis.
         StaticFieldReadAnalysis::Result res = analysis.analyze(clinit);
 
         if (res.is_bottom() || res.is_top()) {
@@ -432,7 +433,11 @@ cp::WholeProgramState analyze_and_simplify_clinits(
         }
         auto fresh_env = ConstantEnvironment();
         cp::set_encoded_values(cls, &fresh_env);
-        intra_cp.run(fresh_env);
+        // Encoding changes nothing else the analysis reads, so from the same
+        // entry state it would reach the same fixpoint on the unchanged code.
+        if (!fresh_env.equals(entry_env)) {
+          intra_cp.run(fresh_env);
+        }
 
         // Detect any field writes made redundant by the new encoded_values and
         // remove those sputs.

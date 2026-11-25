@@ -2739,3 +2739,47 @@ TEST_F(FinalInlineTest,
 
   EXPECT_CODE_EQ(ctor->get_code(), expected.get());
 }
+
+TEST_F(FinalInlineTest, clinitWithNothingToEncodeIsStillSimplified) {
+  // Nothing in this <clinit> can be encoded, so its analysis runs once; the
+  // dead `const` is removed all the same.
+  create_field_with_zero_value("LFoo;.DEFAULT:LFoo;", m_cc.get(),
+                               ACC_PUBLIC | ACC_STATIC | ACC_FINAL);
+  auto* clinit = assembler::method_from_string(R"(
+    (method (public static constructor) "LFoo;.<clinit>:()V"
+     (
+      (const v1 5)
+      (new-instance "LFoo;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "LFoo;.<init>:()V")
+      (sput-object v0 "LFoo;.DEFAULT:LFoo;")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(clinit);
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (return-void)
+     )
+    )
+  )"));
+  auto* cls = m_cc->create();
+  auto expected = assembler::ircode_from_string(R"(
+    (
+      (new-instance "LFoo;")
+      (move-result-pseudo-object v0)
+      (invoke-direct (v0) "LFoo;.<init>:()V")
+      (sput-object v0 "LFoo;.DEFAULT:LFoo;")
+      (return-void)
+    )
+  )");
+
+  run({cls}, /* xstores */ nullptr);
+
+  ASSERT_EQ(cls->get_clinit(), clinit);
+  EXPECT_CODE_EQ(clinit->get_code(), expected.get());
+}

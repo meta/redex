@@ -59,7 +59,14 @@ void ReducedCFGClosureAdapter::gather_type_demands(
     if (!visited.insert(def).second) {
       continue;
     }
-    for (const auto& use : UnorderedIterable((*m_def_uses)[def])) {
+    // `find`, not `operator[]`: this is a const query over a def-use map shared
+    // across the whole method, and `operator[]` would default-insert an empty
+    // entry for any def that has no uses.
+    auto uses_it = m_def_uses->find(def);
+    if (uses_it == m_def_uses->end()) {
+      continue;
+    }
+    for (const auto& use : UnorderedIterable(uses_it->second)) {
       const auto* reduced_component = m_insns->at(use.insn);
       if (m_reduced_components.count(reduced_component) == 0u) {
         continue;

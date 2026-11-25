@@ -6,7 +6,6 @@
  */
 
 #include <memory>
-#include <unordered_map>
 
 #include <gtest/gtest.h>
 
@@ -14,6 +13,7 @@
 #include "MethodSplitter.h"
 
 #include "Creators.h"
+#include "DeterministicContainers.h"
 #include "DexClass.h"
 #include "IRAssembler.h"
 #include "RedexTest.h"
@@ -100,7 +100,7 @@ class MethodSplitterTest : public RedexTest {
     for (auto* out : UnorderedIterable(stats.added_methods)) {
       out->get_code()->cfg().simplify();
     }
-    std::unordered_map<std::string, std::string> expected_map;
+    UnorderedMap<std::string, std::string> expected_map;
     for (const auto& p : expected) {
       expected_map.insert(p);
     }

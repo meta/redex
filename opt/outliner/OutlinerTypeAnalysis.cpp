@@ -10,6 +10,7 @@
 #include "Debug.h"
 #include "DexClass.h"
 #include "DexTypeEnvironment.h"
+#include "Lazy.h"
 #include "Show.h"
 
 namespace outliner_impl {
@@ -55,9 +56,9 @@ OutlinerTypeAnalysis::OutlinerTypeAnalysis(DexMethod* method)
         auto& cfg = method->get_code()->cfg();
         type_inference::TypeInference type_inference(cfg);
         type_inference.run(method);
-        TypeEnvironments res;
-        insert_unordered_iterable(res, type_inference.get_type_environments());
-        return res;
+        // Move, not copy: `type_inference` is a local that dies with this
+        // lambda, and the map holds one environment per instruction.
+        return std::move(type_inference.get_type_environments());
       }),
       m_constant_uses([method]() {
         auto& cfg = method->get_code()->cfg();
@@ -172,12 +173,10 @@ const DexType* OutlinerTypeAnalysis::narrow_type_demands(
 static bool any_outside_range(const UnorderedSet<const IRInstruction*>& insns,
                               int64_t min,
                               int64_t max) {
-  for (const auto* insn : UnorderedIterable(insns)) {
-    if (insn->get_literal() < min || insn->get_literal() > max) {
-      return true;
-    }
-  }
-  return false;
+  return unordered_any_of(insns, [min, max](const IRInstruction* insn) {
+    const auto literal = insn->get_literal();
+    return literal < min || literal > max;
+  });
 }
 
 template <class T>
@@ -860,6 +859,14 @@ const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
   // 2. Let's go over all constant-uses, and use our own judgement.
   UnorderedSet<const DexType*> type_demands;
   bool not_object{false};
+  // Both scan all of `const_insns`, which does not change in the loop below, so
+  // each is worth computing at most once. Lazily, because most opcodes reach
+  // neither: an eager pair of scans would charge every caller for work the
+  // switch below usually never asks for.
+  Lazy<bool> any_outside_bit(
+      [&const_insns] { return any_outside_range(const_insns, 0, 1); });
+  Lazy<bool> any_outside_zero(
+      [&const_insns] { return any_outside_range(const_insns, 0, 0); });
   for (const auto* insn : UnorderedIterable(const_insns)) {
     for (const auto& p :
          m_constant_uses->get_constant_uses(const_cast<IRInstruction*>(insn))) {
@@ -873,7 +880,7 @@ const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
       case OPCODE_AND_INT_LIT:
       case OPCODE_OR_INT_LIT:
       case OPCODE_XOR_INT_LIT:
-        if (any_outside_range(const_insns, 0, 1)) {
+        if (*any_outside_bit) {
           type_demands.insert(type::_int());
         } else {
           type_demands.insert(type::_boolean());
@@ -896,7 +903,7 @@ const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
       case OPCODE_IF_GTZ:
       case OPCODE_IF_LEZ:
         // Could be int or object
-        if (any_outside_range(const_insns, 0, 0)) {
+        if (*any_outside_zero) {
           type_demands.insert(type::_int());
           break;
         }

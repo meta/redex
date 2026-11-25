@@ -177,11 +177,9 @@ std::shared_ptr<const ReducedControlFlowGraph> reduce_cfg(
         }
         it++;
       }
-      auto goes_to_block_sb =
-          source_blocks::gather_source_blocks(goes_to_block);
-      // TODO(T225634378) - When we improve our profiling data to include proper
-      // hit counts, we need to adjust these source blocks in goes_to_block_sb
-      // to be scaled down as well
+      // TODO(T225634378) - When we improve our profiling data to include
+      // proper hit counts, we need to gather the source blocks of
+      // `goes_to_block` here and scale them down as well.
       cfg.delete_succ_edges(block);
     }
   }
@@ -209,7 +207,8 @@ std::shared_ptr<MethodClosures> discover_closures(
     bool too_many_targets{false};
     UnorderedSet<cfg::Block*> srcs;
     cfg::Block* target{nullptr};
-    for (const auto* e : reduced_block->expand_preds()) {
+    auto expanded_preds = reduced_block->expand_preds();
+    for (const auto* e : UnorderedIterable(expanded_preds)) {
       if (e->type() == cfg::EDGE_THROW) {
         any_throw = true;
         break;
@@ -236,7 +235,7 @@ std::shared_ptr<MethodClosures> discover_closures(
     }
     auto reachable = rcfg->reachable(reduced_block);
     if (unordered_any_of(excluded_blocks,
-                         [&](auto* e) { return reachable.count(e); })) {
+                         [&](auto* e) { return reachable.contains(e); })) {
       continue;
     }
     closures.push_back((Closure){reduced_block, std::move(reachable),

@@ -318,9 +318,12 @@ std::optional<ScoredClosure> aggregate(
   for (const auto* c : switched) {
     auto expanded_preds = c->reduced_block->expand_preds(switch_block);
     always_assert(!expanded_preds.empty());
-    const auto* min_edge = *std::min_element(
-        expanded_preds.begin(), expanded_preds.end(),
-        [](auto* e, auto* f) { return e->case_key() < f->case_key(); });
+    // Any minimum will do: ties compare equal on `case_key()`, which is the
+    // only thing read off the winner.
+    const auto* min_edge =
+        *unordered_min_element(expanded_preds, [](auto* e, auto* f) {
+          return e->case_key() < f->case_key();
+        });
     if (min_edge->case_key()) {
       if (predicate(c)) {
         keyed.emplace_back(*min_edge->case_key(), c);
@@ -570,7 +573,10 @@ std::vector<SplittableClosure> to_splittable_closures(
         oss << "B" << b->id() << ", ";
       }
       oss << "reaches ";
-      for (const auto* other : UnorderedIterable(reachable)) {
+      for (const auto* other : unordered_to_ordered(
+               reachable, [](const ReducedBlock* x, const ReducedBlock* y) {
+                 return x->id < y->id;
+               })) {
         oss << "R" << other->id << ", ";
       }
       oss << "\n";

@@ -49,19 +49,23 @@ std::string_view describe(std::optional<HotSplitKind> kind) {
   }
 }
 
-std::vector<const cfg::Edge*> ReducedBlock::expand_preds(
+// The bag type is the point: no consumer of these edges depends on their order
+// -- one takes an order-independent min, the other folds them into flags and a
+// set -- and a `std::vector` here would only invite someone to assume the hash
+// order it happens to arrive in is meaningful.
+UnorderedBag<const cfg::Edge*> ReducedBlock::expand_preds(
     cfg::Block* src) const {
-  std::vector<const cfg::Edge*> res;
+  UnorderedBag<const cfg::Edge*> res;
   for (const auto* reduced_edge : UnorderedIterable(preds)) {
     if (src == nullptr) {
-      insert_unordered_iterable(res, res.end(), reduced_edge->edges);
+      insert_unordered_iterable(res, reduced_edge->edges);
       continue;
     }
-    for (const auto* e : UnorderedIterable(reduced_edge->edges)) {
+    unordered_for_each(reduced_edge->edges, [src, &res](const cfg::Edge* e) {
       if (e->src() == src) {
-        res.push_back(e);
+        res.insert(e);
       }
-    }
+    });
   }
   return res;
 }
@@ -105,19 +109,17 @@ ReducedControlFlowGraph::ReducedControlFlowGraph(cfg::ControlFlowGraph& cfg)
     auto& blocks = reduced_block->blocks;
     for (const auto* b : UnorderedIterable(blocks)) {
       for (auto* e : b->succs()) {
-        if ((e->target() != nullptr) && (blocks.count(e->target()) == 0u)) {
-          always_assert(m_blocks.count(e->target()));
+        if ((e->target() != nullptr) && !blocks.contains(e->target())) {
           auto* reduced_edge =
-              get_edge(reduced_block.get(), m_blocks.at(e->target()));
+              get_edge(reduced_block.get(), get_reduced_block(e->target()));
           reduced_block->succs.insert(reduced_edge);
           reduced_edge->edges.insert(e);
         }
       }
       for (auto* e : b->preds()) {
-        if ((e->src() != nullptr) && (blocks.count(e->src()) == 0u)) {
-          always_assert(m_blocks.count(e->src()));
+        if ((e->src() != nullptr) && !blocks.contains(e->src())) {
           auto* reduced_edge =
-              get_edge(m_blocks.at(e->src()), reduced_block.get());
+              get_edge(get_reduced_block(e->src()), reduced_block.get());
           reduced_block->preds.insert(reduced_edge);
           reduced_edge->edges.insert(e);
         }

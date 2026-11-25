@@ -130,10 +130,9 @@ void visit_in_order_rec(const ControlFlowGraph* cfg,
   UnorderedSet<Block*> visited;
   self_recursive_fn(
       [&](auto self, Block* cur) {
-        if (visited.count(cur)) {
+        if (!visited.insert(cur).second) {
           return;
         }
-        visited.insert(cur);
 
         block_start_fn(cur);
 
@@ -175,11 +174,10 @@ void visit_in_order(const ControlFlowGraph* cfg,
     auto* cur = stack.top().cur;
 
     if (stack.top().initial) {
-      if (visited.count(cur)) {
+      if (!visited.insert(cur).second) {
         stack.pop();
         continue;
       }
-      visited.insert(cur);
 
       block_start_fn(cur);
 

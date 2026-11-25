@@ -118,8 +118,7 @@ class SourceBlocksTest : public RedexTest {
       auto it = b->begin();
       while (it != b->end()) {
         if (it->type == MFLOW_SOURCE_BLOCK) {
-          b->remove_mie(it);
-          it = b->begin();
+          it = b->remove_mie(it);
           continue;
         }
         ++it;
@@ -1824,7 +1823,7 @@ TEST_F(SourceBlocksTest,
 
   auto post_dedup_blocks = foo_method->get_code()->cfg().blocks();
   ASSERT_EQ(post_dedup_blocks.size(), 4);
-  std::unordered_set<uint32_t> seen_ids;
+  UnorderedSet<uint32_t> seen_ids;
   for (auto* block : post_dedup_blocks) {
     auto source_blocks = source_blocks::gather_source_blocks(block);
     for (auto* source_block : source_blocks) {

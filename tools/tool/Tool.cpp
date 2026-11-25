@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iostream>
 
+#include "ClassChecker.h"
 #include "Debug.h"
 #include "DexLoader.h"
 #include "DexUtil.h"
@@ -180,11 +181,16 @@ DexStoresVector Tool::init(const std::string& system_jar_paths,
     stores.emplace_back(std::move(store));
   }
 
+  Scope scope = build_class_scope(stores);
+  auto class_hierarchy_errors = check_class_hierarchy(scope);
+  // The message argument is evaluated only when the assertion fails.
+  always_assert_type_log(!class_hierarchy_errors, RedexError::INVALID_DEX, "%s",
+                         class_hierarchy_errors->c_str());
+
   // Initialize reachable classes
   if (m_verbose) {
     std::cout << "Initializing reachable classes" << '\n';
   }
-  Scope scope = build_class_scope(stores);
   JsonWrapper config;
   init_reachable_classes(scope, ReachableClassesConfig(config));
 

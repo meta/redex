@@ -30,9 +30,9 @@
  * These are the structural properties of the class hierarchy; ART checks more
  * when it links a class (access to the supertypes, for example).
  *
- * redex-all rejects an input for which this reports anything, so that
- * analyses can rely on these properties instead of each tolerating their
- * violation.
+ * redex-all and the tools that load through Tool::init reject an input for
+ * which this reports anything, so that analyses can rely on these properties
+ * instead of each tolerating their violation.
  */
 std::optional<std::string> check_class_hierarchy(const Scope& scope);
 

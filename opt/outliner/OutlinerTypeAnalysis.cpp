@@ -491,13 +491,21 @@ art::Demand OutlinerTypeAnalysis::demand_in_candidate(
   // The candidate is a tree of instruction sequences, not closed under
   // control-flow predecessors: a block it covers may also be entered from
   // outside. So walk it in program order, tracking which registers still hold
-  // the value on each path.
+  // the value on each path, and which of those hold it through a followed use.
   art::Demand demand;
-  std::function<void(const PartialCandidateNode&, UnorderedSet<reg_t>)> walk;
-  walk = [&](const PartialCandidateNode& pcn, UnorderedSet<reg_t> tracked) {
+  art::Demand followed_demand;
+  std::function<void(const PartialCandidateNode&, UnorderedSet<reg_t>,
+                     UnorderedSet<reg_t>)>
+      walk;
+  walk = [&](const PartialCandidateNode& pcn, UnorderedSet<reg_t> tracked,
+             UnorderedSet<reg_t> followed) {
+    auto demand_of = [&](reg_t r) -> art::Demand& {
+      return followed.count(r) != 0u ? followed_demand : demand;
+    };
     for (size_t insn_idx = 0; insn_idx < pcn.insns.size() && !tracked.empty();
          insn_idx++) {
       bool track_dest{false};
+      bool dest_followed{false};
       auto* insn = pcn.insns.at(insn_idx);
       for (size_t i = 0; i < insn->srcs_size(); i++) {
         if (tracked.count(insn->src(i)) == 0u) {
@@ -505,11 +513,13 @@ art::Demand OutlinerTypeAnalysis::demand_in_candidate(
         }
         if (opcode::is_a_move(insn->opcode())) {
           track_dest = true;
+          dest_followed = followed.count(insn->src(i)) != 0u;
           continue;
         }
-        demand.meet_with(demand_of_use(insn, i));
+        demand_of(insn->src(i)).meet_with(demand_of_use(insn, i));
         if (follows_boolean(insn)) {
           track_dest = true;
+          dest_followed = true;
         }
       }
       always_assert(!track_dest || insn->has_dest());
@@ -519,35 +529,46 @@ art::Demand OutlinerTypeAnalysis::demand_in_candidate(
         } else {
           tracked.erase(insn->dest());
         }
+        if (track_dest && dest_followed) {
+          followed.insert(insn->dest());
+        } else {
+          followed.erase(insn->dest());
+        }
         if (insn->dest_is_wide()) {
           tracked.erase(insn->dest() + 1);
+          followed.erase(insn->dest() + 1);
         }
       }
     }
     if (pcn.succs.empty() && result && tracked.count(result->first) != 0u) {
-      demand.meet_with(art::Demand::of_use(result->second));
+      demand_of(result->first).meet_with(art::Demand::of_use(result->second));
     }
     for (const auto& p : pcn.succs) {
-      walk(*p.second, tracked);
+      walk(*p.second, tracked, followed);
     }
   };
-  walk(pc.root, {reg});
+  walk(pc.root, {reg}, {});
+  demand.meet_with(followed_demand);
   return demand;
 }
 
 art::Demand OutlinerTypeAnalysis::demand_of_uses(
     const sparta::PatriciaTreeSet<IRInstruction*>& seeds,
     const Membership& scope) {
+  // Each def is queued with whether its value reached it through a followed
+  // use. A def reached both ways is walked once per way.
   art::Demand demand;
-  std::queue<IRInstruction*> workqueue;
+  art::Demand followed_demand;
+  std::queue<std::pair<IRInstruction*, bool>> workqueue;
   UnorderedSet<IRInstruction*> visited;
+  UnorderedSet<IRInstruction*> visited_followed;
   for (auto* def : seeds) {
-    workqueue.push(def);
+    workqueue.emplace(def, /* followed */ false);
   }
   while (!workqueue.empty()) {
-    auto* def = workqueue.front();
+    auto [def, followed] = workqueue.front();
     workqueue.pop();
-    if (!visited.insert(def).second) {
+    if (!(followed ? visited_followed : visited).insert(def).second) {
       continue;
     }
     // `find`, not `operator[]`: this is a const query over a def-use map shared
@@ -562,15 +583,17 @@ art::Demand OutlinerTypeAnalysis::demand_of_uses(
         continue;
       }
       if (opcode::is_a_move(use.insn->opcode())) {
-        workqueue.push(use.insn);
+        workqueue.emplace(use.insn, followed);
         continue;
       }
-      demand.meet_with(demand_of_use(use.insn, use.src_index));
+      (followed ? followed_demand : demand)
+          .meet_with(demand_of_use(use.insn, use.src_index));
       if (follows_boolean(use.insn)) {
-        workqueue.push(use.insn);
+        workqueue.emplace(use.insn, /* followed */ true);
       }
     }
   }
+  demand.meet_with(followed_demand);
   return demand;
 }
 

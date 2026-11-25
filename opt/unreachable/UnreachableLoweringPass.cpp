@@ -166,6 +166,8 @@ void UnreachableLoweringPass::run_pass(DexStoresVector& stores,
 
       // TODO: Consider other transformations, e.g. just return if there are no
       // monitor instructions, or embed a descriptive message.
+      // `baseline_profiles::lowered_unreachable_extra_code_units` sizes this
+      // replacement for passes that run before this one.
       if (!mutation) {
         mutation = std::make_unique<cfg::CFGMutation>(cfg);
       }

@@ -418,3 +418,34 @@ TEST_F(BaselineProfileTest, topoff_selection_is_stable_across_runs) {
         first);
   }
 }
+
+TEST_F(BaselineProfileTest,
+       size_before_unreachable_lowering_counts_each_unreachable) {
+  ClassCreator creator(DexType::make_type("LUnreachable;"));
+  creator.set_super(type::java_lang_Object());
+  auto* method =
+      DexMethod::make_method("LUnreachable;.f:(Ljava/lang/Object;)V")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC, /* is_virtual */ false);
+  method->set_code(assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (if-nez v0 :other)
+      (unreachable v1)
+      (throw v1)
+      (:other)
+      (unreachable v2)
+      (throw v2)
+    )
+  )"));
+  method->set_deobfuscated_name(show(method));
+  creator.add_method(method);
+  creator.create();
+
+  EXPECT_EQ(bp::dex2oat_code_units_before_unreachable_lowering(method),
+            bp::dex2oat_code_units(method) +
+                2 * bp::lowered_unreachable_extra_code_units());
+  method->get_code()->build_cfg();
+  EXPECT_EQ(bp::dex2oat_code_units_before_unreachable_lowering(method),
+            bp::dex2oat_code_units(method) +
+                2 * bp::lowered_unreachable_extra_code_units());
+}

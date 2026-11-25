@@ -59,6 +59,11 @@ size_t apply_forced_method_flags(const Scope& scope, BaselineProfile* profile);
 // no Android build of ours passes, so the default is what runs.
 constexpr uint32_t DEFAULT_ART_HUGE_METHOD_MAX = 10000;
 
+// ART's default inline_max_code_units_ (art/compiler/driver/compiler_options.h,
+// kDefaultInlineMaxCodeUnits). The optimizing compiler does not inline a
+// callee with more code units.
+constexpr uint32_t DEFAULT_ART_INLINE_MAX_CODE_UNITS = 32;
+
 // Why dex2oat can never turn a profile entry into compiled code.
 //
 // Mirrors the gates in the `quick_fn` lambda of `CompileMethodQuick`,
@@ -94,6 +99,14 @@ enum class UncompilableReason {
 // size gates compare against. The CFG contributes branch widening, so a caller
 // outside a pass that has not built it gets the unadjusted estimate.
 uint32_t dex2oat_code_units(DexMethod* method);
+
+// The code units UnreachableLoweringPass adds per `unreachable` instruction,
+// which it replaces with a call of `createAndThrow` and its move-result.
+uint32_t lowered_unreachable_extra_code_units();
+
+// `dex2oat_code_units` for code that UnreachableLoweringPass has not lowered
+// yet: what dex2oat sees once every `unreachable` is lowered.
+uint32_t dex2oat_code_units_before_unreachable_lowering(DexMethod* method);
 
 UncompilableReason uncompilable_reason(
     DexMethod* method, uint32_t huge_method_max = DEFAULT_ART_HUGE_METHOD_MAX);

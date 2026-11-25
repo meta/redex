@@ -61,12 +61,11 @@ class DexState {
   }
 
   bool can_insert_type_refs(const UnorderedSet<const DexType*>& types) {
-    size_t inserted_count{0};
-    for (const auto* t : UnorderedIterable(types)) {
-      if (m_type_refs.count(t) == 0u) {
-        inserted_count++;
-      }
-    }
+    // `unordered_count_if` returns a signed difference_type; the sum below is
+    // compared against an unsigned size, so narrow it here rather than let the
+    // comparison do it.
+    auto inserted_count = static_cast<size_t>(unordered_count_if(
+        types, [this](const auto* t) { return !m_type_refs.contains(t); }));
     // Yes, looks a bit quirky, but matching what happens in
     // InterDex/DexStructure: The number of type refs must stay *below* the
     // maximum, and must never reach it.
@@ -355,11 +354,11 @@ SplitMethod SplitMethod::create(const SplittableClosure& splittable_closure,
       split_target_ids.insert(closure->target->id());
     }
     split_cfg.delete_succ_edge_if(split_landingpad, [&](auto* e) {
-      return !split_target_ids.count(e->target()->id());
+      return !split_target_ids.contains(e->target()->id());
     });
     cfg.delete_succ_edge_if(splittable_closure.switch_block, [&](auto* e) {
       return e->type() == cfg::EDGE_BRANCH &&
-             split_target_ids.count(e->target()->id());
+             split_target_ids.contains(e->target()->id());
     });
   }
   split_cfg.add_edge(split_entry_block, split_landingpad, cfg::EDGE_GOTO);

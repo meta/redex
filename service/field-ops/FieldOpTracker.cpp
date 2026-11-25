@@ -55,8 +55,8 @@ class WritesAnalyzer {
       m_method_insn_escapes;
 
   bool has_lifetime(const DexType* t) const {
-    return ((m_type_lifetimes == nullptr) && type::is_object(t)) ||
-           m_type_lifetimes->has_lifetime(t);
+    return m_type_lifetimes == nullptr ? type::is_object(t)
+                                       : m_type_lifetimes->has_lifetime(t);
   }
 
   const InstructionEscapes& get_insn_escapes(const DexMethod* method) const {

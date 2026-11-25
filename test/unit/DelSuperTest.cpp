@@ -9,11 +9,13 @@
 
 #include "Creators.h"
 #include "DelSuper.h"
+#include "DexAnnotation.h"
 #include "DexClass.h"
 #include "IRAssembler.h"
 #include "IRCode.h"
 #include "PassManager.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "Show.h"
 #include "TypeUtil.h"
 
@@ -41,6 +43,30 @@ DexClass* make_class(const char* name,
     creator.add_method(method);
   }
   return creator.create();
+}
+
+// `LA;.m` and `LB;.m`, an override in `LB extends LA` that only calls
+// `super.m()`, which DelSuper deletes.
+struct Hierarchy {
+  DexClass* a;
+  DexClass* b;
+  DexMethod* b_m;
+};
+
+Hierarchy make_hierarchy() {
+  auto* a_m = make_vmethod("LA;.m:()V", R"(
+    ((load-param-object v0) (return-void))
+  )");
+  auto* b_m = make_vmethod("LB;.m:()V", R"(
+    (
+      (load-param-object v0)
+      (invoke-super (v0) "LA;.m:()V")
+      (return-void)
+    )
+  )");
+  auto* a = make_class("LA;", type::java_lang_Object(), {}, {a_m});
+  auto* b = make_class("LB;", a->get_type(), {}, {b_m});
+  return {a, b, b_m};
 }
 
 class DelSuperTest : public RedexTest {
@@ -158,6 +184,52 @@ TEST_F(DelSuperTest, interfaceSuperForwarderIsKept) {
 
   EXPECT_TRUE(declares(b, b_m));
   EXPECT_EQ(callee(call), "LB;.m:()I");
+}
+
+TEST_F(DelSuperTest, trivialOverrideIsDeleted) {
+  create_object_class();
+  auto h = make_hierarchy();
+  run_pass({h.a, h.b});
+  EXPECT_FALSE(declares(h.b, h.b_m));
+}
+
+// The type of an invoke-instance method handle of `LB;.m` starts with the
+// class that declares the method it resolves to on Android 9, so redirecting it
+// to `LA;.m` would make this invokeExact throw WrongMethodTypeException there.
+TEST_F(DelSuperTest, overrideNamedByMethodHandleInCodeIsKept) {
+  create_object_class();
+  auto h = make_hierarchy();
+  auto* user = make_class("LUser;", type::java_lang_Object(), {},
+                          {assembler::method_from_string(R"(
+    (method (public static) "LUser;.call:(LB;)V"
+     ((load-param-object v1)
+      (const-method-handle invoke-instance "LB;.m:()V")
+      (move-result-pseudo-object v0)
+      (invoke-polymorphic (v0 v1) "Ljava/lang/invoke/MethodHandle;.invokeExact:([Ljava/lang/Object;)Ljava/lang/Object;" "(LB;)V")
+      (return-void)))
+  )")});
+
+  run_pass({h.a, h.b, user});
+  EXPECT_TRUE(declares(h.b, h.b_m));
+}
+
+// What an invoke-direct method handle of `LB;.m` runs depends on the class of
+// the code that holds it and differs by ART version; here a static field value
+// holds it, not code.
+TEST_F(DelSuperTest, overrideNamedByEncodedMethodHandleIsKept) {
+  create_object_class();
+  auto h = make_hierarchy();
+  auto* holder = make_class("LHolder;", type::java_lang_Object(), {}, {});
+  holder->add_field(
+      DexField::make_field("LHolder;.HANDLE:Ljava/lang/invoke/MethodHandle;")
+          ->make_concrete(
+              ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+              std::make_unique<DexEncodedValueMethodHandle>(
+                  redex::make_method_handle(METHOD_HANDLE_TYPE_INVOKE_DIRECT,
+                                            "LB;.m:()V"))));
+
+  run_pass({h.a, h.b, holder});
+  EXPECT_TRUE(declares(h.b, h.b_m));
 }
 
 } // namespace

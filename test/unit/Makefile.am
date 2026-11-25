@@ -416,7 +416,7 @@ debug_test_SOURCES = DebugTest.cpp
 
 dedup_blocks_test_SOURCES = DedupBlocksTest.cpp VirtScopeHelper.cpp ScopeHelper.cpp
 
-del_super_test_SOURCES = DelSuperTest.cpp
+del_super_test_SOURCES = DelSuperTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 deobfuscated_alias_test_SOURCES = DeobfuscatedAliasTest.cpp
 

@@ -17,6 +17,7 @@
 #include "DexClass.h"
 #include "DexUtil.h"
 #include "IRInstruction.h"
+#include "MethodUtil.h"
 #include "PassManager.h"
 #include "ReachableClasses.h"
 #include "Show.h"
@@ -280,9 +281,16 @@ class DelSuper {
         m_num_culled_super_is_interface(0) {}
 
   void run(bool do_delete, PassManager& mgr) {
+    // An override that a method handle names or can run is kept: unlike an
+    // invoke, the handle cannot be redirected to the super method. On Android
+    // 9 an invoke-instance handle's type begins with the class that declares
+    // the method it resolves to, and what an invoke-direct handle runs depends
+    // on the class of the code that holds it.
+    const auto named_by_method_handles =
+        method::gather_methods_named_by_method_handles(m_scope);
     walk::parallel::methods(m_scope, [&](DexMethod* meth) {
       m_num_methods++;
-      if (root(meth)) {
+      if (root(meth) || named_by_method_handles.count(meth) != 0) {
         return;
       }
       auto* invoked_meth = get_trivial_return_invoke_super(meth);

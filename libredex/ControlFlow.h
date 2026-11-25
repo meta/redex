@@ -1686,20 +1686,19 @@ bool ControlFlowGraph::insert(const InstructionIterator& position,
       before ? position.unwrap() : std::next(position.unwrap());
 
   // We might need to propagate source blocks if we create a block.
-  // Find the latest source block in the current block in case.
-  // NOTE: when `pos` is `b->end()` we must not dereference it; treat that
-  // case as "no matching position MIE in this block" and scan the entire
-  // block for the latest source block.
-  const bool pos_is_end = (pos == b->end());
-  SourceBlock* last_src_block = nullptr;
-  for (const auto& mie : *b) {
-    if (!pos_is_end && mie.pos == pos->pos) {
-      break;
+  // Only a split needs the latest source block before `pos` in the current
+  // block, so it is found just before the first split rather than on every
+  // call: a scan per call makes many inserts into one large block quadratic.
+  std::optional<SourceBlock*> last_src_block;
+  auto find_last_src_block = [&]() {
+    if (!last_src_block) {
+      auto it = std::find_if(IRList::reverse_iterator(pos), b->rend(),
+                             [](const MethodItemEntry& mie) {
+                               return mie.type == MFLOW_SOURCE_BLOCK;
+                             });
+      last_src_block = it == b->rend() ? nullptr : it->src_block.get();
     }
-    if (mie.type == MFLOW_SOURCE_BLOCK) {
-      last_src_block = mie.src_block.get();
-    }
-  }
+  };
 
   bool invalidated_its = false;
   bool insert_source_block = false;
@@ -1718,9 +1717,9 @@ bool ControlFlowGraph::insert(const InstructionIterator& position,
       insn_has_move = insn->has_move_result_pseudo();
 
       if (insert_source_block && !opcode::is_move_result_any(op)) {
-        if (last_src_block != nullptr) {
+        if (*last_src_block != nullptr) {
           b->m_entries.insert_before(
-              pos, source_blocks::clone_as_synthetic(last_src_block));
+              pos, source_blocks::clone_as_synthetic(*last_src_block));
         }
         insert_source_block = false;
       }
@@ -1743,6 +1742,7 @@ bool ControlFlowGraph::insert(const InstructionIterator& position,
           // start a new block. We also copy over all throw-edges. See FIXME
           // below for a discussion about try-regions in general.
           if (throws) {
+            find_last_src_block();
             always_assert_log(
                 !existing_last->insn->has_move_result_any(),
                 "Can't add instructions after throwing instruction "
@@ -1770,10 +1770,10 @@ bool ControlFlowGraph::insert(const InstructionIterator& position,
             if (next_it != end_index) {
               auto next_v = InsertVariant(std::move(*next_it));
               if (std::holds_alternative<IRInstruction*>(next_v)) {
-                if (opcode::may_throw(op) && last_src_block != nullptr) {
+                if (opcode::may_throw(op) && *last_src_block != nullptr) {
                   always_assert(!opcode::is_move_result_any(op));
                   b->m_entries.insert_before(
-                      pos, source_blocks::clone_as_synthetic(last_src_block));
+                      pos, source_blocks::clone_as_synthetic(*last_src_block));
                   insert_source_block = false;
                 }
               }
@@ -1821,6 +1821,7 @@ bool ControlFlowGraph::insert(const InstructionIterator& position,
         }
         // If this created unreachable blocks, they will be removed by simplify.
       } else if (opcode::may_throw(op) && throws) {
+        find_last_src_block();
         insert_source_block = true;
         invalidated_its = true;
         // FIXME: Copying the outgoing throw edges isn't enough.
@@ -1860,9 +1861,9 @@ bool ControlFlowGraph::insert(const InstructionIterator& position,
       insert_source_block = false;
     } else if (std::holds_alternative<std::unique_ptr<DexPosition>>(v)) {
       if (insert_source_block) {
-        if (last_src_block != nullptr) {
+        if (*last_src_block != nullptr) {
           b->m_entries.insert_before(
-              pos, source_blocks::clone_as_synthetic(last_src_block));
+              pos, source_blocks::clone_as_synthetic(*last_src_block));
         }
         insert_source_block = false;
       }
@@ -1878,9 +1879,9 @@ bool ControlFlowGraph::insert(const InstructionIterator& position,
   }
   // We might need to insert a source block at the end, but not if the
   // last instruction we inserted could be followed by a move instruction.
-  if (insert_source_block && last_src_block != nullptr && !insn_has_move) {
+  if (insert_source_block && *last_src_block != nullptr && !insn_has_move) {
     b->m_entries.insert_before(
-        pos, source_blocks::clone_as_synthetic(last_src_block));
+        pos, source_blocks::clone_as_synthetic(*last_src_block));
   }
   return invalidated_its;
 }

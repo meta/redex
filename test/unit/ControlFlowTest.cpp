@@ -1968,6 +1968,125 @@ TEST_F(ControlFlowTest, insertion_with_source_blocks_middle) {
   }
 }
 
+// A split in the middle of an insertion starts its new block with a copy of
+// the latest source block before the insertion point. Here that is the second
+// one, even though non-throwing code is inserted before the split and the
+// third source block lies after the insertion point.
+TEST_F(ControlFlowTest, insertion_split_copies_source_block_before_position) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (:main)
+      (.src_block "LFoo;.bar:()V" 1 (0.1 1.0) (0.1 1.0) (0.1 1.0))
+      (load-param-object v0)
+      (load-param-object v1)
+      (load-param v2)
+      (.try_start foo)
+      (.src_block "LFoo;.bar:()V" 2 (0.2 1.0) (0.2 1.0) (0.2 1.0))
+      (add-int v1 v1 v1)
+      (.src_block "LFoo;.bar:()V" 3 (0.3 1.0) (0.3 1.0) (0.3 1.0))
+      (aput-object v0 v1 v2)
+      (goto :return)
+      (.try_end foo)
+
+      (:return)
+      (return v1)
+
+      (:catch)
+      (.catch (foo))
+      (.src_block "LFoo;.bar:()V" 4 (0.4 1.0) (0.4 1.0) (0.4 1.0))
+      (const v1 0)
+      (return v1)
+    )
+  )");
+  code->build_cfg();
+  auto& cfg = code->cfg();
+  auto* const_before_split = new IRInstruction(OPCODE_CONST);
+  const_before_split->set_dest(3)->set_literal(0);
+  auto* div = new IRInstruction(OPCODE_DIV_INT);
+  div->set_srcs_size(2);
+  div->set_src(0, 2);
+  div->set_src(1, 2);
+  auto* move_result = new IRInstruction(IOPCODE_MOVE_RESULT_PSEUDO);
+  move_result->set_dest(2);
+  auto* const_after_split = new IRInstruction(OPCODE_CONST);
+  const_after_split->set_dest(4)->set_literal(1);
+  auto ii = cfg::InstructionIterable(cfg);
+  auto add_it = std::find_if(ii.begin(), ii.end(), [](const auto& mie) {
+    return mie.insn->opcode() == OPCODE_ADD_INT;
+  });
+  ASSERT_FALSE(add_it.is_end());
+  cfg.insert_before(add_it, std::vector<IRInstruction*>{const_before_split, div,
+                                                        move_result,
+                                                        const_after_split});
+
+  auto* split_block = cfg.find_insn(const_after_split).block();
+  EXPECT_NE(split_block, cfg.find_insn(div).block());
+  auto* copied = source_blocks::get_first_source_block(split_block);
+  ASSERT_NE(copied, nullptr);
+  EXPECT_EQ(copied->id, SourceBlock::kSyntheticId);
+  EXPECT_EQ(copied->get_val(0), std::optional<float>(0.2f));
+}
+
+// A source block inserted ahead of the split is the latest one before the
+// split: the new block starts with a copy of it, not of the one that was in the
+// block before the insertion point.
+TEST_F(ControlFlowTest, insertion_split_copies_inserted_source_block) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (:main)
+      (.src_block "LFoo;.bar:()V" 1 (0.1 1.0) (0.1 1.0) (0.1 1.0))
+      (load-param-object v0)
+      (load-param-object v1)
+      (load-param v2)
+      (.try_start foo)
+      (.src_block "LFoo;.bar:()V" 2 (0.2 1.0) (0.2 1.0) (0.2 1.0))
+      (add-int v1 v1 v1)
+      (aput-object v0 v1 v2)
+      (goto :return)
+      (.try_end foo)
+
+      (:return)
+      (return v1)
+
+      (:catch)
+      (.catch (foo))
+      (.src_block "LFoo;.bar:()V" 3 (0.3 1.0) (0.3 1.0) (0.3 1.0))
+      (const v1 0)
+      (return v1)
+    )
+  )");
+  code->build_cfg();
+  auto& cfg = code->cfg();
+  auto ii = cfg::InstructionIterable(cfg);
+  auto add_it = std::find_if(ii.begin(), ii.end(), [](const auto& mie) {
+    return mie.insn->opcode() == OPCODE_ADD_INT;
+  });
+  ASSERT_FALSE(add_it.is_end());
+  auto* existing = source_blocks::get_first_source_block(add_it.block());
+  ASSERT_NE(existing, nullptr);
+  auto* div = new IRInstruction(OPCODE_DIV_INT);
+  div->set_srcs_size(2);
+  div->set_src(0, 2);
+  div->set_src(1, 2);
+  auto* move_result = new IRInstruction(IOPCODE_MOVE_RESULT_PSEUDO);
+  move_result->set_dest(2);
+  auto* const_after_split = new IRInstruction(OPCODE_CONST);
+  const_after_split->set_dest(4)->set_literal(1);
+  std::vector<cfg::ControlFlowGraph::InsertVariant> to_insert;
+  to_insert.emplace_back(source_blocks::clone_as_synthetic(
+      existing, nullptr, SourceBlock::Val(0.5f, 1.0f)));
+  to_insert.emplace_back(div);
+  to_insert.emplace_back(move_result);
+  to_insert.emplace_back(const_after_split);
+  cfg.insert_before(add_it, to_insert.begin(), to_insert.end());
+
+  auto* split_block = cfg.find_insn(const_after_split).block();
+  EXPECT_NE(split_block, cfg.find_insn(div).block());
+  auto* copied = source_blocks::get_first_source_block(split_block);
+  ASSERT_NE(copied, nullptr);
+  EXPECT_EQ(copied->get_val(0), std::optional<float>(0.5f));
+}
+
 TEST_F(ControlFlowTest, add_sget) {
 
   auto code = assembler::ircode_from_string(R"(

@@ -7,23 +7,31 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <bitset>
+#include <fstream>
 #include <span>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
+#include "Creators.h"
 #include "Debug.h"
 #include "DeterministicContainers.h"
 #include "DexDefs.h"
 #include "DexLoader.h"
 #include "DexOutput.h"
 #include "DexPosition.h"
+#include "DexUtil.h"
 #include "IODIMetadata.h"
+#include "IRAssembler.h"
 #include "InstructionLowering.h"
 #include "RedexContext.h"
 #include "RedexOptions.h"
+#include "RedexTestUtils.h"
 #include "Show.h"
+#include "TypeUtil.h"
 #include "Walkers.h"
 
 using namespace std::literals::string_literals;
@@ -128,6 +136,221 @@ class IODITest : public ::testing::Test {
         load_classes_from_dex(reinterpret_cast<const dex_header*>(data.data()),
                               DexLocation::make_location("", "tmp.dex"),
                               /*balloon=*/false);
+    return result;
+  }
+
+  struct OutputSnapshot {
+    std::vector<std::vector<uint8_t>> dexes;
+    std::string positions;
+    std::string iodi;
+  };
+
+  OutputSnapshot emit_multi_dex(bool parallel,
+                                DebugInfoKind kind,
+                                SortMode code_mode,
+                                bool compression_conscious = true,
+                                size_t batch_size = 4,
+                                bool use_single_dex_api = false,
+                                bool load_method_profile = true) {
+    reset_redex();
+    auto temp = redex::make_tmp_dir("parallel-dex-test-%%%%-%%%%");
+    redex::create_directories(temp.path + "/meta");
+    const auto map_path = temp.path + "/positions";
+    // Isolate writer concurrency from the loader's lazy-index cache races.
+    auto input = load_classes_from_dex(
+        DexLocation::make_location("dex", std::getenv("dexfile")),
+        /*stats=*/nullptr, /*input_dex_version=*/nullptr, /*balloon=*/true,
+        /*throw_on_balloon_error=*/true, /*support_dex_version=*/35,
+        DexLoader::Parallel::kNo);
+    input.reserve(input.size() + 6);
+    for (size_t helper = 0; helper < 6; ++helper) {
+      const auto type_name = "LGreedyHelper" + std::to_string(helper) + ";";
+      ClassCreator creator(DexType::make_type(type_name));
+      creator.set_super(type::java_lang_Object());
+      auto* base = DexMethod::make_method(type_name + ".base:()I")
+                       ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+      base->set_code(
+          assembler::ircode_from_string("((const v0 1) (return v0))"));
+      creator.add_method(base);
+      // Repeat each body pattern eight times so CC retains distinguishing
+      // k-mers.
+      for (size_t i = 0; i < 32; ++i) {
+        const auto method_name = type_name + ".m" + std::to_string(i) + ":()I";
+        auto* method = DexMethod::make_method(method_name)
+                           ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+        method->set_code(assembler::ircode_from_string(
+            "((.pos \"" + method_name +
+            "\" \"ParallelDexTest.java\" \"1\") "
+            "(const v3 " +
+            std::to_string((helper * 4 + i / 8) / 2 + 1) +
+            ") "
+            "(add-int/lit v3 v3 7) (mul-int/lit v3 v3 3) "
+            "(const v0 " +
+            std::to_string(helper * 4 + i / 8 + 1) +
+            ") (add-int v0 v0 v3) "
+            "(.try_start a) "
+            "(invoke-static () \"LGreedyHelper0;.base:()I\") "
+            "(move-result v1) (.try_end a) "
+            "(add-int v0 v0 v1) (if-eqz v0 :zero) (return v0) "
+            "(:zero) (const v0 0) (return v0) "
+            "(.catch (a) \"Ljava/lang/Exception;\") "
+            "(move-exception v2) (const v0 -1) (return v0))"));
+        creator.add_method(method);
+      }
+      input.push_back(creator.create());
+    }
+    DexStore store("classes");
+    std::vector<DexClasses> partitions(3);
+    for (size_t i = 0; i < input.size(); ++i) {
+      partitions[i % partitions.size()].push_back(input[i]);
+    }
+    for (auto& partition : partitions) {
+      store.add_classes(std::move(partition));
+    }
+    DexStoresVector stores;
+    stores.emplace_back(std::move(store));
+    instruction_lowering::normalize_cfg(stores);
+    instruction_lowering::run(stores);
+    Json::Value json_config(Json::objectValue);
+    json_config["method_similarity_order"]["disable"] = false;
+    json_config["method_similarity_order"]["use_compression_conscious_order"] =
+        compression_conscious;
+    if (code_mode == SortMode::METHOD_PROFILED_ORDER && load_method_profile) {
+      const auto profile_path = temp.path + "/methods.csv";
+      std::ofstream profile(profile_path);
+      profile << "interaction,appear#\nColdStart,100\n"
+                 "index,name,appear100,appear#,avg_call,avg_order,"
+                 "avg_rank100,min_api_level\n";
+      for (size_t i = 0; i < 6; ++i) {
+        profile << i << ",LGreedyHelper" << i
+                << ";.m31:()I,100,100,10,0,0,21\n";
+      }
+      profile.close();
+      json_config["agg_method_stats_files"] = Json::Value(Json::arrayValue);
+      json_config["agg_method_stats_files"].append(profile_path);
+    }
+    const char* const mode_name = [&]() {
+      switch (code_mode) {
+      case SortMode::METHOD_SIMILARITY:
+        return "method_similarity_order";
+      case SortMode::METHOD_COLDSTART_ORDER:
+        return "method_coldstart_order";
+      case SortMode::METHOD_PROFILED_ORDER:
+        return "method_profiled_order";
+      case SortMode::CLASS_ORDER:
+        return "class_order";
+      case SortMode::CLINIT_FIRST:
+        return "clinit_order";
+      case SortMode::CLASS_STRINGS:
+      case SortMode::DEFAULT:
+        return "default";
+      }
+      not_reached();
+    }();
+    json_config["bytecode_sort_mode"] = mode_name;
+    ConfigFiles config(json_config, temp.path);
+    config.parse_global_config();
+    std::unique_ptr<PositionMapper> mapper(PositionMapper::make(map_path));
+    UnorderedMap<DexMethod*, uint64_t> method_to_id;
+    UnorderedMap<DexCode*, std::vector<DebugLineItem>> debug_lines;
+    IODIMetadata metadata;
+    if (::is_iodi(kind)) {
+      metadata.mark_methods(stores,
+                            kind == DebugInfoKind::InstructionOffsetsLayered);
+    }
+    auto& root = only(stores);
+    auto& dexen = root.get_dexen();
+    for (const auto& dex : dexen) {
+      size_t coded_methods = 0;
+      size_t coded_classes = 0;
+      for (auto* cls : dex) {
+        bool has_code = false;
+        for (auto* method : cls->get_dmethods()) {
+          if (method->get_code() != nullptr ||
+              method->get_dex_code() != nullptr) {
+            ++coded_methods;
+            has_code = true;
+          }
+        }
+        for (auto* method : cls->get_vmethods()) {
+          if (method->get_code() != nullptr ||
+              method->get_dex_code() != nullptr) {
+            ++coded_methods;
+            has_code = true;
+          }
+        }
+        if (has_code) {
+          ++coded_classes;
+        }
+      }
+      always_assert_log(coded_methods >= 64 && coded_classes >= 2,
+                        "Each test dex must contain at least 64 coded methods "
+                        "across multiple classes");
+    }
+    std::vector<std::string> filenames(dexen.size());
+    for (size_t i = 0; i < dexen.size(); ++i) {
+      filenames[i] = temp.path + "/" + dex_name(root, i);
+    }
+    DexOutputConfig options;
+    options.parallel_dex_writing = parallel;
+    options.parallel_dex_writing_max_batch_size =
+        static_cast<int64_t>(batch_size);
+    const auto dex_magic = "dex\n035\0"s;
+    DexWritingContext context{.output_dir = temp.path,
+                              .dex_magic = dex_magic,
+                              .config = config,
+                              .position_mapper = mapper.get(),
+                              .debug_info_kind = kind,
+                              .method_to_id = &method_to_id,
+                              .code_debug_lines = &debug_lines,
+                              .iodi_metadata =
+                                  ::is_iodi(kind) ? &metadata : nullptr,
+                              .dex_output_config = options,
+                              .min_sdk = 0};
+    if (use_single_dex_api) {
+      for (size_t i = 0; i < dexen.size(); ++i) {
+        write_classes_to_dex(filenames[i], &dexen[i],
+                             std::make_shared<GatheredTypes>(&dexen[i]), 0,
+                             &root.get_name(), i, config, mapper.get(), kind,
+                             &method_to_id, &debug_lines, context.iodi_metadata,
+                             dex_magic, options, 0, {code_mode});
+      }
+    } else {
+      const auto caller = std::this_thread::get_id();
+      size_t callbacks = 0;
+      write_classes_to_multiple_dexes(
+          root, 0, context, [&](enhanced_dex_stats_t stats) {
+            EXPECT_EQ(std::this_thread::get_id(), caller);
+            ASSERT_LT(callbacks, filenames.size());
+            EXPECT_EQ(redex::file_size(filenames[callbacks]), stats.num_bytes);
+            std::ifstream dex_file(filenames[callbacks], std::ios::binary);
+            std::array<uint8_t, 20> signature;
+            dex_file.seekg(12);
+            dex_file.read(reinterpret_cast<char*>(signature.data()),
+                          sizeof(signature));
+            ASSERT_TRUE(dex_file);
+            EXPECT_TRUE(std::equal(signature.begin(), signature.end(),
+                                   stats.signature));
+            ++callbacks;
+          });
+      EXPECT_EQ(callbacks, dexen.size());
+    }
+    OutputSnapshot result;
+    result.dexes.reserve(filenames.size());
+    for (const auto& filename : filenames) {
+      std::ifstream dex_file(filename, std::ios::binary);
+      always_assert(dex_file);
+      const std::string bytes(std::istreambuf_iterator<char>(dex_file), {});
+      result.dexes.emplace_back(bytes.begin(), bytes.end());
+    }
+    mapper->write_map();
+    std::ifstream positions(map_path, std::ios::binary);
+    result.positions.assign(std::istreambuf_iterator<char>(positions), {});
+    if (::is_iodi(kind)) {
+      std::ostringstream stream;
+      metadata.write(stream, method_to_id);
+      result.iodi = stream.str();
+    }
     return result;
   }
 
@@ -285,6 +508,77 @@ TEST_F(IODITest, ExplicitPreparationPhasesPreserveDexBytes) {
     run_redex(nullptr, nullptr, layered, true, &phased);
     ASSERT_FALSE(serial.empty());
     EXPECT_EQ(serial, phased);
+  }
+}
+
+TEST_F(IODITest, parallelPreparationPreservesMultiDexBytesAndDebugMaps) {
+  for (auto kind : {DebugInfoKind::PerMethodDebug, DebugInfoKind::NoPositions,
+                    DebugInfoKind::InstructionOffsetsLayered}) {
+    for (auto sort : {SortMode::DEFAULT, SortMode::METHOD_COLDSTART_ORDER,
+                      SortMode::METHOD_SIMILARITY}) {
+      SCOPED_TRACE(static_cast<uint32_t>(kind));
+      SCOPED_TRACE(static_cast<uint32_t>(sort));
+      const auto serial = emit_multi_dex(false, kind, sort);
+      ASSERT_EQ(serial.dexes.size(), 3u);
+      ASSERT_FALSE(serial.positions.empty());
+      if (::is_iodi(kind)) {
+        ASSERT_FALSE(serial.iodi.empty());
+      }
+      for (size_t repeat = 0; repeat < 3; ++repeat) {
+        const auto parallel = emit_multi_dex(
+            true, kind, sort, true, repeat == 0 ? 1 : (repeat == 1 ? 2 : 4));
+        EXPECT_EQ(serial.dexes, parallel.dexes);
+        EXPECT_EQ(serial.positions, parallel.positions);
+        EXPECT_EQ(serial.iodi, parallel.iodi);
+      }
+    }
+  }
+}
+
+TEST_F(IODITest, parallelGreedyWritingPreservesMultiDexBytesAndDebugMaps) {
+  for (auto kind : {DebugInfoKind::PerMethodDebug, DebugInfoKind::NoPositions,
+                    DebugInfoKind::InstructionOffsetsLayered}) {
+    SCOPED_TRACE(static_cast<uint32_t>(kind));
+    const auto serial =
+        emit_multi_dex(false, kind, SortMode::METHOD_SIMILARITY, false);
+    ASSERT_EQ(serial.dexes.size(), 3u);
+    for (size_t repeat = 0; repeat < 3; ++repeat) {
+      const auto parallel =
+          emit_multi_dex(true, kind, SortMode::METHOD_SIMILARITY, false,
+                         repeat == 0 ? 1 : (repeat == 1 ? 2 : 4));
+      EXPECT_EQ(serial.dexes, parallel.dexes);
+      EXPECT_EQ(serial.positions, parallel.positions);
+      EXPECT_EQ(serial.iodi, parallel.iodi);
+    }
+  }
+}
+
+TEST_F(IODITest, multiDexSerialHelperPreservesSingleDexApiOutput) {
+  for (bool compression_conscious : {false, true}) {
+    const auto kind = DebugInfoKind::InstructionOffsetsLayered;
+    const auto old_api =
+        emit_multi_dex(false, kind, SortMode::METHOD_SIMILARITY,
+                       compression_conscious, 4, true);
+    const auto store_api = emit_multi_dex(
+        false, kind, SortMode::METHOD_SIMILARITY, compression_conscious);
+    EXPECT_EQ(old_api.dexes, store_api.dexes);
+    EXPECT_EQ(old_api.positions, store_api.positions);
+    EXPECT_EQ(old_api.iodi, store_api.iodi);
+  }
+}
+
+TEST_F(IODITest, multiDexHelperInitializesColdMethodProfiles) {
+  const auto kind = DebugInfoKind::InstructionOffsetsLayered;
+  const auto sort = SortMode::METHOD_PROFILED_ORDER;
+  const auto without_profile =
+      emit_multi_dex(false, kind, sort, true, 4, false, false);
+  const auto serial = emit_multi_dex(false, kind, sort);
+  EXPECT_NE(without_profile.dexes, serial.dexes);
+  for (size_t batch : {1u, 2u, 4u}) {
+    const auto parallel = emit_multi_dex(true, kind, sort, true, batch);
+    EXPECT_EQ(serial.dexes, parallel.dexes);
+    EXPECT_EQ(serial.positions, parallel.positions);
+    EXPECT_EQ(serial.iodi, parallel.iodi);
   }
 }
 

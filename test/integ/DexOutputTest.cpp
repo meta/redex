@@ -73,6 +73,81 @@ TEST_F(DexOutputTest, PreparationValidationHandlesUnnamedStores) {
                RedexException);
 }
 
+class MultiDexWriterTest : public RedexTest {};
+
+TEST_F(MultiDexWriterTest, MultiDexWriterHandlesEmptyAndSingleDexStores) {
+  for (bool parallel : {false, true}) {
+    auto temp = redex::make_tmp_dir("multi-dex-boundary-%%%%-%%%%");
+    redex::create_directories(temp.path + "/meta");
+    ConfigFiles config(Json::Value(Json::objectValue), temp.path);
+    config.parse_global_config();
+    DexOutputConfig options;
+    options.parallel_dex_writing = parallel;
+    std::unique_ptr<PositionMapper> mapper(PositionMapper::make(""));
+    const std::string magic("dex\n035");
+    DexWritingContext context{temp.path,
+                              magic,
+                              config,
+                              mapper.get(),
+                              DebugInfoKind::NoCustomSymbolication,
+                              nullptr,
+                              nullptr,
+                              nullptr,
+                              options,
+                              0};
+    DexStore store("classes");
+    size_t callbacks = 0;
+    auto consume = [&](const enhanced_dex_stats_t& stats) {
+      ++callbacks;
+      EXPECT_GT(stats.num_bytes, 0);
+      EXPECT_EQ(stats.num_bytes,
+                redex::file_size(temp.path + "/" + dex_name(store, 0)));
+    };
+    write_classes_to_multiple_dexes(store, 0, context, consume);
+    EXPECT_EQ(callbacks, 0u);
+    store.add_classes({});
+    write_classes_to_multiple_dexes(store, 0, context, consume);
+    EXPECT_EQ(callbacks, 1u);
+  }
+}
+
+TEST_F(MultiDexWriterTest, MultiDexWriterStopsAfterCallbackFailure) {
+  for (bool parallel : {false, true}) {
+    auto temp = redex::make_tmp_dir("multi-dex-consumer-%%%%-%%%%");
+    redex::create_directories(temp.path + "/meta");
+    ConfigFiles config(Json::Value(Json::objectValue), temp.path);
+    config.parse_global_config();
+    DexOutputConfig options;
+    options.parallel_dex_writing = parallel;
+    options.parallel_dex_writing_max_batch_size = 1;
+    std::unique_ptr<PositionMapper> mapper(PositionMapper::make(""));
+    const std::string magic("dex\n035");
+    DexWritingContext context{temp.path,
+                              magic,
+                              config,
+                              mapper.get(),
+                              DebugInfoKind::NoCustomSymbolication,
+                              nullptr,
+                              nullptr,
+                              nullptr,
+                              options,
+                              0};
+    DexStore store("classes");
+    store.add_classes({});
+    store.add_classes({});
+    size_t callbacks = 0;
+    auto consume = [&](const enhanced_dex_stats_t&) {
+      ++callbacks;
+      throw std::runtime_error("consumer stopped");
+    };
+    EXPECT_THROW(write_classes_to_multiple_dexes(store, 0, context, consume),
+                 std::runtime_error);
+    EXPECT_EQ(callbacks, 1u);
+    EXPECT_TRUE(redex::exists(temp.path + "/" + dex_name(store, 0)));
+    EXPECT_FALSE(redex::exists(temp.path + "/" + dex_name(store, 1)));
+  }
+}
+
 TEST_F(DexOutputTest, TEST_SIMILARITY_ORDERER) {
   std::vector<SortMode> sort_modes{SortMode::METHOD_PROFILED_ORDER,
                                    SortMode::METHOD_SIMILARITY};

@@ -250,7 +250,8 @@ MethodSimilarityCompressionConsciousOrderer::get_encoded_method_content(
 void MethodSimilarityCompressionConsciousOrderer::order(
     std::vector<DexMethod*>& methods, GatheredTypes* m_gtypes) {
   Timer t("Reordering " + std::to_string(methods.size()) +
-          " methods by similarity using BPC");
+              " methods by similarity using BPC",
+          /*indent=*/false);
   if (methods.empty()) {
     return;
   }

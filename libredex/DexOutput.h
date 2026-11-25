@@ -22,6 +22,7 @@
 
 class DexAnnotation;
 class DexCallSite;
+class DexStore;
 
 enum class DebugInfoKind : uint32_t;
 
@@ -147,6 +148,32 @@ enhanced_dex_stats_t write_classes_to_dex(
     int min_sdk = 0,
     const std::vector<SortMode>& code_sort_mode = {SortMode::CLASS_ORDER},
     SortMode string_sort_mode = SortMode::DEFAULT);
+
+// Borrowed state shared by the dexes of a store. Referents must outlive the
+// synchronous write_classes_to_multiple_dexes call.
+struct DexWritingContext {
+  const std::string& output_dir;
+  const std::string& dex_magic;
+  ConfigFiles& config;
+  PositionMapper* position_mapper;
+  DebugInfoKind debug_info_kind;
+  UnorderedMap<DexMethod*, uint64_t>* method_to_id;
+  UnorderedMap<DexCode*, std::vector<DebugLineItem>>* code_debug_lines;
+  IODIMetadata* iodi_metadata;
+  const DexOutputConfig& dex_output_config;
+  int min_sdk;
+};
+
+// Owns writer lifetimes, cache initialization, scheduling and ordered shared
+// output for one store. Supplied IODI metadata must already describe the
+// stores. Calls consume_stats on the calling thread, in dex order, after
+// releasing each writer's buffer. The callback must not mutate the store or
+// context, or reenter dex writing; it may move/clear its stats.
+void write_classes_to_multiple_dexes(
+    DexStore& store,
+    size_t store_number,
+    const DexWritingContext& context,
+    const std::function<void(enhanced_dex_stats_t)>& consume_stats);
 
 using cmp_dstring = bool (*)(const DexString*, const DexString*);
 using cmp_dtype = bool (*)(const DexType*, const DexType*);
@@ -410,6 +437,8 @@ class DexOutput {
   // generate_debug_items + generate_map + finalize_header +
   // compute_method_to_id_map (must be sequential for deterministic position
   // mapper ordering).
+  // Initialize method profiles before phase 1, as normal PassManager setup
+  // does.
   void prepare_without_debug(SortMode string_mode,
                              const std::vector<SortMode>& code_mode,
                              ConfigFiles& conf,

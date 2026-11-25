@@ -215,7 +215,8 @@ void MethodSimilarityGreedyOrderer::remove_method(DexMethod* meth) {
 
 void MethodSimilarityGreedyOrderer::order(std::vector<DexMethod*>& methods) {
   Timer t("Reordering " + std::to_string(methods.size()) +
-          " methods by similarity using the greedy approach");
+              " methods by similarity using the greedy approach",
+          /*indent=*/false);
 
   for (auto* method : methods) {
     insert(method);

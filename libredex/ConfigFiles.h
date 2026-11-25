@@ -8,6 +8,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -81,8 +82,18 @@ struct ConfigFiles {
   }
 
   const std::vector<std::string>& get_coldstart_methods() {
-    if (m_coldstart_methods.empty()) {
-      m_coldstart_methods = load_coldstart_methods();
+    {
+      std::lock_guard<std::mutex> lock(m_coldstart_methods_mutex);
+      if (m_coldstart_methods_loaded) {
+        return m_coldstart_methods;
+      }
+    }
+    // Parse outside the lock; failed loads leave initialization retryable.
+    auto methods = load_coldstart_methods();
+    std::lock_guard<std::mutex> lock(m_coldstart_methods_mutex);
+    if (!m_coldstart_methods_loaded) {
+      m_coldstart_methods = std::move(methods);
+      m_coldstart_methods_loaded = true;
     }
     return m_coldstart_methods;
   }
@@ -305,6 +316,8 @@ struct ConfigFiles {
   UnorderedMap<const DexString*, std::vector<uint8_t>> m_class_freq_map;
   std::vector<std::string> m_coldstart_classes;
   std::vector<std::string> m_coldstart_methods;
+  std::mutex m_coldstart_methods_mutex;
+  bool m_coldstart_methods_loaded{false};
   std::vector<std::string> m_extra_baseline_profile_classes;
   std::vector<std::string> m_halfnosis_block_list;
   UnorderedMap<std::string, std::vector<std::string>> m_class_lists;

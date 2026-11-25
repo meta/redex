@@ -226,6 +226,8 @@ struct DexOutputConfig : public Configurable {
     return "Options used by the Dex writer.";
   }
 
+  bool parallel_dex_writing{false};
+  int64_t parallel_dex_writing_max_batch_size{4};
   bool write_class_sizes{false};
 
   // When enabled, record the authoritative post-lowering per-method code_item

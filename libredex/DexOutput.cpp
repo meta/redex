@@ -40,6 +40,7 @@
 #include "DexLimits.h"
 #include "DexMethodHandle.h"
 #include "DexPosition.h"
+#include "DexStore.h"
 #include "DexUtil.h"
 #include "GlobalConfig.h"
 #include "IODIMetadata.h"
@@ -57,6 +58,7 @@
 #include "Trace.h"
 #include "TypeUtil.h"
 #include "Walkers.h"
+#include "WorkQueue.h"
 
 /*
  * For adler32...
@@ -3173,6 +3175,94 @@ enhanced_dex_stats_t write_classes_to_dex(
   dout.metrics();
 
   return dout.m_stats;
+}
+
+void write_classes_to_multiple_dexes(
+    DexStore& store,
+    size_t store_number,
+    const DexWritingContext& context,
+    const std::function<void(enhanced_dex_stats_t)>& consume_stats) {
+  auto& conf = context.config;
+  const auto& options = context.dex_output_config;
+  always_assert_log(options.parallel_dex_writing_max_batch_size > 0,
+                    "parallel_dex_writing_max_batch_size must be positive");
+  auto& dexen = store.get_dexen();
+  if (dexen.empty()) {
+    return;
+  }
+  const auto& store_name = store.get_name();
+  const auto code_sort_mode = get_code_sort_mode(conf, store_name);
+  const auto string_sort_mode = get_string_sort_mode(conf);
+  if (std::find(code_sort_mode.begin(), code_sort_mode.end(),
+                SortMode::METHOD_SIMILARITY) != code_sort_mode.end() ||
+      std::find(code_sort_mode.begin(), code_sort_mode.end(),
+                SortMode::METHOD_PROFILED_ORDER) != code_sort_mode.end()) {
+    conf.get_method_profiles();
+  }
+
+  if (!options.parallel_dex_writing || dexen.size() == 1) {
+    for (size_t i = 0; i < dexen.size(); ++i) {
+      auto* classes = &dexen[i];
+      auto stats = write_classes_to_dex(
+          context.output_dir + "/" + dex_name(store, i), classes,
+          std::make_shared<GatheredTypes>(classes), store_number, &store_name,
+          i, conf, context.position_mapper, context.debug_info_kind,
+          context.method_to_id, context.code_debug_lines, context.iodi_metadata,
+          context.dex_magic, options, context.min_sdk, code_sort_mode,
+          string_sort_mode);
+      consume_stats(std::move(stats));
+    }
+    return;
+  }
+
+  struct DexState {
+    std::string filename;
+    std::unique_ptr<DexOutput> output;
+  };
+  for (size_t batch_start = 0; batch_start < dexen.size();) {
+    const size_t batch_size = std::min(
+        dexen.size() - batch_start,
+        static_cast<size_t>(options.parallel_dex_writing_max_batch_size));
+    std::vector<DexState> states(batch_size);
+
+    // Gather in dex order before any dex-local mutations start.
+    for (size_t i = 0; i < batch_size; ++i) {
+      auto& state = states[i];
+      const size_t dex_number = batch_start + i;
+      auto* classes = &dexen[dex_number];
+      auto gtypes = std::make_shared<GatheredTypes>(classes);
+      state.filename = context.output_dir + "/" + dex_name(store, dex_number);
+      state.output = std::make_unique<DexOutput>(
+          state.filename.c_str(), classes, std::move(gtypes),
+          conf.normal_primary_dex(), store_number, &store_name, dex_number,
+          context.debug_info_kind, context.iodi_metadata, conf,
+          context.position_mapper, context.method_to_id,
+          context.code_debug_lines, options, context.min_sdk);
+    }
+
+    workqueue_run_for<size_t>(0, batch_size, [&](size_t i) {
+      states[i].output->prepare_without_debug(string_sort_mode, code_sort_mode,
+                                              conf, context.dex_magic);
+    });
+
+    // Line numbers and IODI layers must retain serial dex registration order.
+    for (auto& state : states) {
+      state.output->finalize_debug_and_header();
+    }
+
+    workqueue_run_for<size_t>(0, batch_size,
+                              [&](size_t i) { states[i].output->write_dex(); });
+
+    // Symbol files append to shared paths; metrics use shared cumulative state.
+    for (auto& state : states) {
+      state.output->write_symbol_files();
+      state.output->metrics();
+      auto stats = std::move(state.output->m_stats);
+      state.output.reset();
+      consume_stats(std::move(stats));
+    }
+    batch_start += batch_size;
+  }
 }
 
 uint64_t DexOutput::policy_cap() const {

@@ -1796,8 +1796,6 @@ void redex_backend(ConfigFiles& conf,
     dex_output_config.write_method_sizes = true;
   }
 
-  auto string_sort_mode = get_string_sort_mode(conf);
-
   bool should_preserve_input_dexes =
       conf.get_json_config().get("preserve_input_dexes", false);
   if (should_preserve_input_dexes) {
@@ -1811,43 +1809,29 @@ void redex_backend(ConfigFiles& conf,
     constexpr const char* kJsonTimerName =
         "Collecting full-rename-map-json data";
     AccumulatingTimer json_timer{kJsonTimerName};
+    DexWritingContext output_context{
+        .output_dir = output_dir,
+        .dex_magic = dex_magic,
+        .config = conf,
+        .position_mapper = pos_mapper.get(),
+        .debug_info_kind = dik,
+        .method_to_id = needs_addresses ? &method_to_id : nullptr,
+        .code_debug_lines = needs_addresses ? &code_debug_lines : nullptr,
+        .iodi_metadata = is_iodi(dik) ? &iodi_metadata : nullptr,
+        .dex_output_config = dex_output_config,
+        .min_sdk = min_sdk};
     for (size_t store_number = 0; store_number < stores.size();
          ++store_number) {
       auto& store = stores[store_number];
-      const auto& store_name = store.get_name();
-      auto code_sort_mode = get_code_sort_mode(conf, store_name);
       Timer t("Writing optimized dexes");
-      for (size_t i = 0; i < store.get_dexen().size(); i++) {
-        DexClasses* classes = &store.get_dexen()[i];
-        auto gtypes = std::make_shared<GatheredTypes>(classes);
-
-        auto this_dex_stats = write_classes_to_dex(
-            redex::get_dex_output_name(output_dir, store, i),
-            classes,
-            gtypes,
-            store_number,
-            &store_name,
-            i,
-            conf,
-            pos_mapper.get(),
-            redex_options.debug_info_kind,
-            needs_addresses ? &method_to_id : nullptr,
-            needs_addresses ? &code_debug_lines : nullptr,
-            is_iodi(dik) ? &iodi_metadata : nullptr,
-            dex_magic,
-            dex_output_config,
-            min_sdk,
-            code_sort_mode,
-            string_sort_mode);
-
-        output_totals += this_dex_stats;
-        // Remove class sizes here to free up memory.
-        this_dex_stats.class_size.clear();
-        signatures.insert(
-            *reinterpret_cast<uint32_t*>(this_dex_stats.signature));
-        output_dexes_stats.emplace_back(store.get_name(),
-                                        std::move(this_dex_stats));
-      }
+      write_classes_to_multiple_dexes(
+          store, store_number, output_context, [&](enhanced_dex_stats_t stats) {
+            output_totals += stats;
+            // Remove class sizes here to free up memory.
+            stats.class_size.clear();
+            signatures.insert(*reinterpret_cast<uint32_t*>(stats.signature));
+            output_dexes_stats.emplace_back(store.get_name(), std::move(stats));
+          });
       {
         auto timer_scope = json_timer.scope();
         collect_classes_for_full_jsonl(store, &full_jsonl);

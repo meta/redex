@@ -7,6 +7,7 @@
 
 #include <cstdlib>
 #include <fstream>
+#include <future>
 #include <gtest/gtest.h>
 #include <json/reader.h>
 #include <json/value.h>
@@ -15,6 +16,7 @@
 
 #include "ConfigFiles.h"
 #include "Creators.h"
+#include "DexOutput.h"
 #include "GlobalConfig.h"
 #include "MethodProfiles.h"
 #include "RedexTest.h"
@@ -91,6 +93,139 @@ static std::string write_temp_dead_class_file(const std::string& content) {
   out << content;
   out.close();
   return tmpl;
+}
+
+static void expect_parallel_coldstart_methods(
+    ConfigFiles& conf, const std::vector<std::string>& expected) {
+  std::promise<void> start;
+  auto ready = start.get_future().share();
+  std::vector<std::future<void>> readers;
+  readers.reserve(8);
+  for (size_t i = 0; i < 8; ++i) {
+    readers.emplace_back(std::async(std::launch::async, [&, ready]() {
+      ready.wait();
+      for (size_t j = 0; j < 64; ++j) {
+        EXPECT_EQ(conf.get_coldstart_methods(), expected);
+      }
+    }));
+  }
+  start.set_value();
+  for (auto& reader : readers) {
+    reader.get();
+  }
+}
+
+TEST_F(ConfigFilesTest, coldstart_methods_missing_config_parallel_readers) {
+  ConfigFiles conf{Json::Value(Json::objectValue)};
+  expect_parallel_coldstart_methods(conf, {});
+}
+
+TEST_F(ConfigFilesTest, coldstart_methods_empty_file_is_cached) {
+  auto path = write_temp_dead_class_file("");
+  Json::Value json_cfg;
+  json_cfg["coldstart_methods_file"] = path;
+  ConfigFiles conf(json_cfg);
+  expect_parallel_coldstart_methods(conf, {});
+  std::ofstream(path) << "LExample;.added:()V\n";
+  EXPECT_TRUE(conf.get_coldstart_methods().empty());
+  std::remove(path.c_str());
+}
+
+TEST_F(ConfigFilesTest, coldstart_methods_populated_file_parallel_readers) {
+  const std::vector<std::string> expected{"LExample;.a:()V", "LExample;.b:()V"};
+  auto path = write_temp_dead_class_file("LExample;.a:()V\nLExample;.b:()V\n");
+  Json::Value json_cfg;
+  json_cfg["coldstart_methods_file"] = path;
+  ConfigFiles conf(json_cfg);
+  expect_parallel_coldstart_methods(conf, expected);
+  std::remove(path.c_str());
+  EXPECT_EQ(conf.get_coldstart_methods(), expected);
+}
+
+TEST_F(ConfigFilesTest, coldstart_methods_failed_load_remains_retryable) {
+  auto temp = redex::make_tmp_dir("coldstart-retry-%%%%-%%%%");
+  const auto path = temp.path + "/methods.txt";
+  Json::Value json_cfg;
+  json_cfg["coldstart_methods_file"] = path;
+  ConfigFiles config(json_cfg);
+  EXPECT_THROW(config.get_coldstart_methods(), RedexException);
+  {
+    std::ofstream output(path);
+    output << "LExample;.a:()V\n";
+  }
+  expect_parallel_coldstart_methods(config, {"LExample;.a:()V"});
+}
+
+TEST_F(ConfigFilesTest, parallel_dex_writing_is_opt_in) {
+  Json::Value json_cfg;
+  ConfigFiles defaults(json_cfg);
+  defaults.parse_global_config();
+  EXPECT_FALSE(defaults.get_global_config()
+                   .get_config_by_name<DexOutputConfig>("dex_output")
+                   ->parallel_dex_writing);
+  json_cfg["dex_output"]["parallel_dex_writing"] = true;
+  ConfigFiles enabled(json_cfg);
+  enabled.parse_global_config();
+  EXPECT_TRUE(enabled.get_global_config()
+                  .get_config_by_name<DexOutputConfig>("dex_output")
+                  ->parallel_dex_writing);
+}
+
+TEST_F(ConfigFilesTest, parallel_dex_writing_rejects_nonpositive_batch_size) {
+  for (bool enabled : {false, true}) {
+    for (int size : {0, -1}) {
+      Json::Value json_cfg;
+      json_cfg["dex_output"]["parallel_dex_writing"] = enabled;
+      json_cfg["dex_output"]["parallel_dex_writing_max_batch_size"] = size;
+      ConfigFiles config(json_cfg);
+      EXPECT_THROW(config.parse_global_config(), RedexException);
+    }
+  }
+}
+
+TEST_F(ConfigFilesTest, parallel_dex_writing_allows_both_similarity_orderers) {
+  for (bool parallel : {false, true}) {
+    for (bool compression_conscious : {false, true}) {
+      for (bool use_array : {false, true}) {
+        Json::Value json_cfg;
+        json_cfg["dex_output"]["parallel_dex_writing"] = parallel;
+        json_cfg["method_similarity_order"]["disable"] = false;
+        json_cfg["method_similarity_order"]["use_compression_conscious_order"] =
+            compression_conscious;
+        if (use_array) {
+          json_cfg["bytecode_sort_mode"] = Json::Value(Json::arrayValue);
+          json_cfg["bytecode_sort_mode"].append("method_similarity_order");
+        } else {
+          json_cfg["bytecode_sort_mode"] = "method_similarity_order";
+        }
+        ConfigFiles config(json_cfg);
+        config.parse_global_config();
+        EXPECT_EQ(get_code_sort_mode(config, "classes"),
+                  (std::vector<SortMode>{SortMode::METHOD_SIMILARITY}));
+      }
+    }
+  }
+}
+
+TEST_F(ConfigFilesTest, parallel_dex_writing_allows_inactive_greedy_ordering) {
+  for (bool disabled : {false, true}) {
+    for (bool use_similarity_mode : {false, true}) {
+      Json::Value json_cfg;
+      json_cfg["dex_output"]["parallel_dex_writing"] = true;
+      json_cfg["method_similarity_order"]["disable"] = disabled;
+      json_cfg["method_similarity_order"]["use_compression_conscious_order"] =
+          false;
+      json_cfg["method_similarity_order"]["store_name_to_disable"] = "longtail";
+      json_cfg["bytecode_sort_mode"] =
+          use_similarity_mode ? "method_similarity_order" : "class_order";
+      ConfigFiles config(json_cfg);
+      config.parse_global_config();
+      if (disabled || !use_similarity_mode) {
+        EXPECT_NO_THROW(get_code_sort_mode(config, "classes"));
+      }
+      EXPECT_NO_THROW(get_code_sort_mode(config, "longtail"));
+    }
+  }
 }
 
 // Helper: create a ConfigFiles with a dead_class_list pointing to the given

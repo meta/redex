@@ -764,3 +764,212 @@ TEST_F(InstructionSequenceOutlinerTest, CallSiteCallNotOutlined) {
                        OPCODE_INVOKE_CUSTOM,
                        /* make_invoke_custom */ true);
 }
+
+namespace {
+
+// Four methods whose handler catches `catch_a` in one try region and `catch_b`
+// in the other. The handler's shared code copies the caught exception from
+// `v0` to `v1`, which the call after it reads, so an outlined copy of that
+// code returns the exception.
+std::vector<DexMethod*> make_caught_flow(std::vector<DexClass*>* classes,
+                                         const char* catch_a,
+                                         const char* catch_b) {
+  std::vector<DexType*> no_interfaces;
+  DexType* holder = DexType::make_type("LCE;");
+  DexClass* holder_cls =
+      create_class(holder, type::java_lang_Object(), no_interfaces, ACC_PUBLIC);
+  classes->push_back(holder_cls);
+  classes->push_back(create_class(DexType::make_type("LCE_E;"),
+                                  type::java_lang_Throwable(), no_interfaces,
+                                  ACC_PUBLIC));
+  for (const auto* field : {"LCE;.f1:I", "LCE;.f2:I"}) {
+    holder_cls->add_field(
+        DexField::make_field(field)->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  }
+  std::vector<DexMethod*> methods;
+  for (size_t i = 0; i < 4; i++) {
+    auto name = "m" + std::to_string(i);
+    auto* proto = DexProto::make_proto(
+        type::_void(), DexTypeList::make_type_list({type::_int()}));
+    auto* m =
+        DexMethod::make_method(holder, DexString::make_string(name), proto)
+            ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+    holder_cls->add_method(m);
+    std::ostringstream oss;
+    oss << "(\n(load-param v2)\n"
+        << "(if-eqz v2 :second)\n"
+        << "(.try_start a)\n"
+        << "(invoke-static () \"LCE;.work_" << name << ":()V\")\n"
+        << "(.try_end a)\n"
+        << "(return-void)\n"
+        << "(:second)\n"
+        << "(.try_start b)\n"
+        << "(invoke-static () \"LCE;.work2_" << name << ":()V\")\n"
+        << "(.try_end b)\n"
+        << "(return-void)\n"
+        << "(.catch (a) \"" << catch_a << "\")\n"
+        << "(.catch (b) \"" << catch_b << "\")\n"
+        << "(move-exception v0)\n"
+        << "(invoke-static () \"LCE;.mark_" << name << ":()V\")\n";
+    for (int j = 0; j < 7; j++) {
+      oss << "(sput v2 \"LCE;.f1:I\")\n";
+    }
+    oss << "(move-object v1 v0)\n";
+    for (int j = 0; j < 7; j++) {
+      oss << "(sput v2 \"LCE;.f2:I\")\n";
+    }
+    oss << "(invoke-static (v1) \"LCE;.report_" << name << ":(LCE_E;)V\")\n"
+        << "(return-void)\n)";
+    m->set_code(assembler::ircode_from_string(oss.str()));
+    methods.push_back(m);
+  }
+  return methods;
+}
+
+// The outlined calls that return a value. Each value reaches `report_*`, which
+// takes a `reported`, so ART rejects the call unless the outlined method
+// returns `reported` or a subclass.
+size_t check_caught_results(const std::vector<DexMethod*>& methods,
+                            const DexType* reported) {
+  size_t outlined_with_result = 0;
+  for (auto* m : methods) {
+    cfg::ScopedCFG cfg(m->get_code());
+    for (auto& mie : cfg::InstructionIterable(*cfg)) {
+      auto* insn = mie.insn;
+      if (!insn->has_method() || insn->get_method()->get_name()->str().find(
+                                     "$outlined") == std::string::npos) {
+        continue;
+      }
+      auto* rtype = insn->get_method()->get_proto()->get_rtype();
+      if (rtype == type::_void()) {
+        continue;
+      }
+      outlined_with_result++;
+      EXPECT_TRUE(type::check_cast(rtype, reported))
+          << "outlined method returns " << show(rtype)
+          << ", which ART does not accept at report_*(" << show(reported)
+          << "): " << show(insn) << " in " << show(m);
+    }
+  }
+  return outlined_with_result;
+}
+} // namespace
+
+// ART types a caught exception by its handler's catch types: here `LCE_E;`,
+// which both regions catch. The outlined method returns it as an `LCE_E;`.
+TEST_F(InstructionSequenceOutlinerTest, CaughtExceptionResultHasItsCatchType) {
+  auto methods = make_caught_flow(&m_classes, "LCE_E;", "LCE_E;");
+  run(/* type_check */ false);
+  EXPECT_GT(check_caught_results(methods, DexType::make_type("LCE_E;")), 0u);
+}
+
+// The two regions catch `LCE_MissingA;` and `LCE_MissingB;`, which Redex does
+// not define; on the device both extend `LCE_E;`, so ART types the exception
+// as an `LCE_E;`. Redex cannot compute that type, so no outlined method may
+// return the exception with a wider one.
+TEST_F(InstructionSequenceOutlinerTest,
+       CaughtExceptionOfUnjoinableCatchTypesIsNotReturnedWider) {
+  auto methods = make_caught_flow(&m_classes, "LCE_MissingA;", "LCE_MissingB;");
+  run(/* type_check */ false);
+  check_caught_results(methods, DexType::make_type("LCE_E;"));
+}
+
+// Four methods like this Java-like source, with one handler per catch type
+// and `failure` in the register of `e`:
+//
+//   try {
+//     work();
+//   } catch (RuntimeException | TimeoutException | InterruptedException e) {
+//     Exception failure = e;
+//     if (e instanceof ExecutionException &&
+//         e.getCause() instanceof Exception) {
+//       failure = (Exception) e.getCause();
+//     }
+//     report(failure);  // void report(Exception failure)
+//   }
+//
+// The code that computes `failure` is outlined into one method that takes the
+// caught exception and returns `failure`. ART types the exception by its
+// handler's catch type, so `failure` is an `Exception` in every handler. The
+// outlined method must return an `Exception`: with a `Throwable` result, ART
+// rejects the call to `report`.
+TEST_F(InstructionSequenceOutlinerTest,
+       CaughtExceptionsOfDistinctClassesAreReturnedAsTheirJoin) {
+  std::vector<DexType*> no_interfaces;
+  // No SDK is loaded, so the outliner moves a call to `getCause` only when its
+  // class is in scope.
+  DexClass* throwable_cls =
+      create_class(type::java_lang_Throwable(), type::java_lang_Object(),
+                   no_interfaces, ACC_PUBLIC);
+  throwable_cls->add_method(
+      DexMethod::make_method(
+          "Ljava/lang/Throwable;.getCause:()Ljava/lang/Throwable;")
+          ->make_concrete(ACC_PUBLIC, /* is_virtual */ true));
+  m_classes.push_back(throwable_cls);
+  auto* exception = DexType::make_type("Ljava/lang/Exception;");
+  m_classes.push_back(create_class(exception, type::java_lang_Throwable(),
+                                   no_interfaces, ACC_PUBLIC));
+  const std::vector<const char*> catch_types = {
+      "Ljava/lang/RuntimeException;", "Ljava/util/concurrent/TimeoutException;",
+      "Ljava/lang/InterruptedException;"};
+  for (const auto* name : catch_types) {
+    m_classes.push_back(create_class(DexType::make_type(name), exception,
+                                     no_interfaces, ACC_PUBLIC));
+  }
+  m_classes.push_back(create_class(
+      DexType::make_type("Ljava/util/concurrent/ExecutionException;"),
+      exception, no_interfaces, ACC_PUBLIC));
+  DexType* holder = DexType::make_type("LCJ;");
+  DexClass* holder_cls =
+      create_class(holder, type::java_lang_Object(), no_interfaces, ACC_PUBLIC);
+  m_classes.push_back(holder_cls);
+
+  std::vector<DexMethod*> methods;
+  for (size_t i = 0; i < 4; i++) {
+    auto name = "m" + std::to_string(i);
+    auto* m = DexMethod::make_method(
+                  holder, DexString::make_string(name),
+                  DexProto::make_proto(type::_void(),
+                                       DexTypeList::make_type_list({})))
+                  ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+    holder_cls->add_method(m);
+    std::ostringstream oss;
+    oss << "(\n(.try_start t)\n"
+        << "(invoke-static () \"LCJ;.work_" << name << ":()V\")\n"
+        << "(.try_end t)\n"
+        << "(return-void)\n";
+    for (size_t h = 0; h < catch_types.size(); h++) {
+      auto next = h + 1 < catch_types.size() ? " h" + std::to_string(h + 1)
+                                             : std::string();
+      auto here = h == 0 ? std::string("t") : "h" + std::to_string(h);
+      oss << "(.catch (" << here << next << ") \"" << catch_types[h] << "\")\n"
+          << "(move-exception v0)\n"
+          << "(instance-of v0 \"Ljava/util/concurrent/ExecutionException;\")\n"
+          << "(move-result-pseudo v2)\n"
+          << "(if-eqz v2 :done" << h << ")\n"
+          << "(check-cast v0 \"Ljava/util/concurrent/ExecutionException;\")\n"
+          << "(move-result-pseudo-object v3)\n"
+          << "(invoke-virtual (v3) "
+             "\"Ljava/lang/Throwable;.getCause:()Ljava/lang/Throwable;\")\n"
+          << "(move-result-object v4)\n"
+          << "(instance-of v4 \"Ljava/lang/Exception;\")\n"
+          << "(move-result-pseudo v2)\n"
+          << "(if-eqz v2 :done" << h << ")\n"
+          << "(invoke-virtual (v3) "
+             "\"Ljava/lang/Throwable;.getCause:()Ljava/lang/Throwable;\")\n"
+          << "(move-result-object v4)\n"
+          << "(check-cast v4 \"Ljava/lang/Exception;\")\n"
+          << "(move-result-pseudo-object v0)\n"
+          << "(:done" << h << ")\n"
+          << "(invoke-static (v0) \"LCJ;.report_" << name << "_" << h
+          << ":(Ljava/lang/Exception;)V\")\n"
+          << "(return-void)\n";
+    }
+    oss << ")";
+    m->set_code(assembler::ircode_from_string(oss.str()));
+    methods.push_back(m);
+  }
+
+  run(/* type_check */ false);
+  EXPECT_GT(check_caught_results(methods, exception), 0u);
+}

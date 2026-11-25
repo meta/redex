@@ -628,6 +628,19 @@ OutlinerTypeAnalysis::OutlinerTypeAnalysis(DexMethod* method)
       m_constant_uses([method]() {
         auto& cfg = method->get_code()->cfg();
         return std::make_unique<constant_uses::ConstantUses>(cfg, method);
+      }),
+      m_caught_types([method]() {
+        UnorderedMap<const IRInstruction*, const DexType*> res;
+        for (auto* block : method->get_code()->cfg().blocks()) {
+          auto it = block->get_first_insn();
+          if (it != block->end() &&
+              it->insn->opcode() == OPCODE_MOVE_EXCEPTION) {
+            res.emplace(
+                it->insn,
+                type_inference::caught_exception_type(block).value_or(nullptr));
+          }
+        }
+        return res;
       }) {}
 
 art::Value OutlinerTypeAnalysis::value_of_assignments(
@@ -675,8 +688,11 @@ art::Value OutlinerTypeAnalysis::supply_at(const IRInstruction* anchor,
     if (auto defs = known_defs_at(anchor, reg)) {
       return value_of_producers(*defs);
     }
-    auto dex_type = env.get_dex_type(reg);
-    return art::Value::of_type(dex_type ? *dex_type : nullptr);
+    // Defensive: type inference types a register as a reference only where
+    // every path defines it, so its producers are known. Without them, ART's
+    // type cannot be told; type inference's class can be wider, as `Throwable`
+    // is for a caught exception whose catch types have no join.
+    return art::Value::unknown();
   }
   case IRType::FLOAT:
     return art::Value::of_type(type::_float());
@@ -972,8 +988,13 @@ const DexType* OutlinerTypeAnalysis::get_result_type_helper(
   case IOPCODE_WRITE_BARRIER:
     not_reached();
 
-  case OPCODE_MOVE_EXCEPTION:
-    return type::java_lang_Throwable();
+  case OPCODE_MOVE_EXCEPTION: {
+    // A `move-exception` heads its handler block in a CFG.
+    auto it = m_caught_types->find(insn);
+    always_assert_log(it != m_caught_types->end(),
+                      "move-exception does not head a block");
+    return it->second;
+  }
 
   case OPCODE_NEG_INT:
   case OPCODE_NOT_INT:

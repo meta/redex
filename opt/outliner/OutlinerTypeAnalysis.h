@@ -281,6 +281,7 @@ class OutlinerTypeAnalysis {
   // that only constants define keeps those constants where their uses take
   // them as integral values; a literal used as a float, a wide value or null
   // takes that type, and a literal whose uses have no common type is unknown.
+  // A reference whose producers are not known is unknown.
   art::Value supply_at(const IRInstruction* anchor, reg_t reg);
 
   // What reaches a register that `defs` define, with constants kept as
@@ -319,6 +320,10 @@ class OutlinerTypeAnalysis {
   Lazy<live_range::DefUseChains> m_immediate_def_uses;
   Lazy<TypeEnvironments> m_type_environments;
   Lazy<constant_uses::ConstantUses> m_constant_uses;
+  // The type of the exception each `move-exception` holds, as ART's verifier
+  // types it (`type_inference::caught_exception_type`); nullptr when Redex
+  // cannot compute it, where type inference says `Throwable`.
+  Lazy<UnorderedMap<const IRInstruction*, const DexType*>> m_caught_types;
   // Whether each `and`, `or` and `xor` analysed so far is boolean (true) or
   // int (false); nullopt when the type of an operand is unknown.
   UnorderedMap<const IRInstruction*, std::optional<bool>> m_bitwise_booleanness;

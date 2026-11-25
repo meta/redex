@@ -1598,6 +1598,86 @@ static Candidate create_candidate(
   return Candidate{ota, std::move(pc), std::nullopt};
 }
 
+// A caught exception has the type ART's verifier gives it: the join of the
+// catch types of the throw edges into its handler, with `Throwable` for a
+// catch-all.
+TEST_F(OutlinerTypeAnalysisTest, get_result_type_of_caught_exception) {
+  ClassCreator object_creator(type::java_lang_Object());
+  object_creator.create();
+  ClassCreator throwable_creator(type::java_lang_Throwable());
+  throwable_creator.set_super(type::java_lang_Object());
+  throwable_creator.create();
+  auto make_exception = [](const char* name, const DexType* super) {
+    ClassCreator creator(DexType::make_type(name));
+    creator.set_super(const_cast<DexType*>(super));
+    return creator.create()->get_type();
+  };
+  auto* base = make_exception("LBaseFailure;", type::java_lang_Throwable());
+  make_exception("LReadFailure;", base);
+  make_exception("LWriteFailure;", base);
+
+  auto* method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:()V" (
+        (.try_start a)
+        (invoke-static () "LFoo;.read:()V")
+        (.try_end a)
+        (.try_start b)
+        (invoke-static () "LFoo;.read:()V")
+        (.try_end b)
+        (.try_start c)
+        (invoke-static () "LFoo;.write:()V")
+        (.try_end c)
+        (.try_start d)
+        (invoke-static () "LFoo;.write:()V")
+        (.try_end d)
+        (.try_start e)
+        (invoke-static () "LFoo;.read:()V")
+        (.try_end e)
+        (.try_start f)
+        (invoke-static () "LFoo;.write:()V")
+        (.try_end f)
+        (return-void)
+        (.catch (a) "LReadFailure;")
+        (move-exception v0)
+        (return-void)
+        (.catch (b) "LReadFailure;")
+        (.catch (c) "LWriteFailure;")
+        (move-exception v1)
+        (return-void)
+        (.catch (d))
+        (move-exception v2)
+        (return-void)
+        (.catch (e) "LMissingA;")
+        (.catch (f) "LMissingB;")
+        (move-exception v3)
+        (invoke-static (v3) "LFoo;.use:(Ljava/lang/Object;)V")
+        (return-void)
+      )))");
+  method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(method);
+
+  // The type of the exception that `move-exception` into `reg` holds.
+  auto type_caught = [&](reg_t reg) {
+    auto* insn = find_insn(method, [reg](IRInstruction* i) {
+      return i->opcode() == OPCODE_MOVE_EXCEPTION && i->dest() == reg;
+    });
+    return get_result_type(ota, {insn}, /* optional_extra_type */ nullptr);
+  };
+  EXPECT_EQ(type_caught(0), DexType::get_type("LReadFailure;"));
+  EXPECT_EQ(type_caught(1), base)
+      << "a handler for two exception classes holds their common superclass";
+  EXPECT_EQ(type_caught(2), type::java_lang_Throwable())
+      << "a catch-all handler holds a `Throwable`";
+  // `LMissingA;` and `LMissingB;` have no class definitions, so their join
+  // cannot be computed. The definition and the register where it is read must
+  // agree that the type is unknown.
+  EXPECT_EQ(type_caught(3), nullptr);
+  auto* use = find_insn(method, [](IRInstruction* i) {
+    return i->opcode() == OPCODE_INVOKE_STATIC && i->srcs_size() == 1;
+  });
+  EXPECT_EQ(ota.value_at(use, 3).upper(), nullptr);
+}
+
 TEST_F(OutlinerTypeAnalysisTest, get_type_demand_primitive) {
   auto* foo_method = assembler::method_from_string(R"(
       (method (public) "LFoo;.foo:(IZ)Z" (

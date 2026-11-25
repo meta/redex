@@ -169,8 +169,39 @@ TEST_F(SplitNetSavingTest,
   inlined.compiled_copies = 3;
   expect_terms(split_net_saving(inlined, config, /*host_compiled=*/true), 300,
                15, 5 + metadata() + load_params(2) + 5);
-  // By default the host itself is the one compiled copy.
+  // By default the host itself is the one compiled copy, on both sides of the
+  // split.
   EXPECT_EQ(suffix_input().compiled_copies, 1u);
+  EXPECT_FALSE(suffix_input().copies_after.has_value());
+}
+
+TEST_F(SplitNetSavingTest, ACopyOnlyOneSideOfTheSplitHasCostsTheWholeHost) {
+  msi::Config config;
+  // A host of 120 compiled code units that keeps 20 and the 5-unit launchpad.
+  // Inlined at three call sites before the split and five after it, the
+  // three copies on both sides each save 100 and gain the launchpad, and
+  // the two new ones each add the 25-unit host the split leaves.
+  auto more = suffix_input();
+  more.compiled_copies = 3;
+  more.copies_after = msi::NetSavingInput::CopiesAfter{
+      .copies = 5, .host_before = 120, .host_after = 20};
+  expect_terms(split_net_saving(more, config, /*host_compiled=*/true), 300,
+               15 + 2 * 25, 5 + metadata() + load_params(2) + 5);
+  // Inlined at five before and three after, the two copies that go away
+  // each save the whole host.
+  auto fewer = suffix_input();
+  fewer.compiled_copies = 5;
+  fewer.copies_after = msi::NetSavingInput::CopiesAfter{
+      .copies = 3, .host_before = 120, .host_after = 20};
+  expect_terms(split_net_saving(fewer, config, /*host_compiled=*/true),
+               300 + 2 * 120, 15, 5 + metadata() + load_params(2) + 5);
+  // The same count on both sides prices the split as without it.
+  auto same = suffix_input();
+  same.compiled_copies = 3;
+  same.copies_after = msi::NetSavingInput::CopiesAfter{
+      .copies = 3, .host_before = 120, .host_after = 20};
+  expect_terms(split_net_saving(same, config, /*host_compiled=*/true), 300, 15,
+               5 + metadata() + load_params(2) + 5);
 }
 
 TEST_F(SplitNetSavingTest, AHotSplitKeepsOneCompiledCopyOfWhatItEvicts) {

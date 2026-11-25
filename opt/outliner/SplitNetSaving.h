@@ -108,6 +108,20 @@ struct NetSavingInput {
   // copy of a small host that ART inlines into its compiled callers. Every
   // copy loses the evicted code and gains the launchpad.
   size_t compiled_copies{1};
+  // Set when the split changes how many compiled copies of the host there
+  // are, because the smaller host is inlined at more call sites or fewer. A
+  // copy that exists only before the split takes the whole host out of the
+  // compiled code; one that exists only after it adds the host the split
+  // leaves, launchpad included.
+  struct CopiesAfter {
+    // The compiled copies of the host after the split.
+    size_t copies;
+    // The compiled code units of the host before the split, and after it
+    // without the launchpad.
+    size_t host_before;
+    size_t host_after;
+  };
+  std::optional<CopiesAfter> copies_after{std::nullopt};
   // Whether the split itself is compiled, as a Hot split is: the evicted code
   // then stays compiled once, in the split.
   bool split_compiled{false};

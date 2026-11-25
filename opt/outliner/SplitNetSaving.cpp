@@ -7,6 +7,7 @@
 
 #include "SplitNetSaving.h"
 
+#include <algorithm>
 #include <variant>
 
 #include "Debug.h"
@@ -146,13 +147,28 @@ ClosureNetTerms split_net_saving(const NetSavingInput& input,
   // The shed counts as SAVED even though the host's switch is hot. It is
   // compiled code the host no longer holds, so the OAT shrinks by it, and no
   // code moves into the interpreter for it.
-  const auto copies = static_cast<int64_t>(input.compiled_copies);
+  const auto before = static_cast<int64_t>(input.compiled_copies);
+  const auto after = input.copies_after
+                         ? static_cast<int64_t>(input.copies_after->copies)
+                         : before;
+  const auto copies = std::min(before, after);
+  // The copies the split removes, each of the whole host, and those it adds,
+  // each of the host it leaves.
+  int64_t removed = 0;
+  int64_t added = 0;
+  if (input.copies_after) {
+    removed = (before - copies) *
+              static_cast<int64_t>(input.copies_after->host_before);
+    added = (after - copies) *
+            static_cast<int64_t>(input.copies_after->host_after + hot);
+  }
   const auto evicted = static_cast<int64_t>(input.evicted);
-  const auto saved = host_compiled ? copies * (evicted + host_dispatch_shed) -
-                                         (input.split_compiled ? evicted : 0)
-                                   : int64_t{0};
+  const auto saved = host_compiled
+                         ? copies * (evicted + host_dispatch_shed) + removed -
+                               (input.split_compiled ? evicted : 0)
+                         : int64_t{0};
   const auto added_ccuc =
-      host_compiled ? copies * static_cast<int64_t>(hot) : int64_t{0};
+      host_compiled ? copies * static_cast<int64_t>(hot) + added : int64_t{0};
   const auto dex_added =
       static_cast<int64_t>(hot + dex_only) - host_dispatch_shed;
   return ClosureNetTerms{.saved = saved,

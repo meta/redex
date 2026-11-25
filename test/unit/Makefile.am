@@ -134,6 +134,7 @@ check_PROGRAMS = \
     match_test \
     method_inline_test \
     method_splitting_test \
+    method_splitter_region_test_fixture_test \
     method_util_test \
     metrics_sink_test \
     monitor_count_test \
@@ -457,6 +458,10 @@ method_inline_test_SOURCES = MethodInlineTest.cpp
 tail_duplication_test_SOURCES = TailDuplicationTest.cpp
 
 method_splitting_test_SOURCES = MethodSplittingTest.cpp
+
+method_splitter_region_test_fixture_test_SOURCES = \
+	MethodSplitterRegionTestFixture.cpp \
+	MethodSplitterRegionTestFixtureTest.cpp
 
 method_util_test_SOURCES = MethodUtilTest.cpp
 

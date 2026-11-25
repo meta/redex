@@ -210,15 +210,15 @@ std::shared_ptr<const ReducedControlFlowGraph> reduce_cfg(DexMethod* method) {
   return std::make_shared<const ReducedControlFlowGraph>(cfg);
 }
 
-std::shared_ptr<MethodClosures> discover_closures(
-    DexMethod* method, std::shared_ptr<const ReducedControlFlowGraph> rcfg) {
+std::vector<Closure> SuffixStrategy::discover(
+    DexMethod* method, const ReducedControlFlowGraph& rcfg) const {
   std::vector<Closure> closures;
   Lazy<monitor_count::Analyzer> mca([method] {
     return std::make_unique<monitor_count::Analyzer>(method->get_code()->cfg());
   });
-  auto excluded_blocks = get_blocks_with_final_field_puts(method, rcfg.get());
-  for (const auto* reduced_block : rcfg->blocks()) {
-    if (reduced_block == rcfg->entry_block()) {
+  auto excluded_blocks = get_blocks_with_final_field_puts(method, &rcfg);
+  for (const auto* reduced_block : rcfg.blocks()) {
+    if (reduced_block == rcfg.entry_block()) {
       continue;
     }
     bool any_throw{false};
@@ -252,7 +252,7 @@ std::shared_ptr<MethodClosures> discover_closures(
       // TODO: Consider splitting the block?
       continue;
     }
-    auto reachable = rcfg->reachable(reduced_block);
+    auto reachable = rcfg.reachable(reduced_block);
     if (unordered_any_of(excluded_blocks,
                          [&](auto* e) { return reachable.contains(e); })) {
       continue;
@@ -260,6 +260,13 @@ std::shared_ptr<MethodClosures> discover_closures(
     closures.push_back((Closure){reduced_block, std::move(reachable),
                                  std::move(srcs), target});
   }
+  return closures;
+}
+
+std::shared_ptr<MethodClosures> discover_closures(
+    DexMethod* method, std::shared_ptr<const ReducedControlFlowGraph> rcfg) {
+  SuffixStrategy strategy;
+  auto closures = strategy.discover(method, *rcfg);
   if (closures.empty()) {
     return nullptr;
   }

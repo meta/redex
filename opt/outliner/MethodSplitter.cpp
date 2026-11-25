@@ -292,14 +292,14 @@ SplitMethod SplitMethod::create(const SplittableClosure& splittable_closure,
   auto& split_cfg = split_code->cfg();
   split_code->set_debug_item(std::make_unique<DexDebugItem>());
   // NOTE for callers building non-suffix splits (e.g. cold mid-method
-  // regions): `deep_copy` preserves ALL edges of the original cfg —
+  // regions): `deep_copy` preserves ALL edges of the original cfg --
   // including those crossing what the caller may consider a region
   // boundary. The split body will continue to execute past that
   // boundary unless the caller explicitly truncates it. For suffix
   // splits the boundary IS the original method's return so no
   // truncation is needed. For region splits, the caller must walk
   // the region's exit edges in `split_cfg`, delete them, and append
-  // a `return-*` instruction — otherwise the split body double-
+  // a `return-*` instruction -- otherwise the split body double-
   // executes the rejoin code AND the launchpad's `goto rejoin`
   // executes it again. See `apply_code_changes` below for the canonical
   // truncation pattern.
@@ -562,7 +562,15 @@ void split_methods_in_stores(
         reserved_mrefs, splittable_closures, name_infix, &uniquifiers, stats,
         &dex_states, &concurrent_added_methods, concurrent_hot_methods,
         concurrent_new_hot_split_methods);
-    insert_unordered_iterable(stats->added_methods, concurrent_added_methods);
+    // Transfer per-iteration newly-emitted splits into Stats. Sort by
+    // method identity so the append order is deterministic across
+    // runs (ConcurrentSet iteration is not).
+    auto sorted =
+        unordered_to_ordered(concurrent_added_methods, compare_dexmethods);
+    stats->added_methods.reserve(stats->added_methods.size() + sorted.size());
+    for (auto* m : sorted) {
+      stats->added_methods.emplace_back(m, SplitKind::Suffix);
+    }
     TRACE(MS, 1, "[%zu] Split out %zu methods", iteration,
           concurrent_added_methods.size());
   }

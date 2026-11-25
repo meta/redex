@@ -73,6 +73,9 @@ void MethodSplittingPass::bind_config() {
        "no-op insert of the root method. Off by default.");
   bind("excluded_prefices", m_config.excluded_prefices,
        m_config.excluded_prefices);
+  bind("enable_region_splitting", m_config.enable_region_splitting,
+       m_config.enable_region_splitting,
+       "Master switch for cold-region outlining (off by default).");
 }
 
 void MethodSplittingPass::run_pass(DexStoresVector& stores,

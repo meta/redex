@@ -53,7 +53,25 @@ void normalize_cfg_for_splitting(
 // rather than obviously broken.
 std::shared_ptr<const ReducedControlFlowGraph> reduce_cfg(DexMethod* method);
 
-// Find potentially relevant closures for a method.
+// Strategy that produces a set of `Closure` candidates for a single
+// method. Callers may run more than one strategy and concatenate the
+// candidates before scoring.
+class ClosureDiscoveryStrategy {
+ public:
+  virtual ~ClosureDiscoveryStrategy() = default;
+  virtual std::vector<Closure> discover(
+      DexMethod* method, const ReducedControlFlowGraph& rcfg) const = 0;
+};
+
+class SuffixStrategy : public ClosureDiscoveryStrategy {
+ public:
+  std::vector<Closure> discover(
+      DexMethod* method, const ReducedControlFlowGraph& rcfg) const override;
+};
+
+// Find potentially relevant closures for a method. Thin dispatcher
+// over `SuffixStrategy` retained for callers that don't yet have a
+// strategy registry; new code should construct a strategy directly.
 std::shared_ptr<MethodClosures> discover_closures(
     DexMethod* method, std::shared_ptr<const ReducedControlFlowGraph> rcfg);
 

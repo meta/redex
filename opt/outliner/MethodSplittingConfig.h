@@ -51,6 +51,10 @@ struct Config {
   size_t cost_split_switch_case{4};
 
   std::vector<std::string> excluded_prefices;
+
+  // Master switch for cold-region outlining. When false,
+  // MethodSplittingPass runs suffix splitting only.
+  bool enable_region_splitting{false};
 };
 
 } // namespace method_splitting_impl

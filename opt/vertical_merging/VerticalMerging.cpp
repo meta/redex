@@ -139,6 +139,8 @@ size_t record_type_like_strings(const std::vector<const DexString*>& strings,
     refs++;
     if (record_type_like_string_refs) {
       record_dont_merge_state(type, kStrict, dont_merge_status);
+      TRACE(VMERGE, 9, "dont_merge %s for type-like string reference: %s",
+            SHOW(type), string->c_str());
     }
   }
   return refs;
@@ -545,17 +547,6 @@ size_t record_code_reference(const Scope& scope,
             record_class_literal(type_arg->type(), dont_merge_status);
           }
         }
-      } else if (opcode::is_const_string(insn->opcode())) {
-        auto* type = java_names::get_element_type_from_external_name(
-            insn->get_string()->str());
-        if (type != nullptr) {
-          type_like_string_refs++;
-          if (record_type_like_string_refs) {
-            record_dont_merge_state(type, kStrict, dont_merge_status);
-            TRACE(VMERGE, 9, "dont_merge %s for type-like string reference: %s",
-                  SHOW(type), SHOW(insn));
-          }
-        }
       } else if (insn->has_field()) {
         DexField* field = resolve_field(insn->get_field());
         if (field != nullptr) {
@@ -599,6 +590,13 @@ size_t record_code_reference(const Scope& scope,
           }
         }
       }
+      // Any string of the instruction, such as that of a const-string or one
+      // that a call site passes to its bootstrap method, can name a class that
+      // code loads by name.
+      std::vector<const DexString*> strings;
+      insn->gather_strings(strings);
+      type_like_string_refs += record_type_like_strings(
+          strings, record_type_like_string_refs, dont_merge_status);
       for_each_method_handle(insn, [&](const DexMethodHandle* method_handle) {
         record_method_handle_value(method_handle, method, dont_merge_status);
       });

@@ -373,6 +373,29 @@ TEST_F(VerticalMergingMethodHandleTest, classArgumentKeepsItsClass) {
   EXPECT_EQ(callsite->args().at(0)->show(), "[LBase;");
 }
 
+// A const-string that names a class keeps it from being merged away: code can
+// load the class by that name. A string among the bootstrap arguments of a call
+// site can name a class too.
+TEST_F(VerticalMergingMethodHandleTest, stringArgumentKeepsTheClassItNames) {
+  auto* base = make_base(ACC_PUBLIC | ACC_ABSTRACT);
+  auto* impl = make_impl();
+  make_user(R"((
+    (new-instance "LImpl;")
+    (move-result-pseudo-object v0)
+    (invoke-direct (v0) "LImpl;.<init>:()V")
+    (invoke-static () "LUser;.placeholder:()V")
+    (return-void)
+  ))");
+  auto* use = DexMethod::get_method("LUser;.use:()V")->as_def();
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.push_back(
+      std::make_unique<DexEncodedValueString>(DexString::make_string("Base")));
+  redex::make_invoke_custom(use->get_code(), "run", "()V", std::move(args));
+
+  EXPECT_EQ(run_pass(base, impl), 3);
+  EXPECT_EQ(impl->get_super_class(), base->get_type());
+}
+
 namespace {
 
 // `LUser;.use` creates a `LBase;` and calls `LImpl;.make`, so `LImpl;` has no

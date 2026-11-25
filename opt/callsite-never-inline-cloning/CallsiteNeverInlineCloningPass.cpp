@@ -263,156 +263,102 @@ CallsiteProfile collect_callsite_profiles(
             return;
           }
           auto& cfg = code.cfg();
-          if (code.count_opcodes() > config.max_caller_instructions) {
+          switch (never_inline_analysis::caller_inline_budget(
+              code.count_opcodes(), cfg.get_registers_size(),
+              config.max_caller_instructions, config.max_caller_registers)) {
+          case never_inline_analysis::CallerBudget::kTooManyInstructions:
             local_stats.callers_too_many_instructions++;
             return;
-          }
-          if (cfg.get_registers_size() > config.max_caller_registers) {
+          case never_inline_analysis::CallerBudget::kTooManyRegisters:
             local_stats.callers_too_many_registers++;
             return;
+          case never_inline_analysis::CallerBudget::kWithin:
+            break;
           }
-          for (auto* block : cfg.blocks()) {
-            bool callsite_has_catch =
-                cfg.get_succ_edge_of_type(block, cfg::EDGE_THROW) != nullptr;
-
-            // Mirrors ArtProfileWriterPass's own reverse walk exactly:
-            // an invoke immediately preceding an explicit `throw` at the
-            // end of this block, up to and including the first one that
-            // is not an `<init>` call, is typically just constructing
-            // the thrown exception rather than a normal call site.
-            UnorderedSet<IRInstruction*> throw_adjacent_invokes;
-            {
-              bool has_throw = false;
-              bool has_non_init_invoke = false;
-              for (auto& mie : InstructionIterable(block).reversed()) {
-                auto* insn = mie.insn;
-                if (!opcode::is_an_invoke(insn->opcode())) {
-                  if (opcode::is_throw(insn->opcode())) {
-                    has_throw = true;
-                  }
-                  continue;
+          auto skips = never_inline_analysis::for_each_exact_call_site(
+              caller, cfg, callee_context.non_true_virtuals,
+              [&](cfg::Block* block, IRInstruction* insn, DexMethod* callee) {
+                bool callsite_has_catch =
+                    cfg.get_succ_edge_of_type(block, cfg::EDGE_THROW) !=
+                    nullptr;
+                // A clone replaces the callee this invoke names, so the
+                // invoke must name the definition itself.
+                if (callee != insn->get_method()) {
+                  local_stats.invokes_unresolved++;
+                  return;
                 }
-                if (has_throw && !has_non_init_invoke) {
-                  if (!method::is_init(insn->get_method())) {
-                    has_non_init_invoke = true;
-                  }
-                  throw_adjacent_invokes.insert(insn);
+                // Only present for callees in `scope`; see
+                // `CalleeContext::facts`'s own comment above.
+                const auto* facts = callee_context.facts.get(callee);
+                if (facts == nullptr) {
+                  local_stats.invokes_external_or_no_code_callee++;
+                  return;
                 }
-              }
-            }
-
-            for (auto& mie : InstructionIterable(block)) {
-              auto* insn = mie.insn;
-              if (!opcode::is_an_invoke(insn->opcode())) {
-                continue;
-              }
-              if (throw_adjacent_invokes.count(insn)) {
-                local_stats.invokes_throw_adjacent++;
-                continue;
-              }
-              auto op = insn->opcode();
-              if (op == OPCODE_INVOKE_SUPER) {
-                local_stats.invokes_super_opcode++;
-                continue;
-              }
-              if (op == OPCODE_INVOKE_INTERFACE) {
-                local_stats.invokes_interface_opcode++;
-                continue;
-              }
-              if (op != OPCODE_INVOKE_STATIC && op != OPCODE_INVOKE_DIRECT &&
-                  op != OPCODE_INVOKE_VIRTUAL) {
-                // Not reachable given is_an_invoke(), kept as a
-                // defensive default.
-                continue;
-              }
-              auto* callee = resolve_invoke_method_deprecated(insn, caller);
-              if (callee == nullptr || callee != insn->get_method()) {
-                local_stats.invokes_unresolved++;
-                continue;
-              }
-              if (callee->get_code() == nullptr) {
-                local_stats.invokes_external_or_no_code_callee++;
-                continue;
-              }
-              auto* callee_cls = type_class(callee->get_class());
-              if (callee_cls == nullptr || callee_cls->is_external()) {
-                local_stats.invokes_external_or_no_code_callee++;
-                continue;
-              }
-              // Only present for callees in `scope`; see
-              // `CalleeContext::facts`'s own comment above.
-              const auto* facts = callee_context.facts.get(callee);
-              if (facts == nullptr) {
-                local_stats.invokes_external_or_no_code_callee++;
-                continue;
-              }
-              // Exact dispatch only: an invoke-virtual is accepted only
-              // when the resolved callee cannot be overridden at this
-              // call site. No receiver-type inference is attempted for
-              // an otherwise true-virtual target.
-              if (callee->is_virtual() &&
-                  callee_context.non_true_virtuals.count(callee) == 0) {
-                local_stats.invokes_ambiguous_virtual_callee++;
-                continue;
-              }
-              // <init>/<clinit> cannot be cloned under a different name:
-              // the JVM and ART both require the literal names
-              // "<init>"/"<clinit>" for these methods, so renaming would
-              // break object-construction verification entirely.
-              // (ArtProfileWriterPass has no equivalent exclusion: it
-              // only ever attaches an annotation, never renames.)
-              if (method::is_any_init(callee)) {
-                local_stats.invokes_init_callee++;
-                continue;
-              }
-              if (facts->no_optimizations) {
-                local_stats.invokes_no_optimizations_callee++;
-                continue;
-              }
-              // `no_outlining` protects methods whose body or identity must
-              // not be copied into a new method. ReachableNativesPass uses it
-              // for load-library entry points: cloning one would create an
-              // unpinned copy whose forwarding body supplies a non-constant
-              // library-name parameter, violating that pass's final analysis.
-              // This is the same gate used by HotColdMethodSpecializingPass
-              // and the other body-extracting/outlining transforms. A plain
-              // `dont_inline` bit is intentionally not enough: it constrains
-              // Redex inlining, not body cloning.
-              if (facts->no_outlining) {
-                local_stats.invokes_no_outlining_callee++;
-                continue;
-              }
-              // Adding even an otherwise unreachable helper changes the
-              // declared-method set that reflection can observe. Follow
-              // PartialApplication's same-class helper rule and only add a
-              // clone to a class whose name is not kept for reflective use.
-              if (facts->non_renamable_class) {
-                local_stats.invokes_non_renamable_callee_class++;
-                continue;
-              }
-              if (facts->already_never_inline) {
-                local_stats.invokes_already_never_inline_callee++;
-                continue;
-              }
-              if (facts->blocklisted) {
-                local_stats.invokes_blocklisted_callee++;
-                continue;
-              }
-              if (callsite_has_catch && facts->has_catch) {
-                local_stats.invokes_callsite_and_callee_both_have_catch++;
-                continue;
-              }
-              if (is_sufficiently_hot(block, callee)) {
-                profile.hot_callsite_counts.fetch_add(callee, 1);
-              } else {
-                profile.cold_callsites.update(
-                    callee,
-                    [&](DexMethod*, std::vector<ColdCallsite>& v, bool) {
-                      v.push_back(ColdCallsite{caller, insn});
-                    });
-              }
-            }
-          }
+                // <init>/<clinit> cannot be cloned under a different name:
+                // the JVM and ART both require the literal names
+                // "<init>"/"<clinit>" for these methods, so renaming would
+                // break object-construction verification entirely.
+                // (ArtProfileWriterPass has no equivalent exclusion: it
+                // only ever attaches an annotation, never renames.)
+                if (method::is_any_init(callee)) {
+                  local_stats.invokes_init_callee++;
+                  return;
+                }
+                if (facts->no_optimizations) {
+                  local_stats.invokes_no_optimizations_callee++;
+                  return;
+                }
+                // `no_outlining` protects methods whose body or identity must
+                // not be copied into a new method. ReachableNativesPass uses it
+                // for load-library entry points: cloning one would create an
+                // unpinned copy whose forwarding body supplies a non-constant
+                // library-name parameter, violating that pass's final analysis.
+                // This is the same gate used by HotColdMethodSpecializingPass
+                // and the other body-extracting/outlining transforms. A plain
+                // `dont_inline` bit is intentionally not enough: it constrains
+                // Redex inlining, not body cloning.
+                if (facts->no_outlining) {
+                  local_stats.invokes_no_outlining_callee++;
+                  return;
+                }
+                // Adding even an otherwise unreachable helper changes the
+                // declared-method set that reflection can observe. Follow
+                // PartialApplication's same-class helper rule and only add a
+                // clone to a class whose name is not kept for reflective use.
+                if (facts->non_renamable_class) {
+                  local_stats.invokes_non_renamable_callee_class++;
+                  return;
+                }
+                if (facts->already_never_inline) {
+                  local_stats.invokes_already_never_inline_callee++;
+                  return;
+                }
+                if (facts->blocklisted) {
+                  local_stats.invokes_blocklisted_callee++;
+                  return;
+                }
+                if (callsite_has_catch && facts->has_catch) {
+                  local_stats.invokes_callsite_and_callee_both_have_catch++;
+                  return;
+                }
+                if (is_sufficiently_hot(block, callee)) {
+                  profile.hot_callsite_counts.fetch_add(callee, 1);
+                } else {
+                  profile.cold_callsites.update(
+                      callee,
+                      [&](DexMethod*, std::vector<ColdCallsite>& v, bool) {
+                        v.push_back(ColdCallsite{caller, insn});
+                      });
+                }
+              });
+          local_stats.invokes_throw_adjacent += skips.throw_adjacent;
+          local_stats.invokes_super_opcode += skips.super_invoke;
+          local_stats.invokes_interface_opcode += skips.interface_invoke;
+          local_stats.invokes_unresolved += skips.unresolved;
+          local_stats.invokes_external_or_no_code_callee +=
+              skips.external_or_no_code;
+          local_stats.invokes_ambiguous_virtual_callee +=
+              skips.ambiguous_virtual;
         });
         return local_stats;
       });

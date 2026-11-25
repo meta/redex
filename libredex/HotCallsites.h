@@ -41,10 +41,10 @@ struct HotCallsiteThresholds {
 };
 
 // `ArtProfileWriterPass`'s defaults for these bounds, which its doc strings
-// explain, for a pass that reads the configuration that pass runs with.
+// explain, for a pass that reads the configuration that pass runs with. The
+// caller bounds default to `kDefaultMaxCallerInstructions` and
+// `kDefaultMaxCallerRegisters`.
 inline constexpr float kDefaultAppearThreshold = -1.0f;
-inline constexpr size_t kDefaultMaxCallerInstructions = 1100;
-inline constexpr size_t kDefaultMaxCallerRegisters = 32;
 
 // `ArtProfileWriterPass`'s defaults for its `min_hot_callsites` rule: off, and
 // applied to callees of at least this many code units once on.
@@ -83,20 +83,11 @@ CallerVerdict classify_caller(bool compiled,
 // up to and including the first of them that is not a constructor call.
 template <typename F>
 void for_each_block_callsite(cfg::Block* block, F&& f) {
-  bool has_throw = false;
-  bool has_non_init_invoke = false;
+  auto throw_invokes = throw_constructing_invokes(block);
   for (auto& mie : InstructionIterable(block).reversed()) {
     auto* insn = mie.insn;
-    if (!opcode::is_an_invoke(insn->opcode())) {
-      if (opcode::is_throw(insn->opcode())) {
-        has_throw = true;
-      }
-      continue;
-    }
-    if (has_throw && !has_non_init_invoke) {
-      if (!method::is_init(insn->get_method())) {
-        has_non_init_invoke = true;
-      }
+    if (!opcode::is_an_invoke(insn->opcode()) ||
+        throw_invokes.count(insn) != 0u) {
       continue;
     }
     f(insn);

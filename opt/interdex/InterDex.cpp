@@ -22,6 +22,7 @@
 #include "InterDexPassPlugin.h"
 #include "MethodProfiles.h"
 #include "ReachableClasses.h"
+#include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
 #include "Walkers.h"
@@ -84,20 +85,22 @@ UnorderedSet<DexClass*> find_unrefenced_coldstart_classes(
         [&](DexMethod* meth, const IRCode& /*code*/) {
           auto* base_cls = meth->get_class();
           always_assert(meth->get_code()->cfg_built());
+          auto add_reference = [&](const DexType* type) {
+            if (base_cls != type && coldstart_classes.count(type) > 0) {
+              cold_cold_references.insert(type);
+            }
+          };
           for (auto& mie : cfg::InstructionIterable(meth->get_code()->cfg())) {
             auto* inst = mie.insn;
-            const DexType* called_cls = nullptr;
-            if (inst->has_method()) {
-              called_cls = inst->get_method()->get_class();
-            } else if (inst->has_field()) {
-              called_cls = inst->get_field()->get_class();
-            } else if (inst->has_type()) {
-              called_cls = inst->get_type();
-            }
-            if (called_cls != nullptr && base_cls != called_cls &&
-                coldstart_classes.count(called_cls) > 0) {
-              cold_cold_references.insert(called_cls);
-            }
+            for_each_named_type(inst, add_reference);
+            for_each_field_access(inst, [&](IROpcode, DexFieldRef* field,
+                                            const DexMethodHandle*) {
+              add_reference(field->get_class());
+            });
+            for_each_invoke(inst, [&](IROpcode, DexMethodRef* method,
+                                      const DexMethodHandle*) {
+              add_reference(method->get_class());
+            });
           }
         });
     for (const auto& cls : scope) {

@@ -12,6 +12,7 @@
 #include "Debug.h"
 #include "DexClass.h"
 #include "DexLimits.h"
+#include "IRAssembler.h"
 #include "RedexTest.h"
 #include "RedexTestUtils.h"
 
@@ -27,7 +28,8 @@ class InterDexTest : public RedexIntegrationTest {
                    bool order_interdex = true,
                    bool define_dynamically_dead_classes = false,
                    bool last_dexes_only = false,
-                   bool fill_last_coldstart_dex = false) {
+                   bool fill_last_coldstart_dex = false,
+                   bool static_prune = false) {
     if (define_dynamically_dead_classes) {
       for (auto& cls : *classes) {
         if (cls->get_name() ==
@@ -62,6 +64,10 @@ class InterDexTest : public RedexIntegrationTest {
 
     if (fill_last_coldstart_dex) {
       cfg["InterDexPass"]["fill_last_coldstart_dex"] = true;
+    }
+
+    if (static_prune) {
+      cfg["InterDexPass"]["static_prune"] = true;
     }
 
     if (define_dynamically_dead_classes && last_dexes_only) {
@@ -734,6 +740,63 @@ TEST_F(InterDexTest, last_dexes_halfnosis) {
       EXPECT_NE(cls->get_name()->str(), "Lcom/facebook/redextest/C7;");
     }
   }
+}
+
+// With static_prune, a cold-start class keeps its cold-start position only if
+// a root or another kept cold-start class refers to it. C0 is a root (its name
+// is used) whose method takes a C1, so C1 is kept. The only references to C2
+// and C3 are a method handle of C2's constructor and a method type returning
+// C3, held in C1's code, so they are kept as well. C4 is referenced by nothing
+// and loses its position.
+TEST_F(InterDexTest, static_prune_counts_references_in_method_handles_and_types) {
+  auto* c0 = type_class(DexType::get_type("Lcom/facebook/redextest/C0;"));
+  c0->rstate.set_name_used();
+  c0->add_method(assembler::method_from_string(R"(
+    (method (public static) "Lcom/facebook/redextest/C0;.take:(Lcom/facebook/redextest/C1;)V"
+     (
+      (load-param-object v0)
+      (return-void)
+     )
+    )
+  )"));
+  type_class(DexType::get_type("Lcom/facebook/redextest/C1;"))
+      ->add_method(assembler::method_from_string(R"(
+    (method (public static) "Lcom/facebook/redextest/C1;.handles:()V"
+     (
+      (const-method-handle invoke-constructor "Lcom/facebook/redextest/C2;.<init>:()V")
+      (move-result-pseudo-object v0)
+      (const-method-type "()Lcom/facebook/redextest/C3;")
+      (move-result-pseudo-object v1)
+      (return-void)
+     )
+    )
+  )"));
+
+  define_test(
+      {
+          "com/facebook/redextest/InterDexPrimary.class",
+          "com/facebook/redextest/C0.class",
+          "com/facebook/redextest/C1.class",
+          "com/facebook/redextest/C2.class",
+          "com/facebook/redextest/C3.class",
+          "com/facebook/redextest/C4.class",
+      },
+      "Lsecondary/dex00/Canary;,ordinal=0,coldstart=1,extended=0,primary=0,scroll=0,background=0\n",
+      /* minimize_cross_dex_refs_explore_alternatives */ false,
+      /* order_interdex */ true,
+      /* define_dynamically_dead_classes */ false,
+      /* last_dexes_only */ false,
+      /* fill_last_coldstart_dex */ false,
+      /* static_prune */ true);
+
+  auto is_perf_sensitive = [](const char* name) {
+    return type_class(DexType::get_type(name))->is_perf_sensitive();
+  };
+  EXPECT_TRUE(is_perf_sensitive("Lcom/facebook/redextest/C0;"));
+  EXPECT_TRUE(is_perf_sensitive("Lcom/facebook/redextest/C1;"));
+  EXPECT_TRUE(is_perf_sensitive("Lcom/facebook/redextest/C2;"));
+  EXPECT_TRUE(is_perf_sensitive("Lcom/facebook/redextest/C3;"));
+  EXPECT_FALSE(is_perf_sensitive("Lcom/facebook/redextest/C4;"));
 }
 
 /* clang-format on */

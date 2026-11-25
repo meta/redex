@@ -504,6 +504,43 @@ const DexType* declare_parameter(const Demand& uses,
   return supply().upper();
 }
 
+bool accepts_argument(const DexType* parameter, const Value& passed) {
+  if (parameter == nullptr) {
+    return false;
+  }
+  if (type::is_integral(parameter)) {
+    const auto integral = passed.integral();
+    return integral && integral->held_by(parameter);
+  }
+  if (const auto bit = primitive_bit(parameter); bit != 0) {
+    if (passed.m_integral || !passed.m_references.empty() ||
+        (passed.m_primitives & ~bit) != 0) {
+      return false;
+    }
+    const bool wide = parameter != type::_float();
+    return wide ? !passed.m_narrow_constant : !passed.m_wide_constant;
+  }
+  if (passed.m_integral || passed.m_primitives != 0 || passed.m_wide_constant) {
+    return false;
+  }
+  // nullptr when the element type was never created, so no class defines it.
+  const auto* element = type::get_element_type_if_array(parameter);
+  if (element == parameter ||
+      (element != nullptr &&
+       (type::is_primitive(element) || element == type::java_lang_Object()))) {
+    return true;
+  }
+  const auto* cls = element == nullptr ? nullptr : type_class(element);
+  if (cls != nullptr && !is_interface(cls)) {
+    return true;
+  }
+  // An array of an interface, or of a class Redex cannot see.
+  return !passed.m_unknown &&
+         unordered_all_of(passed.m_references, [parameter](const DexType* t) {
+           return t == parameter;
+         });
+}
+
 const DexType* declare_result(const Value& returned) {
   return returned.exact();
 }
@@ -569,6 +606,30 @@ art::Value OutlinerTypeAnalysis::value_of_assignments(
     return incoming ? *incoming : art::Value::unknown();
   }
   return value_of_defs(*defs, incoming ? *incoming : art::Value(), candidate);
+}
+
+art::Value OutlinerTypeAnalysis::value_of_producers(
+    const UnorderedSet<const IRInstruction*>& defs) {
+  art::Value value;
+  UnorderedSet<const IRInstruction*> copies;
+  for (const auto* def : UnorderedIterable(defs)) {
+    if (opcode::is_a_move(def->opcode()) ||
+        opcode::is_move_result_any(def->opcode())) {
+      copies.insert(def);
+    } else {
+      value.join_with(value_of_def(def));
+    }
+  }
+  if (!copies.empty()) {
+    auto producers = get_defs(copies);
+    if (!producers) {
+      return art::Value::unknown();
+    }
+    for (const auto* producer : UnorderedIterable(*producers)) {
+      value.join_with(value_of_def(producer));
+    }
+  }
+  return value;
 }
 
 art::Value OutlinerTypeAnalysis::value_at(const IRInstruction* anchor,
@@ -1531,15 +1592,21 @@ art::Value OutlinerTypeAnalysis::value_of_defs(
     const UnorderedSet<const IRInstruction*>& defs,
     art::Value value,
     const Membership& candidate) {
-  UnorderedSet<const IRInstruction*> const_insns;
-  for (const auto* def : UnorderedIterable(defs)) {
-    if (def->opcode() == OPCODE_CONST || def->opcode() == OPCODE_CONST_WIDE) {
-      const_insns.insert(def);
-    }
-    value.join_with(value_of_def(def));
-  }
+  // `defs` are producers: a copy among them would hide the constants it copies
+  // from the scan below.
+  always_assert(unordered_none_of(defs, [](const IRInstruction* def) {
+    return opcode::is_a_move(def->opcode()) ||
+           opcode::is_move_result_any(def->opcode());
+  }));
+  value.join_with(value_of_producers(defs));
   if (value.is_constant()) {
     // Constants alone give a register no type; their uses do.
+    UnorderedSet<const IRInstruction*> const_insns;
+    for (const auto* def : UnorderedIterable(defs)) {
+      if (def->opcode() == OPCODE_CONST || def->opcode() == OPCODE_CONST_WIDE) {
+        const_insns.insert(def);
+      }
+    }
     return value.typed_by_uses(
         get_const_insns_type_demand(candidate, const_insns));
   }

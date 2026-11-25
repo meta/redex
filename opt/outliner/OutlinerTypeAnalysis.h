@@ -136,6 +136,8 @@ class Value {
   const DexType* exact() const;
 
  private:
+  friend bool accepts_argument(const DexType* parameter, const Value& passed);
+
   bool m_unknown{false};
   // The integral producers.
   std::optional<IntegralType> m_integral;
@@ -191,6 +193,21 @@ class Demand {
 const DexType* declare_parameter(const Demand& uses,
                                  const std::function<Value()>& supply);
 
+// Whether a parameter declared `parameter` holds `passed`, every value its
+// call passes, in every order in which ART may merge them. The call may pass
+// fewer values than the uses were verified with: when the entry is a loop
+// header whose back edge moves into the split, the call passes only the
+// values that reach the header from before the loop. Each is still at or
+// below the merge the uses were verified with. Only for an integral parameter
+// and for an array of interfaces does merge order change the answer; any
+// other parameter accepts a value of its kind (a reference for a reference,
+// a `float` for a `float`) in any order. A parameter that is an array of an
+// interface, or of a class Redex cannot see, is taken to hold only values of
+// exactly its type, or null; an unknown value is refused only there and at an
+// integral parameter. `passed` must list each value, not a join of them.
+[[nodiscard]] bool accepts_argument(const DexType* parameter,
+                                    const Value& passed);
+
 // The type of a value outlined code gives back. The caller's code after the
 // call was verified against the one type ART gave the register, so only a
 // type that every merge order ends at may be declared.
@@ -220,6 +237,14 @@ class OutlinerTypeAnalysis {
 
   // The value of `reg` where `anchor` reads it.
   art::Value value_at(const IRInstruction* anchor, reg_t reg);
+
+  // What reaches a register that `defs` define, with constants kept as
+  // constants: the join of the value of each producer as ART types it. A move
+  // or move-result stands for the producers of what it copies; the value is
+  // unknown when those are not known. ART types a constant by its value, an
+  // `and`, `or` or `xor` as `boolean` when every operand is boolean and as
+  // `int` otherwise, and any other producer by its result type.
+  art::Value value_of_producers(const UnorderedSet<const IRInstruction*>& defs);
 
   // What the instructions of `pc` require of the value `reg` holds on entry.
   // `result` is the register the candidate gives back, with its declared type.

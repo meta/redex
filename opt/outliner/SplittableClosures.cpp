@@ -661,6 +661,36 @@ NetSavingInput net_saving_input(const ScoredClosure& sc,
   };
 }
 
+// What a split's call block passes for one of the split's arguments, `reg`.
+// The call takes the place of the code from `entry`, the candidate's first
+// instruction, so it passes the definitions that reach `entry` from outside
+// the candidate's blocks (`in_cover`). A definition inside those blocks that
+// reaches `entry` only along their own back edges, as in a suffix whose head
+// is a loop, is not passed: the split carries it to `entry` itself. An
+// outlined parameter must hold every value its call passes.
+struct PassedDefs {
+  // The host's definitions that reach the entry. The call passes their values.
+  sparta::PatriciaTreeSet<IRInstruction*> host;
+  // Whether `host` is every definition that reaches the entry.
+  bool every{false};
+  // The values the call passes, as ART types them (`value_of_producers`).
+  art::Value value;
+};
+
+PassedDefs passed_defs(OutlinerTypeAnalysis& ota,
+                       const Membership& in_cover,
+                       IRInstruction* entry,
+                       reg_t reg) {
+  const auto defs = ota.immediate_defs_at(entry, reg);
+  PassedDefs passed;
+  passed.host = defs;
+  passed.host.filter([&](IRInstruction* def) { return !in_cover(def); });
+  passed.every = passed.host.size() == defs.size();
+  passed.value = ota.value_of_producers(UnorderedSet<const IRInstruction*>(
+      passed.host.begin(), passed.host.end()));
+  return passed;
+}
+
 // The inputs of `evaluate_candidate`: the per-method Lazy analyses, built once
 // in `to_splittable_closures`, and that function's other per-method inputs.
 // They are bundled so that the `std::erase_if` predicate that calls
@@ -726,26 +756,27 @@ std::optional<CandidateFate> evaluate_candidate(ScoredClosure& sc,
   auto in_cover = [&ctx, &sc](IRInstruction* insn) {
     return sc.reduced_components.count(ctx.insns->at(insn)) != 0u;
   };
-  // A suffix whose head is a loop is entered at the loop header, so a
-  // definition of a live-in inside the loop reaches the entry too, through the
-  // back edge. The launchpad passes only the definitions from outside the
-  // closure. Typing the parameter by the uses of an in-loop definition could
-  // declare it narrower than the value the host passes.
-  auto passed_defs = [&](reg_t reg) {
-    auto defs = ctx.ota->immediate_defs_at(first_insn, reg);
-    defs.filter([&](IRInstruction* def) { return !in_cover(def); });
-    return defs;
-  };
   for (auto reg : ordered_live_in) {
     auto defs = ctx.ota->defs_at(first_insn, reg);
     if (defs.size() == 1 && opcode::is_a_const((*defs.begin())->opcode())) {
       sc.args.push_back((ClosureArgument){reg, nullptr, *defs.begin()});
       continue;
     }
+    // Typed by the uses of what the call passes. The uses of a definition the
+    // call does not pass could declare the parameter narrower than the value
+    // the host passes.
+    const auto passed = passed_defs(*ctx.ota, in_cover, first_insn, reg);
     const auto* type = art::declare_parameter(
-        ctx.ota->demand_of_uses(passed_defs(reg), in_cover),
+        ctx.ota->demand_of_uses(passed.host, in_cover),
         [&]() { return ctx.ota->value_at(first_insn, reg); });
     if (type == nullptr) {
+      return CandidateFate::Evaluation_LiveInUntypable;
+    }
+    // The uses were verified with every definition that reaches the entry,
+    // merged in the order ART chose. When the call passes only some of them, as
+    // at a loop header whose back edge is among the candidate's blocks, the
+    // declared type must still hold what it passes.
+    if (!passed.every && !art::accepts_argument(type, passed.value)) {
       return CandidateFate::Evaluation_LiveInUntypable;
     }
     // The type demand is a meet over the uses, so it can name a type that no

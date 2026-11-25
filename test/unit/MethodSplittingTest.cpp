@@ -19,6 +19,7 @@
 #include "DeterministicContainers.h"
 #include "DexClass.h"
 #include "IRAssembler.h"
+#include "IRTypeChecker.h"
 #include "RedexTest.h"
 #include "Show.h"
 #include "SourceBlocks.h"
@@ -1178,6 +1179,268 @@ TEST_F(MethodSplitterTest, LoopHeadedSplitTypesLiveInsByTheDefsItIsPassed) {
   ASSERT_EQ(stats.added_methods.size(), 1u);
   auto* split = stats.added_methods.front().first;
   EXPECT_EQ(show(split->get_proto()), "(ILLoopA;)V");
+}
+
+namespace {
+
+// `LAcceptI;` with implementations `LAcceptA;` and `LAcceptB;`, and two
+// subclasses `LAcceptSub1;` and `LAcceptSub2;` of `LAcceptBase;`.
+std::vector<DexClass*> make_accept_classes() {
+  ClassCreator i_creator(DexType::make_type("LAcceptI;"));
+  i_creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  i_creator.set_super(type::java_lang_Object());
+  auto* i_cls = i_creator.create();
+  std::vector<DexClass*> classes{i_cls};
+  for (const auto* name : {"LAcceptA;", "LAcceptB;"}) {
+    ClassCreator creator(DexType::make_type(name));
+    creator.set_access(ACC_PUBLIC);
+    creator.set_super(type::java_lang_Object());
+    creator.add_interface(i_cls->get_type());
+    classes.push_back(creator.create());
+  }
+  ClassCreator base_creator(DexType::make_type("LAcceptBase;"));
+  base_creator.set_access(ACC_PUBLIC);
+  base_creator.set_super(type::java_lang_Object());
+  auto* base_cls = base_creator.create();
+  classes.push_back(base_cls);
+  for (const auto* name : {"LAcceptSub1;", "LAcceptSub2;"}) {
+    ClassCreator creator(DexType::make_type(name));
+    creator.set_access(ACC_PUBLIC);
+    creator.set_super(base_cls->get_type());
+    classes.push_back(creator.create());
+  }
+  return classes;
+}
+
+// Floors under which the only candidate of the tests below is their cold loop.
+method_splitting_impl::Config loop_config() {
+  method_splitting_impl::Config config;
+  config.split_block_size = 100000;
+  config.min_original_size = 1;
+  config.min_original_size_hot_method = 1;
+  config.min_hot_split_size = 4;
+  config.min_hot_cold_split_size = 8;
+  config.min_cold_split_size = 8;
+  config.max_overhead_ratio = 0.5;
+  config.max_iteration = 1;
+  config.cost_split_method = 1;
+  config.cost_split_switch = 1;
+  config.min_large_switch_size = 0;
+  return config;
+}
+
+// Splits the methods of `cls`, with `extra` in the same store.
+void split_with(DexClass* cls,
+                const std::vector<DexClass*>& extra,
+                const method_splitting_impl::Config& config,
+                method_splitting_impl::Stats* stats) {
+  DexStoresVector stores;
+  stores.emplace_back("test_store");
+  DexClasses dex{cls};
+  dex.insert(dex.end(), extra.begin(), extra.end());
+  stores.front().get_dexen().push_back(std::move(dex));
+  auto env = method_splitting_test::split_environment(
+      stores, /* normal_primary_dex */ true);
+  method_splitting_impl::split_methods_in_stores(stores, env, config, stats);
+}
+
+} // namespace
+
+// The host passes `v2` as a boolean or 2, a `byte`, which a `char` rejects.
+TEST_F(MethodSplitterTest, LoopHeadedSplitRefusesALiveInItsUsesReject) {
+  auto [cls, m] = create("(IZ)V", R"(
+    (
+      (load-param v0)
+      (load-param v1)
+      (.src_block "LFoo;.bar:(IZ)V" 0 (1.0 1.0))
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (move v2 v1)
+      (if-eqz v0 :two)
+    (:loop)
+      (.src_block "LFoo;.bar:(IZ)V" 2 (0.0 0.0))
+      (invoke-static (v2) "LFoo;.takeChar:(C)V")
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (invoke-static () "LFoo;.nextChar:()C")
+      (move-result v2)
+      (if-nez v0 :loop)
+      (.src_block "LFoo;.bar:(IZ)V" 3 (0.0 0.0))
+      (sput v0 "LFoo;.i:I")
+      (return-void)
+    (:two)
+      (.src_block "LFoo;.bar:(IZ)V" 1 (1.0 1.0))
+      (const v2 2)
+      (goto :loop)
+    ))");
+  m->get_code()->build_cfg();
+  method_splitting_impl::Stats stats;
+  split_with(cls, {}, loop_config(), &stats);
+  EXPECT_TRUE(stats.added_methods.empty());
+  EXPECT_EQ(
+      stats.snapshot().suffix_fates
+          [method_splitting_impl::CandidateFate::Evaluation_LiveInUntypable],
+      1u);
+}
+
+// Fewer references, `long`s or `float`s never merge wider: the loop splits.
+TEST_F(MethodSplitterTest, LoopHeadedSplitAcceptsReferenceWideAndFloatLiveIns) {
+  auto extra = make_accept_classes();
+  auto [cls, m] = create("(ILAcceptA;LAcceptB;LAcceptSub1;LAcceptSub2;JF)V", R"(
+    (
+      (load-param v0)
+      (load-param-object v1)
+      (load-param-object v2)
+      (load-param-object v3)
+      (load-param-object v4)
+      (load-param-wide v5)
+      (load-param v7)
+      (.src_block "LFoo;.bar:(ILAcceptA;LAcceptB;LAcceptSub1;LAcceptSub2;JF)V" 0 (1.0 1.0))
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (move-object v8 v1)
+      (move-object v9 v3)
+      (move-wide v10 v5)
+      (move v12 v7)
+      (if-eqz v0 :two)
+    (:loop)
+      (.src_block "LFoo;.bar:(ILAcceptA;LAcceptB;LAcceptSub1;LAcceptSub2;JF)V" 2 (0.0 0.0))
+      (invoke-static (v8) "LFoo;.takeI:(LAcceptI;)V")
+      (invoke-static (v9) "LFoo;.takeBase:(LAcceptBase;)V")
+      (invoke-static (v10) "LFoo;.takeLong:(J)V")
+      (invoke-static (v12) "LFoo;.takeFloat:(F)V")
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (invoke-static () "LFoo;.nextI:()LAcceptI;")
+      (move-result-object v8)
+      (invoke-static () "LFoo;.nextBase:()LAcceptBase;")
+      (move-result-object v9)
+      (invoke-static () "LFoo;.nextLong:()J")
+      (move-result-wide v10)
+      (invoke-static () "LFoo;.nextFloat:()F")
+      (move-result v12)
+      (if-nez v0 :loop)
+      (.src_block "LFoo;.bar:(ILAcceptA;LAcceptB;LAcceptSub1;LAcceptSub2;JF)V" 3 (0.0 0.0))
+      (sput v0 "LFoo;.i:I")
+      (return-void)
+    (:two)
+      (.src_block "LFoo;.bar:(ILAcceptA;LAcceptB;LAcceptSub1;LAcceptSub2;JF)V" 1 (1.0 1.0))
+      (move-object v8 v2)
+      (move-object v9 v4)
+      (const-wide v10 7)
+      (const v12 0)
+      (goto :loop)
+    ))");
+  m->get_code()->build_cfg();
+  method_splitting_impl::Stats stats;
+  split_with(cls, extra, loop_config(), &stats);
+  ASSERT_EQ(stats.added_methods.size(), 1u);
+  auto* split = stats.added_methods.front().first;
+  EXPECT_EQ(show(split->get_proto()), "(ILAcceptI;LAcceptBase;JF)V");
+  for (auto* method : {m, split}) {
+    method->get_code()->cfg().simplify();
+    IRTypeChecker checker(method);
+    checker.run();
+    EXPECT_TRUE(checker.good()) << show(method) << ": " << checker.what();
+  }
+}
+
+// The host alone passes `A[]` or `B[]`, which merge to `Object[]`, not `I[]`.
+TEST_F(MethodSplitterTest,
+       LoopHeadedSplitRefusesAnInterfaceArrayItsCallMergesWider) {
+  auto extra = make_accept_classes();
+  auto [cls, m] = create("(I[LAcceptA;[LAcceptB;)V", R"(
+    (
+      (load-param v0)
+      (load-param-object v1)
+      (load-param-object v2)
+      (.src_block "LFoo;.bar:(I[LAcceptA;[LAcceptB;)V" 0 (1.0 1.0))
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (move-object v8 v1)
+      (if-eqz v0 :two)
+    (:loop)
+      (.src_block "LFoo;.bar:(I[LAcceptA;[LAcceptB;)V" 2 (0.0 0.0))
+      (invoke-static (v8) "LFoo;.takeIs:([LAcceptI;)V")
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (invoke-static () "LFoo;.nextIs:()[LAcceptI;")
+      (move-result-object v8)
+      (if-nez v0 :loop)
+      (.src_block "LFoo;.bar:(I[LAcceptA;[LAcceptB;)V" 3 (0.0 0.0))
+      (sput v0 "LFoo;.i:I")
+      (return-void)
+    (:two)
+      (.src_block "LFoo;.bar:(I[LAcceptA;[LAcceptB;)V" 1 (1.0 1.0))
+      (move-object v8 v2)
+      (goto :loop)
+    ))");
+  m->get_code()->build_cfg();
+  method_splitting_impl::Stats stats;
+  split_with(cls, extra, loop_config(), &stats);
+  EXPECT_TRUE(stats.added_methods.empty());
+  EXPECT_EQ(
+      stats.snapshot().suffix_fates
+          [method_splitting_impl::CandidateFate::Evaluation_LiveInUntypable],
+      1u);
+}
+
+// The host passes only the constant 65, which a `char` parameter holds.
+TEST_F(MethodSplitterTest, LoopHeadedSplitAdmitsAConstantItsParameterHolds) {
+  auto [cls, m] = create("(I)V", R"(
+    (
+      (load-param v0)
+      (.src_block "LFoo;.bar:(I)V" 0 (1.0 1.0))
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (const v2 65)
+      (invoke-static (v2) "LFoo;.takeShort:(S)V")
+    (:loop)
+      (.src_block "LFoo;.bar:(I)V" 1 (0.0 0.0))
+      (invoke-static (v2) "LFoo;.takeChar:(C)V")
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (invoke-static () "LFoo;.nextChar:()C")
+      (move-result v2)
+      (if-nez v0 :loop)
+      (.src_block "LFoo;.bar:(I)V" 2 (0.0 0.0))
+      (sput v0 "LFoo;.i:I")
+      (return-void)
+    ))");
+  m->get_code()->build_cfg();
+  method_splitting_impl::Stats stats;
+  split_with(cls, {}, loop_config(), &stats);
+  ASSERT_EQ(stats.added_methods.size(), 1u);
+  auto* split = stats.added_methods.front().first;
+  EXPECT_EQ(show(split->get_proto()), "(IC)V");
 }
 
 TEST_F(MethodSplitterTest, DontSplitLoadParamChains) {

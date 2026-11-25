@@ -525,6 +525,13 @@ static Candidate normalize(
     result.emplace(out_reg->first, c.res_type);
   }
   c.arg_types.reserve(arg_regs.size());
+  // Each call site passes the register as ART typed it where that site's copy
+  // of the sequence starts: the same values, merged in the same order, that
+  // ART verified the uses against. So a parameter of the widest type every use
+  // accepts holds every value a call passes, and no `art::accepts_argument`
+  // check is needed, as long as each use's type is one ART checks it against.
+  // A type a use takes from Redex's inferred type, such as an array operand's,
+  // is not checked here.
   for (auto reg : arg_regs) {
     c.arg_types.push_back(art::declare_parameter(
         type_analysis.demand_in_candidate(pc, reg, result),

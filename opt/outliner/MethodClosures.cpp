@@ -143,47 +143,52 @@ void normalize_cfg_for_splitting(DexMethod* method,
   // BRANCH_RETURN, and cold-region discovery's non-return-entry filter then
   // rejects it without surfacing a useful error. A rejoin needs at least one
   // non-return instruction to survive this.
-  for (auto* block : cfg.blocks()) {
-    auto* goes_to_block = block->goes_to_only_edge();
-    if (goes_to_block == nullptr) {
-      continue;
-    }
-    auto first_insn_it = goes_to_block->get_first_insn();
-    if (first_insn_it == goes_to_block->end()) {
-      continue;
-    }
-    if (opcode::is_a_return(first_insn_it->insn->opcode())) {
-      auto* last_existing_sb = source_blocks::get_last_source_block(block);
-      auto it = goes_to_block->begin();
-      while (true) {
-        switch (it->type) {
-        case MFLOW_OPCODE:
-          block->push_back(new IRInstruction(*it->insn));
-          break;
-        case MFLOW_SOURCE_BLOCK: {
-          auto sb_copy = std::make_unique<SourceBlock>(*it->src_block);
-          if (last_existing_sb != nullptr) {
-            source_blocks::normalize::normalize(last_existing_sb, sb_copy.get(),
-                                                sb_copy->vals_size);
-          }
-          block->insert_before(block->end(), std::move(sb_copy));
-          break;
-        }
-        default:
-          break;
-        }
-        if (it == first_insn_it) {
-          break;
-        }
-        it++;
+  bool changed;
+  do {
+    changed = false;
+    for (auto* block : cfg.blocks()) {
+      auto* goes_to_block = block->goes_to_only_edge();
+      if (goes_to_block == nullptr) {
+        continue;
       }
-      // TODO(T225634378) - When we improve our profiling data to include
-      // proper hit counts, we need to gather the source blocks of
-      // `goes_to_block` here and scale them down as well.
-      cfg.delete_succ_edges(block);
+      auto first_insn_it = goes_to_block->get_first_insn();
+      if (first_insn_it == goes_to_block->end()) {
+        continue;
+      }
+      if (opcode::is_a_return(first_insn_it->insn->opcode())) {
+        auto* last_existing_sb = source_blocks::get_last_source_block(block);
+        auto it = goes_to_block->begin();
+        while (true) {
+          switch (it->type) {
+          case MFLOW_OPCODE:
+            block->push_back(new IRInstruction(*it->insn));
+            break;
+          case MFLOW_SOURCE_BLOCK: {
+            auto sb_copy = std::make_unique<SourceBlock>(*it->src_block);
+            if (last_existing_sb != nullptr) {
+              source_blocks::normalize::normalize(
+                  last_existing_sb, sb_copy.get(), sb_copy->vals_size);
+            }
+            block->insert_before(block->end(), std::move(sb_copy));
+            break;
+          }
+          default:
+            break;
+          }
+          if (it == first_insn_it) {
+            break;
+          }
+          it++;
+        }
+        // TODO(T225634378) - When we improve our profiling data to include
+        // proper hit counts, we need to gather the source blocks of
+        // `goes_to_block` here and scale them down as well.
+        cfg.delete_succ_edges(block);
+        changed = true;
+      }
     }
-  }
-  cfg.remove_unreachable_blocks();
+    cfg.remove_unreachable_blocks();
+  } while (changed);
   if (split_block_size) {
     split_blocks(method, cfg, *split_block_size);
   }

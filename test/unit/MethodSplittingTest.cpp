@@ -1206,6 +1206,27 @@ TEST_F(MethodSplitterTest, DontSplitLoadParamChains) {
   m->get_code()->clear_cfg();
 }
 
+TEST_F(MethodSplitterTest, NormalizeTransitiveEmptyBlocksBeforeReturn) {
+  auto [cls, m] = create("()V", "((return-void))");
+  m->get_code()->build_cfg();
+  auto& cfg = m->get_code()->cfg();
+  auto* return_block = cfg.entry_block();
+  auto* entry_block = cfg.create_block();
+  auto* empty_block = cfg.create_block();
+  cfg.set_entry_block(entry_block);
+  cfg.add_edge(entry_block, empty_block, cfg::EDGE_GOTO);
+  cfg.add_edge(empty_block, return_block, cfg::EDGE_GOTO);
+
+  method_splitting_impl::normalize_cfg_for_splitting(m);
+
+  ASSERT_EQ(cfg.num_blocks(), 1);
+  auto first_insn = cfg.entry_block()->get_first_insn();
+  ASSERT_NE(first_insn, cfg.entry_block()->end());
+  EXPECT_EQ(first_insn->insn->opcode(), OPCODE_RETURN_VOID);
+  method_splitting_impl::reduce_cfg(m);
+  m->get_code()->clear_cfg();
+}
+
 TEST_F(MethodSplitterTest, DuplicateSourceBlocksWithReturn) {
   const auto* code_str = R"(
     (

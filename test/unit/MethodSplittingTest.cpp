@@ -961,6 +961,69 @@ TEST_F(MethodSplitterTest, SplitTypeDemandsRegression) {
   ASSERT_TRUE(res);
 }
 
+// A suffix whose head is a loop is entered at the loop header, so a def inside
+// the loop reaches its own entry through the back edge. The launchpad passes
+// only the defs from outside the closure. Adding the in-loop def's uses to the
+// parameter's type would type it `LLoopB;` here, while the host passes its
+// `LLoopA;` parameter.
+TEST_F(MethodSplitterTest, LoopHeadedSplitTypesLiveInsByTheDefsItIsPassed) {
+  ClassCreator a_creator{DexType::make_type("LLoopA;")};
+  a_creator.set_super(type::java_lang_Object());
+  auto* a_cls = a_creator.create();
+  ClassCreator b_creator{DexType::make_type("LLoopB;")};
+  b_creator.set_super(a_cls->get_type());
+  auto* b_cls = b_creator.create();
+  auto [cls, m] = create("(ILLoopA;)V", R"(
+    (
+      (load-param v0)
+      (load-param-object v1)
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (mul-int v0 v0 v0)
+      (if-eqz v0 :exit)
+    (:loop)
+      (sput-object v1 "LLoopA;.a:LLoopA;")
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (sget-object "LLoopB;.b:LLoopB;")
+      (move-result-pseudo-object v1)
+      (sput-object v1 "LLoopB;.b:LLoopB;")
+      (if-nez v0 :loop)
+      (sput v0 "LLoopA;.i:I")
+      (return-void)
+    (:exit)
+      (return-void)
+    ))");
+  m->get_code()->build_cfg();
+  DexStoresVector stores;
+  stores.emplace_back("test_store");
+  stores.front().get_dexen().push_back({cls, a_cls, b_cls});
+  method_splitting_impl::StoreRefCheckers store_ref_checkers(
+      stores, /* normal_primary_dex */ true, /* min_sdk_api */ nullptr);
+  // One entry block, and the loop's exit alone is below the floor, so the
+  // split is the loop.
+  auto config = defaultConfig();
+  config.split_block_size = 100000;
+  config.min_cold_split_size = 8;
+  method_splitting_impl::Stats stats;
+  method_splitting_impl::split_methods_in_stores(
+      stores, /* min_sdk */ 0, config, store_ref_checkers,
+      /* create_init_class_insns */ false,
+      /* reserved_mrefs */ 0, /* reserved_trefs */ 0, &stats);
+  ASSERT_EQ(stats.added_methods.size(), 1u);
+  auto* split = stats.added_methods.front().first;
+  EXPECT_EQ(show(split->get_proto()), "(ILLoopA;)V");
+}
+
 TEST_F(MethodSplitterTest, DontSplitLoadParamChains) {
   const auto* code_str = R"(
     (

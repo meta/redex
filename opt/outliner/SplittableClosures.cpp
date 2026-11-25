@@ -634,6 +634,9 @@ select_splittable_closures_based_on_costs(
   ConcurrentMap<DexType*, std::vector<SplittableClosure>>
       concurrent_splittable_closures;
   auto concurrent_process_method = [&](DexMethod* method) {
+    if (method->rstate.should_not_outline()) {
+      return;
+    }
     normalize_cfg_for_splitting(method, config.split_block_size);
     auto rcfg = reduce_cfg(method);
     auto is_sufficiently_large = [&]() {
@@ -710,8 +713,10 @@ select_splittable_closures_from_top_level_switch_cases(
   InsertOnlyConcurrentMap<DexMethod*, std::vector<SplittableClosure>>
       concurrent_splittable_closures;
   auto concurrent_process_method = [&](DexMethod* method) {
-    if (method->rstate.no_optimizations()) {
-      TRACE(SWOL, 2, "%s is marked as do-not-optimize", SHOW(method));
+    if (method->rstate.no_optimizations() ||
+        method->rstate.should_not_outline()) {
+      TRACE(SWOL, 2, "%s is marked as do-not-optimize or no-outlining",
+            SHOW(method));
       return;
     }
 

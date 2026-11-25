@@ -81,9 +81,13 @@ class MethodSplitterTest : public RedexTest {
       // store, not just the global class registry: a type whose class is
       // internal but held by no store is an illegal cross-store reference, so a
       // split taking one as an argument would be dropped.
-      const std::vector<DexClass*>& extra_classes = {}) {
+      const std::vector<DexClass*>& extra_classes = {},
+      bool no_outlining = false) {
     auto [cls, m] = create(sig, code_str);
     m->get_code()->build_cfg();
+    if (no_outlining) {
+      m->rstate.set_no_outlining();
+    }
     DexStoresVector stores;
     stores.emplace_back("test_store");
     DexClasses dex{cls};
@@ -168,6 +172,19 @@ TEST_F(MethodSplitterTest, NothingToDo) {
                   defaultConfig(),
                   {std::make_pair<std::string, std::string>("", after)});
   ASSERT_TRUE(res);
+}
+
+TEST_F(MethodSplitterTest, NoOutliningPreventsSuffixExtraction) {
+  const auto* before = R"((
+      (load-param v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (return v0)
+    ))";
+  EXPECT_TRUE(test("(I)I", before, defaultConfig(), {{"", before}}, {}, true));
 }
 
 TEST_F(MethodSplitterTest, SplitLargeBlock) {

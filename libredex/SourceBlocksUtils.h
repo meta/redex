@@ -69,4 +69,12 @@ std::unique_ptr<SourceBlock> clone_as_synthetic_summing(
     const DexMethod* ref,
     const std::vector<SourceBlock*>& many);
 
+// Gives `method`, a method created to serve several call sites, synthetic
+// source blocks whose counts are the sum of the given call sites' source
+// blocks: it runs once for each time one of those sites runs. Does nothing when
+// `call_site_source_blocks` is empty.
+void insert_source_blocks_summing_call_sites(
+    DexMethod* method,
+    const std::vector<SourceBlock*>& call_site_source_blocks);
+
 } // namespace source_blocks

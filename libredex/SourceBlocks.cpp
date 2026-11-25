@@ -1416,6 +1416,20 @@ std::unique_ptr<SourceBlock> clone_as_synthetic_summing(
   return new_sb;
 }
 
+void insert_source_blocks_summing_call_sites(
+    DexMethod* method,
+    const std::vector<SourceBlock*>& call_site_source_blocks) {
+  if (call_site_source_blocks.empty()) {
+    return;
+  }
+  always_assert_log(method->get_code() != nullptr, "%s has no code",
+                    SHOW(method));
+  insert_synthetic_source_blocks_in_method(method, [&]() {
+    return clone_as_synthetic_summing(call_site_source_blocks.front(), method,
+                                      call_site_source_blocks);
+  });
+}
+
 void adjust_block_hits_with_appear100_threshold(
     ControlFlowGraph* cfg, int32_t block_appear100_threshold) {
   for (auto* block : cfg->blocks()) {

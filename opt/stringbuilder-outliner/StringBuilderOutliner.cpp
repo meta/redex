@@ -347,19 +347,10 @@ void Outliner::set_hot_method_from_callsite() {
     for (const auto& snapshot : snapshots) {
       source_blocks_callsites.push_back(snapshot.get());
     }
-
-    if (!source_blocks_callsites.empty()) {
-      always_assert(target->get_code());
-      auto* template_sb = source_blocks_callsites[0];
-      source_blocks::insert_synthetic_source_blocks_in_method(
-          target, [target, template_sb, &source_blocks_callsites]() {
-            // The outlined `target` is reached from every call site, so
-            // its synthetic count is the SUM of those sites' counts, not the
-            // max.
-            return source_blocks::clone_as_synthetic_summing(
-                template_sb, target, source_blocks_callsites);
-          });
-    }
+    // The outlined `target` is reached from every call site, so its synthetic
+    // count is the SUM of those sites' counts, not the max.
+    source_blocks::insert_source_blocks_summing_call_sites(
+        target, source_blocks_callsites);
   }
 }
 

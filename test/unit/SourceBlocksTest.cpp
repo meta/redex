@@ -1903,6 +1903,26 @@ TEST_F(SourceBlocksTest, clone_as_synthetic_summing) {
   auto maxed = source_blocks::clone_as_synthetic(&s1, nullptr, many);
   EXPECT_FLOAT_EQ(*maxed->get_val(0), 30.0f); // max, not 60
 }
+
+// A method created for two call sites runs as often as both together.
+TEST_F(SourceBlocksTest, insert_source_blocks_summing_call_sites) {
+  const auto* s = DexString::make_string("x");
+  SourceBlock s1(s, 7, std::vector<SourceBlock::Val>{SourceBlock::Val(10, 5)});
+  SourceBlock s2(s, 8, std::vector<SourceBlock::Val>{SourceBlock::Val(20, 90)});
+  auto* method = create_method("LBar");
+  method->set_code(assembler::ircode_from_string("((return-void))"));
+  method->get_code()->build_cfg();
+
+  source_blocks::insert_source_blocks_summing_call_sites(method, {});
+  EXPECT_EQ(source_blocks::get_first_source_block_of_method(method), nullptr);
+
+  source_blocks::insert_source_blocks_summing_call_sites(method, {&s1, &s2});
+  auto* sb = source_blocks::get_first_source_block_of_method(method);
+  ASSERT_NE(sb, nullptr);
+  EXPECT_EQ(sb->id, SourceBlock::kSyntheticId);
+  EXPECT_FLOAT_EQ(*sb->get_val(0), 30.0f);
+  EXPECT_FLOAT_EQ(*sb->get_appear100(0), 90.0f);
+}
 TEST_F(SourceBlocksTest, violation_name_round_trip) {
   for (size_t i = 0;
        i != static_cast<size_t>(ViolationsHelper::Violation::ViolationSize);

@@ -1155,13 +1155,9 @@ void create_partial_application_methods(
       for (auto& sb : *call_site_sbs) {
         sbs.push_back(&sb);
       }
-      source_blocks::insert_synthetic_source_blocks_in_method(
-          pa_method, [pa_method, &sbs]() {
-            // N:1: the helper method is reached from every call-site it serves,
-            // so its count is about the SUM of theirs, not the max.
-            return source_blocks::clone_as_synthetic_summing(sbs.front(),
-                                                             pa_method, sbs);
-          });
+      // N:1: the helper method is reached from every call-site it serves, so
+      // its count is about the SUM of theirs, not the max.
+      source_blocks::insert_source_blocks_summing_call_sites(pa_method, sbs);
     }
     cls->add_method(pa_method);
     TRACE(PA, 5, "[PartialApplication] Created %s binding %s:\n%s",

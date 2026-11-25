@@ -817,14 +817,6 @@ void run_inliner(
     inliner_config.intermediate_shrinking = false;
     inliner_config.multiple_callers = true;
     inliner_config.delete_non_virtuals = true;
-    // We disable relaxed init inlining as bridge-synth-inlining likely runs
-    // before general class merging, and relaxed init inlining may regress the
-    // effectiveness of class merging, as it currently simply excludes classes
-    // affected by relaxed inits.
-    // TODO T184662680: While this is not a correctness issue, we should fully
-    // support relaxed init methods in class-merging and then not change
-    // the relaxed_init_inline here.
-    inliner_config.relaxed_init_inline = false;
     inliner_config.shrinker = shrinker::ShrinkerConfig();
     inliner_config.shrinker.compute_pure_methods = false;
     inliner_config.shrinker.run_const_prop = true;

@@ -5,17 +5,21 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include "BridgeSynthInlinePass.h"
 #include "BridgeSynthInlineInternal.h"
 
 #include <gtest/gtest.h>
 
+#include "ConfigFiles.h"
 #include "ControlFlow.h"
 #include "Creators.h"
 #include "DexClass.h"
 #include "IRAssembler.h"
 #include "IRCode.h"
 #include "IRInstruction.h"
+#include "PassManager.h"
 #include "RedexTest.h"
+#include "Show.h"
 #include "TypeUtil.h"
 
 class BridgeSynthInlinePassTest : public RedexTest {
@@ -115,4 +119,70 @@ TEST_F(BridgeSynthInlinePassTest, honors_no_optimizations_flag) {
 
   EXPECT_TRUE(body_contains_opcode(bridge->get_code(), OPCODE_INVOKE_SUPER));
   EXPECT_FALSE(body_throws_abstract_method_error(bridge->get_code()));
+}
+
+// A synthetic constructor that only calls a super constructor is
+// relaxed-inlined: its caller then initializes the object with the super
+// constructor, and the synthetic constructor is deleted.
+TEST_F(BridgeSynthInlinePassTest, relaxed_inlines_synthetic_ctor) {
+  auto* base_cls = assembler::class_from_string(R"(
+    (class (public) "LBase;"
+      (method (public constructor) "LBase;.<init>:()V"
+        (
+          (load-param-object v0)
+          (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+          (return-void)
+        )
+      )
+    )
+  )");
+  auto* foo_cls = assembler::class_from_string(R"(
+    (class (public) "LFoo;" extends "LBase;"
+      (method (public constructor synthetic) "LFoo;.<init>:(I)V"
+        (
+          (load-param-object v0)
+          (load-param v1)
+          (invoke-direct (v0) "LBase;.<init>:()V")
+          (return-void)
+        )
+      )
+    )
+  )");
+  auto* bar_cls = assembler::class_from_string(R"(
+    (class (public) "LBar;"
+      (method (public static) "LBar;.make:()Ljava/lang/Object;"
+        (
+          (const v0 0)
+          (new-instance "LFoo;")
+          (move-result-pseudo-object v1)
+          (invoke-direct (v1 v0) "LFoo;.<init>:(I)V")
+          (return-object v1)
+        )
+      )
+    )
+  )");
+  DexStoresVector stores;
+  DexStore store("root");
+  store.add_classes({base_cls, foo_cls, bar_cls});
+  stores.push_back(std::move(store));
+  Json::Value config;
+  config["inliner"]["relaxed_init_inline"] = true;
+  ConfigFiles conf(config);
+  conf.parse_global_config();
+  RedexOptions options;
+  options.min_sdk = 21;
+  BridgeSynthInlinePass pass;
+  PassManager manager({&pass}, conf, options);
+  manager.run_passes(stores, conf);
+
+  EXPECT_TRUE(foo_cls->get_ctors().empty());
+  auto* make = bar_cls->get_dmethods().front();
+  make->get_code()->build_cfg();
+  std::vector<std::string> invoked;
+  for (const auto& mie : cfg::InstructionIterable(make->get_code()->cfg())) {
+    if (mie.insn->has_method()) {
+      invoked.push_back(show(mie.insn->get_method()));
+    }
+  }
+  EXPECT_EQ(invoked, std::vector<std::string>{"LBase;.<init>:()V"});
 }

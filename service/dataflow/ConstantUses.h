@@ -48,6 +48,13 @@ class ConstantUses {
   // demand across all execution paths.
   TypeDemand get_constant_type_demand(IRInstruction*) const;
 
+  // Given a const or const-wide instruction, whether every use would also
+  // accept any other int value in its place, such as a parameter or the result
+  // of an int computation. TypeDemand::Int alone does not say that: it
+  // includes boolean, byte, char and short consumers, which a constant can
+  // satisfy but an arbitrary int cannot, even when it holds the same value.
+  bool accepts_any_int(IRInstruction*) const;
+
   // Whether type inference information was required to be computed.
   bool has_type_inference() const;
 
@@ -59,6 +66,10 @@ class ConstantUses {
  private:
   static TypeDemand get_type_demand(const DexType* type);
   TypeDemand get_type_demand(IRInstruction* insn, size_t src_index) const;
+  // The type that `insn` declares for its operand `src_index`, such as a
+  // parameter, field, return or array element type; nullptr if it declares
+  // none.
+  const DexType* get_declared_type(IRInstruction* insn, size_t src_index) const;
 
   mutable std::unique_ptr<type_inference::TypeInference> m_type_inference;
   UnorderedMap<IRInstruction*, std::vector<std::pair<IRInstruction*, size_t>>>

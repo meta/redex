@@ -7,6 +7,7 @@
 
 #include "ReduceSparseSwitchesPass.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <numeric>
@@ -23,7 +24,6 @@
 #include "Show.h"
 #include "SourceBlocks.h"
 #include "Trace.h"
-#include "TypeUtil.h"
 #include "Walkers.h"
 
 namespace {
@@ -888,46 +888,10 @@ bool can_use_integer_arithmetic(const ArithmeticSwitch& plan,
                                 cfg::ControlFlowGraph& cfg,
                                 DexMethod* method) {
   constant_uses::ConstantUses uses(cfg, method);
-  auto is_narrow = [](const DexType* type) {
-    return type::is_integral(type) && !type::is_int(type);
-  };
-  for (auto* target : plan.targets) {
-    auto* insn = target->get_first_insn()->insn;
-    if (uses.get_constant_type_demand(insn) != constant_uses::TypeDemand::Int) {
-      return false;
-    }
-    // TypeDemand::Int includes boolean, byte, char and short consumers.
-    // Constants can satisfy those narrow types; an ordinary int computation
-    // cannot, even when it produces the same numeric value.
-    for (const auto& [use, src] : uses.get_constant_uses(insn)) {
-      const auto op = use->opcode();
-      if (op == OPCODE_RETURN && is_narrow(method->get_proto()->get_rtype())) {
-        return false;
-      }
-      if (opcode::is_an_iput(op) || opcode::is_an_sput(op)) {
-        if (src == 0 && is_narrow(use->get_field()->get_type())) {
-          return false;
-        }
-      }
-      if (opcode::is_an_invoke(op) &&
-          is_narrow(use->get_invoke_src_type(src))) {
-        return false;
-      }
-      if (op == OPCODE_FILLED_NEW_ARRAY) {
-        const auto* component = type::get_array_component_type(use->get_type());
-        if (component == nullptr || is_narrow(component)) {
-          return false;
-        }
-      }
-      if (op == OPCODE_APUT_BOOLEAN || op == OPCODE_APUT_BYTE ||
-          op == OPCODE_APUT_CHAR || op == OPCODE_APUT_SHORT) {
-        if (src == 0) {
-          return false;
-        }
-      }
-    }
-  }
-  return true;
+  return std::all_of(
+      plan.targets.begin(), plan.targets.end(), [&](cfg::Block* target) {
+        return uses.accepts_any_int(target->get_first_insn()->insn);
+      });
 }
 
 } // namespace

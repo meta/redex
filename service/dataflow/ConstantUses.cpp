@@ -69,6 +69,7 @@
 #include "ReachingDefinitions.h"
 #include "Show.h"
 #include "Trace.h"
+#include "TypeUtil.h"
 
 namespace constant_uses {
 
@@ -182,6 +183,61 @@ TypeDemand ConstantUses::get_constant_type_demand(IRInstruction* insn) const {
   return type_demand;
 }
 
+bool ConstantUses::accepts_any_int(IRInstruction* insn) const {
+  if (get_constant_type_demand(insn) != TypeDemand::Int) {
+    return false;
+  }
+  for (const auto& [use, src] : get_constant_uses(insn)) {
+    const auto* type = get_declared_type(use, src);
+    if (type != nullptr && type::is_integral(type) && !type::is_int(type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const DexType* ConstantUses::get_declared_type(IRInstruction* insn,
+                                               size_t src_index) const {
+  always_assert(src_index < insn->srcs_size());
+  const auto op = insn->opcode();
+  if (op == OPCODE_RETURN || op == OPCODE_RETURN_WIDE) {
+    return m_rtype;
+  }
+  if (opcode::is_an_iput(op)) {
+    if (src_index == 1) {
+      return insn->get_field()->get_class();
+    }
+    always_assert(src_index == 0);
+    return insn->get_field()->get_type();
+  }
+  if (opcode::is_an_sput(op)) {
+    return insn->get_field()->get_type();
+  }
+  if (opcode::is_an_invoke(op)) {
+    size_t expected_args = insn->invoke_srcs_size();
+    always_assert(insn->srcs_size() == expected_args);
+    return insn->get_invoke_src_type(src_index);
+  }
+  if (op == OPCODE_FILLED_NEW_ARRAY) {
+    return type::make_array_component_type(insn->get_type());
+  }
+  if (src_index == 0) {
+    if (op == OPCODE_APUT_BOOLEAN) {
+      return type::_boolean();
+    }
+    if (op == OPCODE_APUT_BYTE) {
+      return type::_byte();
+    }
+    if (op == OPCODE_APUT_CHAR) {
+      return type::_char();
+    }
+    if (op == OPCODE_APUT_SHORT) {
+      return type::_short();
+    }
+  }
+  return nullptr;
+}
+
 TypeDemand ConstantUses::get_type_demand(const DexType* type) {
   switch (type->c_str()[0]) {
   case 'V':
@@ -249,8 +305,10 @@ TypeDemand ConstantUses::get_type_demand(IRInstruction* insn,
     not_reached();
 
   case OPCODE_RETURN:
-  case OPCODE_RETURN_WIDE:
-    return m_rtype != nullptr ? get_type_demand(m_rtype) : TypeDemand::Error;
+  case OPCODE_RETURN_WIDE: {
+    const auto* type = get_declared_type(insn, src_index);
+    return type != nullptr ? get_type_demand(type) : TypeDemand::Error;
+  }
 
   case OPCODE_MOVE:
     return TypeDemand::IntOrFloat;
@@ -321,10 +379,6 @@ TypeDemand ConstantUses::get_type_demand(IRInstruction* insn,
   case OPCODE_REM_INT_LIT:
     return TypeDemand::Int;
 
-  case OPCODE_FILLED_NEW_ARRAY: {
-    DexType* component_type = type::make_array_component_type(insn->get_type());
-    return get_type_demand(component_type);
-  }
   case OPCODE_CMPL_FLOAT:
   case OPCODE_CMPG_FLOAT:
   case OPCODE_NEG_FLOAT:
@@ -497,7 +551,7 @@ TypeDemand ConstantUses::get_type_demand(IRInstruction* insn,
     case OPCODE_APUT_BYTE:
     case OPCODE_APUT_CHAR:
     case OPCODE_APUT_SHORT:
-      return TypeDemand::Int;
+      return get_type_demand(get_declared_type(insn, src_index));
     case OPCODE_APUT_OBJECT:
       return TypeDemand::Object;
     default:
@@ -511,12 +565,6 @@ TypeDemand ConstantUses::get_type_demand(IRInstruction* insn,
   case OPCODE_IPUT_SHORT:
   case OPCODE_IPUT_WIDE:
   case OPCODE_IPUT_OBJECT:
-    if (src_index == 1) {
-      return TypeDemand::Object;
-    }
-    always_assert(src_index == 0);
-    return get_type_demand(insn->get_field()->get_type());
-
   case OPCODE_SPUT:
   case OPCODE_SPUT_BOOLEAN:
   case OPCODE_SPUT_BYTE:
@@ -524,19 +572,15 @@ TypeDemand ConstantUses::get_type_demand(IRInstruction* insn,
   case OPCODE_SPUT_SHORT:
   case OPCODE_SPUT_WIDE:
   case OPCODE_SPUT_OBJECT:
-    return get_type_demand(insn->get_field()->get_type());
-
   case OPCODE_INVOKE_VIRTUAL:
   case OPCODE_INVOKE_SUPER:
   case OPCODE_INVOKE_DIRECT:
   case OPCODE_INVOKE_STATIC:
   case OPCODE_INVOKE_INTERFACE:
+  case OPCODE_FILLED_NEW_ARRAY:
   case OPCODE_INVOKE_CUSTOM:
-  case OPCODE_INVOKE_POLYMORPHIC: {
-    size_t expected_args = insn->invoke_srcs_size();
-    always_assert(insn->srcs_size() == expected_args);
-    return get_type_demand(insn->get_invoke_src_type(src_index));
-  }
+  case OPCODE_INVOKE_POLYMORPHIC:
+    return get_type_demand(get_declared_type(insn, src_index));
   case OPCODE_CONST_METHOD_HANDLE:
   case OPCODE_CONST_METHOD_TYPE:
     not_reached_log(

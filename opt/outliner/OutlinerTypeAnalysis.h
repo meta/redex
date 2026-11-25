@@ -27,6 +27,72 @@ using TypeEnvironments =
 using ReachingDefsEnvironments =
     UnorderedMap<const IRInstruction*, reaching_defs::Environment>;
 
+// The type ART's verifier gives an integral register.
+//
+// ART types each value by its definition: a constant by its value, any other
+// producer by its result type. Where several values reach a point, ART merges
+// their types pairwise, in whatever order it visits the paths
+// (`RegType::Merge`). The merge is not associative. `boolean` and 65 merge into
+// `byte`, which 40000 then takes to `int`. But 65 and 40000 first merge into a
+// constant, which `boolean` then takes to `char`.
+//
+// So an `IntegralType` keeps what each value contributes, as a set of ART types
+// of single values. `type()` answers the least type above the merge of that set
+// in EVERY order. `exact_type()` answers the type all orders end at, if they
+// agree. `join` is the union of the sets, so the type of a union never depends
+// on how its parts were grouped.
+//
+// A constant is kept as the set of integral types that hold it, because that
+// is all ART's merge looks at. To the merge, 65 and 74 are the same constant:
+// each merges with a `byte` into a `byte` and with a `char` into a `char`.
+class IntegralType {
+ public:
+  // The type of a value of the integral type `t`.
+  static IntegralType of(const DexType* t);
+  // The type of the constant `value`.
+  static IntegralType constant(int64_t value);
+
+  // The value of a register that may hold a value of `a` or of `b`.
+  static IntegralType join(const IntegralType& a, const IntegralType& b);
+  // `b` when nothing has accumulated in `a` yet, else their join.
+  static IntegralType join(const std::optional<IntegralType>& a,
+                           const IntegralType& b) {
+    return a ? join(*a, b) : b;
+  }
+
+  // Whether only constants contribute: ART types the register by their values,
+  // and no single type stands for them.
+  bool is_constant() const { return m_types == 0; }
+  // The least integral type above every merge order; nullptr for a constant.
+  const DexType* type() const;
+  // The type every merge order ends at, or nullptr when the order decides the
+  // type (a `boolean`, a `char` and 2 end at `char` or `int`) or for a
+  // constant.
+  const DexType* exact_type() const;
+  // Whether ART accepts this value wherever it accepts `bound`. Against a
+  // typed `bound`, this value's `type()` must be at or below `bound`'s type;
+  // when this value is a constant, `bound`'s type must hold it instead.
+  // Against a constant `bound`, this value must be a constant that every type
+  // holding `bound` also holds.
+  bool leq(const IntegralType& bound) const;
+  // Whether `t` holds every value: ART accepts this value where `t` is
+  // demanded.
+  bool held_by(const DexType* t) const { return leq(of(t)); }
+
+  bool operator==(const IntegralType& o) const {
+    return m_types == o.m_types && m_constants == o.m_constants;
+  }
+
+ private:
+  IntegralType(uint8_t types, uint16_t constants)
+      : m_types(types), m_constants(constants) {}
+  // Bit `k` of `m_types` stands for a value of the k-th of Z, B, S, C, I. Bit
+  // `m` of `m_constants` stands for a constant held by exactly the types in the
+  // mask `m` over Z, B, S, C (`int` holds every constant).
+  uint8_t m_types;
+  uint16_t m_constants;
+};
+
 // Outlined code declares a type for every value that crosses its boundary.
 // That type must be at or above what reaches the register and at or below
 // what its uses accept. `art::Value` models what reaches the register, a join
@@ -60,16 +126,13 @@ class Value {
 
  private:
   bool m_unknown{false};
-  // Bit k: a value of the k-th of `boolean`, `byte`, `short`, `char`, `int`.
-  uint8_t m_integral{0};
+  // The integral producers.
+  std::optional<IntegralType> m_integral;
   // Bit k: a value of the k-th of `float`, `long`, `double`.
   uint8_t m_primitives{0};
   // The other types contributing: classes and arrays.
   UnorderedSet<const DexType*> m_references;
-  bool m_has_constants{false};
-  // Bit k is set when the k-th of `boolean`, `byte`, `short`, `char` holds
-  // every contributing constant.
-  uint8_t m_constants_held_by{0xf};
+  std::optional<IntegralType> m_constants;
 };
 
 // What the uses of a register require of it: the type each use demands.

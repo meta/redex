@@ -511,7 +511,8 @@ std::vector<SplittableClosure> to_splittable_closures(
     std::sort(ordered_live_in.begin(), ordered_live_in.end());
 
     ReducedCFGClosureAdapter rcfgca(*ota, first_insn, insns,
-                                    sc.reduced_components, def_uses);
+                                    sc.reduced_components, def_uses,
+                                    /*exclude_in_cover_seed_defs=*/false);
     for (auto reg : ordered_live_in) {
       auto defs = rcfgca.get_defs(reg);
       if (defs.size() == 1 && opcode::is_a_const((*defs.begin())->opcode())) {

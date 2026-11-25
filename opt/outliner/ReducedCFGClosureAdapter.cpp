@@ -17,12 +17,19 @@ ReducedCFGClosureAdapter::ReducedCFGClosureAdapter(
     Lazy<UnorderedMap<IRInstruction*,
                       const method_splitting_impl::ReducedBlock*>>& insns,
     const UnorderedSet<const ReducedBlock*>& reduced_components,
-    Lazy<live_range::DefUseChains>& def_uses)
+    Lazy<live_range::DefUseChains>& def_uses,
+    bool exclude_in_cover_seed_defs)
     : m_ota(ota),
       m_first_insn(first_insn),
       m_reduced_components(reduced_components),
       m_insns(insns),
-      m_def_uses(def_uses) {}
+      m_def_uses(def_uses),
+      m_exclude_in_cover_seed_defs(exclude_in_cover_seed_defs) {}
+
+bool ReducedCFGClosureAdapter::is_in_cover(IRInstruction* insn) const {
+  auto it = m_insns->find(insn);
+  return it != m_insns->end() && m_reduced_components.contains(it->second);
+}
 
 const type_inference::TypeEnvironment& ReducedCFGClosureAdapter::get_type_env()
     const {
@@ -50,6 +57,9 @@ void ReducedCFGClosureAdapter::gather_type_demands(
   for (auto reg : UnorderedIterable(regs_to_track)) {
     auto defs = irdef_env.get(reg).elements();
     for (auto* def : defs) {
+      if (m_exclude_in_cover_seed_defs && is_in_cover(def)) {
+        continue;
+      }
       workqueue.push(def);
     }
   }

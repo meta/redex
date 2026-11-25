@@ -58,6 +58,7 @@ check_PROGRAMS = \
     class_merging_hot_cold_grouping_test \
     class_merging_method_handle_test \
     class_merging_models_test \
+    class_merging_relaxed_init_test \
     class_order_sample_test \
     check_breadcrumbs_test \
     check_cast_analysis_test \
@@ -358,6 +359,9 @@ class_merging_method_handle_test_SOURCES = \
 
 class_merging_models_test_SOURCES = \
     ClassMergingModelsTest.cpp ScopeHelper.cpp
+
+class_merging_relaxed_init_test_SOURCES = \
+    ClassMergingRelaxedInitTest.cpp ScopeHelper.cpp
 
 concurrent_containers_test_SOURCES = ConcurrentContainersTest.cpp
 

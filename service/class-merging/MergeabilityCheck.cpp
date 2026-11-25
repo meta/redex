@@ -124,13 +124,15 @@ TypeSet MergeabilityChecker::exclude_unsupported_bytecode_refs_for(
     DexMethod* method) {
   TypeSet non_mergeables;
   auto* code = method->get_code();
-  if ((code == nullptr) || (m_generated.count(method->get_class()) != 0u)) {
+  if (code == nullptr) {
     return non_mergeables;
   }
 
   // We find and exclude classes of which instances are created via
   // new-instance, but then the associated constructor call invokes a
-  // constructor of a super type, and not the exact instantiated type.
+  // constructor of a super type, and not the exact instantiated type. This
+  // applies to generated code too, as merging such a class would not store its
+  // type tag.
   // TODO T184662680: Fully support such scenario, e.g. by synthesizing a
   // corresponding constructor on the instantiated class, and not just exclude.
   auto relaxed_inits = constructor_analysis::find_relaxed_inits(
@@ -144,6 +146,10 @@ TypeSet MergeabilityChecker::exclude_unsupported_bytecode_refs_for(
           SHOW(relaxed_init.new_instance), SHOW(relaxed_init.invoke),
           SHOW(method));
     non_mergeables.insert(relaxed_init.new_instance->get_type());
+  }
+
+  if (m_generated.count(method->get_class()) != 0u) {
+    return non_mergeables;
   }
 
   bool has_type_tag = m_spec.has_type_tag();

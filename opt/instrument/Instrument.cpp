@@ -703,29 +703,11 @@ size_t check_integrity(DexStoresVector& stores, const std::string& prefix) {
     cfg::ScopedCFG cfg{code};
     for (auto& mie : cfg::InstructionIterable(*cfg)) {
       auto* insn = mie.insn;
-      always_assert_log(!insn->has_type() || check_type(insn->get_type()), "%s",
-                        SHOW(insn));
-
-      always_assert_log(!insn->has_field() ||
-                            check_type(insn->get_field()->get_type()),
-                        "%s", SHOW(insn));
-      always_assert_log(!insn->has_field() ||
-                            check_type(insn->get_field()->get_class()),
-                        "%s", SHOW(insn));
-
-      always_assert_log(!insn->has_method() ||
-                            check_type(insn->get_method()->get_class()),
-                        "%s", SHOW(insn));
-      always_assert_log(
-          !insn->has_method() ||
-              check_type(insn->get_method()->get_proto()->get_rtype()),
-          "%s", SHOW(insn));
-      always_assert_log(
-          !insn->has_method() ||
-              std::all_of(insn->get_method()->get_proto()->get_args()->begin(),
-                          insn->get_method()->get_proto()->get_args()->end(),
-                          check_type),
-          "%s", SHOW(insn));
+      std::vector<const DexType*> types;
+      insn->gather_types(types);
+      for (const auto* type : types) {
+        always_assert_log(check_type(type), "%s", SHOW(insn));
+      }
     }
   });
   return checked_types.size();

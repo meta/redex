@@ -117,6 +117,7 @@ check_PROGRAMS = \
     init_class_pruner_test \
     init_class_lowering_pass_test \
     instruction_sequence_outliner_test \
+    instrument_test \
     int_type_patcher_test \
     interprocedural_constant_propagation_test \
     ipcp_stringbuilder_append_chain_test \
@@ -495,6 +496,8 @@ unreachable_lowering_pass_test_SOURCES = UnreachableLoweringPassTest.cpp
 int_type_patcher_test_SOURCES = IntTypePatcherTest.cpp
 
 instruction_sequence_outliner_test_SOURCES = InstructionSequenceOutlinerTest.cpp ScopeHelper.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
+
+instrument_test_SOURCES = InstrumentTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 interprocedural_constant_propagation_test_SOURCES = constant-propagation/IPConstantPropagationTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 

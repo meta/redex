@@ -9,6 +9,8 @@
 
 #include <boost/regex.hpp>
 
+#include "DexAnnotation.h"
+#include "DexCallSite.h"
 #include "DexClass.h"
 #include "DexInstruction.h"
 #include "DexUtil.h"
@@ -88,8 +90,41 @@ UnorderedSet<uint32_t> find_code_resource_references(
       if (assume_id_inlined && resources::is_potential_resid(lit)) {
         potential_ids_from_code.emplace(lit);
       }
-    } else if (insn->has_string()) {
-      std::string to_find = insn->get_string()->str_copy();
+    } else if (assume_id_inlined && insn->opcode() == OPCODE_FILL_ARRAY_DATA) {
+      auto* op_data = insn->get_data();
+      auto* cls = type_class(m->get_class());
+      // Do not blanket assume the filling of customized arrays is a usage.
+      auto customized_r = !resources::is_non_customized_r_class(cls) &&
+                          r_class_reader.is_r_class(cls);
+      if (!customized_r && fill_array_data_payload_width(op_data) == 4) {
+        // Consider only int[] for resource ids.
+        auto payload = get_fill_array_data_payload<uint32_t>(op_data);
+        for (const auto& lit : payload) {
+          if (resources::is_potential_resid(lit)) {
+            potential_ids_from_code.emplace(lit);
+          }
+        }
+      }
+    }
+    // An integer that a call site passes to its bootstrap method can be a
+    // resource id too.
+    if (assume_id_inlined && insn->has_callsite()) {
+      for (const auto& arg : insn->get_callsite()->args()) {
+        if (arg->evtype() == DEVT_INT || arg->evtype() == DEVT_LONG) {
+          auto lit = static_cast<int64_t>(arg->value());
+          if (resources::is_potential_resid(lit)) {
+            potential_ids_from_code.emplace(lit);
+          }
+        }
+      }
+    }
+    // Any string of the instruction, such as that of a const-string or one
+    // that a call site passes to its bootstrap method, can hold a resource id
+    // or name.
+    std::vector<const DexString*> strings;
+    insn->gather_strings(strings);
+    for (const auto* string : strings) {
+      std::string to_find = string->str_copy();
       if (assume_id_inlined) {
         // Redex evaluates expressions like
         // String.valueOf(R.drawable.inspiration_no_format)
@@ -119,21 +154,6 @@ UnorderedSet<uint32_t> find_code_resource_references(
         if (search != name_to_ids.end()) {
           potential_ids_from_strings.insert(search->second.begin(),
                                             search->second.end());
-        }
-      }
-    } else if (assume_id_inlined && insn->opcode() == OPCODE_FILL_ARRAY_DATA) {
-      auto* op_data = insn->get_data();
-      auto* cls = type_class(m->get_class());
-      // Do not blanket assume the filling of customized arrays is a usage.
-      auto customized_r = !resources::is_non_customized_r_class(cls) &&
-                          r_class_reader.is_r_class(cls);
-      if (!customized_r && fill_array_data_payload_width(op_data) == 4) {
-        // Consider only int[] for resource ids.
-        auto payload = get_fill_array_data_payload<uint32_t>(op_data);
-        for (const auto& lit : payload) {
-          if (resources::is_potential_resid(lit)) {
-            potential_ids_from_code.emplace(lit);
-          }
         }
       }
     }

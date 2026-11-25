@@ -482,3 +482,85 @@ TEST_F(ApkResourcesCodeRootsTest, RFieldReadThroughMethodHandleIsRoot) {
         EXPECT_EQ(roots.count(id), 1);
       });
 }
+
+// With `check_string_for_name` and `assume_id_inlined`, a resource whose name
+// or id a string of code spells out, or whose id an integer of code holds, is a
+// root, since code can look the resource up by it. The strings and integers
+// among the bootstrap arguments of a call site count like those of other
+// instructions.
+TEST_F(ApkResourcesCodeRootsTest, CallSiteArgumentsAreRoots) {
+  setup_resources_and_run([&](const std::string& temp_dir_path,
+                              ApkResources* resources) {
+    ResourceConfig global_resources_config;
+    resources::ReachabilityOptions options;
+    options.check_string_for_name = true;
+    options.assume_id_inlined = true;
+    auto res_table = resources->load_res_table();
+    auto get_roots = [&](DexStoresVector& stores) {
+      resources::ReachableResources reachable_resources(
+          temp_dir_path, global_resources_config, options);
+      return reachable_resources.get_resource_roots(stores);
+    };
+    auto stores_without_code = make_empty_stores();
+    auto roots_without_code = get_roots(stores_without_code);
+    // Four resources that are not roots without code: one named by its
+    // name, one by its id in a string, and two by their ids as an int and as
+    // a long.
+    std::string name;
+    uint32_t named_id{0};
+    for (const auto& [resource_name, ids] : res_table->name_to_ids) {
+      if (ids.size() == 1 && roots_without_code.count(ids[0]) == 0) {
+        name = resource_name;
+        named_id = ids[0];
+        break;
+      }
+    }
+    ASSERT_FALSE(name.empty());
+    const auto& sorted_ids = res_table->sorted_res_ids;
+    auto it =
+        std::find_if(sorted_ids.begin(), sorted_ids.end(), [&](uint32_t id) {
+          return id != named_id && roots_without_code.count(id) == 0;
+        });
+    ASSERT_NE(it, sorted_ids.end());
+    uint32_t spelled_id = *it;
+    auto it2 = std::find_if(std::next(it), sorted_ids.end(), [&](uint32_t id) {
+      return id != named_id && roots_without_code.count(id) == 0;
+    });
+    ASSERT_NE(it2, sorted_ids.end());
+    uint32_t integer_id = *it2;
+    auto it3 = std::find_if(std::next(it2), sorted_ids.end(), [&](uint32_t id) {
+      return id != named_id && roots_without_code.count(id) == 0;
+    });
+    ASSERT_NE(it3, sorted_ids.end());
+    uint32_t long_id = *it3;
+
+    ClassCreator user_creator(DexType::make_type("Lcom/example/User;"));
+    user_creator.set_super(type::java_lang_Object());
+    auto* use = assembler::method_from_string(R"(
+      (method (public static) "Lcom/example/User;.use:()V"
+        (
+          (invoke-static () "Lcom/example/User;.placeholder:()V")
+          (return-void)
+        )
+      )
+    )");
+    user_creator.add_method(use);
+    std::vector<std::unique_ptr<DexEncodedValue>> args;
+    args.emplace_back(new DexEncodedValueString(DexString::make_string(name)));
+    args.emplace_back(new DexEncodedValueString(
+        DexString::make_string(std::to_string(spelled_id))));
+    args.emplace_back(new DexEncodedValuePrimitive(DEVT_INT, integer_id));
+    args.emplace_back(new DexEncodedValuePrimitive(DEVT_LONG, long_id));
+    redex::make_invoke_custom(use->get_code(), "run", "()V", std::move(args));
+
+    DexStoresVector stores;
+    DexStore store("classes");
+    store.add_classes({user_creator.create()});
+    stores.emplace_back(std::move(store));
+    auto roots = get_roots(stores);
+    EXPECT_EQ(roots.count(named_id), 1);
+    EXPECT_EQ(roots.count(spelled_id), 1);
+    EXPECT_EQ(roots.count(integer_id), 1);
+    EXPECT_EQ(roots.count(long_id), 1);
+  });
+}

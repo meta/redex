@@ -1001,6 +1001,42 @@ TEST_F(OutlinerTypeAnalysisTest, get_result_type_merges_constants_by_value) {
   EXPECT_EQ(type_of(4, 65), type::_char());
 }
 
+// A register holds either one 32-bit value or a 64-bit pair. A narrow `const 0`
+// has no fixed type, but it has a width: where it meets a `long` or a
+// `const-wide`, no type holds both, whatever the uses accept. Only a value
+// whose contributions all have one width has a type.
+TEST_F(OutlinerTypeAnalysisTest, get_result_type_of_mixed_widths) {
+  auto* foo_method = assembler::method_from_string(R"(
+      (method (public static) "LFoo;.foo:(J)V" (
+        (load-param-wide v0)
+        (const v2 0)
+        (const-wide v4 4294967296)
+        (const-wide v6 0)
+        (add-long v8 v2 v4)
+        (add-long v8 v6 v4)
+        (return-void)
+      )))");
+  foo_method->get_code()->build_cfg();
+  outliner_impl::OutlinerTypeAnalysis ota(foo_method);
+  auto* narrow_zero = find_insn(foo_method, OPCODE_CONST);
+  auto* wide_constant = find_insn(foo_method, OPCODE_CONST_WIDE);
+  auto* wide_zero = find_insn(foo_method, OPCODE_CONST_WIDE, 2);
+  auto* long_param = find_insn(foo_method, IOPCODE_LOAD_PARAM_WIDE);
+  // Mixed widths: a narrow constant beside a `long` producer, beside a
+  // `const-wide`, or beside an incoming `long`.
+  EXPECT_EQ(get_result_type(ota, {narrow_zero, long_param}, nullptr), nullptr);
+  EXPECT_EQ(get_result_type(ota, {narrow_zero, wide_constant}, nullptr),
+            nullptr);
+  EXPECT_EQ(get_result_type(ota, {narrow_zero}, type::_long()), nullptr);
+  // A `const-wide` beside a narrow type.
+  EXPECT_EQ(get_result_type(ota, {wide_constant}, type::_float()), nullptr);
+  // One width: wide constants and a `long` are a `long`.
+  EXPECT_EQ(get_result_type(ota, {wide_zero, wide_constant}, nullptr),
+            type::_long());
+  EXPECT_EQ(get_result_type(ota, {wide_zero, long_param}, nullptr),
+            type::_long());
+}
+
 // A register whose only definitions are undefined values, or that has none,
 // takes its incoming type.
 TEST_F(OutlinerTypeAnalysisTest, get_result_type_of_incoming_type_alone) {

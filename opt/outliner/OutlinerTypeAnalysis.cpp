@@ -332,6 +332,15 @@ Value Value::constant(const IRInstruction* insn) {
   Value v;
   v.m_constants = IntegralType::constant(insn->get_literal());
   v.m_wide_constant = insn->opcode() == OPCODE_CONST_WIDE;
+  v.m_narrow_constant = !v.m_wide_constant;
+  return v;
+}
+
+Value Value::typed_by_uses(const DexType* t) const {
+  always_assert(is_constant());
+  auto v = of_type(t);
+  v.m_wide_constant = m_wide_constant;
+  v.m_narrow_constant = m_narrow_constant;
   return v;
 }
 
@@ -346,6 +355,7 @@ void Value::join_with(const Value& other) {
     m_constants = IntegralType::join(m_constants, *other.m_constants);
   }
   m_wide_constant |= other.m_wide_constant;
+  m_narrow_constant |= other.m_narrow_constant;
 }
 
 std::optional<IntegralType> Value::integral() const {
@@ -365,7 +375,12 @@ bool Value::is_constant() const {
 }
 
 const DexType* Value::upper() const {
-  if (m_unknown) {
+  constexpr uint8_t kWidePrimitives = 2 | 4; // `long`, `double`
+  const bool wide = m_wide_constant || (m_primitives & kWidePrimitives) != 0;
+  const bool narrow = m_narrow_constant || m_integral ||
+                      (m_primitives & ~kWidePrimitives) != 0 ||
+                      !m_references.empty();
+  if (m_unknown || (wide && narrow)) {
     return nullptr;
   }
   const int kinds = (m_integral ? 1 : 0) + std::popcount(m_primitives) +
@@ -1513,7 +1528,7 @@ art::Value OutlinerTypeAnalysis::value_of_defs(
   }
   if (value.is_constant()) {
     // Constants alone give a register no type; their uses do.
-    return art::Value::of_type(
+    return value.typed_by_uses(
         get_const_insns_type_demand(candidate, const_insns));
   }
   return value;

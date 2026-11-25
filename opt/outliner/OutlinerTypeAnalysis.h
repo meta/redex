@@ -102,8 +102,8 @@ class IntegralType {
 namespace art {
 
 // What ART's verifier may hold in a register: the type of every producer and
-// every constant that reaches it. `join` keeps each contribution; `upper()`
-// resolves them into one type.
+// every constant that reaches it, each one register wide or a wide pair.
+// `join` keeps each contribution; `upper()` resolves them into one type.
 class Value {
  public:
   // No value reaches the register.
@@ -113,6 +113,9 @@ class Value {
   static Value of_type(const DexType* t);
   // The value of a `const` or `const-wide`.
   static Value constant(const IRInstruction* insn);
+  // This value, to which only constants contribute, given the type `t` that the
+  // uses of those constants need. The constants keep their widths.
+  Value typed_by_uses(const DexType* t) const;
 
   void join_with(const Value& other);
 
@@ -125,7 +128,8 @@ class Value {
   bool is_constant() const;
   // The type of the register, at or above every contribution; nullptr when
   // a contribution is unknown, no type holds them all, or only constants
-  // contribute.
+  // contribute. No type holds a one-register value beside a wide pair, such
+  // as a `const 0` beside a `long`.
   const DexType* upper() const;
   // `upper()` when every order in which ART may merge the contributions ends
   // at that type, else nullptr (`IntegralType::exact_type`).
@@ -141,6 +145,7 @@ class Value {
   UnorderedSet<const DexType*> m_references;
   std::optional<IntegralType> m_constants;
   bool m_wide_constant{false};
+  bool m_narrow_constant{false};
 };
 
 // What the uses of a register require of it: the type each use demands.

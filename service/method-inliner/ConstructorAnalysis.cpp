@@ -360,9 +360,16 @@ UnorderedSet<const DexType*> find_complex_init_inlined_types(
             for (const auto& use : UnorderedIterable(search->second)) {
               if (use.insn->has_method()) {
                 auto* use_method = use.insn->get_method();
-                if (use.src_index == 0 && method::is_init(use_method) &&
-                    use_method != object_init &&
-                    use_method->get_class() != new_instance_type) {
+                if (use.src_index != 0 || !method::is_init(use_method) ||
+                    use_method == object_init) {
+                  continue;
+                }
+                // A constructor reference that does not resolve names no
+                // constructor of the instantiated type.
+                auto* resolved_init = resolve_method_deprecated(
+                    use_method, opcode_to_search(use.insn), method);
+                if (resolved_init == nullptr ||
+                    resolved_init->get_class() != new_instance_type) {
                   items.insert(new_instance_type);
                 }
               }

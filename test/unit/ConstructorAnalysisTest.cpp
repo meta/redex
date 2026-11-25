@@ -176,6 +176,10 @@ TEST_F(ConstructorAnalysisTest, can_detect_relaxed_inlined_init) {
   auto* baz_cls = create_a_class("Lbaz;", bar_cls->get_type());
   create_an_init_method(baz_cls, bar_init, 0, {});
 
+  auto* qux_cls = create_a_class("Lqux;");
+  create_an_init_method(
+      qux_cls, DexMethod::make_method("Ljava/lang/Object;.<init>:()V"), 0, {});
+
   auto* use_cls = assembler::class_from_string(R"(
     (class (public) "Luse;"
       (method (public static) "Luse;.a:(I)V"
@@ -194,13 +198,18 @@ TEST_F(ConstructorAnalysisTest, can_detect_relaxed_inlined_init) {
           (new-instance "Lbaz;")
           (move-result-pseudo-object v3)
           (invoke-direct (v3) "Lbar;.<init>:()V")
+
+          ; complex, as the constructor does not resolve
+          (new-instance "Lqux;")
+          (move-result-pseudo-object v4)
+          (invoke-direct (v4) "Lqux;.<init>:(I)V")
           (return-void)
         )
       )
     )
   )");
 
-  Scope scope{foo_cls, bar_cls, baz_cls, use_cls};
+  Scope scope{foo_cls, bar_cls, baz_cls, qux_cls, use_cls};
   for (auto* cls : scope) {
     for (auto* m : cls->get_all_methods()) {
       auto* code = m->get_code();
@@ -210,7 +219,7 @@ TEST_F(ConstructorAnalysisTest, can_detect_relaxed_inlined_init) {
     }
   }
   auto result = constructor_analysis::find_complex_init_inlined_types(scope);
-  EXPECT_EQ(result.size(), 1);
-  EXPECT_EQ(*unordered_any(result), baz_cls->get_type())
-      << "GOT " << show(*unordered_any(result));
+  EXPECT_EQ(result.size(), 2);
+  EXPECT_EQ(result.count(baz_cls->get_type()), 1);
+  EXPECT_EQ(result.count(DexType::get_type("Lqux;")), 1);
 }

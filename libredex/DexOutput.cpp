@@ -2919,6 +2919,28 @@ void DexOutput::prepare(SortMode string_mode,
                         const std::vector<SortMode>& code_mode,
                         ConfigFiles& conf,
                         const std::string& dex_magic) {
+  prepare_without_debug(string_mode, code_mode, conf, dex_magic);
+  finalize_debug_and_header();
+}
+
+void DexOutput::prepare_without_debug(SortMode string_mode,
+                                      const std::vector<SortMode>& code_mode,
+                                      ConfigFiles& conf,
+                                      const std::string& dex_magic) {
+  always_assert_log(!conf.force_single_dex() || m_dex_number == 0,
+                    "force_single_dex requires one dex");
+  auto class_order_violations = check_class_order(m_classes);
+  if (class_order_violations > 0) {
+    // If enforce_class_order was enabled we fail the program if there exist any
+    // violations, otherwise we just record the number of violation.
+    always_assert_log(!conf.enforce_class_order(),
+                      "Dex %s - %zu has %d class order violations",
+                      m_store_name == nullptr ? "<unnamed>"
+                                              : m_store_name->c_str(),
+                      m_dex_number, class_order_violations);
+  }
+  m_stats.class_order_violations = class_order_violations;
+
   m_gtypes->set_config(&conf);
 
   fix_jumbos(m_classes, &m_dodx);
@@ -2936,6 +2958,9 @@ void DexOutput::prepare(SortMode string_mode,
   generate_callsite_data();
   generate_methodhandle_data();
   generate_annotations();
+}
+
+void DexOutput::finalize_debug_and_header() {
   generate_debug_items();
   generate_map();
   finalize_header();
@@ -2943,6 +2968,11 @@ void DexOutput::prepare(SortMode string_mode,
 }
 
 void DexOutput::write() {
+  write_dex();
+  write_symbol_files();
+}
+
+void DexOutput::write_dex() {
   int fd = open(m_filename, O_CREAT | O_TRUNC | O_WRONLY | O_BINARY, 0660);
   always_assert_log(fd != -1, "Cannot open dex output %s: %s", m_filename,
                     strerror(errno));
@@ -2964,7 +2994,6 @@ void DexOutput::write() {
   always_assert_log(close(fd) == 0, "Cannot close dex output %s: %s",
                     m_filename, strerror(errno));
   m_stats.num_bytes = static_cast<int64_t>(written);
-  write_symbol_files();
 }
 
 namespace {
@@ -3132,22 +3161,7 @@ enhanced_dex_stats_t write_classes_to_dex(
     int min_sdk,
     const std::vector<SortMode>& code_sort_mode,
     SortMode string_sort_mode) {
-  const JsonWrapper& json_cfg = conf.get_json_config();
-  bool force_single_dex = json_cfg.get("force_single_dex", false);
-  if (force_single_dex) {
-    always_assert_log(dex_number == 0, "force_single_dex requires one dex");
-  }
-
   TRACE(OPUT, 2, "[write_classes_to_dex][filename] %s", filename.c_str());
-  auto this_class_order_violations = check_class_order(classes);
-  if (this_class_order_violations > 0) {
-    // If enforce_class_order was enabled we fail the program if there exist any
-    // violations, otherwise we just record the number of violation.
-    always_assert_log(!conf.enforce_class_order(),
-                      "Dex %s - %zu has %d class order violations",
-                      store_name->c_str(), dex_number,
-                      this_class_order_violations);
-  }
 
   DexOutput dout(filename.c_str(), classes, std::move(gtypes),
                  conf.normal_primary_dex(), store_number, store_name,
@@ -3158,7 +3172,6 @@ enhanced_dex_stats_t write_classes_to_dex(
   dout.write();
   dout.metrics();
 
-  dout.m_stats.class_order_violations = this_class_order_violations;
   return dout.m_stats;
 }
 

@@ -51,7 +51,9 @@ class IODITest : public ::testing::Test {
 
   DexClasses run_redex(MidMap* mids = nullptr,
                        std::string* iodi_data = nullptr,
-                       bool iodi_layers = false) {
+                       bool iodi_layers = false,
+                       bool phased = false,
+                       std::vector<uint8_t>* dex_bytes = nullptr) {
     reset_redex();
     const char* dexfile = std::getenv("dexfile");
     EXPECT_NE(nullptr, dexfile);
@@ -94,8 +96,18 @@ class IODITest : public ::testing::Test {
                      pos_mapper.get(),
                      &method_to_id,
                      &code_debug_lines);
-    output.prepare(SortMode::DEFAULT, {SortMode::DEFAULT}, dummy_cfg,
-                   "dex\n035\0"s);
+    if (phased) {
+      output.prepare_without_debug(SortMode::DEFAULT, {SortMode::DEFAULT},
+                                   dummy_cfg, "dex\n035\0"s);
+      output.finalize_debug_and_header();
+    } else {
+      output.prepare(SortMode::DEFAULT, {SortMode::DEFAULT}, dummy_cfg,
+                     "dex\n035\0"s);
+    }
+    if (dex_bytes != nullptr) {
+      auto bytes = DexOutputTestHelper::output_bytes(output);
+      dex_bytes->assign(bytes.begin(), bytes.end());
+    }
     if (mids != nullptr) {
       for (auto& iter : UnorderedIterable(method_to_id)) {
         DexMethod* method = iter.first;
@@ -264,6 +276,17 @@ void log_debug_to_methods(const std::map<void*, DexMethods>& result) {
 };
 
 } // namespace
+
+TEST_F(IODITest, ExplicitPreparationPhasesPreserveDexBytes) {
+  for (bool layered : {false, true}) {
+    std::vector<uint8_t> serial;
+    std::vector<uint8_t> phased;
+    run_redex(nullptr, nullptr, layered, false, &serial);
+    run_redex(nullptr, nullptr, layered, true, &phased);
+    ASSERT_FALSE(serial.empty());
+    EXPECT_EQ(serial, phased);
+  }
+}
 
 TEST_F(IODITest, avoidDexLayoutOOM) {
   // Here we want to test that for each debug program the inflated size in

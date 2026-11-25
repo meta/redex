@@ -9,6 +9,7 @@
 #include <json/json.h>
 
 #include "ConfigFiles.h"
+#include "Creators.h"
 #include "DexPosition.h"
 #include "DexUtil.h"
 #include "InstructionLowering.h"
@@ -31,6 +32,46 @@ class DexOutputTest : public RedexIntegrationTest {
     return code_items;
   }
 };
+
+TEST_F(DexOutputTest, SplitWritePreservesOpenFailureBehavior) {
+  auto temp = redex::make_tmp_dir("dex-write-phase-%%%%-%%%%");
+  redex::create_directories(temp.path + "/meta");
+  ConfigFiles config(Json::Value(Json::objectValue), temp.path);
+  DexClasses empty_classes;
+  const std::string store_name("classes");
+  const auto filename = temp.path + "/missing/output.dex";
+  std::unique_ptr<PositionMapper> mapper(PositionMapper::make(""));
+  DexOutput output(filename.c_str(), &empty_classes,
+                   std::make_shared<GatheredTypes>(&empty_classes), true, 0,
+                   &store_name, 0, DebugInfoKind::NoCustomSymbolication,
+                   nullptr, config, mapper.get(), nullptr, nullptr);
+  output.prepare(SortMode::DEFAULT, {SortMode::DEFAULT}, config, "dex\n035");
+  EXPECT_THROW(output.write_dex(), RedexException);
+  EXPECT_THROW(output.write(), RedexException);
+  EXPECT_EQ(output.m_stats.num_bytes, 0);
+  EXPECT_FALSE(redex::exists(config.metafile("redex-class-rename-map.txt")));
+  EXPECT_FALSE(redex::exists(config.metafile("redex-full-rename-map.txt")));
+}
+
+TEST_F(DexOutputTest, PreparationValidationHandlesUnnamedStores) {
+  ClassCreator parent(DexType::make_type("LPhaseParent;"));
+  parent.set_super(DexType::make_type("Ljava/lang/Object;"));
+  auto* parent_class = parent.create();
+  ClassCreator child(DexType::make_type("LPhaseChild;"));
+  child.set_super(parent_class->get_type());
+  DexClasses invalid_order{child.create(), parent_class};
+  Json::Value json;
+  json["enforce_class_order"] = true;
+  ConfigFiles config(json);
+  std::unique_ptr<PositionMapper> mapper(PositionMapper::make(""));
+  DexOutput output("unused.dex", &invalid_order,
+                   std::make_shared<GatheredTypes>(&invalid_order), true, 0,
+                   nullptr, 0, DebugInfoKind::NoCustomSymbolication, nullptr,
+                   config, mapper.get(), nullptr, nullptr);
+  EXPECT_THROW(output.prepare_without_debug(
+                   SortMode::DEFAULT, {SortMode::DEFAULT}, config, "dex\n035"),
+               RedexException);
+}
 
 TEST_F(DexOutputTest, TEST_SIMILARITY_ORDERER) {
   std::vector<SortMode> sort_modes{SortMode::METHOD_PROFILED_ORDER,

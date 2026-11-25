@@ -361,7 +361,6 @@ class DexOutput {
   void generate_map();
   void finalize_header();
   void init_header_offsets(const std::string& dex_magic);
-  void write_symbol_files();
   uint32_t align(uint32_t offset) { return (offset + 3) & ~3; }
   void align_output();
 
@@ -406,7 +405,21 @@ class DexOutput {
                const std::vector<SortMode>& code_mode,
                ConfigFiles& conf,
                const std::string& dex_magic);
+  // Two-phase prepare for parallel dex writing. Phase 1 does everything up to
+  // and including generate_annotations (parallelizable). Phase 2 does
+  // generate_debug_items + generate_map + finalize_header +
+  // compute_method_to_id_map (must be sequential for deterministic position
+  // mapper ordering).
+  void prepare_without_debug(SortMode string_mode,
+                             const std::vector<SortMode>& code_mode,
+                             ConfigFiles& conf,
+                             const std::string& dex_magic);
+  void finalize_debug_and_header();
   void write();
+  // Dex-local bytes can be written concurrently; symbol appends must be
+  // ordered.
+  void write_dex();
+  void write_symbol_files();
   void metrics();
   static void check_method_instruction_size_limit(
       const ConfigFiles& conf,

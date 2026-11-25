@@ -82,6 +82,20 @@ void MethodSplittingPass::bind_config() {
 
 namespace method_splitting_impl {
 
+void FateCounters::export_metrics(PassManager& mgr) const {
+  const std::string prefix = kind == SplitKind::Region ? "region_" : "suffix_";
+  mgr.set_metric(prefix + "candidates", candidates.load());
+  for (const auto& [fate, fate_name] : kCandidateFateNames) {
+    if (!can_reach(kind, fate)) {
+      continue;
+    }
+    const auto i = static_cast<size_t>(fate);
+    const auto name = prefix + std::string(fate_name);
+    mgr.set_metric(name, n[i].load());
+    mgr.set_metric(name + "_code_units", code_units[i].load());
+  }
+}
+
 void Stats::export_metrics(PassManager& mgr) const {
   mgr.set_metric("split_count", added_methods.size());
   mgr.set_metric("split_count_simple", split_count_simple.load());
@@ -100,11 +114,8 @@ void Stats::export_metrics(PassManager& mgr) const {
   mgr.set_metric("created_large_sparse_switches",
                  created_large_sparse_switches.load());
   mgr.set_metric("excluded_methods", excluded_methods.load());
-  // A nonzero value on a run that also reports `min_sdk_no_file` means the gate
-  // rejected external types for want of an api model rather than on a real
-  // min-sdk violation.
-  mgr.set_metric("arg_type_illegal", arg_type_illegal.load());
   mgr.set_metric("iterations", iterations);
+  suffix_fates.export_metrics(mgr);
 }
 
 } // namespace method_splitting_impl

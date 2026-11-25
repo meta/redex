@@ -8,8 +8,11 @@
 #include "MethodSplitterTestFixture.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <set>
 #include <sstream>
+#include <utility>
 
 #include "ControlFlow.h"
 #include "Creators.h"
@@ -175,6 +178,8 @@ SplitResult runSplitter(std::string_view sig,
   stores.emplace_back("test_store");
   stores.front().get_dexen().push_back({cls});
   method_splitting_impl::Stats stats;
+  method_splitting_impl::EvaluationLog evaluations;
+  stats.evaluations = &evaluations;
   // A null `min_sdk_api` leaves every EXTERNAL type failing the loadability
   // check, which is the conservative default the harness wants.
   method_splitting_impl::StoreRefCheckers store_ref_checkers(
@@ -192,7 +197,52 @@ SplitResult runSplitter(std::string_view sig,
     }
   }
   res.stats = stats.snapshot();
+  res.evaluations = evaluations.records();
+  expectEveryCandidateHasOneFate(res.stats, res.evaluations,
+                                 /* one_host */ true);
   return res;
+}
+
+void expectEveryCandidateHasOneFate(
+    const method_splitting_impl::StatsSnapshot& stats,
+    const std::vector<method_splitting_impl::CandidateEvaluation>& records,
+    bool one_host) {
+  using method_splitting_impl::SplitKind;
+  auto check = [&](SplitKind kind,
+                   const method_splitting_impl::FateSnapshot& fates,
+                   const char* name) {
+    always_assert_log(fates.recorded() == fates.candidates,
+                      "%zu %s candidates, %zu fates", fates.candidates, name,
+                      fates.recorded());
+    std::array<size_t, method_splitting_impl::kCandidateFateCount> per_fate{};
+    for (const auto& e : records) {
+      if (e.kind == kind) {
+        per_fate[static_cast<size_t>(e.fate)]++;
+      }
+    }
+    for (size_t i = 0; i < per_fate.size(); ++i) {
+      always_assert_log(
+          per_fate[i] == fates.n[i], "%zu %s records at %s, %zu counted",
+          per_fate[i], name,
+          std::string(method_splitting_impl::kCandidateFateNames[i].name)
+              .c_str(),
+          fates.n[i]);
+    }
+  };
+  check(SplitKind::Suffix, stats.suffix_fates, "suffix");
+  if (!one_host) {
+    return;
+  }
+  // Only the first iteration is checked. It scans the host alone; later
+  // iterations also scan the splits, whose block ids repeat the host's.
+  std::set<std::pair<SplitKind, std::vector<cfg::BlockId>>> seen;
+  for (const auto& e : records) {
+    if (e.iteration == 0) {
+      always_assert_log(seen.emplace(e.kind, e.heads).second,
+                        "a candidate headed at B%zu has two records",
+                        (size_t)e.heads.front());
+    }
+  }
 }
 
 std::vector<std::string> reachableFieldNames(DexMethod* m) {

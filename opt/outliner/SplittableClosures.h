@@ -69,6 +69,9 @@ struct SplittableClosure {
   bool is_large_packed_switch{false};
   bool creates_large_sparse_switch{false};
   bool destroys_large_packed_switch{false};
+  // The net saving of a net-gated candidate, carried to emission, where the
+  // candidate's fate is recorded with it.
+  std::optional<ClosureNetTerms> net_terms;
   // The code units of the closures' blocks. The candidate's fate counts these
   // code units.
   size_t covered_code_units{0};

@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -19,6 +20,7 @@
 #include "Debug.h"
 #include "DexClass.h"
 #include "MethodClosures.h"
+#include "SplitNetSaving.h"
 
 class PassManager;
 
@@ -59,6 +61,7 @@ inline constexpr std::array kSuffixFates{
     CandidateFate::Evaluation_LiveInUntypable,
     CandidateFate::Evaluation_ArgTypeIllegal,
     CandidateFate::Evaluation_LiveInUninitialized,
+    CandidateFate::Evaluation_NetNotPositive,
     CandidateFate::Selection_Displaced,
     CandidateFate::Emission_DexLimit,
     CandidateFate::Emitted,
@@ -111,11 +114,13 @@ struct FateCounters {
   }
 };
 
-// What became of one candidate, for tests: its kind, its heads, its fate, the
-// iteration that decided it, and the split emitted for it.
+// What became of one candidate, for tests: its kind, its heads, the net saving
+// a net gate computed for it, if any, its fate, the iteration that decided it,
+// and the split emitted for it.
 struct CandidateEvaluation {
   SplitKind kind;
   std::vector<cfg::BlockId> heads;
+  std::optional<ClosureNetTerms> terms;
   CandidateFate fate;
   size_t iteration;
   const DexMethod* split{nullptr};
@@ -193,6 +198,7 @@ struct Stats {
   template <typename HeadIds>
   void record(SplitKind kind,
               const HeadIds& head_ids,
+              std::optional<ClosureNetTerms> terms,
               CandidateFate fate,
               size_t code_units,
               const DexMethod* split = nullptr) {
@@ -200,6 +206,7 @@ struct Stats {
     if (evaluations != nullptr) {
       evaluations->add(CandidateEvaluation{.kind = kind,
                                            .heads = head_ids(),
+                                           .terms = terms,
                                            .fate = fate,
                                            .iteration = iterations,
                                            .split = split});

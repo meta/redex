@@ -250,6 +250,55 @@ TEST_F(MethodSplitterTest, SplitLargeBlock) {
   ASSERT_TRUE(res);
 }
 
+TEST_F(MethodSplitterTest, SplitNameSkipsExistingMethods) {
+  // A method already has the name the split would get, e.g. a split made by
+  // an earlier run. The split takes the next free name instead of replacing
+  // that method.
+  auto [cls, m] = create("(I)I", R"(
+    (
+      (load-param v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (add-int v0 v0 v0)
+      (return v0)
+    ))");
+  auto* existing =
+      DexMethod::make_method(cls->get_type()->str() + ".bar$split$cold0:(I)I")
+          ->make_concrete(ACC_PRIVATE | ACC_STATIC,
+                          assembler::ircode_from_string(R"(
+            (
+              (load-param v0)
+              (const v0 7)
+              (return v0)
+            ))"),
+                          false);
+  cls->add_method(existing);
+  auto* existing_code = existing->get_code();
+  existing_code->build_cfg();
+  m->get_code()->build_cfg();
+  DexStoresVector stores;
+  stores.emplace_back("test_store");
+  stores.front().get_dexen().push_back(DexClasses{cls});
+  method_splitting_impl::StoreRefCheckers store_ref_checkers(
+      stores, /* normal_primary_dex */ true, /* min_sdk_api */ nullptr);
+  method_splitting_impl::Stats stats;
+  method_splitting_impl::split_methods_in_stores(
+      stores, /* min_sdk */ 0, defaultConfig(), store_ref_checkers,
+      /* create_init_class_insns */ false,
+      /* reserved_mrefs */ 0, /* reserved_trefs */ 0, &stats);
+  ASSERT_EQ(stats.added_methods.size(), 1);
+  auto* split = stats.added_methods.begin()->first;
+  EXPECT_EQ(split->str(), "bar$split$cold1");
+  EXPECT_EQ(existing->get_code(), existing_code);
+  size_t named_cold0 = 0;
+  for (auto* d : cls->get_dmethods()) {
+    named_cold0 += d->str() == "bar$split$cold0" ? 1 : 0;
+  }
+  EXPECT_EQ(named_cold0, 1);
+}
+
 TEST_F(MethodSplitterTest, SplitConstants) {
   const auto* before = R"(
     (

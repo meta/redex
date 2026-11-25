@@ -207,6 +207,24 @@ TypeSet MergeabilityChecker::exclude_unsupported_bytecode_refs_for(
       continue;
     }
 
+    // Any other string of an instruction, such as one that a call site passes
+    // to its bootstrap method, can name a class or an array of it for
+    // reflection too. Merging rewrites only the strings of const-string
+    // instructions, so the class is kept from merging even with `replace`.
+    if (!opcode::is_const_string(insn->opcode())) {
+      std::vector<const DexString*> strings;
+      insn->gather_strings(strings);
+      for (const auto* string : strings) {
+        auto* type =
+            java_names::get_element_type_from_external_name(string->str());
+        if ((type != nullptr) && m_spec.merging_targets.count(type) > 0) {
+          non_mergeables.insert(type);
+          TRACE(CLMG, 5, "[non mergeable] type like string unsafe: %s in %s",
+                SHOW(insn), SHOW(method));
+        }
+      }
+    }
+
     // With type tags, a Class among the bootstrap arguments of a call site is
     // checked like a const-class whose only use passes it to the bootstrap
     // method.

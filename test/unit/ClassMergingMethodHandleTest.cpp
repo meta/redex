@@ -27,6 +27,9 @@ using namespace class_merging_test;
 
 namespace {
 
+DexCallSite* add_call_site_with_argument(DexClass* user,
+                                         std::unique_ptr<DexEncodedValue> arg);
+
 // `Lcom/redextest/Base;` has the mergeable subclasses `Lcom/redextest/A;` and
 // `Lcom/redextest/B;`.
 class ClassMergingMethodHandleTest : public ClassMergingTest {
@@ -66,6 +69,31 @@ class ClassMergingMethodHandleTest : public ClassMergingTest {
       });
     });
     return method_handles;
+  }
+
+  // Adds a call site that passes the string `name` to its bootstrap method,
+  // and returns whether `A` was merged away, with `type_like_string_config`
+  // set to `replace` when `replace` is set.
+  bool run_merging_with_call_site_string(const char* name, bool replace) {
+    if (replace) {
+      // Classes with true virtual methods are not merged without type tags.
+      for (auto* cls : {m_a, m_b}) {
+        cls->remove_method(cls->get_vmethods().front());
+      }
+    }
+    make_class("LBoot;", type::java_lang_Object());
+    auto* user = make_class("Lcom/redextest/User;", type::java_lang_Object());
+    add_call_site_with_argument(
+        user,
+        std::make_unique<DexEncodedValueString>(DexString::make_string(name)));
+    if (!replace) {
+      return run_merging();
+    }
+    return run_merging([](Json::Value& model) {
+      model["type_like_string_config"] = "replace";
+      model["type_tag_config"] = "none";
+      model["interdex_grouping"] = "disabled";
+    });
   }
 
   DexClass* m_a{nullptr};
@@ -226,9 +254,9 @@ TEST_F(ClassMergingMethodHandleTest,
 namespace {
 
 // A call site in the static method `User.use` whose only bootstrap argument is
-// the Class of `type`.
-DexCallSite* add_call_site_with_class_argument(DexClass* user,
-                                               const char* type) {
+// `arg`.
+DexCallSite* add_call_site_with_argument(DexClass* user,
+                                         std::unique_ptr<DexEncodedValue> arg) {
   auto* use = assembler::method_from_string(R"(
     (method (public static) "Lcom/redextest/User;.use:()V"
      (
@@ -238,13 +266,20 @@ DexCallSite* add_call_site_with_class_argument(DexClass* user,
     )
   )");
   std::vector<std::unique_ptr<DexEncodedValue>> args;
-  args.push_back(
-      std::make_unique<DexEncodedValueType>(DexType::make_type(type)));
+  args.push_back(std::move(arg));
   auto* callsite =
       redex::make_invoke_custom(use->get_code(), "run", "()V", std::move(args));
   use->get_code()->build_cfg();
   user->add_method(use);
   return callsite;
+}
+
+// A call site in the static method `User.use` whose only bootstrap argument is
+// the Class of `type`.
+DexCallSite* add_call_site_with_class_argument(DexClass* user,
+                                               const char* type) {
+  return add_call_site_with_argument(
+      user, std::make_unique<DexEncodedValueType>(DexType::make_type(type)));
 }
 
 // The Class that `callsite` passes to its bootstrap method.
@@ -355,6 +390,38 @@ TEST_F(ClassMergingMethodHandleTest,
   }));
   EXPECT_EQ(class_argument().rfind("Lcom/redextest/HandlesBaseShape", 0), 0)
       << class_argument();
+}
+
+// A const-string that names a class keeps it apart: code can load the class by
+// that name. A string among the bootstrap arguments of a call site can name a
+// class too.
+TEST_F(ClassMergingMethodHandleTest, callSiteStringKeepsTheClassItNames) {
+  EXPECT_FALSE(run_merging_with_call_site_string("com.redextest.A",
+                                                 /* replace */ false));
+}
+
+// A string that names an array of a class keeps the class apart too: code can
+// load the array class by that name.
+TEST_F(ClassMergingMethodHandleTest,
+       callSiteStringKeepsTheElementClassOfTheArrayItNames) {
+  EXPECT_FALSE(run_merging_with_call_site_string("[Lcom.redextest.A;",
+                                                 /* replace */ false));
+}
+
+// With `replace`, merging rewrites a const-string that names a merged class to
+// name the merged class instead, but it cannot rewrite the strings of a call
+// site, so the class that such a string names stays apart.
+TEST_F(ClassMergingMethodHandleTest,
+       callSiteStringKeepsTheClassItNamesWhenReplacingStrings) {
+  EXPECT_FALSE(
+      run_merging_with_call_site_string("com.redextest.A", /* replace */ true));
+}
+
+TEST_F(
+    ClassMergingMethodHandleTest,
+    callSiteStringKeepsTheElementClassOfTheArrayItNamesWhenReplacingStrings) {
+  EXPECT_FALSE(run_merging_with_call_site_string("[Lcom.redextest.A;",
+                                                 /* replace */ true));
 }
 
 namespace {

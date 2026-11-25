@@ -747,12 +747,18 @@ TEST_F(CFGInlinerTest, try_catch_with_may_throws) {
       (move-result-pseudo-object v2)
       (if-eqz v2 :thr)
       (move v0 v2)
-      (goto :exit)
+
+      (:exit)
+      (return v0)
 
       (:thr)
       (throw v2)
       (.try_end inner)
 
+      (.catch (inner outer) "LInnerExcept")
+      (const v2 0)
+      (move v0 v2)
+      (goto :exit)
 
       (.catch (all))
       (return v0)
@@ -760,13 +766,6 @@ TEST_F(CFGInlinerTest, try_catch_with_may_throws) {
       (.catch (outer all) "LOuterExcept;")
       (const v1 1)
       (return v1)
-
-      (.catch (inner outer) "LInnerExcept")
-      (const v2 0)
-      (move v0 v2)
-
-      (:exit)
-      (return v0)
     )
   )";
   test_inliner(caller_str, callee_str, expected_str);
@@ -855,12 +854,10 @@ TEST_F(CFGInlinerTest, try_catch_callee_has_chain) {
       (sget-object "LCls;.field:Ljava/lang/Object;")
       (move-result-pseudo-object v2)
       (move v0 v2)
-      (goto :end_callee)
-      (.try_end inner1)
 
-      (.catch (outer))
-      (const v1 1)
-      (return v1)
+      (:end_callee)
+      (return v0)
+      (.try_end inner1)
 
       (.catch (inner2 outer) "LExcept2;")
       (const v2 1)
@@ -870,9 +867,11 @@ TEST_F(CFGInlinerTest, try_catch_callee_has_chain) {
       (.catch (inner1 inner2) "LExcept1;")
       (const v2 0)
       (move v0 v2)
+      (goto :end_callee)
 
-      (:end_callee)
-      (return v0)
+      (.catch (outer))
+      (const v1 1)
+      (return v1)
     )
   )";
   test_inliner(caller_str, callee_str, expected_str);

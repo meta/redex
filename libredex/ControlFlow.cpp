@@ -1867,7 +1867,8 @@ struct LinearizationOrderGraph : public GraphInterface {
 // (see `insert_try_catch_markers`): it has no catch handler edges, cannot throw
 // and is not the entry block, which is laid out first. Catch blocks are
 // excluded: a try region that contains one of its own catch blocks makes an
-// invalid dex try entry.
+// invalid dex try entry. `ChainJoinRule` asks the same question, so that the
+// chains and the try regions agree on where such a block goes.
 bool takes_try_region_of_block_before(const Block* b) {
   const auto& cfg = b->cfg();
   return b != cfg.entry_block() &&
@@ -1875,27 +1876,74 @@ bool takes_try_region_of_block_before(const Block* b) {
          b->cannot_throw() && !b->is_catch();
 }
 
-// Whether the goto `e` puts its target into the chain of its source (see
-// `build_chains`). A block that starts with a move-result stays with the block
-// before it, so for such a source the try region compared is that of the
-// nearest block before it that does not start with a move-result.
-bool goto_continues_chain(const Edge* e) {
-  const Block* target = e->target();
-  if (target->starts_with_move_result()) {
-    return true;
-  }
-  // Walk back only along gotos: a block has at most one goto successor, so the
-  // walk can only come back to where it started, and stops there.
-  const Block* src = e->src();
-  while (src->starts_with_move_result() && src->preds().size() == 1) {
-    const Edge* pred = src->preds().front();
-    if (pred->type() != EDGE_GOTO || pred->src() == e->src()) {
-      break;
+// The rule that decides whether a goto puts its target into the chain of its
+// source (see `build_chains`). Whether a block takes the try region of the
+// block before it needs a scan of its instructions, and the rule asks that for
+// every goto into the block, so it is decided once per block.
+class ChainJoinRule {
+ public:
+  explicit ChainJoinRule(const ControlFlowGraph& cfg) {
+    for (const Block* b : cfg.blocks_view()) {
+      if (takes_try_region_of_block_before(b)) {
+        m_takes_try_region.insert(b);
+      }
     }
-    src = pred->src();
   }
-  return target->same_try(src);
-}
+
+  // Whether the goto `e` may put its target into the chain of its source (a
+  // target that another chain has taken already stays there): yes unless
+  // falling through would certainly start or end a try region. Two
+  // blocks that a rebuild of the linearized code merges into one, because no
+  // try boundary separates them, are then already in one chain, so the next
+  // linearization lays out the merged block the same way.
+  bool goto_continues_chain(const Edge* e) const {
+    const Block* target = e->target();
+    // A move-result cannot be separated from the instruction before it, and a
+    // target that takes the try region of the block before it needs no
+    // boundary.
+    if (target->starts_with_move_result() || takes_try_region(target)) {
+      return true;
+    }
+    // Any other target has its own try region (none without catch handler
+    // edges). If the source's region is not known yet, the target still joins:
+    // that can cost a try region boundary instead of a goto, but not joining
+    // leaves layouts that a later round trip changes.
+    const Block* region_block = find_try_region_block(e->src());
+    return region_block == nullptr || target->same_try(region_block);
+  }
+
+ private:
+  bool takes_try_region(const Block* b) const {
+    return m_takes_try_region.contains(b);
+  }
+
+  // The block whose try region `b` ends up in when laid out, or nullptr if the
+  // chains do not decide that. A block that takes the try region of the block
+  // before it gets the region of its only predecessor if that predecessor
+  // reaches it by a goto: `goto_continues_chain` puts it right after that
+  // predecessor, and no other chain can take it first, because its only way in
+  // is through that predecessor, which `build_chains` visits before it in
+  // depth-first preorder.
+  // Otherwise the order of the chains decides which block comes before it.
+  const Block* find_try_region_block(const Block* b) const {
+    // Walk back only along gotos: a block has at most one goto successor, so
+    // the walk can only come back to where it started, and gives up there.
+    const Block* start = b;
+    while (takes_try_region(b)) {
+      if (b->preds().size() != 1) {
+        return nullptr;
+      }
+      const Edge* pred = b->preds().front();
+      if (pred->type() != EDGE_GOTO || pred->src() == start) {
+        return nullptr;
+      }
+      b = pred->src();
+    }
+    return b;
+  }
+
+  UnorderedSet<const Block*> m_takes_try_region;
+};
 
 } // namespace
 
@@ -1937,6 +1985,7 @@ std::vector<Block*> ControlFlowGraph::order(
 void ControlFlowGraph::build_chains(
     std::vector<std::unique_ptr<BlockChain>>* chains,
     UnorderedMap<Block*, BlockChain*>* block_to_chain) {
+  const ChainJoinRule rule(*this);
   auto handle_block = [&](Block* b) {
     if (block_to_chain->count(b) != 0) {
       return;
@@ -1960,15 +2009,16 @@ void ControlFlowGraph::build_chains(
                             m_blocks.count(goto_block->id()) > 0,
                         "bogus block reference %zu -> %zu in %s",
                         goto_edge->src()->id(), goto_block->id(), SHOW(*this));
-      if (goto_continues_chain(goto_edge)) {
+      if (rule.goto_continues_chain(goto_edge)) {
         // If the goto edge leads to a block with a move-result(-pseudo), then
         // that block must be placed immediately after this one because we can't
         // insert anything between an instruction and its move-result(-pseudo).
         //
-        // We also add gotos that are in the same try because we can minimize
-        // instructions (by using fallthroughs) without adding another try
-        // region. This is not required, but empirical evidence shows that it
-        // generates smaller dex files.
+        // We also add gotos that need not start or end a try region (see
+        // `goto_continues_chain`) because we can minimize instructions (by
+        // using fallthroughs), and rebuilding the CFG from the result keeps the
+        // layout. This is not required for correct code, but empirical
+        // evidence shows that it generates smaller dex files.
         const auto& pair = block_to_chain->emplace(goto_block, chain);
         bool was_already_there = !pair.second;
         if (was_already_there) {
@@ -2019,11 +2069,11 @@ void ControlFlowGraph::build_chains(
   // sequence leading into it, and the block before the cut would need a goto.
   // So chains start first at the blocks that no goto continues into, and only
   // then at the blocks left over, which a cycle of such gotos leads into.
-  auto continues_a_chain = [](const Block* b) {
+  auto continues_a_chain = [&rule](const Block* b) {
     return std::any_of(b->preds().begin(), b->preds().end(),
-                       [b](const Edge* e) {
+                       [&rule, b](const Edge* e) {
                          return e->type() == EDGE_GOTO && e->src() != b &&
-                                goto_continues_chain(e);
+                                rule.goto_continues_chain(e);
                        });
   };
   // Both rounds take blocks in depth-first preorder from the entry block, with

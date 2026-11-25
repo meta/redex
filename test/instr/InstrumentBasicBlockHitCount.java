@@ -1257,7 +1257,7 @@ public class InstrumentBasicBlockHitCount {
 
     assertThat(MetadataParser.getOffset("testFunc20")).isEqualTo(67);
     assertThat(MetadataParser.getHitOffset("testFunc20")).isEqualTo(178);
-    assertThat(MetadataParser.getBlockHits("testFunc20", stats, hitStats)).isEqualTo("35[2:4,3:4,4:3,5:12,6:12,7:12,8:9,9:9,10:9,11:9,12:6,13:6,14:6,15:6,16:6,17:3,18:3,19:3,20:3,21:3,24:0,25:0,26:0,28:9,29:3,31:0,32:9,33:9,35:0,36:0,37:0,38:3,39:0,40:1,42:0]");
+    assertThat(MetadataParser.getBlockHits("testFunc20", stats, hitStats)).isEqualTo("35[2:9,3:9,4:6,5:6,6:6,7:6,8:6,9:9,10:3,12:0,13:0,14:0,15:3,16:4,17:4,18:3,19:12,20:12,21:12,22:9,23:9,26:3,27:3,28:3,29:3,30:3,33:0,34:0,35:0,36:0,37:9,38:9,39:1,41:0,43:0]");
   }
 
   @Test
@@ -1277,7 +1277,7 @@ public class InstrumentBasicBlockHitCount {
 
     assertThat(MetadataParser.getOffset("testFunc20")).isEqualTo(67);
     assertThat(MetadataParser.getHitOffset("testFunc20")).isEqualTo(178);
-    assertThat(MetadataParser.getBlockHits("testFunc20", stats, hitStats)).isEqualTo("35[2:1,3:1,4:1,5:2,6:2,7:2,8:2,9:2,10:2,11:2,12:1,13:1,14:1,15:1,16:1,17:1,18:1,19:0,20:0,21:0,24:0,25:0,26:0,28:1,29:0,31:0,32:1,33:1,35:0,36:0,37:0,38:0,39:1,40:0,42:1]");
+    assertThat(MetadataParser.getBlockHits("testFunc20", stats, hitStats)).isEqualTo("35[2:2,3:2,4:1,5:1,6:1,7:1,8:1,9:1,10:0,12:0,13:0,14:0,15:0,16:1,17:1,18:1,19:2,20:2,21:2,22:2,23:2,26:1,27:1,28:0,29:0,30:0,33:0,34:0,35:0,36:0,37:1,38:1,39:0,41:1,43:1]");
   }
 
   @Test
@@ -1297,7 +1297,7 @@ public class InstrumentBasicBlockHitCount {
 
     assertThat(MetadataParser.getOffset("testFunc20")).isEqualTo(67);
     assertThat(MetadataParser.getHitOffset("testFunc20")).isEqualTo(178);
-    assertThat(MetadataParser.getBlockHits("testFunc20", stats, hitStats)).isEqualTo("35[2:4,3:4,4:3,5:12,6:12,7:12,8:9,9:9,10:9,11:9,12:6,13:6,14:6,15:3,16:3,17:3,18:3,19:3,20:3,21:3,24:0,25:0,26:0,28:6,29:3,31:0,32:6,33:9,35:0,36:0,37:0,38:3,39:0,40:1,42:0]");
+    assertThat(MetadataParser.getBlockHits("testFunc20", stats, hitStats)).isEqualTo("35[2:9,3:9,4:6,5:6,6:6,7:3,8:3,9:6,10:3,12:0,13:0,14:0,15:3,16:4,17:4,18:3,19:12,20:12,21:12,22:9,23:9,26:3,27:3,28:3,29:3,30:3,33:0,34:0,35:0,36:0,37:6,38:9,39:1,41:0,43:0]");
   }
 
   @Test

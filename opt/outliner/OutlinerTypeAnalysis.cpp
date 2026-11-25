@@ -8,6 +8,7 @@
 #include "OutlinerTypeAnalysis.h"
 
 #include "Debug.h"
+#include "DexClass.h"
 #include "DexTypeEnvironment.h"
 #include "Show.h"
 
@@ -922,7 +923,13 @@ const DexType* OutlinerTypeAnalysis::get_const_insns_type_demand(
 static const DexType* compute_joined_type(
     const UnorderedSet<const DexType*>& types) {
   std::optional<dtv_impl::DexTypeValue> joined_type_value;
-  for (const auto* t : UnorderedIterable(types)) {
+  // `join_with` is neither associative nor commutative. When the common super
+  // class walk reaches Object, `find_common_type` resolves through the
+  // interfaces the operands share: sharing several incomparable ones is an
+  // intersection type no DexType can hold, so it gives up to Top, and the
+  // shared set is collected from the left operand only. Either one makes the
+  // fold depend on the visit order. Fold in a stable type order.
+  for (const auto* t : unordered_to_ordered(types, compare_dextypes)) {
     if (!type::is_object(t)) {
       return nullptr;
     }

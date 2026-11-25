@@ -1212,20 +1212,37 @@ RareSuffixSelection::~RareSuffixSelection() {
 
 namespace {
 
-// The largest count the first source block of `b` carries over all
-// interactions, or none if it carries none.
-std::optional<float> block_count(const cfg::Block* b) {
+// The count of the first source block of `b` in each interaction, none where
+// it has no count; empty if `b` has no source block.
+std::vector<std::optional<float>> interaction_counts(const cfg::Block* b) {
+  std::vector<std::optional<float>> counts;
   const auto* sb = source_blocks::get_first_source_block(b);
-  if (sb == nullptr) {
-    return std::nullopt;
-  }
-  std::optional<float> count;
-  sb->foreach_val([&count](const auto& v) {
-    if (v) {
-      count = std::max(count.value_or(0.0f), v->val);
+  if (sb != nullptr) {
+    counts.reserve(sb->vals_size);
+    for (size_t i = 0; i < sb->vals_size; i++) {
+      counts.push_back(sb->get_val(i));
     }
-  });
-  return count;
+  }
+  return counts;
+}
+
+// Whether `head` runs at most `ratio` times as often as the method in each
+// interaction where the method's entry, counted by `entry_counts`, has a count.
+// A missing count at `head` is not evidence that it runs rarely.
+bool runs_rarely(const std::vector<std::optional<float>>& entry_counts,
+                 const cfg::Block* head,
+                 float ratio) {
+  const auto head_counts = interaction_counts(head);
+  for (size_t i = 0; i < entry_counts.size(); i++) {
+    if (!entry_counts[i]) {
+      continue;
+    }
+    if (i >= head_counts.size() || !head_counts[i] ||
+        *head_counts[i] > ratio * *entry_counts[i]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // What ArtProfileWriterPass measures of a body, which it reads once each
@@ -1283,18 +1300,21 @@ RareSuffixSelection::RareSuffixSelection(
         }
         always_assert_log(!method->get_code()->has_try_blocks(),
                           "%s has try blocks", SHOW(method));
-        // How often the method runs, for a suffix that returns; read before
-        // anything changes. Set only when the method ran: in a method that
-        // never ran, every count is zero, which says nothing about which of
-        // its suffixes run rarely.
-        std::optional<float> entry_count;
+        // How often the method runs in each interaction, for a suffix that
+        // returns; read before anything changes. Set only when the method
+        // ran: in a method that never ran, every count is zero, which says
+        // nothing about which of its suffixes run rarely.
+        std::optional<std::vector<std::optional<float>>> entry_counts;
         if (max_returning_suffix_ratio) {
-          entry_count = block_count(method->get_code()->cfg().entry_block());
+          const auto* entry = method->get_code()->cfg().entry_block();
+          const auto entry_count = source_blocks::max_val_over_interactions(
+              source_blocks::get_first_source_block(entry));
           if (!entry_count) {
             selection_stats.no_block_counts++;
           } else if (*entry_count <= 0.0f) {
             selection_stats.method_never_ran++;
-            entry_count = std::nullopt;
+          } else {
+            entry_counts = interaction_counts(entry);
           }
         }
         auto original_code = method->release_code();
@@ -1330,13 +1350,10 @@ RareSuffixSelection::RareSuffixSelection(
           for (const auto& c : mcs->closures) {
             if (reaching_return.count(c.target) != 0u) {
               // A suffix that returns qualifies when it runs rarely: at most
-              // `max_returning_suffix_ratio` times as often as the method.
-              if (!entry_count) {
-                continue;
-              }
-              auto suffix_count = block_count(c.target);
-              if (!suffix_count ||
-                  *suffix_count > *max_returning_suffix_ratio * *entry_count) {
+              // `max_returning_suffix_ratio` times as often as the method, in
+              // every interaction.
+              if (!entry_counts || !runs_rarely(*entry_counts, c.target,
+                                                *max_returning_suffix_ratio)) {
                 continue;
               }
               selection_stats.returning_suffixes++;

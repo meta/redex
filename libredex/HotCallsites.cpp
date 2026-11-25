@@ -11,14 +11,10 @@
 #include <atomic>
 
 #include "BaselineProfile.h"
-#include "ControlFlow.h"
 #include "Debug.h"
 #include "DeterministicContainers.h"
 #include "IRCode.h"
-#include "IRInstruction.h"
 #include "MethodProfiles.h"
-#include "MethodUtil.h"
-#include "NeverInlineEligibility.h"
 #include "Resolver.h"
 #include "SourceBlocks.h"
 #include "TypeInference.h"
@@ -26,13 +22,26 @@
 
 namespace never_inline_analysis {
 
-HotCallsites::HotCallsites(
-    const Scope& scope,
-    const baseline_profiles::BaselineProfile& baseline_profile,
-    const method_profiles::MethodProfiles& method_profiles,
-    const HotCallsiteThresholds& thresholds) {
-  using baseline_profiles::is_compiled;
+CallerVerdict classify_caller(bool compiled,
+                              size_t instructions,
+                              size_t registers,
+                              size_t max_caller_instructions,
+                              size_t max_caller_registers) {
+  if (!compiled) {
+    return CallerVerdict::kNotCompiled;
+  }
+  if (instructions > max_caller_instructions) {
+    return CallerVerdict::kTooManyInstructions;
+  }
+  if (registers > max_caller_registers) {
+    return CallerVerdict::kTooManyRegisters;
+  }
+  return CallerVerdict::kRead;
+}
 
+CallsiteWalkCounts walk_callsites(const Scope& scope,
+                                  const CallsiteWalk& walk,
+                                  const CallsiteVisitor& visit) {
   auto consider_callee = [&](DexMethod* callee) {
     if (callee == nullptr || (callee->get_code() == nullptr)) {
       return false;
@@ -77,13 +86,14 @@ HotCallsites::HotCallsites(
       }
       caller = callee;
       invoke_insn = nullptr;
-    } while (is_simple(callee, &invoke_insn) && invoke_insn != nullptr);
+    } while (is_simple(callee, &invoke_insn) && invoke_insn != nullptr &&
+             walk.follow_forwarder(callee));
     return callee;
   };
 
   // Analyze caller/callee relationships
-  std::atomic<size_t> callers_too_many_instructions_count{0};
-  std::atomic<size_t> callers_too_many_registers_count{0};
+  std::atomic<size_t> callers_too_many_instructions{0};
+  std::atomic<size_t> callers_too_many_registers{0};
   InsertOnlyConcurrentMap<DexMethod*, size_t> estimated_instructions;
   InsertOnlyConcurrentMap<DexMethod*, bool> has_catches;
   walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {
@@ -115,6 +125,61 @@ HotCallsites::HotCallsites(
     }
     receiver_types.emplace(method, std::move(map));
   });
+  walk::parallel::code(scope, [&](DexMethod* caller, IRCode& code) {
+    bool within_register_bound = true;
+    switch (classify_caller(walk.caller_compiled(caller),
+                            estimated_instructions.at(caller),
+                            code.cfg().get_registers_size(),
+                            walk.max_caller_instructions,
+                            walk.max_caller_registers)) {
+    case CallerVerdict::kNotCompiled:
+      return;
+    case CallerVerdict::kTooManyInstructions:
+      callers_too_many_instructions.fetch_add(1);
+      return;
+    case CallerVerdict::kTooManyRegisters:
+      callers_too_many_registers.fetch_add(1);
+      if (!walk.visit_callers_over_register_bound) {
+        return;
+      }
+      within_register_bound = false;
+      break;
+    case CallerVerdict::kRead:
+      break;
+    }
+    for (auto* b : code.cfg().blocks()) {
+      for_each_block_callsite(b, [&](IRInstruction* insn) {
+        DexMethod* callee = get_callee(caller, insn);
+        if (callee == nullptr) {
+          return;
+        }
+
+        auto it = estimated_instructions.find(callee);
+        if (it == estimated_instructions.end()) {
+          return;
+        }
+
+        if (is_try_excluded(code.cfg(), b, has_catches.at(callee))) {
+          return;
+        }
+
+        visit(b, callee, within_register_bound);
+      });
+    }
+  });
+  return CallsiteWalkCounts{
+      .callers_too_many_instructions = callers_too_many_instructions.load(),
+      .callers_too_many_registers = callers_too_many_registers.load(),
+  };
+}
+
+HotCallsites::HotCallsites(
+    const Scope& scope,
+    const baseline_profiles::BaselineProfile& baseline_profile,
+    const method_profiles::MethodProfiles& method_profiles,
+    const HotCallsiteThresholds& thresholds) {
+  using baseline_profiles::is_compiled;
+
   auto method_profile_appears = [&](DexMethod* method, float appear_threshold) {
     for (const auto& p : method_profiles.all_interactions()) {
       auto it = p.second.find(method);
@@ -143,64 +208,58 @@ HotCallsites::HotCallsites(
     }
     return true;
   };
-  walk::parallel::code(scope, [&](DexMethod* caller, IRCode& code) {
-    if (!is_compiled(baseline_profile, caller)) {
-      return;
-    }
-    size_t caller_instructions = estimated_instructions.at(caller);
-    if (caller_instructions > thresholds.max_caller_instructions) {
-      callers_too_many_instructions_count.fetch_add(1);
-      return;
-    }
-    size_t caller_registers = code.cfg().get_registers_size();
-    if (caller_registers > thresholds.max_caller_registers) {
-      callers_too_many_registers_count.fetch_add(1);
-      return;
-    }
-    for (auto* b : code.cfg().blocks()) {
-      bool callsite_has_catch =
-          code.cfg().get_succ_edge_of_type(b, cfg::EDGE_THROW) != nullptr;
-      bool has_throw = false;
-      bool has_non_init_invoke = false;
-      for (auto& mie : InstructionIterable(b).reversed()) {
-        auto* insn = mie.insn;
-        if (!opcode::is_an_invoke(insn->opcode())) {
-          if (opcode::is_throw(insn->opcode())) {
-            has_throw = true;
-          }
-          continue;
-        }
-        if (has_throw && !has_non_init_invoke) {
-          if (!method::is_init(insn->get_method())) {
-            has_non_init_invoke = true;
-          }
-          continue;
-        }
-
-        DexMethod* callee = get_callee(caller, insn);
-        if (callee == nullptr) {
-          continue;
-        }
-
-        auto it = estimated_instructions.find(callee);
-        if (it == estimated_instructions.end()) {
-          continue;
-        }
-
-        if (callsite_has_catch && has_catches.at(callee)) {
-          continue;
-        }
-
-        if (is_sufficiently_hot(b, callee)) {
+  const auto counts = walk_callsites(
+      scope,
+      CallsiteWalk{
+          .caller_compiled =
+              [&](DexMethod* caller) {
+                return is_compiled(baseline_profile, caller);
+              },
+          .max_caller_instructions = thresholds.max_caller_instructions,
+          .max_caller_registers = thresholds.max_caller_registers,
+          .visit_callers_over_register_bound = false,
+          .follow_forwarder = [](const DexMethod*) { return true; },
+      },
+      [&](cfg::Block* block, DexMethod* callee, bool) {
+        if (is_sufficiently_hot(block, callee)) {
           hot_callsite_counts.fetch_add(callee, 1);
         } else {
           hot_cold_callees.insert(callee);
         }
-      }
-    }
-  });
-  callers_too_many_instructions = callers_too_many_instructions_count.load();
-  callers_too_many_registers = callers_too_many_registers_count.load();
+      });
+  callers_too_many_instructions = counts.callers_too_many_instructions;
+  callers_too_many_registers = counts.callers_too_many_registers;
+}
+
+NeverInlineVerdict decide_never_inline(IRCode& code,
+                                       bool already_never_inline,
+                                       bool has_cold_callsite,
+                                       size_t hot_callsites,
+                                       const NeverInlineCriteria& criteria) {
+  if (already_never_inline) {
+    return {.decision = NeverInlineDecision::kAlreadyNeverInline};
+  }
+
+  bool min_hot_callsites_rule_met =
+      hot_callsites >= criteria.min_hot_callsites &&
+      code.estimate_code_units() >= criteria.min_hot_callsites_min_code_units;
+
+  if (!has_cold_callsite && !min_hot_callsites_rule_met) {
+    return {.decision = NeverInlineDecision::kNoCandidate};
+  }
+
+  if (hot_callsites != 0u && !min_hot_callsites_rule_met) {
+    return {.decision = NeverInlineDecision::kTooHot};
+  }
+
+  const auto ineligibility = never_inline_eligibility(
+      code, criteria.max_callee_code_units, criteria.min_callee_instructions);
+  if (ineligibility != Ineligibility::kEligible) {
+    return {.decision = NeverInlineDecision::kIneligible,
+            .ineligibility = ineligibility};
+  }
+  return {.decision = NeverInlineDecision::kAnnotate,
+          .min_hot_callsites_rule_met = min_hot_callsites_rule_met};
 }
 
 } // namespace never_inline_analysis

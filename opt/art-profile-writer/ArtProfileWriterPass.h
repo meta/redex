@@ -10,20 +10,15 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "HotCallsites.h"
 #include "Pass.h"
 #include "PassManager.h"
 
 class ArtProfileWriterPass : public Pass {
  public:
-  // Inlining replaces a call
-  //
-  //   invoke-static {...}, callee   // 3 code units
-  //   move-result vX                // 1 code unit
-  //
-  // with a copy of the callee, so it adds code only when the callee is longer
-  // than 4 code units. Therefore, 5 is the minimum callee size that can benefit
-  // from not inlining.
-  static constexpr uint32_t kDefaultNeverInlineMinHotCallsitesMinCodeUnits = 5;
+  // See `never_inline_analysis::kDefaultMinHotCallsitesMinCodeUnits`.
+  static constexpr uint32_t kDefaultNeverInlineMinHotCallsitesMinCodeUnits =
+      never_inline_analysis::kDefaultMinHotCallsitesMinCodeUnits;
 
   ArtProfileWriterPass() : Pass("ArtProfileWriterPass") {}
 

@@ -17,9 +17,12 @@
 namespace never_inline_analysis {
 
 bool is_simple(DexMethod* method, IRInstruction** invoke_insn) {
-  auto* code = method->get_code();
-  always_assert(code->cfg_built());
-  auto& cfg = code->cfg();
+  return is_simple(*method->get_code(), invoke_insn);
+}
+
+bool is_simple(IRCode& code, IRInstruction** invoke_insn) {
+  always_assert(code.cfg_built());
+  auto& cfg = code.cfg();
   if (cfg.blocks().size() != 1) {
     return false;
   }
@@ -60,18 +63,24 @@ bool is_simple(DexMethod* method, IRInstruction** invoke_insn) {
 Ineligibility never_inline_eligibility(DexMethod* method,
                                        uint32_t max_callee_code_units,
                                        size_t min_callee_instructions) {
-  auto* code = method->get_code();
-  always_assert(code->cfg_built());
-  if (code->cfg().return_blocks().empty()) {
+  return never_inline_eligibility(*method->get_code(), max_callee_code_units,
+                                  min_callee_instructions);
+}
+
+Ineligibility never_inline_eligibility(IRCode& code,
+                                       uint32_t max_callee_code_units,
+                                       size_t min_callee_instructions) {
+  always_assert(code.cfg_built());
+  if (code.cfg().return_blocks().empty()) {
     return Ineligibility::kAlwaysThrows;
   }
-  if (code->estimate_code_units() > max_callee_code_units) {
+  if (code.estimate_code_units() > max_callee_code_units) {
     return Ineligibility::kTooLarge;
   }
-  if (code->count_opcodes() < min_callee_instructions) {
+  if (code.count_opcodes() < min_callee_instructions) {
     return Ineligibility::kTooSmall;
   }
-  if (is_simple(method)) {
+  if (is_simple(code)) {
     return Ineligibility::kSimple;
   }
   return Ineligibility::kEligible;

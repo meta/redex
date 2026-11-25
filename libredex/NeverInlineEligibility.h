@@ -42,6 +42,11 @@ enum class Ineligibility {
   kSimple, // A trivial forwarder per `is_simple`.
 };
 
+// `ArtProfileWriterPass`'s defaults for the bounds below, which its doc
+// strings explain.
+inline constexpr uint32_t kDefaultMaxCalleeCodeUnits = 40;
+inline constexpr size_t kDefaultMinCalleeInstructions = 4;
+
 // `method`'s code must already have its CFG built (the Redex pass-entry
 // invariant). Recomputes `estimate_code_units()`/`count_opcodes()` internally
 // rather than taking precomputed values, since this is only ever called for

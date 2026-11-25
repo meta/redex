@@ -742,6 +742,26 @@ TEST_F(DexTypeEnvironmentTest, ArrayJoinTest) {
   EXPECT_FALSE(sub3_nested_array.is_top());
 }
 
+TEST_F(DexTypeEnvironmentTest, ArrayJoinCreatesNoElementTypeTest) {
+  // A dex file can name an array type without its element type, e.g. when
+  // the element class is missing from the input and only arrays of it are
+  // used.
+  auto missing = SingletonDexTypeDomain(DexType::make_type("[Lmissing/T;"));
+  ASSERT_EQ(DexType::get_type("Lmissing/T;"), nullptr);
+  missing.join_with(SingletonDexTypeDomain(m_sub1_array));
+  EXPECT_TRUE(missing.is_top());
+  EXPECT_EQ(DexType::get_type("Lmissing/T;"), nullptr);
+
+  // Different levels join to Top without looking at the element types.
+  auto missing_nested =
+      SingletonDexTypeDomain(DexType::make_type("[[Lmissing/U;"));
+  ASSERT_EQ(DexType::get_type("Lmissing/U;"), nullptr);
+  auto sub1_array = SingletonDexTypeDomain(m_sub1_array);
+  sub1_array.join_with(missing_nested);
+  EXPECT_TRUE(sub1_array.is_top());
+  EXPECT_EQ(DexType::get_type("Lmissing/U;"), nullptr);
+}
+
 TEST_F(DexTypeEnvironmentTest, SingletonDexTypeDomainLeqTest) {
   // top and bottom
   auto top = SingletonDexTypeDomain::top();

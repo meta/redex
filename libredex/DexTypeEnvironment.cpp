@@ -175,26 +175,27 @@ const DexType* find_common_type(const DexType* l, const DexType* r) {
  * 1. Reference type arrays with the same depth level => common type array with
  * the same level
  * 2. If there's primitive array or the levels don't match => Top.
+ *
+ * A dex file can name an array type without its element type, so the element
+ * types are looked up, not created. No class names an element type that does
+ * not exist, not even as a super class or interface, so find_common_type
+ * would find nothing in common with it.
  */
 const DexType* find_common_array_type(const DexType* l, const DexType* r) {
-  uint32_t l_dim = type::get_array_level(l);
-  uint32_t r_dim = type::get_array_level(r);
-
-  bool has_primitive = false;
-  auto* l_elem_type = type::make_array_element_type(l);
-  auto* r_elem_type = type::make_array_element_type(r);
-  if (type::is_primitive(l_elem_type) || type::is_primitive(r_elem_type)) {
-    has_primitive = true;
+  uint32_t level = type::get_array_level(l);
+  if (level != type::get_array_level(r)) {
+    return nullptr;
   }
-  if (!has_primitive && l_dim == r_dim) {
-    const auto* common_element_type =
-        find_common_type(l_elem_type, r_elem_type);
-    return common_element_type != nullptr
-               ? type::make_array_type(common_element_type, l_dim)
-               : nullptr;
+  const auto* l_elem_type = type::get_array_element_type(l);
+  const auto* r_elem_type = type::get_array_element_type(r);
+  if (l_elem_type == nullptr || r_elem_type == nullptr ||
+      type::is_primitive(l_elem_type) || type::is_primitive(r_elem_type)) {
+    return nullptr;
   }
-
-  return nullptr;
+  const auto* common_element_type = find_common_type(l_elem_type, r_elem_type);
+  return common_element_type != nullptr
+             ? type::make_array_type(common_element_type, level)
+             : nullptr;
 }
 
 /*

@@ -156,6 +156,26 @@ TEST_F(TypeUtilTest, check_cast_array) {
                          DexType::make_type("[Ljava/lang/Object;")));
 }
 
+// Like a dex whose code uses `Cell[][]` but never `Cell[]`.
+TEST_F(TypeUtilTest, check_cast_array_does_not_create_types) {
+  using namespace type;
+  ClassCreator(java_lang_Object()).create();
+  ClassCreator creator(DexType::make_type("LCell;"));
+  creator.set_super(java_lang_Object());
+  creator.create();
+  auto* cells = DexType::make_type("[[LCell;");
+  auto* objects = DexType::make_type("[Ljava/lang/Object;");
+
+  EXPECT_TRUE(check_cast(cells, objects));
+  EXPECT_TRUE(check_cast(cells, DexType::make_type("[[Ljava/lang/Object;")));
+  EXPECT_FALSE(check_cast(cells, DexType::make_type("[[Ljava/lang/String;")));
+  EXPECT_FALSE(check_cast(DexType::make_type("[Lmissing/T;"), objects));
+  EXPECT_FALSE(check_cast(cells, DexType::make_type("[[Lmissing/U;")));
+  EXPECT_EQ(DexType::get_type("[LCell;"), nullptr);
+  EXPECT_EQ(DexType::get_type("Lmissing/T;"), nullptr);
+  EXPECT_EQ(DexType::get_type("Lmissing/U;"), nullptr);
+}
+
 TEST_F(TypeUtilTest, same_package) {
   using namespace type;
 

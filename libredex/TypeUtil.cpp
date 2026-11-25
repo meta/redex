@@ -269,15 +269,32 @@ bool check_cast(const DexType* type, const DexType* base_type) {
     return true;
   }
   if (type != nullptr && is_array(type)) {
-    if (base_type != nullptr && is_array(base_type)) {
-      auto* component_type = make_array_component_type(type);
-      auto* component_base_type = make_array_component_type(base_type);
-      if (!is_primitive(component_type) && !is_primitive(component_base_type) &&
-          check_cast(component_type, component_base_type)) {
-        return true;
-      }
+    if (base_type == nullptr) {
+      return false;
     }
-    return base_type == java_lang_Object();
+    auto level = get_array_level(type);
+    auto base_level = get_array_level(base_type);
+    if (level > base_level) {
+      // `type` has more array levels, so the base, or the base's element type
+      // if it is an array, must be a supertype of an array. Of those
+      // (java.lang.Object, Cloneable, Serializable), `check_cast` proves only
+      // java.lang.Object.
+      return get_element_type_if_array(base_type) == java_lang_Object();
+    }
+    if (level < base_level) {
+      // The base has more array levels, so the element type of `type` would
+      // have to be an instance of an array type, and it is not an array.
+      return false;
+    }
+    // `[A` is an instance of `[B` when A is an instance of B. Only look the
+    // element types up: creating them would make the set of existing types
+    // depend on the order in which parallel passes run their queries. A
+    // primitive or never-created element type has no class, and no class
+    // extends it, so `check_cast` can prove nothing about it.
+    const auto* element = get_array_element_type(type);
+    const auto* base_element = get_array_element_type(base_type);
+    return element != nullptr && base_element != nullptr &&
+           check_cast(element, base_element);
   }
   return is_instance_of_if_known(type, base_type).value_or(false);
 }

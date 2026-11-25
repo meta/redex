@@ -48,6 +48,26 @@ std::string_view get_merger_package_name(const DexType* root_type) {
 
 namespace class_merging {
 
+DexMethod* create_forwarding_ctor(DexType* owner, DexMethodRef* super_ctor) {
+  auto mc = MethodCreator(owner,
+                          DexString::make_string("<init>"),
+                          super_ctor->get_proto(),
+                          ACC_PUBLIC | ACC_CONSTRUCTOR);
+  // Call to super.<init>
+  std::vector<Location> args;
+  size_t args_size = super_ctor->get_proto()->get_args()->size();
+  args.reserve(args_size + 1);
+  for (size_t arg_loc = 0; arg_loc < args_size + 1; ++arg_loc) {
+    args.push_back(mc.get_local(static_cast<int>(arg_loc)));
+  }
+  auto* mb = mc.get_main_block();
+  mb->invoke(OPCODE_INVOKE_DIRECT, super_ctor, args);
+  mb->ret_void();
+  auto* ctor = mc.create();
+  ctor->get_code()->build_cfg();
+  return ctor;
+}
+
 DexClass* create_class(const DexType* type,
                        const DexType* super_type,
                        const std::string_view pkg_name,
@@ -80,22 +100,7 @@ DexClass* create_class(const DexType* type,
   // Create ctor.
   auto super_ctors = type_class(super_type)->get_ctors();
   for (auto* super_ctor : super_ctors) {
-    auto mc = MethodCreator(t,
-                            DexString::make_string("<init>"),
-                            super_ctor->get_proto(),
-                            ACC_PUBLIC | ACC_CONSTRUCTOR);
-    // Call to super.<init>
-    std::vector<Location> args;
-    size_t args_size = super_ctor->get_proto()->get_args()->size();
-    args.reserve(args_size + 1);
-    for (size_t arg_loc = 0; arg_loc < args_size + 1; ++arg_loc) {
-      args.push_back(mc.get_local(static_cast<int>(arg_loc)));
-    }
-    auto* mb = mc.get_main_block();
-    mb->invoke(OPCODE_INVOKE_DIRECT, super_ctor, args);
-    mb->ret_void();
-    auto* ctor = mc.create();
-    ctor->get_code()->build_cfg();
+    auto* ctor = create_forwarding_ctor(t, super_ctor);
     TRACE(CLMG, 4, " default ctor created %s", SHOW(ctor));
     cls->add_method(ctor);
   }

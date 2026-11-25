@@ -34,6 +34,13 @@ void cook_merger_fields_lookup(
     const FieldsMap& fields_map,
     UnorderedMap<DexField*, DexField*>& merger_fields_lookup);
 
+/**
+ * Creates the constructor `owner.<init>(P) { super_ctor(this, P); }`, with
+ * built CFG, where P is the proto of `super_ctor`, a constructor of a super
+ * type of `owner`. The caller adds it to the owner's class.
+ */
+DexMethod* create_forwarding_ctor(DexType* owner, DexMethodRef* super_ctor);
+
 DexClass* create_class(const DexType* type,
                        const DexType* super_type,
                        const std::string_view pkg_name,

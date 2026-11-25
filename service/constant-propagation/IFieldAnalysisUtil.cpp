@@ -332,7 +332,7 @@ bool get_ifields_read(const UnorderedSet<std::string>& allowlist_method_names,
                       const DispatchTargets& dispatch_targets,
                       const DexClass* ifield_cls,
                       const DexMethod* method,
-                      ConcurrentSet<DexField*>* blocklist_ifields,
+                      InsertOnlyConcurrentSet<DexField*>* blocklist_ifields,
                       UnorderedSet<const DexMethod*>* visited) {
   if (visited->count(method) != 0u) {
     return true;
@@ -352,7 +352,7 @@ bool get_ifields_read(const UnorderedSet<std::string>& allowlist_method_names,
   if (method == nullptr || method->get_code() == nullptr) {
     // We can't track down further, don't process any ifields from ifield_cls.
     for (const auto& field : ifield_cls->get_ifields()) {
-      blocklist_ifields->emplace(field);
+      blocklist_ifields->insert(field);
     }
     return false;
   }
@@ -366,7 +366,7 @@ bool get_ifields_read(const UnorderedSet<std::string>& allowlist_method_names,
           auto* field = resolve_field(insn->get_field(), FieldSearch::Instance);
           if (field != nullptr &&
               field->get_class() == ifield_cls->get_type()) {
-            blocklist_ifields->emplace(field);
+            blocklist_ifields->insert(field);
           }
         } else if (opcode::is_an_invoke(insn->opcode()) &&
                    !insn->has_method()) {
@@ -460,10 +460,10 @@ bool get_ifields_read(const UnorderedSet<std::string>& allowlist_method_names,
  *     }
  *   }
  */
-ConcurrentSet<DexField*> get_ifields_read_in_callees(
+InsertOnlyConcurrentSet<DexField*> get_ifields_read_in_callees(
     const Scope& scope,
     const UnorderedSet<std::string>& allowlist_method_names) {
-  ConcurrentSet<DexField*> return_ifields;
+  InsertOnlyConcurrentSet<DexField*> return_ifields;
   TypeSystem ts(scope);
   auto override_graph = method_override_graph::build_graph(scope);
   auto hierarchy = build_type_hierarchy(scope);
@@ -511,7 +511,7 @@ ConcurrentSet<DexField*> get_ifields_read_in_callees(
         if (!check_methods) {
           // This object escaped to heap, blocklist all.
           for (const auto& field : cls->get_ifields()) {
-            return_ifields.emplace(field);
+            return_ifields.insert(field);
           }
           return;
         }
@@ -552,7 +552,7 @@ UnorderedSet<const DexField*> gather_ifields_written_only_by_constructors(
     ifields_candidates.emplace(field);
   });
 
-  ConcurrentSet<DexField*> invalid_candidates;
+  InsertOnlyConcurrentSet<DexField*> invalid_candidates;
   walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {
     // Remove candidate field if it was written in code other than its class'
     // init function, or in an init function excluded from optimization.

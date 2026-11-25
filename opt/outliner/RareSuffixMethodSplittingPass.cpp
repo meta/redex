@@ -7,16 +7,23 @@
 
 #include "RareSuffixMethodSplittingPass.h"
 
+#include <algorithm>
+#include <functional>
+#include <string>
+#include <vector>
+
 #include "AnnoUtils.h"
 #include "BaselineProfile.h"
 #include "ConcurrentContainers.h"
 #include "ConfigFiles.h"
 #include "DexUtil.h"
 #include "MethodOverrideGraph.h"
+#include "MethodProfiles.h"
 #include "MethodSplitter.h"
 #include "MethodUtil.h"
 #include "NeverInlineEligibility.h"
 #include "PassManager.h"
+#include "Show.h"
 #include "SplittableClosures.h"
 #include "TypeUtil.h"
 #include "Walkers.h"
@@ -27,6 +34,59 @@ namespace {
 
 // See `net_oat_weight`.
 constexpr float kDefaultNetOatWeight = 1.0f;
+
+// How many split methods each top list reports.
+constexpr size_t kTopSplitCount = 10;
+
+// A method that got a split, for the top lists.
+struct SplitReport {
+  DexMethod* method;
+  int64_t call_count;
+  size_t compiled_call_sites;
+  // The kind in the name of its first split, e.g. `hot_cold`.
+  std::string kind;
+  // The code units of its splits.
+  size_t split_code_units;
+};
+
+// The kind part of a split's name, `<method>$split$<kind>$rare_suffix$<i>`.
+std::string kind_of_split(const DexMethod* split) {
+  std::string_view name = split->str();
+  constexpr std::string_view kMarker = "$split$";
+  auto begin = name.rfind(kMarker);
+  if (begin == std::string_view::npos) {
+    return "unknown";
+  }
+  begin += kMarker.size();
+  auto end = name.find('$', begin);
+  return std::string(name.substr(begin, end - begin));
+}
+
+// Reports the methods in `reports` with the highest `key`, as ArtProfileWriter
+// reports its top never-compile methods: one metric per method, named after
+// its rank, its split kind and the method, whose value is the key, and one
+// with the code units of its splits.
+void report_top_splits(PassManager& mgr,
+                       const std::string& prefix,
+                       std::vector<SplitReport> reports,
+                       const std::function<int64_t(const SplitReport&)>& key) {
+  std::sort(reports.begin(), reports.end(),
+            [&](const SplitReport& a, const SplitReport& b) {
+              if (key(a) != key(b)) {
+                return key(a) > key(b);
+              }
+              return compare_dexmethods(a.method, b.method);
+            });
+  reports.resize(std::min(reports.size(), kTopSplitCount));
+  for (size_t i = 0; i < reports.size(); ++i) {
+    const auto& r = reports[i];
+    const auto name = prefix + std::to_string(i) + "_" + r.kind + "_" +
+                      show_deobfuscated(r.method);
+    mgr.set_metric(name, key(r));
+    mgr.set_metric(name + "_split_code_units",
+                   static_cast<int64_t>(r.split_code_units));
+  }
+}
 
 } // namespace
 
@@ -164,6 +224,51 @@ void RareSuffixMethodSplittingPass::run_pass(DexStoresVector& stores,
   for (auto* m : UnorderedIterable(split_methods)) {
     split_call_sites += compiled_call_sites.load(m);
   }
+
+  // The top split methods, by how often the profile says they run and by how
+  // many call sites in compiled callers inline them.
+  UnorderedSet<const DexMethodRef*> splits;
+  for (const auto& [split, kind] : stats.added_methods) {
+    splits.insert(split);
+  }
+  std::vector<SplitReport> reports;
+  for (auto* m : UnorderedIterable(split_methods)) {
+    SplitReport r{.method = m,
+                  .call_count = 0,
+                  .compiled_call_sites = compiled_call_sites.load(m),
+                  .kind = {},
+                  .split_code_units = 0};
+    auto stat = conf.get_method_profiles().get_method_stat(
+        method_profiles::COLD_START, m);
+    if (stat) {
+      r.call_count = static_cast<int64_t>(stat->call_count);
+    }
+    // A method that got a split has code.
+    always_assert_log(m->get_code() != nullptr, "%s", SHOW(m));
+    for (const auto& mie : cfg::InstructionIterable(m->get_code()->cfg())) {
+      if (!mie.insn->has_method() ||
+          splits.count(mie.insn->get_method()) == 0) {
+        continue;
+      }
+      auto* ref = mie.insn->get_method();
+      auto* split = ref->as_def();
+      // The ref names a split this pass just created, so it is a definition
+      // with code.
+      always_assert_log(split != nullptr && split->get_code() != nullptr, "%s",
+                        SHOW(ref));
+      if (r.kind.empty()) {
+        r.kind = kind_of_split(split);
+      }
+      r.split_code_units += split->get_code()->estimate_code_units();
+    }
+    reports.push_back(std::move(r));
+  }
+  report_top_splits(mgr, "top_split_by_call_count_", reports,
+                    [](const SplitReport& r) { return r.call_count; });
+  report_top_splits(mgr, "top_split_by_compiled_call_sites_", reports,
+                    [](const SplitReport& r) {
+                      return static_cast<int64_t>(r.compiled_call_sites);
+                    });
 
   mgr.set_metric("callers_too_many_instructions",
                  callers_too_many_instructions.load());

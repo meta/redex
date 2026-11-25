@@ -13,10 +13,12 @@
 #include "ClassReorderingPass.h"
 #include "ConfigFiles.h"
 #include "Creators.h"
+#include "DexAnnotation.h"
 #include "IRAssembler.h"
 #include "IRCode.h"
 #include "PassManager.h"
 #include "RedexTest.h"
+#include "RedexTestUtils.h"
 #include "TypeUtil.h"
 
 namespace {
@@ -49,7 +51,12 @@ struct PassManagerFeatureTest : public RedexTest {
                             int version,
                             const std::string& expected,
                             bool is_interface = false) {
-    auto input = stores(method, is_interface);
+    run_rejecting(stores(method, is_interface), version, expected);
+  }
+
+  static void run_rejecting(std::vector<DexStore> input,
+                            int version,
+                            const std::string& expected) {
     FeatureCheckPass pass("FeatureCheckPass");
     ClassReorderingPass reorder;
     ConfigFiles config(Json::nullValue);
@@ -129,6 +136,49 @@ TEST_F(PassManagerFeatureTest, method_type_constants_still_reject) {
   run_rejecting(method, 39,
                 "Input APK has dex39 features that this pass FeatureCheckPass "
                 "doesn't support");
+}
+
+// The method handles and method types that static field values and
+// annotations hold are dex 038 data, like those of call sites, so a pass
+// that supports only dex 035 does not run on them.
+TEST_F(PassManagerFeatureTest, encoded_method_handles_and_types_reject) {
+  for (int version : {38, 39}) {
+    auto suffix = std::to_string(version);
+    auto* holder = assembler::method_from_string(
+        "(method (public static) \"LFeatureStaticValue" + suffix +
+        ";.empty:()V\" ((return-void)))");
+    auto input = stores(holder);
+    type_class(holder->get_class())
+        ->add_field(
+            DexField::make_field("LFeatureStaticValue" + suffix +
+                                 ";.HANDLE:Ljava/lang/invoke/MethodHandle;")
+                ->make_concrete(
+                    ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+                    std::make_unique<DexEncodedValueMethodHandle>(
+                        redex::make_method_handle(
+                            METHOD_HANDLE_TYPE_INVOKE_STATIC,
+                            "LFeatureStaticValue" + suffix + ";.empty:()V"))));
+    run_rejecting(std::move(input), version,
+                  "Input APK has dex38 features that this pass "
+                  "FeatureCheckPass doesn't support");
+
+    auto* annotated = assembler::method_from_string(
+        "(method (public static synthetic) \"LFeatureAnnotation" + suffix +
+        ";.take:(I)V\" ((load-param v0) (return-void)))");
+    auto annotation = std::make_unique<DexAnnotation>(
+        DexType::make_type("LAnno;"), DAV_RUNTIME);
+    auto* elements = new DexEncodedValueArray::Storage();
+    elements->push_back(std::make_unique<DexEncodedValueMethodType>(
+        DexProto::make_proto(type::_void(), DexTypeList::make_type_list({}))));
+    annotation->add_element("value",
+                            std::make_unique<DexEncodedValueArray>(elements));
+    auto annotation_set = std::make_unique<DexAnnotationSet>();
+    annotation_set->add_annotation(std::move(annotation));
+    annotated->attach_param_annotation_set(0, std::move(annotation_set));
+    run_rejecting(annotated, version,
+                  "Input APK has dex38 features that this pass "
+                  "FeatureCheckPass doesn't support");
+  }
 }
 
 } // namespace

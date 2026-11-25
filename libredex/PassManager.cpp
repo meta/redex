@@ -1526,8 +1526,9 @@ class PassManager::RunPassesContext {
   }
 
   // Aborts if the input uses dex features that `pass` cannot handle. The
-  // feature scan walks every method, so its result is memoized in the
-  // has_dex3*_features members for the rest of the run.
+  // feature scan walks every method and every static field value and
+  // annotation, so its result is memoized in the has_dex3*_features members
+  // for the rest of the run.
   void check_no_new_dex_features(const Pass* pass, int check_against_version) {
     always_assert_log(check_against_version <= 39 &&
                           check_against_version >= 35,
@@ -1539,7 +1540,8 @@ class PassManager::RunPassesContext {
       std::atomic<bool> found_dex37_features{false};
       std::atomic<bool> found_dex38_features{false};
       std::atomic<bool> found_dex39_features{false};
-      walk::parallel::classes(build_class_scope(stores), [&](DexClass* cls) {
+      auto classes = build_class_scope(stores);
+      walk::parallel::classes(classes, [&](DexClass* cls) {
         if (is_interface(cls)) {
           for (auto* m : cls->get_vmethods()) {
             if (m->get_code() != nullptr) {
@@ -1574,6 +1576,17 @@ class PassManager::RunPassesContext {
               }
             }
           }
+        }
+      });
+      // Dex 038 added method handles and method types with call sites; static
+      // field values and annotations can hold them too.
+      walk::parallel::encoded_values(classes, [&](const Gatherable& value) {
+        std::vector<DexMethodHandle*> method_handles;
+        value.gather_methodhandles(method_handles);
+        std::vector<DexProto*> method_types;
+        value.gather_protos(method_types);
+        if (!method_handles.empty() || !method_types.empty()) {
+          found_dex38_features = true;
         }
       });
       has_dex37_features = found_dex37_features;

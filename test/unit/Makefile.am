@@ -372,7 +372,7 @@ atomic_map_test_SOURCES = AtomicMapTest.cpp
 pass_input_edits_test_SOURCES = PassInputEditsTest.cpp $(top_srcdir)/test/common/pass_input_edits/PassInputEdits.cpp
 pass_input_edits_test_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/test/common/pass_input_edits -I$(top_srcdir)/opt/remove-unused-fields
 
-pass_manager_feature_test_SOURCES = PassManagerFeatureTest.cpp
+pass_manager_feature_test_SOURCES = PassManagerFeatureTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 
 configurable_test_SOURCES = ConfigurableTest.cpp
 configurable_test_LDADD = $(COMMON_MOCK_TEST_LIBS)

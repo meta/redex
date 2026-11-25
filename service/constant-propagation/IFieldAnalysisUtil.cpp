@@ -204,8 +204,8 @@ class ThisObjectAnalysis final
     : public sparta::MonotonicFixpointIterator<cfg::GraphInterface,
                                                ThisEnvironment> {
  public:
-  explicit ThisObjectAnalysis(cfg::ControlFlowGraph* cfg,
-                              DexMethod* method,
+  explicit ThisObjectAnalysis(const cfg::ControlFlowGraph* cfg,
+                              const DexMethod* method,
                               size_t this_param_reg)
       : MonotonicFixpointIterator(*cfg, cfg->num_blocks()),
         m_method(method),
@@ -221,9 +221,8 @@ class ThisObjectAnalysis final
     return exit_state_at_source;
   }
 
-  std::optional<UnorderedSet<const DexMethod*>> collect_method_called_on_this(
-      const DispatchTargets& dispatch_targets) {
-    UnorderedSet<const DexMethod*> return_set;
+  std::optional<std::vector<const IRInstruction*>> collect_invokes_on_this() {
+    std::vector<const IRInstruction*> invokes;
     const auto* code = m_method->get_code();
     const auto& cfg = code->cfg();
     for (cfg::Block* block : cfg.blocks()) {
@@ -242,24 +241,8 @@ class ThisObjectAnalysis final
               break;
             }
           }
-          if (use_this && !insn->has_method()) {
-            // invoke-polymorphic and invoke-custom run unknown code.
-            return_set.emplace(nullptr);
-          } else if (use_this) {
-            auto* insn_method = insn->get_method();
-            auto* callee = resolve_method_deprecated(
-                insn_method, opcode_to_search(insn), m_method);
-            if (insn->opcode() == OPCODE_INVOKE_STATIC ||
-                insn->opcode() == OPCODE_INVOKE_DIRECT) {
-              if (callee != nullptr && callee->get_code() != nullptr) {
-                return_set.emplace(callee);
-              }
-            } else {
-              return_set.emplace(callee);
-              dispatch_targets.for_each_other_target(
-                  insn, callee,
-                  [&](const DexMethod* target) { return_set.emplace(target); });
-            }
+          if (use_this) {
+            invokes.push_back(insn);
           }
         } else if (op == OPCODE_IPUT_OBJECT || op == OPCODE_SPUT_OBJECT ||
                    op == OPCODE_APUT_OBJECT) {
@@ -278,7 +261,7 @@ class ThisObjectAnalysis final
         analyze_instruction(insn, &env);
       }
     }
-    return return_set;
+    return invokes;
   }
 
  private:
@@ -452,6 +435,45 @@ class EarlyReadFinder {
     return res;
   }
 
+  /**
+   * Adds the instance fields of ifield_cls that the constructor may read
+   * before storing them.
+   */
+  void visit_constructor(const DexMethod* ctor) {
+    const auto& cfg = ctor->get_code()->cfg();
+    check_this::ThisObjectAnalysis fixpoint(
+        &cfg, ctor, cfg.get_first_param_instruction()->dest());
+    fixpoint.run(check_this::ThisEnvironment());
+    // Only check on methods called with this object as arguments. They
+    // include the superclass constructor and any constructor that gets
+    // this as an argument: each can run code that reads this object's
+    // fields.
+    auto invokes = fixpoint.collect_invokes_on_this();
+    if (!invokes) {
+      // This object escaped to heap, blocklist all.
+      blocklist_all();
+      return;
+    }
+    for (const auto* insn : *invokes) {
+      if (!insn->has_method()) {
+        // invoke-polymorphic and invoke-custom run unknown code.
+        blocklist_all();
+        return;
+      }
+      auto* callee = resolve_method_deprecated(insn->get_method(),
+                                               opcode_to_search(insn), ctor);
+      if ((insn->opcode() == OPCODE_INVOKE_STATIC ||
+           insn->opcode() == OPCODE_INVOKE_DIRECT) &&
+          (callee == nullptr || callee->get_code() == nullptr)) {
+        continue;
+      }
+      // A callee that did not resolve makes visit_method give up on the class.
+      if (!visit_dispatch_targets(insn, callee)) {
+        return;
+      }
+    }
+  }
+
  private:
   /**
    * Visits the callee of the invoke instruction, and the other methods that
@@ -536,31 +558,10 @@ InsertOnlyConcurrentSet<DexField*> get_ifields_read_in_callees(
         auto* ctor = cls->get_ctors().front();
         auto* code = ctor->get_code();
         always_assert(code != nullptr);
-        auto& cfg = code->cfg();
-        check_this::ThisObjectAnalysis fixpoint(
-            &cfg, ctor, cfg.get_first_param_instruction()->dest());
-        fixpoint.run(check_this::ThisEnvironment());
-        // Only check on methods called with this object as arguments. They
-        // include the superclass constructor and any constructor that gets
-        // this as an argument: each can run code that reads this object's
-        // fields.
         DispatchTargets dispatch_targets(*override_graph, hierarchy, cls);
-        auto check_methods =
-            fixpoint.collect_method_called_on_this(dispatch_targets);
-        if (!check_methods) {
-          // This object escaped to heap, blocklist all.
-          for (const auto& field : cls->get_ifields()) {
-            return_ifields.insert(field);
-          }
-          return;
-        }
         EarlyReadFinder finder(ts, dispatch_targets, allowlist_method_names,
                                cls, &return_ifields);
-        for (const auto* const method : UnorderedIterable(*check_methods)) {
-          if (!finder.visit_method(method)) {
-            break;
-          }
-        }
+        finder.visit_constructor(ctor);
       });
   return return_ifields;
 }

@@ -487,7 +487,7 @@ void collect_refs(Scope& scope, RefsMap& def_refs) {
       });
   // The method handles that static field values and annotations hold call
   // methods too.
-  auto collect_refs_of = [&](const Gatherable& value) {
+  walk::parallel::encoded_values(scope, [&](const Gatherable& value) {
     std::vector<DexMethodHandle*> method_handles;
     value.gather_methodhandles(method_handles);
     for (const auto* method_handle : method_handles) {
@@ -495,14 +495,7 @@ void collect_refs(Scope& scope, RefsMap& def_refs) {
         collect_ref(method_handle->methodref());
       }
     }
-  };
-  walk::parallel::fields(scope, [&](DexField* field) {
-    if (auto* value = field->get_static_value()) {
-      collect_refs_of(*value);
-    }
   });
-  walk::parallel::annotations(
-      scope, [&](DexAnnotation* annotation) { collect_refs_of(*annotation); });
 }
 
 } // namespace

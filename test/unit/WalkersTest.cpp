@@ -7,9 +7,12 @@
 
 #include "Walkers.h"
 
+#include <mutex>
+
 #include <gmock/gmock.h>
 
 #include "Creators.h"
+#include "DexAnnotation.h"
 #include "RedexTest.h"
 #include "Show.h"
 
@@ -74,4 +77,60 @@ TEST_F(WalkersTest, accumulate_with_init_is_thread_count_independent) {
     EXPECT_EQ(merged.size(), 4u) << "merge, " << num_threads << " threads";
     EXPECT_EQ(merged.count("seed"), 1u);
   }
+}
+
+namespace {
+
+std::unique_ptr<DexAnnotationSet> make_annotation_set(const char* marker) {
+  auto annotation = std::make_unique<DexAnnotation>(
+      DexType::make_type("LAnno;"), DAV_RUNTIME);
+  annotation->add_element(
+      "value",
+      std::make_unique<DexEncodedValueString>(DexString::make_string(marker)));
+  auto annotation_set = std::make_unique<DexAnnotationSet>();
+  annotation_set->add_annotation(std::move(annotation));
+  return annotation_set;
+}
+
+} // namespace
+
+// Every static field value and every annotation of a class, its fields, its
+// methods and their parameters is visited once.
+TEST_F(WalkersTest, encoded_values) {
+  ClassCreator cc(DexType::make_type("LValues;"));
+  cc.set_super(type::java_lang_Object());
+  cc.add_field(DexField::make_field("LValues;.with_value:Ljava/lang/String;")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+                                   std::make_unique<DexEncodedValueString>(
+                                       DexString::make_string("static"))));
+  cc.add_field(DexField::make_field("LValues;.zero_value:I")
+                   ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  auto* field = DexField::make_field("LValues;.instance:I")
+                    ->make_concrete(ACC_PUBLIC | ACC_SYNTHETIC);
+  ASSERT_TRUE(field->attach_annotation_set(make_annotation_set("field")));
+  cc.add_field(field);
+  auto* method =
+      DexMethod::make_method("LValues;.m:(I)V")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_SYNTHETIC, false);
+  ASSERT_TRUE(method->attach_annotation_set(make_annotation_set("method")));
+  method->attach_param_annotation_set(0, make_annotation_set("parameter"));
+  cc.add_method(method);
+  auto* cls = cc.create();
+  ASSERT_TRUE(cls->attach_annotation_set(make_annotation_set("class")));
+
+  std::mutex mutex;
+  std::vector<std::string> strings;
+  walk::parallel::encoded_values(Scope{cls}, [&](const Gatherable& value) {
+    std::vector<const DexString*> value_strings;
+    value.gather_strings(value_strings);
+    std::lock_guard<std::mutex> lock(mutex);
+    for (const auto* string : value_strings) {
+      if (string->str() != "value") {
+        strings.emplace_back(string->str());
+      }
+    }
+  });
+  EXPECT_THAT(strings,
+              ::testing::UnorderedElementsAre("static", "field", "method",
+                                              "parameter", "class"));
 }

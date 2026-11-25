@@ -308,6 +308,18 @@ class walk {
     });
   }
 
+  template <typename WalkerFn>
+  static void iterate_encoded_values(DexClass* cls, const WalkerFn& walker) {
+    iterate_fields(cls, [&walker](DexField* field) {
+      if (const auto* value = field->get_static_value()) {
+        walker(static_cast<const Gatherable&>(*value));
+      }
+    });
+    iterate_annotations(cls, [&walker](const DexAnnotation* annotation) {
+      walker(static_cast<const Gatherable&>(*annotation));
+    });
+  }
+
   template <class T, typename WalkerFn>
   static void call_annotation_walker(T* dex_thingy, const WalkerFn& walker) {
     const auto& anno_set = dex_thingy->get_anno_set();
@@ -669,6 +681,25 @@ class walk {
         size_t num_threads = redex_parallel::default_num_threads()) {
       workqueue_run<DexClass*>(
           [&walker](DexClass* cls) { walk::iterate_annotations(cls, walker); },
+          classes,
+          num_threads);
+    }
+
+    // Call `walker`, in parallel, on each encoded value that `classes` hold
+    // outside code: the initial value of each static field that has one, and
+    // each annotation of the classes, their fields, their methods and the
+    // methods' parameters. The value's gather_* functions also reach the
+    // arrays and annotations nested in it.
+    //   WalkerFn should accept a `const Gatherable&`.
+    template <class Classes, typename WalkerFn>
+    static void encoded_values(
+        const Classes& classes,
+        const WalkerFn& walker,
+        size_t num_threads = redex_parallel::default_num_threads()) {
+      workqueue_run<DexClass*>(
+          [&walker](DexClass* cls) {
+            walk::iterate_encoded_values(cls, walker);
+          },
           classes,
           num_threads);
     }

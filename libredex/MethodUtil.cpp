@@ -560,20 +560,13 @@ namespace {
 // `caller`.
 template <typename Fn>
 void walk_method_handles(const Scope& scope, const Fn& f) {
-  auto walk_value = [&](const Gatherable& value) {
+  walk::parallel::encoded_values(scope, [&](const Gatherable& value) {
     std::vector<DexMethodHandle*> method_handles;
     value.gather_methodhandles(method_handles);
     for (const auto* method_handle : method_handles) {
       f(method_handle, /* caller */ nullptr);
     }
-  };
-  walk::parallel::fields(scope, [&](DexField* field) {
-    if (auto* value = field->get_static_value()) {
-      walk_value(*value);
-    }
   });
-  walk::parallel::annotations(
-      scope, [&](DexAnnotation* annotation) { walk_value(*annotation); });
   walk::parallel::opcodes(scope, [&](DexMethod* method, IRInstruction* insn) {
     for_each_method_handle(insn, [&](const DexMethodHandle* method_handle) {
       f(method_handle, method);

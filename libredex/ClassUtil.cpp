@@ -9,6 +9,7 @@
 #include "Debug.h"
 #include "DexAsm.h"
 #include "IRCode.h"
+#include "ReachableClasses.h"
 #include "Show.h"
 #include "TypeUtil.h"
 
@@ -80,6 +81,17 @@ bool has_hierarchy_in_scope(DexClass* cls) {
     super_cls = type_class_internal(super);
   }
   return super == type::java_lang_Object();
+}
+
+bool may_be_instantiated_at_runtime(const DexClass* intf) {
+  always_assert(is_interface(intf));
+  if (is_annotation(intf) || root(intf) || !can_rename(intf)) {
+    return true;
+  }
+  return std::any_of(intf->get_vmethods().begin(), intf->get_vmethods().end(),
+                     [](const DexMethod* method) {
+                       return root(method) || !can_rename(method);
+                     });
 }
 
 bool maybe_d8_desugared_anonymous_class(const DexClass* cls) {

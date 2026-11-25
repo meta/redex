@@ -63,4 +63,13 @@ bool maybe_non_d8_desugared_anonymous_class(const DexClass* cls);
  */
 bool maybe_anonymous_class(const DexClass* cls);
 
+/**
+ * Whether the runtime may create instances of the interface without a class
+ * in the input implementing it: a java.lang.reflect.Proxy class for it, or the
+ * implementation of an annotation. Keep rules mark the interfaces a proxy may
+ * be created for: they keep the interface or one of its methods, or do not
+ * allow renaming them.
+ */
+bool may_be_instantiated_at_runtime(const DexClass* intf);
+
 }; // namespace klass

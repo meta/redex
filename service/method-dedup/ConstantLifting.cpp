@@ -114,7 +114,7 @@ std::vector<DexMethod*> ConstantLifting::lift_constants_from(
     auto& cfg = method->get_code()->cfg();
     ConstantValues const_vals(type_tags, kinds_str, vals_str,
                               stud_method_threshold, cfg);
-    auto const_loads = const_vals.collect_constant_loads(cfg);
+    auto const_loads = const_vals.collect_constant_loads(method);
     if (const_loads.empty()) {
       // No matching constant found.
       TRACE(METH_DEDUP,

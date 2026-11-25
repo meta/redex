@@ -13,6 +13,10 @@
 #include "TypeTags.h"
 #include "TypeUtil.h"
 
+namespace constant_uses {
+class ConstantUses;
+} // namespace constant_uses
+
 class ConstantValue {
 
   /////////////////////////////////////////////////////////////////////////
@@ -73,8 +77,11 @@ class ConstantValue {
     }
   }
 
+  // An int constant matches only a `const` whose uses all accept an `int`
+  // parameter in its place; `uses` describes the uses in `cfg` and is needed
+  // only for an int constant.
   std::vector<ConstantLoad> collect_constant_loads_in(
-      cfg::ControlFlowGraph& cfg);
+      cfg::ControlFlowGraph& cfg, const constant_uses::ConstantUses* uses);
 
   std::vector<IRInstruction*> make_load_const(reg_t const_reg);
 
@@ -112,8 +119,7 @@ class ConstantValues {
                  const size_t stud_method_threshold,
                  cfg::ControlFlowGraph& cfg);
 
-  std::vector<ConstantValueLoad> collect_constant_loads(
-      cfg::ControlFlowGraph& cfg);
+  std::vector<ConstantValueLoad> collect_constant_loads(DexMethod* method);
 
   std::vector<ConstantValue> get_constant_values() const {
     return m_const_vals;

@@ -67,6 +67,7 @@ check_PROGRAMS = \
     concurrent_hashtable_test \
     configurable_test \
     config_files_test \
+    constant_lifting_test \
     constant_uses_test \
     constructor_accesses_test \
     constructor_analysis_test \
@@ -380,6 +381,8 @@ configurable_test_LDADD = $(COMMON_MOCK_TEST_LIBS)
 config_files_test_SOURCES = ConfigFilesTest.cpp
 EXTRA_config_files_test_DEPENDENCIES = config_files_test.env
 $(eval $(call make_env,config_files_test,class_frequencies_path=$(srcdir)/class_frequencies.txt))
+
+constant_lifting_test_SOURCES = ConstantLiftingTest.cpp
 
 constant_uses_test_SOURCES = ConstantUsesTest.cpp $(top_srcdir)/test/common/RedexTestUtils.cpp
 constant_uses_test_LDADD = $(COMMON_MOCK_TEST_LIBS)

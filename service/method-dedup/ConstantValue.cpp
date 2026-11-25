@@ -7,8 +7,11 @@
 
 #include "ConstantValue.h"
 
+#include <optional>
+
 #include <boost/algorithm/string.hpp>
 
+#include "ConstantUses.h"
 #include "Creators.h"
 #include "Debug.h"
 #include "DexAsm.h"
@@ -77,19 +80,21 @@ ConstantValue::ConstantValue(const TypeTags* type_tags,
 }
 
 std::vector<ConstantValue::ConstantLoad>
-ConstantValue::collect_constant_loads_in(cfg::ControlFlowGraph& cfg) {
+ConstantValue::collect_constant_loads_in(
+    cfg::ControlFlowGraph& cfg, const constant_uses::ConstantUses* uses) {
+  always_assert(!is_int_value() || uses != nullptr);
   std::vector<ConstantValue::ConstantLoad> res;
   always_assert(is_valid());
   auto ii = InstructionIterable(cfg);
   for (auto it = ii.begin(); it != ii.end(); ++it) {
     auto* insn = it->insn;
-    if (is_int_value() && opcode::is_a_literal_const(insn->opcode())) {
+    if (is_int_value() && insn->opcode() == OPCODE_CONST) {
       int64_t literal = insn->get_literal();
       // Special handling for type tags to avoid sign extensionon on int64_t.
       if (m_kind == ConstantKind::TYPE) {
         literal = static_cast<uint32_t>(literal);
       }
-      if (is_int_value() && literal == m_int_val) {
+      if (literal == m_int_val && uses->accepts_any_int(insn)) {
         res.emplace_back(it, insn->dest());
       }
     } else if (is_str_value() && insn->opcode() == OPCODE_CONST_STRING) {
@@ -161,14 +166,20 @@ ConstantValues::ConstantValues(const TypeTags* type_tags,
 }
 
 std::vector<ConstantValues::ConstantValueLoad>
-ConstantValues::collect_constant_loads(cfg::ControlFlowGraph& cfg) {
+ConstantValues::collect_constant_loads(DexMethod* method) {
+  auto& cfg = method->get_code()->cfg();
   std::vector<ConstantValueLoad> const_val_loads;
+  std::optional<constant_uses::ConstantUses> uses;
   UnorderedSet<IRInstruction*> matched_loads;
   for (auto& const_val : m_const_vals) {
     if (const_val.is_invalid()) {
       continue;
     }
-    auto const_loads = const_val.collect_constant_loads_in(cfg);
+    if (const_val.is_int_value() && !uses) {
+      uses.emplace(cfg, method);
+    }
+    auto const_loads =
+        const_val.collect_constant_loads_in(cfg, uses ? &*uses : nullptr);
     if (m_skip_multiple_const_0 && const_val.is_int_kind() &&
         const_val.get_int_value() == 0 && !const_loads.empty()) {
       const_val_loads.emplace_back(const_val, const_loads.front());

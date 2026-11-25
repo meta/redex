@@ -48,10 +48,8 @@ class IRFixpointIterator final
                     LivenessDomain* current_state) const override {
     // Since liveness is a backward analysis, we analyze each instruction inside
     // a block in the reverse order of execution.
-    for (auto it = block->rbegin(); it != block->rend(); ++it) {
-      if (it->type == MFLOW_OPCODE) {
-        analyze_instruction(it->insn, current_state);
-      }
+    for (auto& mie : InstructionIterable(block).reversed()) {
+      analyze_instruction(mie.insn, current_state);
     }
   }
 

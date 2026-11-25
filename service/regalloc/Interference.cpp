@@ -296,11 +296,8 @@ Graph GraphBuilder::build(const LivenessFixpointIterator& fixpoint_iter,
 
   for (cfg::Block* block : cfg.blocks()) {
     LivenessDomain live_out = fixpoint_iter.get_live_out_vars_at(block);
-    for (auto it = block->rbegin(); it != block->rend(); ++it) {
-      if (it->type != MFLOW_OPCODE) {
-        continue;
-      }
-      auto* insn = it->insn;
+    for (auto& mie : InstructionIterable(block).reversed()) {
+      auto* insn = mie.insn;
       auto op = insn->opcode();
       if (insn->has_dest()) {
         for (auto reg : live_out.elements()) {
@@ -327,7 +324,7 @@ Graph GraphBuilder::build(const LivenessFixpointIterator& fixpoint_iter,
       }
       if (op == OPCODE_CHECK_CAST) {
         auto move_result =
-            cfg.move_result_of(block->to_cfg_instruction_iterator(*it));
+            cfg.move_result_of(block->to_cfg_instruction_iterator(mie));
         always_assert(!move_result.is_end());
         IRInstruction* move_result_pseudo = move_result->insn;
         for (auto reg : live_out.elements()) {
@@ -341,7 +338,7 @@ Graph GraphBuilder::build(const LivenessFixpointIterator& fixpoint_iter,
           graph.add_containment_edge(insn->dest(), reg);
         }
       }
-      fixpoint_iter.analyze_instruction(it->insn, &live_out);
+      fixpoint_iter.analyze_instruction(mie.insn, &live_out);
       // adding containment edge between liverange used in insn and elements
       // in live-in set of insn
       if (containment_edges) {

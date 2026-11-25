@@ -233,6 +233,7 @@ struct OpcodeRedirectParam {
   std::string name;
   IROpcode opcode;
   std::string caller_ir;
+  std::string expected_type{"LNonSingletonLambda$0;"};
 };
 
 class NonSingleton_InstructionRedirectTest
@@ -246,7 +247,6 @@ TEST_P(NonSingleton_InstructionRedirectTest, RedirectsToCanonical) {
   auto* canonical = create_lambda("LNonSingletonLambda$0;", false);
   auto* target_lambda = create_lambda("LNonSingletonTarget$0;", false);
   const auto* target_type = target_lambda->get_type();
-  const auto* canonical_type = canonical->get_type();
 
   ClassCreator cc(DexType::make_type("LNonSingletonCaller;"));
   cc.set_super(type::java_lang_Object());
@@ -269,7 +269,7 @@ TEST_P(NonSingleton_InstructionRedirectTest, RedirectsToCanonical) {
     ASSERT_NE(ref_type, nullptr);
     EXPECT_NE(ref_type, target_type)
         << "instruction must be redirected from non-canonical type";
-    EXPECT_EQ(ref_type, canonical_type)
+    EXPECT_EQ(ref_type->str(), param.expected_type)
         << "instruction must reference the canonical type from dex 0";
   }
   EXPECT_TRUE(found) << "expected at least one " << param.name
@@ -308,6 +308,76 @@ INSTANTIATE_TEST_SUITE_P(
           (move-result-pseudo-object v0)
           (return-object v0)
         ))"}),
+    [](const ::testing::TestParamInfo<OpcodeRedirectParam>& info) {
+      return info.param.name;
+    });
+
+// An array type operand of a folded lambda names an array of the canonical
+// lambda, so the canonical's instances can be stored in it. kotlinc emits the
+// new-array for a local `val` holding
+// `arrayOf(object : Lambda<Int>(0), () -> Int { ... })` and the check-cast for
+// its `copyOf()`; javac emits the `[LT;.clone()` call for `array.clone()`.
+INSTANTIATE_TEST_SUITE_P(
+    NonSingleton_ArrayTypeRedirectTests,
+    NonSingleton_InstructionRedirectTest,
+    ::testing::Values(
+        OpcodeRedirectParam{"NewArray", OPCODE_NEW_ARRAY, R"((
+          (const v0 1)
+          (new-array v0 "[LNonSingletonTarget$0;")
+          (move-result-pseudo-object v1)
+          (new-instance "LNonSingletonTarget$0;")
+          (move-result-pseudo-object v2)
+          (invoke-direct (v2) "LNonSingletonTarget$0;.<init>:()V")
+          (const v3 0)
+          (aput-object v2 v1 v3)
+          (return-object v1)
+        ))",
+                            "[LNonSingletonLambda$0;"},
+        OpcodeRedirectParam{"NewNestedArray", OPCODE_NEW_ARRAY, R"((
+          (const v0 1)
+          (new-array v0 "[[LNonSingletonTarget$0;")
+          (move-result-pseudo-object v1)
+          (return-object v1)
+        ))",
+                            "[[LNonSingletonLambda$0;"},
+        OpcodeRedirectParam{"FilledNewArray", OPCODE_FILLED_NEW_ARRAY, R"((
+          (new-instance "LNonSingletonTarget$0;")
+          (move-result-pseudo-object v0)
+          (invoke-direct (v0) "LNonSingletonTarget$0;.<init>:()V")
+          (filled-new-array (v0) "[LNonSingletonTarget$0;")
+          (move-result-object v1)
+          (return-object v1)
+        ))",
+                            "[LNonSingletonLambda$0;"},
+        OpcodeRedirectParam{"CheckCast", OPCODE_CHECK_CAST, R"((
+          (const v0 0)
+          (check-cast v0 "[LNonSingletonTarget$0;")
+          (move-result-pseudo-object v0)
+          (return-object v0)
+        ))",
+                            "[LNonSingletonLambda$0;"},
+        OpcodeRedirectParam{"InstanceOf", OPCODE_INSTANCE_OF, R"((
+          (const v0 0)
+          (instance-of v0 "[LNonSingletonTarget$0;")
+          (move-result-pseudo v1)
+          (return-object v0)
+        ))",
+                            "[LNonSingletonLambda$0;"},
+        OpcodeRedirectParam{"ConstClass", OPCODE_CONST_CLASS, R"((
+          (const-class "[LNonSingletonTarget$0;")
+          (move-result-pseudo-object v0)
+          (return-object v0)
+        ))",
+                            "[LNonSingletonLambda$0;"},
+        OpcodeRedirectParam{"InvokeArrayClone", OPCODE_INVOKE_VIRTUAL, R"((
+          (const v0 1)
+          (new-array v0 "[LNonSingletonTarget$0;")
+          (move-result-pseudo-object v1)
+          (invoke-virtual (v1) "[LNonSingletonTarget$0;.clone:()Ljava/lang/Object;")
+          (move-result-object v2)
+          (return-object v2)
+        ))",
+                            "[LNonSingletonLambda$0;"}),
     [](const ::testing::TestParamInfo<OpcodeRedirectParam>& info) {
       return info.param.name;
     });

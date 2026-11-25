@@ -23,6 +23,7 @@
 #include "Resolver.h"
 #include "Show.h"
 #include "Trace.h"
+#include "TypeReference.h"
 #include "TypeUtil.h"
 #include "UniqueMethodTracker.h"
 #include "Walkers.h"
@@ -139,7 +140,7 @@ struct SingletonDeduplicationResult {
   std::unordered_map<DexFieldRef*, DexFieldRef*> field_redirect_map;
   // Map from non-canonical lambda type to the canonical's type.
   // Used to redirect type references (invoke-virtual, check-cast, etc.).
-  std::unordered_map<const DexType*, DexType*> type_redirect_map;
+  UnorderedMap<const DexType*, DexType*> type_redirect_map;
   size_t lambdas_deduplicated = 0;
   size_t duplicate_group_count = 0;
 };
@@ -207,7 +208,7 @@ SingletonDeduplicationResult process_singleton_duplicates(
 // Result of processing non-singleton duplicate groups.
 struct NonSingletonDeduplicationResult {
   // Map from original lambda type to the canonical's type.
-  std::unordered_map<const DexType*, DexType*> type_redirect_map;
+  UnorderedMap<const DexType*, DexType*> type_redirect_map;
   // Map from original constructor to the canonical's constructor.
   std::unordered_map<DexMethodRef*, DexMethodRef*> ctor_redirect_map;
   size_t lambdas_deduplicated = 0;
@@ -379,7 +380,8 @@ void KotlinLambdaDeduplicationPass::run_pass(DexStoresVector& stores,
   // Build a combined type redirect map covering both singleton and
   // non-singleton non-canonical lambda types.
   auto type_redirect_map = std::move(singleton_result.type_redirect_map);
-  type_redirect_map.merge(non_singleton_result.type_redirect_map);
+  insert_unordered_iterable(type_redirect_map,
+                            non_singleton_result.type_redirect_map);
 
   struct RewriteCounts {
     size_t singleton = 0;
@@ -406,7 +408,7 @@ void KotlinLambdaDeduplicationPass::run_pass(DexStoresVector& stores,
         // is dead after dedup (all usage sites have been redirected), and
         // rewriting self-referencing method calls (e.g., the bridge invoke
         // calling this.invoke()) would create type inconsistencies.
-        if (type_redirect_map.contains(meth->get_class())) {
+        if (type_redirect_map.count(meth->get_class()) != 0u) {
           return counts;
         }
 
@@ -429,12 +431,14 @@ void KotlinLambdaDeduplicationPass::run_pass(DexStoresVector& stores,
           }
 
           // Redirect type operands: new-instance, check-cast, instance-of,
-          // const-class, new-array (non-singleton lambdas).
+          // const-class, new-array (non-singleton lambdas). An array of a
+          // folded lambda, at any depth, becomes an array of the canonical.
           if (insn->has_type()) {
             const auto* type = insn->get_type();
-            if (const auto it = type_redirect_map.find(type);
-                it != type_redirect_map.end()) {
-              insn->set_type(it->second);
+            if (auto* new_type =
+                    type_reference::get_new_type(type, type_redirect_map);
+                new_type != type) {
+              insn->set_type(new_type);
               if (opcode == OPCODE_NEW_INSTANCE) {
                 counts.non_singleton++;
               }
@@ -454,11 +458,21 @@ void KotlinLambdaDeduplicationPass::run_pass(DexStoresVector& stores,
             }
             // Redirect by declaring type (covers invoke-virtual,
             // invoke-interface, invoke-direct on private methods, etc.).
+            // An array declares no methods, so a reference such as
+            // `[LT;.clone()` on the canonical's array type need not exist
+            // yet: make it instead of looking it up.
             const auto* declaring_type = method_ref->get_class();
-            if (const auto it = type_redirect_map.find(declaring_type);
-                it != type_redirect_map.end()) {
-              auto* redirected = DexMethod::get_method(
-                  it->second, method_ref->get_name(), method_ref->get_proto());
+            if (auto* new_declaring_type = type_reference::get_new_type(
+                    declaring_type, type_redirect_map);
+                new_declaring_type != declaring_type) {
+              auto* redirected =
+                  type::is_array(new_declaring_type)
+                      ? DexMethod::make_method(new_declaring_type,
+                                               method_ref->get_name(),
+                                               method_ref->get_proto())
+                      : DexMethod::get_method(new_declaring_type,
+                                              method_ref->get_name(),
+                                              method_ref->get_proto());
               always_assert(redirected != nullptr);
               insn->set_method(redirected);
             }

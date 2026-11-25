@@ -43,6 +43,7 @@ struct InlinerConfig {
   bool true_virtual_inline{false};
   bool relaxed_init_inline{false};
   bool unfinalize_relaxed_init_inline{false};
+  bool relaxed_init_inline_maybe_anonymous{false};
   bool strict_throwable_init_inline{false};
   bool throws_inline{false};
   bool throw_after_no_return{false};

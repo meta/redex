@@ -1966,20 +1966,14 @@ bool MultiMethodInliner::can_inline_init(const DexMethod* init_method) {
                     // is maintained between a proper constructor and a finalize
                     // method, if any.
 
-                    // We also exclude possibly anonymous classes as those may
-                    // regress the effectiveness of the class-merging passes.
-                    // TODO T184662680: While this is not a correctness issue,
-                    // we should fully support relaxed init methods in
-                    // class-merging. Align with what happens in
-                    // unfinalize_fields_if_beneficial.
-
                     // We also don't want to inline constructors of throwable
                     // (exception, error) classes, as they capture the current
                     // stack trace in a way that is sensitive to inlining.
                     bool relaxed =
                         m_config.relaxed_init_inline &&
-                        !klass::maybe_anonymous_class(
-                            type_class(init_method->get_class())) &&
+                        (m_config.relaxed_init_inline_maybe_anonymous ||
+                         !klass::maybe_anonymous_class(
+                             type_class(init_method->get_class()))) &&
                         !is_finalizable(init_method->get_class()) &&
                         (!m_config.strict_throwable_init_inline ||
                          !type::check_cast(init_method->get_class(),

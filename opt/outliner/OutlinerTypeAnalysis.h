@@ -225,6 +225,10 @@ class OutlinerTypeAnalysis {
 
   art::Demand demand_of_use(IRInstruction* use, src_index_t src_index);
 
+  // Whether ART types `reg` as null where `insn` reads it: every definition
+  // that reaches it is null to ART.
+  bool is_null_to_art(const IRInstruction* insn, reg_t reg);
+
   size_t get_load_param_index(const IRInstruction* load_param_insn);
 
   const DexType* get_result_type_helper(const IRInstruction* insn);

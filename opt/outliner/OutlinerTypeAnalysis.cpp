@@ -934,6 +934,17 @@ const DexType* OutlinerTypeAnalysis::get_result_type_helper(
   }
 }
 
+// The demand a field or array put places on the value it stores. ART checks a
+// primitive put by category only: any integral value may be stored into a
+// `boolean`, `byte`, `char` or `short` slot. So an integral slot demands `int`,
+// whatever its declared type. An invocation argument, in contrast, must be
+// assignable to the parameter type. Taking the slot type as the demand would
+// therefore turn a value that only ever reaches such a put into an outlined
+// parameter narrower than what the caller holds.
+static const DexType* primitive_put_value_demand(const DexType* slot_type) {
+  return type::is_integral(slot_type) ? type::_int() : slot_type;
+}
+
 const DexType* OutlinerTypeAnalysis::get_if_insn_type_demand(
     IRInstruction* insn) {
   always_assert(opcode::is_a_conditional_branch(insn->opcode()));
@@ -1187,17 +1198,42 @@ const DexType* OutlinerTypeAnalysis::get_type_demand(IRInstruction* insn,
       auto& env = m_type_environments->at(insn);
       auto dex_type = env.get_dex_type(insn->src(1));
       return (dex_type && type::is_array(*dex_type))
-                 ? type::get_array_component_type(*dex_type)
+                 ? primitive_put_value_demand(
+                       type::get_array_component_type(*dex_type))
                  : nullptr;
     }
     case OPCODE_APUT_BOOLEAN:
-      return type::_boolean();
     case OPCODE_APUT_BYTE:
-      return type::_byte();
     case OPCODE_APUT_CHAR:
-      return type::_char();
-    case OPCODE_APUT_SHORT:
-      return type::_short();
+    case OPCODE_APUT_SHORT: {
+      // Into an array, ART checks the value by category only
+      // (`primitive_put_value_demand`). But when ART types the array operand
+      // as null, it checks the value strictly against the instruction's own
+      // type (`VerifyAPut` in `method_verifier.cc`, android-6.0.0_r1 and
+      // later). A known array type proves that ART sees an array: the operand
+      // comes from a definition of an array, and ART merges a null with an
+      // array into the array. Without a known array type, ART may still see an
+      // array that Redex does not, for example after an `instance-of` test. So
+      // only a proven null demands the instruction's type.
+      auto& env = m_type_environments->at(insn);
+      auto dex_type = env.get_dex_type(insn->src(1));
+      if (dex_type && type::is_array(*dex_type)) {
+        return type::_int();
+      }
+      if (!is_null_to_art(insn, insn->src(1))) {
+        return nullptr;
+      }
+      switch (insn->opcode()) {
+      case OPCODE_APUT_BOOLEAN:
+        return type::_boolean();
+      case OPCODE_APUT_BYTE:
+        return type::_byte();
+      case OPCODE_APUT_CHAR:
+        return type::_char();
+      default:
+        return type::_short();
+      }
+    }
     case OPCODE_APUT_OBJECT:
       // There seems to be very little static verification for this
       // instruction, as most is deferred to runtime.
@@ -1219,7 +1255,7 @@ const DexType* OutlinerTypeAnalysis::get_type_demand(IRInstruction* insn,
       return insn->get_field()->get_class();
     }
     always_assert(src_index == 0);
-    return insn->get_field()->get_type();
+    return primitive_put_value_demand(insn->get_field()->get_type());
 
   case OPCODE_SPUT:
   case OPCODE_SPUT_BOOLEAN:
@@ -1229,7 +1265,7 @@ const DexType* OutlinerTypeAnalysis::get_type_demand(IRInstruction* insn,
   case OPCODE_SPUT_WIDE:
   case OPCODE_SPUT_OBJECT:
     always_assert(src_index == 0);
-    return insn->get_field()->get_type();
+    return primitive_put_value_demand(insn->get_field()->get_type());
 
   case OPCODE_INVOKE_VIRTUAL:
   case OPCODE_INVOKE_SUPER:
@@ -1465,6 +1501,39 @@ art::Value OutlinerTypeAnalysis::value_of_defs(
         get_const_insns_type_demand(candidate, const_insns));
   }
   return value;
+}
+
+bool OutlinerTypeAnalysis::is_null_to_art(const IRInstruction* insn,
+                                          reg_t reg) {
+  // ART types a `const 0` as null, and an `aget-object` from a null array too
+  // (`VerifyAGet` in `method_verifier.cc`, android-5.0.0_r1 and
+  // android-16.0.0_r1).
+  std::vector<std::pair<const IRInstruction*, reg_t>> worklist{{insn, reg}};
+  UnorderedSet<const IRInstruction*> visited;
+  bool defined = false;
+  while (!worklist.empty()) {
+    auto [use, src] = worklist.back();
+    worklist.pop_back();
+    const auto& defs = m_reaching_defs_environments->at(use).get(src);
+    if (defs.is_bottom() || defs.is_top()) {
+      return false;
+    }
+    for (const auto* def : defs.elements()) {
+      if (def->opcode() == IOPCODE_UNREACHABLE || !visited.insert(def).second) {
+        continue;
+      }
+      defined = true;
+      if (def->opcode() == OPCODE_CONST && def->get_literal() == 0) {
+        continue;
+      }
+      if (def->opcode() == OPCODE_AGET_OBJECT) {
+        worklist.emplace_back(def, def->src(0));
+        continue;
+      }
+      return false;
+    }
+  }
+  return defined;
 }
 
 } // namespace outliner_impl

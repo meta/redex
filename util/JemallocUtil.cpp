@@ -58,6 +58,14 @@ void some_malloc_stats(const std::function<void(const char*, uint64_t)>& fn) {
       "stats.retained",     "stats.zero_reallocs",
   };
 
+  // jemalloc caches its statistics; they only refresh when the epoch advances.
+  uint64_t epoch = 1;
+  size_t epoch_len = sizeof(epoch);
+  auto epoch_err = mallctl("epoch", &epoch, &epoch_len, &epoch, epoch_len);
+  if (epoch_err != 0) {
+    std::cerr << "Failed refreshing jemalloc stats: " << epoch_err << std::endl;
+  }
+
   for (const char* stat : STATS) {
     size_t value;
     size_t len = sizeof(value);

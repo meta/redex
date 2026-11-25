@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <optional>
+
 #include <gtest/gtest.h>
 
 #include "BaselineProfile.h"
@@ -87,6 +89,10 @@ class RareSuffixMethodSplittingTest : public RedexTest {
     json_conf["RareSuffixMethodSplittingPass"]["enabled"] = enabled;
     json_conf["RareSuffixMethodSplittingPass"]["net_oat_weight"] =
         m_net_oat_weight;
+    if (m_max_returning_suffix_ratio) {
+      json_conf["RareSuffixMethodSplittingPass"]["max_returning_suffix_ratio"] =
+          *m_max_returning_suffix_ratio;
+    }
     if (!m_call_counts.empty()) {
       json_conf["baseline_profile"]["default"]["deep_data_interaction_config"]
                [method_profiles::COLD_START]["name"] =
@@ -195,6 +201,8 @@ class RareSuffixMethodSplittingTest : public RedexTest {
   std::unique_ptr<ConfigFiles> m_conf;
   // Most tests check what is split, not whether it pays.
   double m_net_oat_weight{1000.0};
+  // Unset: the pass's default.
+  std::optional<double> m_max_returning_suffix_ratio;
   std::vector<DexClass*> m_extra_classes;
   std::vector<DexMethod*> m_compiled;
   // Call counts the profile reports for these methods.
@@ -286,13 +294,160 @@ TEST_F(RareSuffixMethodSplittingTest, reportsTheTopSplitMethods) {
   auto metrics = run();
   const std::string rare_name = "cold_LFoo;.rare:(Ljava/lang/Object;)V";
   const std::string frequent_name = "cold_LFoo;.frequent:(Ljava/lang/Object;)V";
-  EXPECT_EQ(metrics["top_split_by_call_count_0_" + frequent_name], 100);
-  EXPECT_EQ(metrics["top_split_by_call_count_1_" + rare_name], 5);
-  EXPECT_EQ(metrics["top_split_by_compiled_call_sites_0_" + rare_name], 3);
-  EXPECT_EQ(metrics["top_split_by_compiled_call_sites_1_" + frequent_name], 2);
-  EXPECT_GT(metrics["top_split_by_call_count_0_" + frequent_name +
+  EXPECT_EQ(metrics["top_throw_split_by_call_count_0_" + frequent_name], 100);
+  EXPECT_EQ(metrics["top_throw_split_by_call_count_1_" + rare_name], 5);
+  EXPECT_EQ(metrics["top_throw_split_by_compiled_call_sites_0_" + rare_name],
+            3);
+  EXPECT_EQ(
+      metrics["top_throw_split_by_compiled_call_sites_1_" + frequent_name], 2);
+  EXPECT_GT(metrics["top_throw_split_by_call_count_0_" + frequent_name +
                     "_split_code_units"],
             0);
+}
+
+// A lazily initialized value: the method returns the cached value nearly every
+// time, and computes it on its first call. The block counts say how often each
+// part runs.
+std::string lazy_get(bool with_counts, bool ran) {
+  const std::string sb = "LFoo;.get:()Ljava/lang/Object;";
+  auto counts = [&](int id, const char* val) {
+    return with_counts ? "(.src_block \"" + sb + "\" " + std::to_string(id) +
+                             (ran ? std::string(" (") + val + " 1.0))"
+                                  : std::string(" (0.0 0.0))"))
+                       : std::string();
+  };
+  return "((sget-object \"LFoo;.cached:Ljava/lang/Object;\")" +
+         counts(0, "1000.0") +
+         "(move-result-pseudo-object v0)"
+         "(if-eqz v0 :compute)" +
+         counts(1, "999.0") +
+         "(return-object v0)"
+         "(:compute)" +
+         counts(2, "1.0") +
+         "(new-instance \"Ljava/lang/Object;\")"
+         "(move-result-pseudo-object v0)"
+         "(invoke-direct (v0) \"Ljava/lang/Object;.<init>:()V\")"
+         "(sput-object v0 \"LFoo;.cached:Ljava/lang/Object;\")"
+         "(return-object v0))";
+}
+
+class RareSuffixMethodSplittingReturningTest
+    : public RareSuffixMethodSplittingTest {
+ public:
+  DexMethod* add_lazy_get(bool with_counts, bool ran = true) {
+    m_cls->add_field(DexField::make_field("LFoo;.cached:Ljava/lang/Object;")
+                         ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+    auto* get =
+        add_method("get:()Ljava/lang/Object;", lazy_get(with_counts, ran));
+    // The part that computes the value runs, so its split stays compiled: it
+    // pays only with more compiled copies than the launchpads cost.
+    for (int i = 0; i < 4; i++) {
+      m_compiled.push_back(
+          add_method("caller" + std::to_string(m_callers++) + ":()V", R"(
+        (
+          (invoke-static () "LFoo;.get:()Ljava/lang/Object;")
+          (move-result-object v0)
+          (return-void)
+        )
+      )"));
+    }
+    return get;
+  }
+
+  static DexMethod* any_split(const DexMethod* m) {
+    for (auto* d : type_class(m->get_class())->get_dmethods()) {
+      if (d->str().starts_with(std::string(m->str()) + "$split$")) {
+        return d;
+      }
+    }
+    return nullptr;
+  }
+};
+
+TEST_F(RareSuffixMethodSplittingReturningTest,
+       splitsARarelyRunSuffixThatReturns) {
+  auto* get = add_lazy_get(/* with_counts */ true);
+  m_max_returning_suffix_ratio = 0.01;
+  auto metrics = run();
+  auto* split = any_split(get);
+  ASSERT_NE(split, nullptr);
+  EXPECT_TRUE(calls(get, split));
+  EXPECT_TRUE(returns(split));
+  EXPECT_EQ(metrics["returning_suffixes"], 1);
+}
+
+TEST_F(RareSuffixMethodSplittingReturningTest, leavesASuffixThatRunsTooOften) {
+  auto* get = add_lazy_get(/* with_counts */ true);
+  m_max_returning_suffix_ratio = 0.0001;
+  auto metrics = run();
+  EXPECT_EQ(any_split(get), nullptr);
+  EXPECT_EQ(metrics["returning_suffixes"], 0);
+}
+
+TEST_F(RareSuffixMethodSplittingReturningTest,
+       listsRareSplitsApartFromThrowSplits) {
+  auto* get = add_lazy_get(/* with_counts */ true);
+  auto* check = add_method("check:(Ljava/lang/Object;)V", kCheck);
+  add_callers(check, 3);
+  m_max_returning_suffix_ratio = 0.01;
+  auto metrics = run();
+  ASSERT_NE(any_split(get), nullptr);
+  ASSERT_NE(any_split(check), nullptr);
+  bool rare_get = false;
+  bool throw_check = false;
+  for (const auto& [name, value] : UnorderedIterable(metrics)) {
+    const bool is_get = name.find("LFoo;.get:") != std::string::npos;
+    const bool is_check = name.find("LFoo;.check:") != std::string::npos;
+    if (name.starts_with("top_rare_split_by_compiled_call_sites_")) {
+      EXPECT_FALSE(is_check) << name;
+      rare_get |= is_get && value == 4;
+    }
+    if (name.starts_with("top_throw_split_by_compiled_call_sites_")) {
+      EXPECT_FALSE(is_get) << name;
+      throw_check |= is_check && value == 3;
+    }
+  }
+  EXPECT_TRUE(rare_get);
+  EXPECT_TRUE(throw_check);
+}
+
+TEST_F(RareSuffixMethodSplittingReturningTest,
+       leavesAMethodWithoutBlockCounts) {
+  auto* get = add_lazy_get(/* with_counts */ false);
+  m_max_returning_suffix_ratio = 0.01;
+  auto* code_before = get->get_code();
+  auto metrics = run();
+  EXPECT_EQ(any_split(get), nullptr);
+  EXPECT_EQ(metrics["rejected_no_block_counts"], 1);
+  EXPECT_EQ(get->get_code(), code_before);
+}
+
+TEST_F(RareSuffixMethodSplittingReturningTest, leavesAMethodThatNeverRan) {
+  // Every count is zero: the computing part's count of 0 is not evidence that
+  // it runs rarely, since the method never ran at all.
+  auto* get = add_lazy_get(/* with_counts */ true, /* ran */ false);
+  m_max_returning_suffix_ratio = 0.01;
+  auto* code_before = get->get_code();
+  auto metrics = run();
+  EXPECT_EQ(any_split(get), nullptr);
+  EXPECT_EQ(metrics["rejected_method_never_ran"], 1);
+  EXPECT_EQ(metrics["returning_suffixes"], 0);
+  EXPECT_EQ(get->get_code(), code_before);
+}
+
+TEST_F(RareSuffixMethodSplittingReturningTest,
+       splitsARarelyRunSuffixThatReturnsByDefault) {
+  auto* get = add_lazy_get(/* with_counts */ true);
+  run();
+  EXPECT_NE(any_split(get), nullptr);
+}
+
+TEST_F(RareSuffixMethodSplittingReturningTest,
+       splitsNoSuffixThatReturnsWhenTurnedOff) {
+  auto* get = add_lazy_get(/* with_counts */ true);
+  m_max_returning_suffix_ratio = -1.0;
+  run();
+  EXPECT_EQ(any_split(get), nullptr);
 }
 
 TEST_F(RareSuffixMethodSplittingTest, isOffByDefault) {

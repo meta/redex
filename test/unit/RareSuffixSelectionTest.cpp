@@ -122,7 +122,8 @@ class RareSuffixSelectionTest : public RedexTest {
     method_splitting_impl::RareSuffixSelectionStats selection_stats;
     method_splitting_impl::Stats stats;
     method_splitting_impl::RareSuffixSelection selection(
-        methods, m_config, /* min_suffix_runtime_calls */ 2, copies,
+        methods, m_config, /* min_suffix_runtime_calls */ 2,
+        /* max_returning_suffix_ratio */ std::nullopt, copies,
         env.store_ref_checkers, stats, selection_stats);
     result.too_few_runtime_calls = selection_stats.too_few_runtime_calls;
     result.not_splittable = selection_stats.not_splittable;
@@ -423,6 +424,7 @@ TEST_F(RareSuffixSelectionTest, restoresSelectedMethodsThatWereNotSplit) {
     method_splitting_impl::RareSuffixSelection selection(
         {check}, method_splitting_impl::Config{},
         /* min_suffix_runtime_calls */ 2,
+        /* max_returning_suffix_ratio */ std::nullopt,
         /* compiled_copies */ [](auto*) { return kManyCopies; },
         env.store_ref_checkers, stats, selection_stats);
     ASSERT_EQ(selection.selected_method_count(), 1);

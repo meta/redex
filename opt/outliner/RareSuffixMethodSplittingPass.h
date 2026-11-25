@@ -49,6 +49,7 @@ allocations.
   size_t m_max_caller_instructions;
   size_t m_min_compiled_call_sites;
   size_t m_min_suffix_runtime_calls;
+  float m_max_returning_suffix_ratio;
   // The candidate evaluation and the net cost model MethodSplittingPass uses,
   // with this pass's live-in limit and code-unit costs.
   method_splitting_impl::Config m_config;

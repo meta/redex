@@ -44,6 +44,10 @@ constexpr const char* kCheck = R"(
   )
 )";
 
+// Caller prologues whose block ran in the profile, or never ran.
+constexpr const char* kHotBlock = R"((.src_block "" 0 (1.0 100)) (const v0 0))";
+constexpr const char* kColdBlock = R"((.src_block "" 0 (0 0)) (const v0 0))";
+
 class RareSuffixMethodSplittingTest : public RedexTest {
  public:
   RareSuffixMethodSplittingTest() {
@@ -92,6 +96,13 @@ class RareSuffixMethodSplittingTest : public RedexTest {
     if (m_max_returning_suffix_ratio) {
       json_conf["RareSuffixMethodSplittingPass"]["max_returning_suffix_ratio"] =
           *m_max_returning_suffix_ratio;
+    }
+    if (!m_writer_config.isNull()) {
+      json_conf["ArtProfileWriterPass"] = m_writer_config;
+    }
+    if (!m_harvest_config.isNull()) {
+      json_conf["baseline_profile"]["default"]["harvest_config"] =
+          m_harvest_config;
     }
     if (!m_call_counts.empty()) {
       json_conf["baseline_profile"]["default"]["deep_data_interaction_config"]
@@ -203,6 +214,11 @@ class RareSuffixMethodSplittingTest : public RedexTest {
   double m_net_oat_weight{1000.0};
   // Unset: the pass's default.
   std::optional<double> m_max_returning_suffix_ratio;
+  // ArtProfileWriterPass's configuration; null when it has none.
+  Json::Value m_writer_config;
+  // The default baseline profile's harvest configuration; null when it has
+  // none.
+  Json::Value m_harvest_config;
   std::vector<DexClass*> m_extra_classes;
   std::vector<DexMethod*> m_compiled;
   // Call counts the profile reports for these methods.
@@ -283,6 +299,92 @@ TEST_F(RareSuffixMethodSplittingTest,
   auto metrics = run();
   EXPECT_EQ(helper(check), nullptr);
   EXPECT_EQ(metrics["callers_too_many_instructions"], 2);
+}
+
+TEST_F(RareSuffixMethodSplittingTest,
+       countsNoInlinedCopyOfAMethodArtProfileWriterPassAnnotates) {
+  // ArtProfileWriterPass annotates a method `@NeverInline` when it has a call
+  // site that is not hot and none that is, so ART inlines no copy of it. A
+  // site is hot when its block ran often enough and the method is compiled.
+  m_writer_config["never_inline_attach_annotations"] = true;
+  m_writer_config["never_inline_hot_block_appear_threshold"] = 50;
+  // Only cold call sites, and the method is not compiled: no copy runs
+  // compiled, so a split saves nothing.
+  auto* cold = add_method("cold:(Ljava/lang/Object;)V", kCheck);
+  add_callers(cold, 2, kColdBlock);
+  // A hot call site keeps the annotation off, and ART inlines both copies.
+  auto* hot = add_method("hot:(Ljava/lang/Object;)V", kCheck);
+  m_compiled.push_back(hot);
+  add_callers(hot, 1, kHotBlock);
+  add_callers(hot, 1, kColdBlock);
+  auto metrics = run();
+  EXPECT_EQ(helper(cold), nullptr);
+  EXPECT_NE(helper(hot), nullptr);
+  EXPECT_EQ(metrics["methods_without_compiled_copies"], 1);
+}
+
+TEST_F(RareSuffixMethodSplittingTest,
+       pricesTheCopiesASplitAddsBelowArtProfileWriterPassFloor) {
+  // ArtProfileWriterPass leaves a method with fewer instructions than its
+  // floor, here 5, unannotated. Both methods are annotated as they are and
+  // compiled, so each runs compiled once. Splitting `flips` leaves it 4
+  // instructions, with the launchpad, so ART would inline its two new copies,
+  // which cost more than the split saves; `stays` keeps 5.
+  m_writer_config["never_inline_attach_annotations"] = true;
+  m_writer_config["never_inline_hot_block_appear_threshold"] = 50;
+  m_writer_config["never_inline_min_callee_instructions"] = 5;
+  auto* flips = add_method("flips:(Ljava/lang/Object;)V", kCheck);
+  auto* stays = add_method("stays:(Ljava/lang/Object;)V", R"(
+    (
+      (load-param-object v0)
+      (sget-object "LFoo;.lock:Ljava/lang/Object;")
+      (move-result-pseudo-object v2)
+      (if-nez v0 :ok)
+      (new-instance "Ljava/lang/NullPointerException;")
+      (move-result-pseudo-object v1)
+      (invoke-direct (v1) "Ljava/lang/NullPointerException;.<init>:()V")
+      (throw v1)
+      (:ok)
+      (return-void)
+    )
+  )");
+  for (auto* m : {flips, stays}) {
+    m_compiled.push_back(m);
+    add_callers(m, 2, kColdBlock);
+  }
+  auto metrics = run();
+  EXPECT_EQ(helper(flips), nullptr);
+  EXPECT_NE(helper(stays), nullptr);
+  EXPECT_EQ(metrics["suffixes_changing_copies"], 1);
+}
+
+TEST_F(RareSuffixMethodSplittingTest, countsNoCopyInCallersLeftUncompiled) {
+  // ArtProfileWriterPass's never-compile selection drops from the profile the
+  // methods it calls at most this many times, here both callers, and dex2oat
+  // leaves them uncompiled, so ART inlines no copy into them.
+  m_harvest_config["enable_never_compile"] = true;
+  m_harvest_config["never_compile_callcount_threshold"] = 0;
+  auto* check = add_method("check:(Ljava/lang/Object;)V", kCheck);
+  add_callers(check, 2);
+  auto metrics = run();
+  EXPECT_EQ(helper(check), nullptr);
+  EXPECT_EQ(metrics["never_compiled_methods"], 2);
+}
+
+TEST_F(RareSuffixMethodSplittingTest, countsTheCompiledMethodItselfAsACopy) {
+  // Each copy loses the 6-unit throwing part for a 4-unit launchpad, 2 code
+  // units weighed at 6, while the dex pays 32 code units once. The two
+  // inlined copies do not pay for the split; with the compiled method itself
+  // as a third copy, they do.
+  m_net_oat_weight = 6;
+  auto* compiled = add_method("compiled:(Ljava/lang/Object;)V", kCheck);
+  m_compiled.push_back(compiled);
+  add_callers(compiled, 2);
+  auto* uncompiled = add_method("uncompiled:(Ljava/lang/Object;)V", kCheck);
+  add_callers(uncompiled, 2);
+  run();
+  EXPECT_NE(helper(compiled), nullptr);
+  EXPECT_EQ(helper(uncompiled), nullptr);
 }
 
 TEST_F(RareSuffixMethodSplittingTest, reportsTheTopSplitMethods) {

@@ -64,6 +64,10 @@ constexpr const char* kTwoChecks = R"(
 // Enough compiled copies for any of the tails below to pay for its split.
 constexpr size_t kManyCopies = 100;
 
+// The compiled copies of a method with a body of a given shape.
+using CompiledCopies = std::function<size_t(
+    const DexMethod*, const never_inline_analysis::CalleeShape&)>;
+
 class RareSuffixSelectionTest : public RedexTest {
  public:
   RareSuffixSelectionTest() {
@@ -99,8 +103,8 @@ class RareSuffixSelectionTest : public RedexTest {
   // not split their code back.
   Result select_and_split(
       const std::vector<DexMethod*>& methods,
-      const std::function<size_t(const DexMethod*)>& copies =
-          [](const DexMethod*) { return kManyCopies; },
+      const CompiledCopies& copies = [](const DexMethod*,
+                                        const auto&) { return kManyCopies; },
       std::optional<size_t> room = std::nullopt) {
     for (auto* m : methods) {
       m->get_code()->build_cfg();
@@ -210,9 +214,10 @@ TEST_F(RareSuffixSelectionTest, countsUnreachableAtItsLoweredSize) {
       (return-void)
     )
   )");
-  EXPECT_EQ(select_and_split({bang}, [](const DexMethod*) { return 3; })
-                .split_methods,
-            1);
+  EXPECT_EQ(
+      select_and_split({bang}, [](const DexMethod*, const auto&) { return 3; })
+          .split_methods,
+      1);
 }
 
 TEST_F(RareSuffixSelectionTest, skipsCheapTailsAndLeavesTheirCodeAlone) {
@@ -257,8 +262,8 @@ TEST_F(RareSuffixSelectionTest, splitsOnlyWhenItsCompiledCopiesPayForTheSplit) {
   m_config.net_oat_weight = 4;
   auto* four = add_method("four:(Ljava/lang/Object;)V", kCheck);
   auto* five = add_method("five:(Ljava/lang/Object;)V", kCheck);
-  auto result =
-      select_and_split({four, five}, [&](const DexMethod* m) -> size_t {
+  auto result = select_and_split(
+      {four, five}, [&](const DexMethod* m, const auto&) -> size_t {
         return m == five ? 5 : 4;
       });
   EXPECT_EQ(result.split_methods, 1);
@@ -299,7 +304,8 @@ TEST_F(RareSuffixSelectionTest, countsOnlyTheCodeThatLeavesTheMethod) {
       (return-void)
     )
   )");
-  auto result = select_and_split({shared}, [](const DexMethod*) { return 1; });
+  auto result = select_and_split(
+      {shared}, [](const DexMethod*, const auto&) { return 1; });
   EXPECT_EQ(result.split_methods, 0);
   EXPECT_TRUE(splits().empty());
 }
@@ -370,7 +376,8 @@ TEST_F(RareSuffixSelectionTest, leavesAHotTailWithOneCompiledCopy) {
       (return-void)
     )
   )");
-  auto result = select_and_split({hot}, [](const DexMethod*) { return 1; });
+  auto result =
+      select_and_split({hot}, [](const DexMethod*, const auto&) { return 1; });
   EXPECT_EQ(result.split_methods, 0);
   EXPECT_EQ(
       result.fates
@@ -425,7 +432,8 @@ TEST_F(RareSuffixSelectionTest, restoresSelectedMethodsThatWereNotSplit) {
         {check}, method_splitting_impl::Config{},
         /* min_suffix_runtime_calls */ 2,
         /* max_returning_suffix_ratio */ std::nullopt,
-        /* compiled_copies */ [](auto*) { return kManyCopies; },
+        /* compiled_copies */
+        [](const DexMethod*, const auto&) { return kManyCopies; },
         env.store_ref_checkers, stats, selection_stats);
     ASSERT_EQ(selection.selected_method_count(), 1);
     EXPECT_NE(check->get_code(), original);
@@ -437,7 +445,8 @@ TEST_F(RareSuffixSelectionTest, keepsSplitsMadeBeforeTheDexIsFull) {
   auto* a = add_method("a:(Ljava/lang/Object;)V", kCheck);
   auto* b = add_method("b:(Ljava/lang/Object;)V", kCheck);
   auto result = select_and_split(
-      {a, b}, [](const DexMethod*) { return kManyCopies; }, /* room */ 1);
+      {a, b}, [](const DexMethod*, const auto&) { return kManyCopies; },
+      /* room */ 1);
   EXPECT_EQ(result.split_methods, 1);
   auto all = splits();
   ASSERT_EQ(all.size(), 1);
@@ -447,7 +456,8 @@ TEST_F(RareSuffixSelectionTest, keepsSplitsMadeBeforeTheDexIsFull) {
 TEST_F(RareSuffixSelectionTest, keepsAPartialSplitWhenTheDexIsFull) {
   auto* m = add_method("m:(Ljava/lang/Object;Ljava/lang/Object;)V", kTwoChecks);
   auto result = select_and_split(
-      {m}, [](const DexMethod*) { return kManyCopies; }, /* room */ 1);
+      {m}, [](const DexMethod*, const auto&) { return kManyCopies; },
+      /* room */ 1);
   EXPECT_EQ(result.split_methods, 1);
   auto all = splits();
   ASSERT_EQ(all.size(), 1);

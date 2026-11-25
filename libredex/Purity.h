@@ -132,8 +132,8 @@ MethodOverrideAction get_base_or_overriding_method_action(
     bool ignore_methods_with_assumenosideeffects);
 
 // Given a (base) method, iterate over all relevant (base + overriding)
-// methods, and run a handler method for each method that should be included
-// in the analysis.
+// methods, including default methods of sub-interfaces, and run a handler
+// method for each method that should be included in the analysis.
 // Returns true if all invoked handlers returned true, and no method with an
 // unknown implementation was encountered.
 bool process_base_and_overriding_methods(

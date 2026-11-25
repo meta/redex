@@ -2732,3 +2732,106 @@ TEST_F(CommonSubexpressionEliminationTest, sameMethodHandleConstants) {
        /* declaring_type */ nullptr, DexTypeList::make_type_list({}),
        /* finalish_field_names */ {}, share_method_handle);
 }
+
+// interface I { void m(); }
+// interface J extends I { default void m() { Foo.s = 1; } }
+// class C implements J {}
+// A call to I.m() on a C runs J.m(), so the call is a barrier for Foo.s.
+TEST_F(CommonSubexpressionEliminationTest,
+       sub_interface_default_method_is_barrier) {
+  ClassCreator i_creator(DexType::make_type("LI;"));
+  i_creator.set_super(type::java_lang_Object());
+  i_creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  auto* i_m =
+      DexMethod::make_method("LI;.m:()V")
+          ->make_concrete(ACC_PUBLIC | ACC_ABSTRACT, true /* is_virtual */);
+  i_creator.add_method(i_m);
+  DexClass* i_class = i_creator.create();
+
+  ClassCreator j_creator(DexType::make_type("LJ;"));
+  j_creator.set_super(type::java_lang_Object());
+  j_creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  j_creator.add_interface(i_class->get_type());
+  auto* j_m = DexMethod::make_method("LJ;.m:()V")
+                  ->make_concrete(ACC_PUBLIC, true /* is_virtual */);
+  j_m->set_code(assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (const v1 1)
+      (sput v1 "LFoo;.s:I")
+      (return-void)
+    )
+  )"));
+  j_creator.add_method(j_m);
+  DexClass* j_class = j_creator.create();
+
+  ClassCreator c_creator(DexType::make_type("LC;"));
+  c_creator.set_super(type::java_lang_Object());
+  c_creator.add_interface(j_class->get_type());
+  DexClass* c_class = c_creator.create();
+
+  const auto* code_str = R"(
+    (
+      (const v0 0)
+      (sget "LFoo;.s:I")
+      (move-result-pseudo v1)
+      (invoke-interface (v0) "LI;.m:()V")
+      (sget "LFoo;.s:I")
+      (move-result-pseudo v2)
+    )
+  )";
+  test(Scope{type_class(type::java_lang_Object()), i_class, j_class, c_class},
+       code_str,
+       code_str,
+       0);
+}
+
+// Same as above, but C itself implements m().
+TEST_F(CommonSubexpressionEliminationTest,
+       class_method_implementing_sub_interface_is_barrier) {
+  ClassCreator i_creator(DexType::make_type("LI;"));
+  i_creator.set_super(type::java_lang_Object());
+  i_creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  auto* i_m =
+      DexMethod::make_method("LI;.m:()V")
+          ->make_concrete(ACC_PUBLIC | ACC_ABSTRACT, true /* is_virtual */);
+  i_creator.add_method(i_m);
+  DexClass* i_class = i_creator.create();
+
+  ClassCreator j_creator(DexType::make_type("LJ;"));
+  j_creator.set_super(type::java_lang_Object());
+  j_creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+  j_creator.add_interface(i_class->get_type());
+  DexClass* j_class = j_creator.create();
+
+  ClassCreator c_creator(DexType::make_type("LC;"));
+  c_creator.set_super(type::java_lang_Object());
+  c_creator.add_interface(j_class->get_type());
+  auto* c_m = DexMethod::make_method("LC;.m:()V")
+                  ->make_concrete(ACC_PUBLIC, true /* is_virtual */);
+  c_m->set_code(assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (const v1 1)
+      (sput v1 "LFoo;.s:I")
+      (return-void)
+    )
+  )"));
+  c_creator.add_method(c_m);
+  DexClass* c_class = c_creator.create();
+
+  const auto* code_str = R"(
+    (
+      (const v0 0)
+      (sget "LFoo;.s:I")
+      (move-result-pseudo v1)
+      (invoke-interface (v0) "LI;.m:()V")
+      (sget "LFoo;.s:I")
+      (move-result-pseudo v2)
+    )
+  )";
+  test(Scope{type_class(type::java_lang_Object()), i_class, j_class, c_class},
+       code_str,
+       code_str,
+       0);
+}

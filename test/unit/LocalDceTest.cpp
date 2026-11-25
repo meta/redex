@@ -565,6 +565,93 @@ TEST_F(LocalDceEnhanceTest, NoImplementorMayAllocateRegistersTest) {
                 /* may_allocate_registers */ true);
 }
 
+// interface A { void m(); }
+// interface B extends A { default void m() { throw ...; } }
+// class C implements B {}
+// A call to A.m() on a C runs B.m(), so the call has side effects.
+TEST_F(LocalDceEnhanceTest, SubIntfDefaultMethodWithSideEffectsTest) {
+  Scope scope = create_empty_scope();
+  auto* void_void =
+      DexProto::make_proto(type::_void(), DexTypeList::make_type_list({}));
+  DexType* a_type = DexType::make_type("LA;");
+  DexClass* a_cls = create_internal_class(a_type, type::java_lang_Object(), {},
+                                          ACC_PUBLIC | ACC_INTERFACE);
+  create_abstract_method(a_cls, "m", void_void);
+
+  DexType* b_type = DexType::make_type("LB;");
+  DexClass* b_cls = create_internal_class(b_type, type::java_lang_Object(),
+                                          {a_type}, ACC_PUBLIC | ACC_INTERFACE);
+  create_throwing_method(b_cls, "m", void_void);
+
+  DexType* c_type = DexType::make_type("LC;");
+  DexClass* c_cls =
+      create_internal_class(c_type, type::java_lang_Object(), {b_type});
+
+  scope.push_back(a_cls);
+  scope.push_back(b_cls);
+  scope.push_back(c_cls);
+
+  const auto* code_str = R"(
+    (
+      (invoke-interface (v0) "LA;.m:()V")
+      (return-void)
+    )
+  )";
+  auto code = assembler::ircode_from_string(code_str);
+  auto expected_code = assembler::ircode_from_string(code_str);
+  dce(scope, code.get());
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
+// interface A { void m(); }
+// interface B extends A { default void m() {} }
+// class C implements B {}
+// B.m() implements A.m(), so a dead call to A.m() is removed, not replaced
+// by a NullPointerException.
+TEST_F(LocalDceEnhanceTest, SubIntfDefaultMethodIsImplementorTest) {
+  Scope scope = create_empty_scope();
+  auto* void_void =
+      DexProto::make_proto(type::_void(), DexTypeList::make_type_list({}));
+  DexType* a_type = DexType::make_type("LA;");
+  DexClass* a_cls = create_internal_class(a_type, type::java_lang_Object(), {},
+                                          ACC_PUBLIC | ACC_INTERFACE);
+  create_abstract_method(a_cls, "m", void_void);
+
+  DexType* b_type = DexType::make_type("LB;");
+  DexClass* b_cls = create_internal_class(b_type, type::java_lang_Object(),
+                                          {a_type}, ACC_PUBLIC | ACC_INTERFACE);
+  create_empty_method(b_cls, "m", void_void);
+
+  DexType* c_type = DexType::make_type("LC;");
+  DexClass* c_cls =
+      create_internal_class(c_type, type::java_lang_Object(), {b_type});
+
+  scope.push_back(a_cls);
+  scope.push_back(b_cls);
+  scope.push_back(c_cls);
+
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (invoke-interface (v0) "LA;.m:()V")
+      (return-void)
+    )
+  )");
+  auto expected_code = assembler::ircode_from_string(R"(
+    (
+      (return-void)
+    )
+  )");
+  init_classes::InitClassesWithSideEffects init_classes_with_side_effects(
+      scope, /* create_init_class_insns */ false);
+  const auto& pure_methods =
+      get_no_side_effect_methods(scope, init_classes_with_side_effects);
+  auto override_graph = method_override_graph::build_graph(scope);
+  LocalDce(&init_classes_with_side_effects, pure_methods, override_graph.get(),
+           /* may_allocate_registers */ true)
+      .dce(code.get(), /* normalize_new_instances */ true);
+  EXPECT_CODE_EQ(code.get(), expected_code.get());
+}
+
 TEST_F(LocalDceTryTest, invoked_static_method_with_pure_external_barrier) {
   ClassCreator creator(DexType::make_type("LNativeTest;"));
   creator.set_super(type::java_lang_Object());

@@ -423,8 +423,12 @@ bool process_base_and_overriding_methods_impl(
   }
 
   // Okay, let's process all overridden methods just like the base method.
+  // Interface methods are included, as a call can reach a default method of a
+  // sub-interface.
   return method_override_graph::all_overriding_methods(
-      *method_override_graph, method, [&](const DexMethod* overriding_method) {
+      *method_override_graph,
+      method,
+      [&](const DexMethod* overriding_method) {
         action = get_base_or_overriding_method_action(
             overriding_method, methods_to_ignore,
             ignore_methods_with_assumenosideeffects);
@@ -432,7 +436,8 @@ bool process_base_and_overriding_methods_impl(
             action == MethodOverrideAction::UNKNOWN ||
             (action == MethodOverrideAction::INCLUDE &&
              !handler_func(const_cast<DexMethod*>(overriding_method))));
-      });
+      },
+      /* include_interfaces */ true);
   return true;
 }
 

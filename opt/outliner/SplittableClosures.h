@@ -62,6 +62,9 @@ struct SplittableClosure {
   std::shared_ptr<MethodClosures> method_closures;
   cfg::Block* switch_block;
   std::vector<const Closure*> closures;
+  // The ids of the closures' head blocks. A split that takes several cases of
+  // `switch_block` takes the switch's edges into these blocks.
+  UnorderedSet<cfg::BlockId> grouped_heads;
   std::vector<ClosureArgument> args;
   double rank;
   size_t added_code_size;

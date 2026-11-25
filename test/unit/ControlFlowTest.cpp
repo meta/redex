@@ -7,7 +7,9 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <regex>
+#include <sstream>
 
 #include "ControlFlow.h"
 #include "Debug.h"
@@ -3177,4 +3179,131 @@ TEST_F(ControlFlowTest, blockUnconditionallyThrowsInfiniteLoopNotFlagged) {
   auto& cfg = code->cfg();
   EXPECT_FALSE(cfg::block_eventually_throws(cfg.entry_block()))
       << "Infinite loop should NOT be flagged as unconditionally throwing";
+}
+
+namespace {
+
+// One branch, one switch, a typed and a catch-all handler, and (after
+// `calculate_exit_block`) ghost edges into a synthetic exit block: every kind
+// of edge the graph formats label.
+std::unique_ptr<IRCode> code_with_every_edge_type() {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (load-param-object v0)
+      (load-param v1)
+      (if-eqz v0 :null)
+      (switch v1 (:a :b))
+      (.try_start t)
+      (invoke-static () "LFoo;.bar:()V")
+      (.try_end t)
+      (return-object v0)
+      (:a 1)
+      (const v2 1)
+      (return-object v2)
+      (:b 7)
+      (const v2 7)
+      (return-object v2)
+      (.catch (t all) "Ljava/lang/IllegalStateException;")
+      (const v2 2)
+      (return-object v2)
+      (.catch (all))
+      (const v2 3)
+      (return-object v2)
+      (:null)
+      (new-instance "LFoo;")
+      (move-result-pseudo-object v2)
+      (invoke-direct (v2) "LFoo;.<init>:()V")
+      (throw v2)
+    )
+  )");
+  code->build_cfg();
+  code->cfg().calculate_exit_block();
+  return code;
+}
+
+} // namespace
+
+TEST_F(ControlFlowTest, write_mermaid_format) {
+  auto code = code_with_every_edge_type();
+  std::ostringstream out;
+  code->cfg().write_mermaid_format(out);
+  EXPECT_EQ(out.str(), R"MERMAID(flowchart TD
+  B0["B0 (entry)<br/>OPCODE: IOPCODE_LOAD_PARAM_OBJECT v0<br/>OPCODE: IOPCODE_LOAD_PARAM v1<br/>OPCODE: IF_EQZ v0"]
+  B1["B1<br/>OPCODE: SWITCH v1"]
+  B2["B2<br/>OPCODE: INVOKE_STATIC LFoo;.bar:()V"]
+  B4["B4<br/>OPCODE: RETURN_OBJECT v0"]
+  B5["B5<br/>OPCODE: CONST v2, 1<br/>OPCODE: RETURN_OBJECT v2"]
+  B6["B6<br/>OPCODE: CONST v2, 7<br/>OPCODE: RETURN_OBJECT v2"]
+  B7["B7<br/>OPCODE: CONST v2, 2<br/>OPCODE: RETURN_OBJECT v2"]
+  B8["B8<br/>OPCODE: CONST v2, 3<br/>OPCODE: RETURN_OBJECT v2"]
+  B9["B9<br/>OPCODE: NEW_INSTANCE LFoo;<br/>OPCODE: IOPCODE_MOVE_RESULT_PSEUDO_OBJECT v2<br/>OPCODE: INVOKE_DIRECT v2, LFoo;.#lt;init#gt;:()V<br/>OPCODE: THROW v2"]
+  B10["B10 (exit)"]
+  B0 -->|"br"| B9
+  B0 --> B1
+  B1 -->|"br 1"| B5
+  B1 -->|"br 7"| B6
+  B1 --> B2
+  B2 -.->|"th Ljava/lang/IllegalStateException;"| B7
+  B2 -.->|"th A"| B8
+  B2 --> B4
+  B4 -.->|"gh"| B10
+  B5 -.->|"gh"| B10
+  B6 -.->|"gh"| B10
+  B7 -.->|"gh"| B10
+  B8 -.->|"gh"| B10
+  B9 -.->|"gh"| B10
+)MERMAID");
+}
+
+TEST_F(ControlFlowTest, write_mermaid_format_escapes_labels) {
+  auto code = assembler::ircode_from_string(R"(
+    (
+      (const-string "say \"hi\" #1 <&>")
+      (move-result-pseudo-object v0)
+      (return-object v0)
+    )
+  )");
+  code->build_cfg();
+  std::ostringstream out;
+  code->cfg().write_mermaid_format(out);
+  EXPECT_EQ(out.str(), R"MERMAID(flowchart TD
+  B0["B0 (entry)<br/>OPCODE: CONST_STRING #quot;say \#quot;hi\#quot; #35;1 #lt;#amp;#gt;#quot;<br/>OPCODE: IOPCODE_MOVE_RESULT_PSEUDO_OBJECT v0<br/>OPCODE: RETURN_OBJECT v0"]
+)MERMAID");
+}
+
+TEST_F(ControlFlowTest, write_dot_format) {
+  auto code = code_with_every_edge_type();
+  std::ostringstream out;
+  code->cfg().write_dot_format(out);
+  // Entries are shown with their addresses, which change from run to run.
+  auto dot =
+      std::regex_replace(out.str(), std::regex(R"(\[0x[0-9a-f]+\] )"), "");
+  EXPECT_EQ(dot, R"DOT(digraph {
+node [shape=box];
+B0 [label="B0 (entry)\lOPCODE: IOPCODE_LOAD_PARAM_OBJECT v0\lOPCODE: IOPCODE_LOAD_PARAM v1\lOPCODE: IF_EQZ v0\l"];
+B1 [label="B1\lOPCODE: SWITCH v1\l"];
+B2 [label="B2\lOPCODE: INVOKE_STATIC LFoo;.bar:()V\l"];
+B4 [label="B4\lOPCODE: RETURN_OBJECT v0\l"];
+B5 [label="B5\lOPCODE: CONST v2, 1\lOPCODE: RETURN_OBJECT v2\l"];
+B6 [label="B6\lOPCODE: CONST v2, 7\lOPCODE: RETURN_OBJECT v2\l"];
+B7 [label="B7\lOPCODE: CONST v2, 2\lOPCODE: RETURN_OBJECT v2\l"];
+B8 [label="B8\lOPCODE: CONST v2, 3\lOPCODE: RETURN_OBJECT v2\l"];
+B9 [label="B9\lOPCODE: NEW_INSTANCE LFoo;\lOPCODE: IOPCODE_MOVE_RESULT_PSEUDO_OBJECT v2\lOPCODE: INVOKE_DIRECT v2, LFoo;.<init>:()V\lOPCODE: THROW v2\l"];
+B10 [label="B10 (exit)\l"];
+B0 -> B9 [label="br"];
+B0 -> B1;
+B1 -> B5 [label="br 1"];
+B1 -> B6 [label="br 7"];
+B1 -> B2;
+B2 -> B7 [label="th Ljava/lang/IllegalStateException;"];
+B2 -> B8 [label="th A"];
+B2 -> B4;
+B4 -> B10 [label="gh"];
+B5 -> B10 [label="gh"];
+B6 -> B10 [label="gh"];
+B7 -> B10 [label="gh"];
+B8 -> B10 [label="gh"];
+B9 -> B10 [label="gh"];
+}
+)DOT");
 }

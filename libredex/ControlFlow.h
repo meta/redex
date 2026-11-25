@@ -904,6 +904,16 @@ class ControlFlowGraph {
    */
   std::ostream& write_dot_format(std::ostream&) const;
 
+  /*
+   * Print the graph as a Mermaid flowchart, e.g. to paste into a Mermaid
+   * editor or a Markdown document that renders Mermaid. Blocks and edges are
+   * labeled as in write_dot_format, but entries are shown without their
+   * addresses, so the same code always prints the same chart. Mermaid refuses
+   * charts longer than its `maxTextSize` (50000 characters by default), which
+   * the largest methods exceed.
+   */
+  std::ostream& write_mermaid_format(std::ostream&) const;
+
   size_t num_blocks() const { return m_blocks.size(); }
   size_t num_edges() const { return m_edges.size(); }
 

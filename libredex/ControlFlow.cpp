@@ -9,7 +9,10 @@
 
 #include <iterator>
 #include <queue>
+#include <sstream>
 #include <stack>
+#include <string>
+#include <string_view>
 #include <utility>
 
 #include "CppUtil.h"
@@ -3082,6 +3085,72 @@ uint32_t ControlFlowGraph::replace_blocks(
   return remove_blocks(blocks_to_remove);
 }
 
+namespace {
+
+// The label both graph formats put on an edge, e.g. "br 3" for a switch case
+// or "th Ljava/lang/Exception;" for a typed catch. Empty for a goto.
+std::string edge_label(const Edge* e) {
+  std::ostringstream o;
+  switch (e->type()) {
+  case EDGE_BRANCH:
+    o << "br";
+    if (e->case_key() != std::nullopt) {
+      o << " " << *e->case_key();
+    }
+    break;
+  case EDGE_THROW:
+    o << "th";
+    if (e->throw_info() != nullptr) {
+      o << " ";
+      if (e->throw_info()->catch_type != nullptr) {
+        o << show(e->throw_info()->catch_type);
+      } else {
+        o << "A";
+      }
+    }
+    break;
+  case EDGE_GHOST:
+    o << "gh";
+    break;
+
+  // For completeness.
+  case EDGE_GOTO:
+  case EDGE_TYPE_SIZE:
+    break;
+  }
+  return o.str();
+}
+
+// Mermaid renders labels as HTML and reads `#name;` and `#number;` as entity
+// codes, so instruction text has to be escaped: `"` would end the label, `<`
+// and `>` would turn `<init>` into a tag, and `#` or `&` could start an entity.
+void write_mermaid_text(std::ostream& o, std::string_view text) {
+  for (char c : text) {
+    switch (c) {
+    case '"':
+      o << "#quot;";
+      break;
+    case '#':
+      o << "#35;";
+      break;
+    case '&':
+      o << "#amp;";
+      break;
+    case '<':
+      o << "#lt;";
+      break;
+    case '>':
+      o << "#gt;";
+      break;
+    default:
+      o << c;
+      break;
+    }
+  }
+}
+
+} // namespace
+
 std::ostream& ControlFlowGraph::write_dot_format(std::ostream& o) const {
   o << "digraph {\nnode [shape=box];\n";
   for (auto* block : blocks()) {
@@ -3102,40 +3171,46 @@ std::ostream& ControlFlowGraph::write_dot_format(std::ostream& o) const {
     for (const auto& succ : block->succs()) {
       o << "B" << block->id() << " -> B" << succ->target()->id();
       if (succ->type() != EDGE_GOTO) {
-        o << " [label=\"";
-        switch (succ->type()) {
-        case EDGE_BRANCH:
-          o << "br";
-          if (succ->case_key() != std::nullopt) {
-            o << " " << *succ->case_key();
-          }
-          break;
-        case EDGE_THROW:
-          o << "th";
-          if (succ->throw_info() != nullptr) {
-            o << " ";
-            if (succ->throw_info()->catch_type != nullptr) {
-              o << show(succ->throw_info()->catch_type);
-            } else {
-              o << "A";
-            }
-          }
-          break;
-        case EDGE_GHOST:
-          o << "gh";
-          break;
-
-        // For completeness.
-        case EDGE_GOTO:
-        case EDGE_TYPE_SIZE:
-          break;
-        }
-        o << "\"]";
+        o << " [label=\"" << edge_label(succ) << "\"]";
       }
       o << ";\n";
     }
   }
   o << "}\n";
+  return o;
+}
+
+std::ostream& ControlFlowGraph::write_mermaid_format(std::ostream& o) const {
+  o << "flowchart TD\n";
+  for (auto* block : blocks()) {
+    o << "  B" << block->id() << "[\"B" << block->id();
+    if (block == entry_block()) {
+      o << " (entry)";
+    }
+    if (block == exit_block()) {
+      o << " (exit)";
+    }
+    for (auto& mie : *block) {
+      o << "<br/>";
+      write_mermaid_text(o, show_mie_plain(mie));
+    }
+    o << "\"]\n";
+  }
+
+  for (auto* block : blocks()) {
+    for (const auto& succ : block->succs()) {
+      o << "  B" << block->id();
+      // Dotted arrows for the edges that are not normal control flow.
+      bool dotted = succ->type() == EDGE_THROW || succ->type() == EDGE_GHOST;
+      o << (dotted ? " -.->" : " -->");
+      if (succ->type() != EDGE_GOTO) {
+        o << "|\"";
+        write_mermaid_text(o, edge_label(succ));
+        o << "\"|";
+      }
+      o << " B" << succ->target()->id() << "\n";
+    }
+  }
   return o;
 }
 

@@ -12,6 +12,7 @@
 #include "DexClass.h"
 #include "DexUtil.h"
 #include "IRCode.h"
+#include "MethodUtil.h"
 #include "Walkers.h"
 
 void MaterializeNullChecksPass::run_pass(DexStoresVector& stores,
@@ -21,9 +22,9 @@ void MaterializeNullChecksPass::run_pass(DexStoresVector& stores,
   m_getClass_ref =
       DexMethod::get_method("Ljava/lang/Object;.getClass:()Ljava/lang/Class;");
 
-  m_null_check_type = DexType::get_type("Lredex/$NullCheck;");
-  if (m_null_check_type == nullptr) {
-    // Could not find Lredex/$NullCheck;
+  m_null_check_ref = method::redex_internal_checkObjectNotNull();
+  if (m_null_check_ref == nullptr) {
+    // Could not find Lredex/$NullCheck;.null_check
     // return.
     return;
   }
@@ -48,8 +49,10 @@ MaterializeNullChecksPass::Stats MaterializeNullChecksPass::rewrite_null_check(
       if (!opcode::is_invoke_static(insn->opcode())) {
         continue;
       }
-      auto* mtype = insn->get_method()->get_class();
-      if (mtype != m_null_check_type || insn->srcs().size() > 1) {
+      // Only calls of the intrinsic itself: other static methods of
+      // `Lredex/$NullCheck;`, such as one another pass split out of it, keep
+      // their own calls.
+      if (insn->get_method() != m_null_check_ref) {
         continue;
       }
       // Found invoke-static

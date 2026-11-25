@@ -42,6 +42,10 @@
  * - Some public methods might override multiple (formerly package private)
  *   virtual roots. We don't currently support this.
  * - Some methods might be marked as do-not-rename.
+ * - A non-public method might implement an interface method. Some Android
+ *   versions refuse to link its class or skip the method, and making the
+ *   method public, as the MakePublicPass does, changes that. We report such
+ *   methods as unsupported.
  *
  * We don't currently hit any of those limitations.
  *
@@ -85,6 +89,10 @@ const DexString* gen_new_name(std::string_view org_name, size_t seed) {
     seed /= 62;
   }
   return DexString::make_string(name);
+}
+
+bool is_interface_method(const DexMethod* method) {
+  return is_interface(type_class(method->get_class()));
 }
 
 size_t hash_type(DexType* type) {
@@ -407,6 +415,17 @@ PackagePrivatePreprocessorPass::Stats analyze_graph(
       return;
     }
     for (auto* method : cls->get_vmethods()) {
+      if (!is_public(method) && !is_abstract(method) &&
+          mog::any_overridden_methods(graph, method, is_interface_method,
+                                      /* include_interfaces */ true)) {
+        *unsupported_stream
+            << "  Semantics will change! The following non-public method may "
+               "implement an interface method; making it public changes how "
+               "ART links its class: "
+            << show(method) << "\n";
+        stats.unsupported_non_public_interface_implementations++;
+      }
+
       const auto* parent = get_parent(graph, method);
       if (parent == nullptr) {
         continue;
@@ -531,9 +550,6 @@ PackagePrivatePreprocessorPass::Stats transform(
   ConcurrentSet<const DexMethod*> may_be_interface_implementors;
   workqueue_run<const DexMethod*>(
       [&](const DexMethod* method) {
-        auto is_interface_method = [&](const auto* m) {
-          return is_interface(type_class(m->get_class()));
-        };
         always_assert(!is_interface_method(method));
         if (mog::any_overriding_methods(graph, method, is_interface_method,
                                         /* include_interfaces */ true) ||
@@ -702,10 +718,12 @@ void PackagePrivatePreprocessorPass::Stats::report(PassManager& mgr) {
   REPORT(unsupported_unrenamable_methods);
   REPORT(unsupported_interface_implementations);
   REPORT(unsupported_multiple_package_private_overrides);
+  REPORT(unsupported_non_public_interface_implementations);
 
   int unsupported = unsupported_unrenamable_methods +
                     unsupported_interface_implementations +
-                    unsupported_multiple_package_private_overrides;
+                    unsupported_multiple_package_private_overrides +
+                    unsupported_non_public_interface_implementations;
   if (unsupported > 0) {
     mgr.incr_metric("WARNING_UNSUPPORTED", unsupported);
   }
@@ -746,6 +764,8 @@ PackagePrivatePreprocessorPass::Stats::operator+=(const Stats& that) {
       that.unsupported_interface_implementations;
   this->unsupported_multiple_package_private_overrides +=
       that.unsupported_multiple_package_private_overrides;
+  this->unsupported_non_public_interface_implementations +=
+      that.unsupported_non_public_interface_implementations;
 
   this->package_private_accessed_classes +=
       that.package_private_accessed_classes;

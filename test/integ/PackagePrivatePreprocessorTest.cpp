@@ -9,7 +9,12 @@
 
 #include <gtest/gtest.h>
 
+#include "ConfigFiles.h"
+#include "Creators.h"
+#include "IRAssembler.h"
 #include "JarLoader.h"
+#include "PassManager.h"
+#include "RedexException.h"
 #include "RedexTest.h"
 #include "Show.h"
 #include "Walkers.h"
@@ -97,4 +102,117 @@ LR/I;.interface_collision_not_okay:()V <= interface_collision_not_okay
   EXPECT_EQ(stats.unsupported_unrenamable_methods, 0);
   EXPECT_EQ(stats.unsupported_interface_implementations, 1);
   EXPECT_EQ(stats.unsupported_multiple_package_private_overrides, 1);
+  EXPECT_EQ(stats.unsupported_non_public_interface_implementations, 0);
+}
+
+// javac rejects the shapes where `p.B` lists `I`, directly or through `p.A`, as
+// `B.m` would weaken the access of `I.m`. It compiles the shape where `q.C`
+// lists `I`, as `q.C` does not inherit the package-private `B.m`.
+struct PackagePrivateProcessorGeneratedBytecodeTest : public RedexTest {
+  // Creates `package p; public interface I { default void m() {} }`, a class
+  // `p.A`, its subclass `p.B` with a package-private `m`, and `q.C`, a
+  // subclass of `p.B`; `interfaces_of_a`, `interfaces_of_b` and
+  // `interfaces_of_c` say which of them lists `I`.
+  void create_classes(bool interfaces_of_a,
+                      bool interfaces_of_b,
+                      bool interfaces_of_c) {
+    auto* i_type = DexType::make_type("Lp/I;");
+    ClassCreator i_creator(i_type);
+    i_creator.set_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+    i_creator.set_super(type::java_lang_Object());
+    i_creator.add_method(assembler::method_from_string(R"(
+      (method (public) "Lp/I;.m:()V" ((load-param-object v0) (return-void)))
+    )"));
+
+    auto* a_type = DexType::make_type("Lp/A;");
+    ClassCreator a_creator(a_type);
+    a_creator.set_access(ACC_PUBLIC);
+    a_creator.set_super(type::java_lang_Object());
+    if (interfaces_of_a) {
+      a_creator.add_interface(i_type);
+    }
+
+    auto* b_type = DexType::make_type("Lp/B;");
+    ClassCreator b_creator(b_type);
+    b_creator.set_access(ACC_PUBLIC);
+    b_creator.set_super(a_type);
+    if (interfaces_of_b) {
+      b_creator.add_interface(i_type);
+    }
+    b_creator.add_method(assembler::method_from_string(R"(
+      (method () "Lp/B;.m:()V" ((load-param-object v0) (return-void)))
+    )"));
+
+    ClassCreator c_creator(DexType::make_type("Lq/C;"));
+    c_creator.set_access(ACC_PUBLIC);
+    c_creator.set_super(b_type);
+    if (interfaces_of_c) {
+      c_creator.add_interface(i_type);
+    }
+
+    DexStore store("classes");
+    store.add_classes({i_creator.create(), a_creator.create(),
+                       b_creator.create(), c_creator.create()});
+    m_stores.emplace_back(std::move(store));
+  }
+
+  // Runs the pass with `fail_if_unsupported_refs` and returns its error.
+  std::string run_pass() {
+    Json::Value config;
+    config["PackagePrivatePreprocessorPass"]["fail_if_unsupported_refs"] = true;
+    ConfigFiles conf(config);
+    conf.parse_global_config();
+    PackagePrivatePreprocessorPass pass;
+    PassManager manager({&pass}, conf);
+    try {
+      manager.run_passes(m_stores, conf);
+    } catch (const RedexException& e) {
+      return e.what();
+    }
+    return "";
+  }
+
+  DexStoresVector m_stores;
+};
+
+// package p; public class A implements I {}
+// package p; public class B extends A { void m() {} }
+//
+// Android 12 and earlier refuse to link B; Android 13 and 14 link it, and B.m
+// implements I.m. Once B.m is public, B links on Android 12 too.
+TEST_F(PackagePrivateProcessorGeneratedBytecodeTest,
+       nonPublicImplementationOfInheritedInterfaceIsUnsupported) {
+  create_classes(/* interfaces_of_a */ true, /* interfaces_of_b */ false,
+                 /* interfaces_of_c */ false);
+  auto error = run_pass();
+  EXPECT_NE(error.find("Redex limitation"), std::string::npos) << error;
+  EXPECT_NE(error.find("Lp/B;.m:()V"), std::string::npos) << error;
+}
+
+// package p; public class A {}
+// package p; public class B extends A implements I { void m() {} }
+//
+// Android 13 and earlier refuse to link B; Android 14 links it, and I.m runs
+// for calls of I.m. Once B.m is public, B.m runs instead.
+TEST_F(PackagePrivateProcessorGeneratedBytecodeTest,
+       nonPublicImplementationOfAddedInterfaceIsUnsupported) {
+  create_classes(/* interfaces_of_a */ false, /* interfaces_of_b */ true,
+                 /* interfaces_of_c */ false);
+  auto error = run_pass();
+  EXPECT_NE(error.find("Redex limitation"), std::string::npos) << error;
+  EXPECT_NE(error.find("Lp/B;.m:()V"), std::string::npos) << error;
+}
+
+// package q; public class C extends p.B implements p.I {}
+//
+// Android 13 and earlier refuse to link C, as ART matches B.m with I.m;
+// Android 14 links it, and I.m runs for calls of I.m. Once B.m is public, B.m
+// runs instead.
+TEST_F(PackagePrivateProcessorGeneratedBytecodeTest,
+       nonPublicImplementationInheritedBySubclassIsUnsupported) {
+  create_classes(/* interfaces_of_a */ false, /* interfaces_of_b */ false,
+                 /* interfaces_of_c */ true);
+  auto error = run_pass();
+  EXPECT_NE(error.find("Redex limitation"), std::string::npos) << error;
+  EXPECT_NE(error.find("Lp/B;.m:()V"), std::string::npos) << error;
 }

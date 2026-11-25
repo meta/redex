@@ -47,6 +47,7 @@ class PackagePrivatePreprocessorPass : public Pass {
     int unsupported_unrenamable_methods{0};
     int unsupported_interface_implementations{0};
     int unsupported_multiple_package_private_overrides{0};
+    int unsupported_non_public_interface_implementations{0};
 
     void report(PassManager& mgr);
 

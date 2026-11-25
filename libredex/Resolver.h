@@ -15,6 +15,7 @@
 #include "DexCallSite.h"
 #include "DexClass.h"
 #include "DexMethodHandle.h"
+#include "Gatherable.h"
 #include "IRInstruction.h"
 #include "Show.h"
 
@@ -280,6 +281,42 @@ void for_each_indirectly_named_type(const IRInstruction* insn, Fn&& f) {
   }
   std::vector<const DexType*> types;
   insn->gather_types(types);
+  for (const auto* type : types) {
+    f(type);
+  }
+}
+
+/**
+ * Calls `f(type)` for every type that `value`, such as a static field value or
+ * an annotation, names inside a method handle or a method type, including in
+ * nested arrays and annotations: the classes and the field types or prototypes
+ * of the members that its method handles name, and the prototypes of its
+ * method types. As with an instruction's method handles and method types, a
+ * pass that rewrites type, field and method references does not rewrite these.
+ * An array type is reported as is.
+ */
+template <typename Fn>
+void for_each_indirectly_named_type(const Gatherable& value, Fn&& f) {
+  std::vector<const DexType*> types;
+  std::vector<DexMethodHandle*> method_handles;
+  value.gather_methodhandles(method_handles);
+  for (const auto* method_handle : method_handles) {
+    std::vector<DexMethodRef*> methods;
+    method_handle->gather_methods(methods);
+    for (const auto* method : methods) {
+      method->gather_types_shallow(types);
+    }
+    std::vector<DexFieldRef*> fields;
+    method_handle->gather_fields(fields);
+    for (const auto* field : fields) {
+      field->gather_types_shallow(types);
+    }
+  }
+  std::vector<DexProto*> method_types;
+  value.gather_protos(method_types);
+  for (const auto* method_type : method_types) {
+    method_type->gather_types(types);
+  }
   for (const auto* type : types) {
     f(type);
   }

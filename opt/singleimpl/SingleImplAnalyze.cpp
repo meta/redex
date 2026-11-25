@@ -43,6 +43,7 @@ struct AnalysisImpl : SingleImplAnalysis {
   void collect_field_defs();
   void collect_method_defs();
   void analyze_opcodes();
+  void analyze_encoded_values();
   void escape_cross_stores();
   void remove_escaped();
 
@@ -578,6 +579,20 @@ void AnalysisImpl::analyze_opcodes() {
   });
 }
 
+/**
+ * Escape the interfaces that the method handles and method types of static
+ * field values and annotations name, as `analyze_opcodes` does for those of
+ * code. The optimization does not rewrite these values.
+ */
+void AnalysisImpl::analyze_encoded_values() {
+  walk::parallel::encoded_values(scope, [&](const Gatherable& value) {
+    for_each_indirectly_named_type(value, [&](const DexType* type) {
+      escape_interface(type::get_element_type_if_array(type),
+                       METHOD_HANDLE_OR_TYPE);
+    });
+  });
+}
+
 } // namespace
 
 /**
@@ -597,6 +612,7 @@ std::unique_ptr<SingleImplAnalysis> SingleImplAnalysis::analyze(
   single_impls->collect_field_defs();
   single_impls->collect_method_defs();
   single_impls->analyze_opcodes();
+  single_impls->analyze_encoded_values();
   single_impls->escape_cross_stores();
   single_impls->remove_escaped();
   return std::move(single_impls);

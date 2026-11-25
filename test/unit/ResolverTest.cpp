@@ -958,10 +958,11 @@ TEST_F(ResolverTest, ResolveCallOfInvokeDirectHandleIsNamedMethod) {
 
 namespace {
 
-std::set<std::string> indirectly_named_types(const IRInstruction* insn) {
+template <typename Named>
+std::set<std::string> indirectly_named_types(const Named& named) {
   std::set<std::string> types;
   for_each_indirectly_named_type(
-      insn, [&](const DexType* type) { types.insert(show(type)); });
+      named, [&](const DexType* type) { types.insert(show(type)); });
   return types;
 }
 
@@ -1004,6 +1005,22 @@ TEST_F(ResolverTest, ForEachIndirectlyNamedType) {
   IRInstruction invoke(OPCODE_INVOKE_STATIC);
   invoke.set_method(DexMethod::make_method("LA;.s:(LB;)V"));
   EXPECT_TRUE(indirectly_named_types(&invoke).empty());
+
+  // A value outside code, here an array, names the same types inside its
+  // method handles and method types, but not as a type value.
+  auto* elements = new DexEncodedValueArray::Storage();
+  elements->push_back(
+      std::make_unique<DexEncodedValueMethodHandle>(redex::make_method_handle(
+          METHOD_HANDLE_TYPE_INVOKE_INSTANCE, "LA;.m:([[LB;)LC;")));
+  elements->push_back(std::make_unique<DexEncodedValueMethodHandle>(
+      redex::make_method_handle(METHOD_HANDLE_TYPE_INSTANCE_GET, "LH;.f:LI;")));
+  elements->push_back(std::make_unique<DexEncodedValueMethodType>(
+      DexProto::make_proto("(LD;)[LE;")));
+  elements->push_back(
+      std::make_unique<DexEncodedValueType>(DexType::make_type("LF;")));
+  DexEncodedValueArray array(elements);
+  EXPECT_EQ(indirectly_named_types(array),
+            (Types{"LA;", "[[LB;", "LC;", "LH;", "LI;", "LD;", "[LE;"}));
 }
 
 namespace {

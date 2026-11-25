@@ -13,6 +13,7 @@
 
 #include "ConfigFiles.h"
 #include "Creators.h"
+#include "DexAnnotation.h"
 #include "DexClass.h"
 #include "DexStore.h"
 #include "IRAssembler.h"
@@ -89,18 +90,32 @@ class SingleImplMethodHandleTest : public RedexTest {
   DexClass* m_user{nullptr};
 };
 
+// The body of `LUser;.use` in which every reference to `LI;` is one that the
+// pass rewrites.
+constexpr const char* kRewritableUses = R"((
+  (new-instance "LImpl;")
+  (move-result-pseudo-object v0)
+  (invoke-direct (v0) "LImpl;.<init>:()V")
+  (invoke-interface (v0) "LI;.m:()V")
+  (invoke-static (v0) "LUser;.take:(LI;)V")
+  (return-void)
+))";
+
+std::unique_ptr<DexAnnotationSet> make_annotation_set(
+    std::unique_ptr<DexEncodedValue> value) {
+  auto annotation = std::make_unique<DexAnnotation>(
+      DexType::make_type("LAnno;"), DAV_RUNTIME);
+  annotation->add_element("value", std::move(value));
+  auto annotation_set = std::make_unique<DexAnnotationSet>();
+  annotation_set->add_annotation(std::move(annotation));
+  return annotation_set;
+}
+
 } // namespace
 
 // Without anything that the pass cannot rewrite, it removes `LI;`.
 TEST_F(SingleImplMethodHandleTest, removesInterfaceThatOnlyCodeNames) {
-  make_user(R"((
-    (new-instance "LImpl;")
-    (move-result-pseudo-object v0)
-    (invoke-direct (v0) "LImpl;.<init>:()V")
-    (invoke-interface (v0) "LI;.m:()V")
-    (invoke-static (v0) "LUser;.take:(LI;)V")
-    (return-void)
-  ))");
+  make_user(kRewritableUses);
   EXPECT_FALSE(run_pass_and_find_interface());
 }
 
@@ -146,5 +161,66 @@ TEST_F(SingleImplMethodHandleTest, keepsInterfaceInCallSiteMethodType) {
     (return-void)
   ))");
   redex::make_invoke_custom(code, "make", "()LI;");
+  EXPECT_TRUE(run_pass_and_find_interface());
+}
+
+// The method type of an annotation of a class would name a removed interface.
+TEST_F(SingleImplMethodHandleTest, keepsInterfaceInAnnotationMethodType) {
+  make_user(kRewritableUses);
+  ASSERT_TRUE(m_user->attach_annotation_set(make_annotation_set(
+      std::make_unique<DexEncodedValueMethodType>(DexProto::make_proto(
+          type::_void(), DexTypeList::make_type_list({m_intf->get_type()}))))));
+  EXPECT_TRUE(run_pass_and_find_interface());
+}
+
+// The pass changes `take` to take `LImpl;`. The handle that a static field
+// value holds names the same method, so its type would change with it. This is
+// defensive: an exact call of the handle names `LI;` in its call-site
+// prototype, which keeps `LI;` by itself, and ART rejects a method handle as
+// the initial value of a static field.
+TEST_F(SingleImplMethodHandleTest,
+       keepsInterfaceInPrototypeOfStaticValueHandle) {
+  make_user(kRewritableUses);
+  m_user->add_field(
+      DexField::make_field("LUser;.HANDLE:Ljava/lang/invoke/MethodHandle;")
+          ->make_concrete(
+              ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+              std::make_unique<DexEncodedValueMethodHandle>(
+                  redex::make_method_handle(METHOD_HANDLE_TYPE_INVOKE_STATIC,
+                                            "LUser;.take:(LI;)V"))));
+  EXPECT_TRUE(run_pass_and_find_interface());
+}
+
+// A handle in a parameter annotation would name the method of a removed
+// interface.
+TEST_F(SingleImplMethodHandleTest,
+       keepsInterfaceWhoseMethodParameterAnnotationHandleCalls) {
+  make_user(kRewritableUses);
+  auto* annotated = assembler::method_from_string(R"(
+    (method (public static synthetic) "LUser;.annotated:(I)V"
+      ((load-param v0) (return-void))))");
+  annotated->attach_param_annotation_set(
+      0,
+      make_annotation_set(std::make_unique<DexEncodedValueMethodHandle>(
+          redex::make_method_handle(METHOD_HANDLE_TYPE_INVOKE_INTERFACE,
+                                    "LI;.m:()V"))));
+  m_user->add_method(annotated);
+  EXPECT_TRUE(run_pass_and_find_interface());
+}
+
+// A method type inside an array inside a nested annotation counts too, and an
+// array of the interface names the interface.
+TEST_F(SingleImplMethodHandleTest, keepsInterfaceInNestedAnnotationMethodType) {
+  make_user(kRewritableUses);
+  auto* elements = new DexEncodedValueArray::Storage();
+  elements->push_back(
+      std::make_unique<DexEncodedValueMethodType>(DexProto::make_proto(
+          DexType::make_type("[LI;"), DexTypeList::make_type_list({}))));
+  EncodedAnnotations nested;
+  nested.emplace_back(DexString::make_string("types"),
+                      std::make_unique<DexEncodedValueArray>(elements));
+  ASSERT_TRUE(m_user->attach_annotation_set(
+      make_annotation_set(std::make_unique<DexEncodedValueAnnotation>(
+          DexType::make_type("LNested;"), std::move(nested)))));
   EXPECT_TRUE(run_pass_and_find_interface());
 }

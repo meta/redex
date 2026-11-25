@@ -13,8 +13,10 @@
 #include "DexClass.h"
 #include "DexInstruction.h"
 #include "DexMethodHandle.h"
+#include "IRInstruction.h"
 #include "RedexTest.h"
 #include "Show.h"
+#include "TypeUtil.h"
 
 class DexAnnotationTest : public RedexTest {};
 
@@ -109,4 +111,56 @@ TEST_F(DexAnnotationTest, ShowMethodHandleAndCallSiteByContent) {
       METHOD_HANDLE_TYPE_STATIC_GET, DexField::make_field("LFoo;.bar:I"));
   DexOpcodeMethodHandle const_handle(DOPCODE_CONST_METHOD_HANDLE, field_handle);
   EXPECT_EQ(show(&const_handle), "const-method-handle LFoo;.bar:I v0");
+}
+
+// Deobfuscated, method handles and call sites print the classes, methods and
+// fields they refer to by their deobfuscated names, as instructions that refer
+// to them directly do.
+TEST_F(DexAnnotationTest, ShowDeobfuscatedMethodHandleAndCallSite) {
+  ClassCreator creator(DexType::make_type("LX/a;"));
+  creator.set_super(type::java_lang_Object());
+  auto* method = DexMethod::make_method("LX/a;.b:(LX/a;)V")
+                     ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  method->set_deobfuscated_name("Lcom/fb/MyThing;.run:(Lcom/fb/MyThing;)V");
+  creator.add_method(method);
+  auto* field = DexField::make_field("LX/a;.c:LX/a;")
+                    ->make_concrete(ACC_PUBLIC | ACC_STATIC);
+  field->set_deobfuscated_name("Lcom/fb/MyThing;.count:Lcom/fb/MyThing;");
+  creator.add_field(field);
+  creator.create()->set_deobfuscated_name(
+      DexString::make_string("Lcom/fb/MyThing;"));
+
+  auto* method_handle = DexMethodHandle::make_method_handle(
+      METHOD_HANDLE_TYPE_INVOKE_STATIC, method);
+  const std::string shown_method_handle =
+      "METHODHANDLE: TYPE=4 "
+      "FIELD_OR_METHOD_ID=Lcom/fb/MyThing;.run:(Lcom/fb/MyThing;)V";
+  EXPECT_EQ(show_deobfuscated(method_handle), shown_method_handle);
+  EXPECT_EQ(DexEncodedValueMethodHandle(method_handle).show_deobfuscated(),
+            shown_method_handle);
+
+  IRInstruction const_field_handle(OPCODE_CONST_METHOD_HANDLE);
+  const_field_handle.set_methodhandle(DexMethodHandle::make_method_handle(
+      METHOD_HANDLE_TYPE_STATIC_GET, field));
+  EXPECT_EQ(show_deobfuscated(&const_field_handle),
+            "CONST_METHOD_HANDLE METHODHANDLE: TYPE=1 "
+            "FIELD_OR_METHOD_ID=Lcom/fb/MyThing;.count:Lcom/fb/MyThing;");
+
+  auto* bootstrap = DexMethodHandle::make_method_handle(
+      METHOD_HANDLE_TYPE_INVOKE_STATIC,
+      DexMethod::make_method(
+          "LBoot;.bootstrap:(Ljava/lang/invoke/MethodHandles$Lookup;"
+          "Ljava/lang/String;Ljava/lang/invoke/MethodType;"
+          "Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)"
+          "Ljava/lang/invoke/CallSite;"));
+  std::vector<std::unique_ptr<DexEncodedValue>> args;
+  args.emplace_back(new DexEncodedValueMethodHandle(method_handle));
+  args.emplace_back(
+      new DexEncodedValueMethodType(DexProto::make_proto("(LX/a;)V")));
+  DexCallSite call_site(bootstrap, DexString::make_string("run"),
+                        DexProto::make_proto("()LX/a;"), std::move(args));
+  EXPECT_EQ(show_deobfuscated(&call_site),
+            "CALLSITE: METHODHANDLE=" + show(bootstrap) +
+                " METHODNAME=run METHODTYPE=()Lcom/fb/MyThing; ARGS=[" +
+                shown_method_handle + ", (Lcom/fb/MyThing;)V]");
 }

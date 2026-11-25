@@ -1158,6 +1158,5 @@ std::string DexEncodedValueMethodHandle::show() const {
   return ::show(methodhandle());
 }
 std::string DexEncodedValueMethodHandle::show_deobfuscated() const {
-  // TODO(T58570881) - fix deobfuscation
-  return ::show(methodhandle());
+  return ::show_deobfuscated(methodhandle());
 }

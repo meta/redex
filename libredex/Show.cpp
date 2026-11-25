@@ -1564,29 +1564,40 @@ std::ostream& operator<<(std::ostream& o, const MethodItemEntry& mie) {
   return o;
 }
 
-std::ostream& operator<<(std::ostream& o, const DexMethodHandle& mh) {
-  o << "METHODHANDLE: TYPE=" << show(mh.type());
-  o << " FIELD_OR_METHOD_ID=";
-  if (DexMethodHandle::isInvokeType(mh.type())) {
-    o << show(mh.methodref());
-  } else {
-    o << show(mh.fieldref());
-  }
-  return o;
+namespace {
+
+// A method handle with its kind, unlike `show_methodhandle`, which prints only
+// the member that it names.
+std::string show_methodhandle_with_kind(const DexMethodHandle& mh,
+                                        bool deobfuscated) {
+  return "METHODHANDLE: TYPE=" + show(mh.type()) +
+         " FIELD_OR_METHOD_ID=" + show_methodhandle(&mh, deobfuscated);
 }
 
-std::ostream& operator<<(std::ostream& o, const DexCallSite& cs) {
-  o << "CALLSITE: METHODHANDLE=" << show(cs.method_handle());
+std::string show_callsite(const DexCallSite& cs, bool deobfuscated) {
+  std::ostringstream o;
+  o << "CALLSITE: METHODHANDLE="
+    << show_methodhandle_with_kind(*cs.method_handle(), deobfuscated);
   o << " METHODNAME=" << show(cs.method_name());
-  o << " METHODTYPE=" << show(cs.method_type());
+  o << " METHODTYPE=" << show_proto(cs.method_type(), deobfuscated);
   o << " ARGS=[";
   const char* separator = "";
   for (const auto& arg : cs.args()) {
-    o << separator << arg->show();
+    o << separator << (deobfuscated ? arg->show_deobfuscated() : arg->show());
     separator = ", ";
   }
   o << "]";
-  return o;
+  return o.str();
+}
+
+} // namespace
+
+std::ostream& operator<<(std::ostream& o, const DexMethodHandle& mh) {
+  return o << show_methodhandle_with_kind(mh, /* deobfuscated */ false);
+}
+
+std::ostream& operator<<(std::ostream& o, const DexCallSite& cs) {
+  return o << show_callsite(cs, /* deobfuscated */ false);
 }
 
 std::string show(const IRList* ir, bool code_only) {
@@ -1758,16 +1769,14 @@ std::string show_deobfuscated(const DexCallSite* callsite) {
   if (callsite == nullptr) {
     return "";
   }
-  // TODO(T58570881) - actually deobfuscate
-  return SHOW(callsite);
+  return show_callsite(*callsite, /* deobfuscated */ true);
 }
 
 std::string show_deobfuscated(const DexMethodHandle* methodhandle) {
   if (methodhandle == nullptr) {
     return "";
   }
-  // TODO(T58570881) - actually deobfuscate
-  return SHOW(methodhandle);
+  return show_methodhandle_with_kind(*methodhandle, /* deobfuscated */ true);
 }
 
 std::string pretty_bytes(uint64_t val) {

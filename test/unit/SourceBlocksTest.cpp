@@ -1035,7 +1035,7 @@ B4: LFoo;.bar:()V@3(0.4:0.2))");
 }
 
 TEST_F(SourceBlocksTest, coalesce) {
-  IRList::CONSECUTIVE_STYLE = IRList::ConsecutiveStyle::kChain;
+  ScopedConsecutiveStyle style(IRList::ConsecutiveStyle::kChain);
 
   auto* foo_method = create_method("LFoo");
 
@@ -1221,7 +1221,7 @@ TEST_F(SourceBlocksTest, get_last_source_block_before_non_entry) {
 // dedup the diamond test code from the DedupBlocks unit tests
 TEST_F(SourceBlocksTest, dedup_diamond_with_interactions) {
   g_redex->instrument_mode = true;
-  IRList::CONSECUTIVE_STYLE = IRList::ConsecutiveStyle::kChain;
+  ScopedConsecutiveStyle style(IRList::ConsecutiveStyle::kChain);
   DexMethod* method = create_method("diamond");
 
   const auto* str = R"(
@@ -1280,7 +1280,7 @@ TEST_F(SourceBlocksTest, dedup_diamond_with_interactions) {
 
 TEST_F(SourceBlocksTest, dedup_multiple_interactions_in_same_block) {
   g_redex->instrument_mode = true;
-  IRList::CONSECUTIVE_STYLE = IRList::ConsecutiveStyle::kChain;
+  ScopedConsecutiveStyle style(IRList::ConsecutiveStyle::kChain);
   DexMethod* method = create_method("multiple_interactions");
 
   const auto* str = R"(
@@ -1350,7 +1350,7 @@ TEST_F(SourceBlocksTest, dedup_multiple_interactions_in_same_block) {
 
 TEST_F(SourceBlocksTest, create_synth_sb_from_val) {
   g_redex->instrument_mode = true;
-  IRList::CONSECUTIVE_STYLE = IRList::ConsecutiveStyle::kChain;
+  ScopedConsecutiveStyle style(IRList::ConsecutiveStyle::kChain);
   auto* foo_method = create_method("LFoo");
 
   constexpr const char* kFoo = R"(
@@ -1395,7 +1395,7 @@ TEST_F(SourceBlocksTest, create_synth_sb_from_val) {
 
 TEST_F(SourceBlocksTest, create_synth_sb_from_opt_val) {
   g_redex->instrument_mode = true;
-  IRList::CONSECUTIVE_STYLE = IRList::ConsecutiveStyle::kChain;
+  ScopedConsecutiveStyle style(IRList::ConsecutiveStyle::kChain);
   auto* foo_method = create_method("LFoo");
 
   constexpr const char* kFoo = R"(
@@ -1440,7 +1440,7 @@ TEST_F(SourceBlocksTest, create_synth_sb_from_opt_val) {
 
 TEST_F(SourceBlocksTest, create_synth_sb_from_val_list) {
   g_redex->instrument_mode = true;
-  IRList::CONSECUTIVE_STYLE = IRList::ConsecutiveStyle::kChain;
+  ScopedConsecutiveStyle style(IRList::ConsecutiveStyle::kChain);
   auto* foo_method = create_method("LFoo");
 
   constexpr const char* kFoo = R"(

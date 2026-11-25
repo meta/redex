@@ -23,6 +23,7 @@
 #include "DexLoader.h"
 #include "DexStore.h"
 #include "IRAssembler.h"
+#include "IRList.h"
 #include "PassManager.h"
 #include "ProguardConfiguration.h"
 #include "ProguardMatcher.h"
@@ -62,9 +63,26 @@ extern bool enable_param_exit_value_summary;
 extern bool enable_check_cast_value_preservation;
 } // namespace constant_propagation
 
+// IRList::CONSECUTIVE_STYLE is process-global, and a test binary may run all
+// of its tests in one process (the OSS build does). A test that needs another
+// style sets it with this guard, so the tests after it still build their CFGs
+// under the default style.
+struct ScopedConsecutiveStyle {
+  explicit ScopedConsecutiveStyle(IRList::ConsecutiveStyle style)
+      : m_previous(IRList::CONSECUTIVE_STYLE) {
+    IRList::CONSECUTIVE_STYLE = style;
+  }
+  ~ScopedConsecutiveStyle() { IRList::CONSECUTIVE_STYLE = m_previous; }
+
+  ScopedConsecutiveStyle(const ScopedConsecutiveStyle&) = delete;
+  ScopedConsecutiveStyle& operator=(const ScopedConsecutiveStyle&) = delete;
+
+  IRList::ConsecutiveStyle m_previous;
+};
+
 struct RedexTest : public testing::Test {
  public:
-  RedexTest() {
+  RedexTest() : m_consecutive_style(IRList::CONSECUTIVE_STYLE) {
     g_redex = new RedexContext();
     // TODO(T275196808): Remove this.
     constant_propagation::enable_param_exit_value_summary = true;
@@ -72,13 +90,25 @@ struct RedexTest : public testing::Test {
     constant_propagation::enable_check_cast_value_preservation = true;
   }
 
-  ~RedexTest() { delete g_redex; }
+  ~RedexTest() {
+    delete g_redex;
+    // A test that changes the style must restore it (ScopedConsecutiveStyle).
+    // Restore it here too, so a test that forgets to does not change the CFGs
+    // that later tests in the same process build.
+    EXPECT_TRUE(IRList::CONSECUTIVE_STYLE == m_consecutive_style)
+        << "test changed IRList::CONSECUTIVE_STYLE without restoring it; "
+           "set it with ScopedConsecutiveStyle";
+    IRList::CONSECUTIVE_STYLE = m_consecutive_style;
+  }
 
   std::string android_sdk_jar_path() {
     std::string android_sdk = get_env("sdk_path");
     std::string android_target(get_env("android_target"));
     return android_sdk + "/platforms/" + android_target + "/android.jar";
   }
+
+ private:
+  IRList::ConsecutiveStyle m_consecutive_style;
 };
 
 struct RedexIntegrationTest : public RedexTest {

@@ -46,7 +46,6 @@ class SourceBlocksDedupTest : public RedexIntegrationTest {
 
   testing::AssertionResult prepare() {
     g_redex->instrument_mode = true;
-    IRList::CONSECUTIVE_STYLE = IRList::ConsecutiveStyle::kChain;
     auto* type =
         DexType::get_type("Lcom/facebook/redextest/SourceBlocksDedupTest;");
     if (type == nullptr) {
@@ -81,6 +80,11 @@ class SourceBlocksDedupTest : public RedexIntegrationTest {
 
     return testing::AssertionSuccess();
   }
+
+ private:
+  // Every test here expects `kChain`: the CFG build chains consecutive source
+  // blocks instead of merging them.
+  ScopedConsecutiveStyle m_consecutive_style{IRList::ConsecutiveStyle::kChain};
 };
 
 TEST_F(SourceBlocksDedupTest, source_blocks_dedup_useSwitch) {
@@ -479,7 +483,6 @@ TEST_F(SourceBlocksDedupTest, source_blocks_dedup_identicalSelfLoops) {
 
 TEST_F(SourceBlocksDedupTest, source_blocks_chain) {
   g_redex->instrument_mode = true;
-  IRList::CONSECUTIVE_STYLE = IRList::ConsecutiveStyle::kChain;
   auto* type =
       DexType::get_type("Lcom/facebook/redextest/SourceBlocksDedupTest;");
   ASSERT_NE(type, nullptr);
@@ -584,7 +587,6 @@ TEST_F(SourceBlocksDedupTest, source_blocks_chain) {
 
 TEST_F(SourceBlocksDedupTest, multiple_source_blocks_in_one_block) {
   g_redex->instrument_mode = true;
-  IRList::CONSECUTIVE_STYLE = IRList::ConsecutiveStyle::kChain;
   auto* type =
       DexType::get_type("Lcom/facebook/redextest/SourceBlocksDedupTest;");
   ASSERT_NE(type, nullptr);

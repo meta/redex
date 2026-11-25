@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "ConstructorAnalysis.h"
 #include "Debug.h"
 #include "EnumClinitAnalysis.h"
 #include "Lazy.h"
@@ -1142,58 +1143,20 @@ void reject_enums_for_relaxed_inits(
     const std::vector<DexClass*>& classes,
     ConcurrentSet<const DexType*>* candidate_enums) {
   ConcurrentSet<const DexType*> rejected_enums;
-  walk::parallel::code(classes, [&](DexMethod* method, IRCode& code) {
-    auto& cfg = code.cfg();
-    UnorderedSet<const IRInstruction*> new_instances_to_verify;
-    for (auto& mie : InstructionIterable(cfg)) {
-      auto* insn = mie.insn;
-      if (insn->opcode() != OPCODE_NEW_INSTANCE ||
-          (candidate_enums->count(insn->get_type()) == 0u)) {
-        continue;
-      }
-      new_instances_to_verify.insert(insn);
-    }
-    if (new_instances_to_verify.empty()) {
-      return;
-    }
-    live_range::MoveAwareChains chains(
-        cfg, /* ignore_unreachable */ false,
-        [&](auto* insn) { return new_instances_to_verify.count(insn); });
-    live_range::DefUseChains du_chains = chains.get_def_use_chains();
-    for (const auto* new_instance_insn :
-         UnorderedIterable(new_instances_to_verify)) {
-      const auto* enum_type = new_instance_insn->get_type();
-      const auto& use_set =
-          du_chains[const_cast<IRInstruction*>(new_instance_insn)];
-      for (const auto& use : UnorderedIterable(use_set)) {
-        if (use.src_index != 0) {
-          continue;
-        }
-        auto* use_insn = use.insn;
-        if (opcode::is_a_move(use_insn->opcode())) {
-          // Ignore moves
-          continue;
-        }
-        if (!use_insn->has_method()) {
-          continue;
-        }
-        auto* callee = use_insn->get_method();
-        if (!method::is_init(callee)) {
-          continue;
-        }
-        const auto* resolved_callee = resolve_method_deprecated(
-            callee, opcode_to_search(use_insn), method);
-        if ((resolved_callee == nullptr) ||
-            resolved_callee->get_class() != enum_type) {
-          TRACE(ENUM, 4,
-                "Reject %s because base constructor %s in invoke instruction "
-                "%s may be called on new-instance instruction %s in %s",
-                SHOW(enum_type), SHOW(resolved_callee), SHOW(use_insn),
-                SHOW(new_instance_insn), SHOW(method));
-          rejected_enums.insert(enum_type);
-          break;
-        }
-      }
+  walk::parallel::code(classes, [&](DexMethod* method, IRCode&) {
+    auto relaxed_inits = constructor_analysis::find_relaxed_inits(
+        method, [&](const DexType* type) {
+          return candidate_enums->count(type) != 0u;
+        });
+    for (const auto& relaxed_init : relaxed_inits) {
+      const auto* enum_type = relaxed_init.new_instance->get_type();
+      TRACE(ENUM, 4,
+            "Reject %s because base constructor %s in invoke instruction "
+            "%s may be called on new-instance instruction %s in %s",
+            SHOW(enum_type), SHOW(relaxed_init.resolved_init),
+            SHOW(relaxed_init.invoke), SHOW(relaxed_init.new_instance),
+            SHOW(method));
+      rejected_enums.insert(enum_type);
     }
   });
   for (const DexType* type : UnorderedIterable(rejected_enums)) {

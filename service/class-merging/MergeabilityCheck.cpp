@@ -10,6 +10,7 @@
 #include <array>
 
 #include "ClassUtil.h"
+#include "ConstructorAnalysis.h"
 #include "DexAnnotation.h"
 #include "DexCallSite.h"
 #include "DexMethodHandle.h"
@@ -131,16 +132,14 @@ TypeSet MergeabilityChecker::exclude_unsupported_bytecode_refs_for(
   std::vector<std::pair<IRInstruction*, const DexType*>>
       const_classes_to_verify;
   UnorderedSet<const IRInstruction*> const_classes_to_verify_set;
-  std::vector<IRInstruction*> new_instances_to_verify;
-  UnorderedSet<const IRInstruction*> new_instances_to_verify_set;
+  bool has_new_instances_to_verify = false;
   auto& cfg = code->cfg();
   for (const auto& mie : InstructionIterable(cfg)) {
     auto* insn = mie.insn;
 
     if (opcode::is_new_instance(insn->opcode()) &&
         (m_spec.merging_targets.count(insn->get_type()) != 0u)) {
-      new_instances_to_verify.push_back(insn);
-      new_instances_to_verify_set.insert(insn);
+      has_new_instances_to_verify = true;
       continue;
     }
 
@@ -266,15 +265,33 @@ TypeSet MergeabilityChecker::exclude_unsupported_bytecode_refs_for(
     }
   }
 
-  if (const_classes_to_verify.empty() && new_instances_to_verify.empty()) {
+  // We find and exclude classes of which instances are created via
+  // new-instance, but then the associated constructor call invokes a
+  // constructor of a super type, and not the exact instantiated type.
+  // TODO T184662680: Fully support such scenario, e.g. by synthesizing a
+  // corresponding constructor on the instantiated class, and not just exclude.
+  if (has_new_instances_to_verify) {
+    auto relaxed_inits = constructor_analysis::find_relaxed_inits(
+        method, [&](const DexType* type) {
+          return m_spec.merging_targets.count(type) != 0u;
+        });
+    for (const auto& relaxed_init : relaxed_inits) {
+      TRACE(CLMG, 5,
+            "[non mergeable] new-instance %s associated with invoke init %s "
+            "defined in other type in %s",
+            SHOW(relaxed_init.new_instance), SHOW(relaxed_init.invoke),
+            SHOW(method));
+      non_mergeables.insert(relaxed_init.new_instance->get_type());
+    }
+  }
+
+  if (const_classes_to_verify.empty()) {
     return non_mergeables;
   }
 
   live_range::MoveAwareChains chains(
-      cfg, /* ignore_unreachable */ false, [&](auto* insn) {
-        return const_classes_to_verify_set.count(insn) ||
-               new_instances_to_verify_set.count(insn);
-      });
+      cfg, /* ignore_unreachable */ false,
+      [&](auto* insn) { return const_classes_to_verify_set.count(insn); });
   live_range::DefUseChains du_chains = chains.get_def_use_chains();
 
   for (const auto& pair : const_classes_to_verify) {
@@ -299,44 +316,6 @@ TypeSet MergeabilityChecker::exclude_unsupported_bytecode_refs_for(
         TRACE(CLMG, 5, "[non mergeable] const class unsafe callee %s in %s",
               SHOW(callee), SHOW(method));
         non_mergeables.insert(referenced_type);
-        break;
-      }
-    }
-  }
-
-  // We find and exclude classes of which instances are created via
-  // new-instance, but then the associated constructor call invokes a
-  // constructor of a super type, and not the exact instantiated type.
-  // TODO T184662680: Fully support such scenario, e.g. by synthesizing a
-  // corresponding constructor on the instantiated class, and not just exclude.
-  for (auto* new_instance_insn : UnorderedIterable(new_instances_to_verify)) {
-    auto* type = new_instance_insn->get_type();
-    const auto& use_set = du_chains[new_instance_insn];
-    for (const auto& use : UnorderedIterable(use_set)) {
-      if (use.src_index != 0) {
-        continue;
-      }
-      auto* use_insn = use.insn;
-      if (opcode::is_a_move(use_insn->opcode())) {
-        // Ignore moves
-        continue;
-      }
-      if (!use_insn->has_method()) {
-        continue;
-      }
-      auto* callee = use_insn->get_method();
-      if (!method::is_init(callee)) {
-        continue;
-      }
-      const auto* resolved_callee =
-          resolve_method_deprecated(callee, opcode_to_search(use_insn), method);
-      if ((resolved_callee == nullptr) ||
-          resolved_callee->get_class() != type) {
-        TRACE(CLMG, 5,
-              "[non mergeable] new-instance %s associated with invoke init %s "
-              "defined in other type in %s",
-              SHOW(new_instance_insn), SHOW(use_insn), SHOW(method));
-        non_mergeables.insert(type);
         break;
       }
     }

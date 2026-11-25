@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <functional>
 #include <vector>
 
 #include "DeterministicContainers.h"
@@ -40,11 +41,25 @@ bool can_inline_inits_in_same_class(DexMethod* caller_method,
                                     const DexMethod* callee_method,
                                     IRInstruction* callsite_insn);
 
-// Iterates the scope to find any types that have apparently been optimized by
-// relaxed init inlining (either by Redex or the input dex of an application).
-// Complex is defined such that the called <init> method on a new-instance is
-// defined on some other type in the hierarchy, aside from java.lang.Object's
-// default constructor.
-UnorderedSet<const DexType*> find_complex_init_inlined_types(
-    const std::vector<DexClass*>& scope);
+// A constructor invocation that initializes the object created by a
+// new-instance instruction with a constructor that the instantiated type does
+// not define. Relaxed init inlining (by Redex, or in the input dex of an
+// application) produces them: after inlining `A.<init>` into its caller, the
+// caller's `new-instance A` is initialized by `invoke-direct S.<init>`, where S
+// is a super type of A.
+struct RelaxedInit {
+  IRInstruction* new_instance;
+  IRInstruction* invoke;
+  // The constructor the invocation resolves to; nullptr when it does not
+  // resolve, for example when it names no constructor of its class.
+  DexMethod* resolved_init;
+};
+
+// Finds the relaxed inits in the given method, which must have code with built
+// CFG, whose new-instance type satisfies `is_relevant_type`, sorted by the CFG
+// iteration order of the invocation, then of the new-instance.
+std::vector<RelaxedInit> find_relaxed_inits(
+    DexMethod* method,
+    const std::function<bool(const DexType*)>& is_relevant_type);
+
 } // namespace constructor_analysis

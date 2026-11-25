@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include "ConstructorAnalysis.h"
+
 #include <vector>
 
 #include <sparta/ConstantAbstractDomain.h>
@@ -12,7 +14,6 @@
 #include <sparta/ReducedProductAbstractDomain.h>
 
 #include "BaseIRAnalyzer.h"
-#include "ConcurrentContainers.h"
 #include "ControlFlow.h"
 #include "Debug.h"
 #include "DexClass.h"
@@ -336,51 +337,58 @@ bool can_inline_inits_in_same_class(DexMethod* caller_method,
   }
 }
 
-UnorderedSet<const DexType*> find_complex_init_inlined_types(
-    const std::vector<DexClass*>& scope) {
-  InsertOnlyConcurrentSet<const DexType*> items;
-  // Calling this on an unknown type is apparently OK for verification.
-  auto* object_init = DexMethod::get_method("Ljava/lang/Object;.<init>:()V");
-  walk::parallel::methods(scope, [&](DexMethod* method) {
-    auto* code = method->get_code();
-    if (code == nullptr) {
-      return;
+std::vector<RelaxedInit> find_relaxed_inits(
+    DexMethod* method,
+    const std::function<bool(const DexType*)>& is_relevant_type) {
+  std::vector<RelaxedInit> relaxed_inits;
+  auto& cfg = method->get_code()->cfg();
+  UnorderedSet<const IRInstruction*> new_instances;
+  for (const auto& mie : cfg::InstructionIterable(cfg)) {
+    auto* insn = mie.insn;
+    if (opcode::is_new_instance(insn->opcode()) &&
+        is_relevant_type(insn->get_type())) {
+      new_instances.insert(insn);
     }
-    always_assert(code->cfg_built());
-    auto& cfg = code->cfg();
-    Lazy<live_range::LazyLiveRanges> live_ranges(
-        [&]() { return std::make_unique<live_range::LazyLiveRanges>(cfg); });
-    for (auto* block : cfg.blocks()) {
-      for (auto& mie : InstructionIterable(block)) {
-        auto* insn = mie.insn;
-        if (insn->opcode() == OPCODE_NEW_INSTANCE) {
-          auto* new_instance_type = insn->get_type();
-          auto search = live_ranges->def_use_chains->find(insn);
-          if (search != live_ranges->def_use_chains->end()) {
-            for (const auto& use : UnorderedIterable(search->second)) {
-              if (use.insn->has_method()) {
-                auto* use_method = use.insn->get_method();
-                if (use.src_index != 0 || !method::is_init(use_method) ||
-                    use_method == object_init) {
-                  continue;
-                }
-                // A constructor reference that does not resolve names no
-                // constructor of the instantiated type.
-                auto* resolved_init = resolve_method_deprecated(
-                    use_method, opcode_to_search(use.insn), method);
-                if (resolved_init == nullptr ||
-                    resolved_init->get_class() != new_instance_type) {
-                  items.insert(new_instance_type);
-                }
-              }
-            }
-          }
-        }
+  }
+  if (new_instances.empty()) {
+    return relaxed_inits;
+  }
+  live_range::MoveAwareChains chains(
+      cfg, /* ignore_unreachable */ false,
+      [&](auto* insn) { return new_instances.count(insn) != 0u; });
+  auto du_chains = chains.get_def_use_chains();
+  for (auto&& [def, uses] : UnorderedIterable(du_chains)) {
+    const auto* type = def->get_type();
+    for (const auto& use : UnorderedIterable(uses)) {
+      auto* use_insn = use.insn;
+      if (use.src_index != 0 || !use_insn->has_method() ||
+          !method::is_init(use_insn->get_method())) {
+        continue;
       }
+      auto* resolved_init = resolve_method_deprecated(
+          use_insn->get_method(), opcode_to_search(use_insn), method);
+      if (resolved_init != nullptr && resolved_init->get_class() == type) {
+        continue;
+      }
+      relaxed_inits.push_back(RelaxedInit{def, use_insn, resolved_init});
     }
-  });
-  UnorderedSet<const DexType*> result;
-  insert_unordered_iterable(result, items);
-  return result;
+  }
+  if (relaxed_inits.empty()) {
+    return relaxed_inits;
+  }
+  UnorderedMap<const IRInstruction*, size_t> indices;
+  for (const auto& mie : cfg::InstructionIterable(cfg)) {
+    indices.emplace(mie.insn, indices.size());
+  }
+  std::sort(relaxed_inits.begin(), relaxed_inits.end(),
+            [&](const RelaxedInit& a, const RelaxedInit& b) {
+              auto a_invoke = indices.at(a.invoke);
+              auto b_invoke = indices.at(b.invoke);
+              if (a_invoke != b_invoke) {
+                return a_invoke < b_invoke;
+              }
+              return indices.at(a.new_instance) < indices.at(b.new_instance);
+            });
+  return relaxed_inits;
 }
 } // namespace constructor_analysis

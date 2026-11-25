@@ -139,3 +139,22 @@ TEST_F(ConstantLiftingTest, intOneDoesNotReplaceBooleanArgumentBehindMove) {
   EXPECT_EQ(lift(method), 0u);
   EXPECT_EQ(count_opcode(method, OPCODE_CONST), 1u);
 }
+
+// An unresolvable type constant does not stop the int constant 0 from
+// replacing every `const 0` used as an int.
+TEST_F(ConstantLiftingTest, intZeroReplacesEveryIntUseNextToInvalidType) {
+  auto* method =
+      make_meta_method("LC6;", "LC6;.m:()V", "TI", "LDoesNotExist;:0", R"(
+    (
+     (const v0 0)
+     (invoke-static (v0) "LC6;.use:(I)V")
+     (const v1 0)
+     (invoke-static (v1) "LC6;.use:(I)V")
+     (return-void)
+    )
+  )");
+  ASSERT_EQ(lift(method), 1u);
+  EXPECT_EQ(count_opcode(method, OPCODE_CONST), 0u)
+      << show(method->get_code()->cfg());
+  EXPECT_EQ(type_check(method), "") << show(method->get_code()->cfg());
+}

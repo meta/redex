@@ -158,10 +158,6 @@ ConstantValues::ConstantValues(const TypeTags* type_tags,
     auto param_reg = cfg.allocate_temp();
     ConstantValue cval(type_tags, pair.first, pair.second, param_reg);
     m_const_vals.emplace_back(cval);
-    if (cval.is_invalid()) {
-      m_skip_multiple_const_0 = true;
-      TRACE(METH_DEDUP, 9, "const value: skip multiple const 0");
-    }
   }
 }
 
@@ -180,12 +176,6 @@ ConstantValues::collect_constant_loads(DexMethod* method) {
     }
     auto const_loads =
         const_val.collect_constant_loads_in(cfg, uses ? &*uses : nullptr);
-    if (m_skip_multiple_const_0 && const_val.is_int_kind() &&
-        const_val.get_int_value() == 0 && !const_loads.empty()) {
-      const_val_loads.emplace_back(const_val, const_loads.front());
-      TRACE(METH_DEDUP, 9, "const value: skip const 0 loads");
-      continue;
-    }
     for (auto& load : const_loads) {
       if (matched_loads.count(load.first->insn) > 0) {
         // If the same const load insn has been matched for multiple const

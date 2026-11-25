@@ -9,11 +9,14 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include "ConfigFiles.h"
 #include "Creators.h"
+#include "DexAnnotation.h"
+#include "DexMethodHandle.h"
 #include "DexStore.h"
 #include "DexUtil.h"
 #include "IRAssembler.h"
@@ -516,3 +519,79 @@ INSTANTIATE_TEST_SUITE_P(
     [](const ::testing::TestParamInfo<OpcodeRedirectParam>& info) {
       return info.param.name;
     });
+
+namespace {
+
+// Runs the pass on a singleton lambda that `LSingletonCaller;` reads, after
+// `name_target` makes something outside code (a static field value or an
+// annotation of the caller) name the lambda, and returns the type of the
+// caller's sget.
+const DexType* deduplicate_lambda_named_outside_code(
+    const std::function<void(DexClass*, const DexType*)>& name_target) {
+  auto* canonical = create_lambda("LSingletonLambda$0;", true);
+  auto* target_lambda = create_lambda("LSingletonTarget$0;", true);
+
+  ClassCreator cc(DexType::make_type("LSingletonCaller;"));
+  cc.set_super(type::java_lang_Object());
+  auto* caller_method =
+      DexMethod::make_method("LSingletonCaller;.call:()Ljava/lang/Object;")
+          ->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  caller_method->set_code(assembler::ircode_from_string(R"((
+    (sget-object "LSingletonTarget$0;.INSTANCE:LSingletonTarget$0;")
+    (move-result-pseudo-object v0)
+    (return-object v0)
+  ))"));
+  cc.add_method(caller_method);
+  auto* caller_cls = cc.create();
+  name_target(caller_cls, target_lambda->get_type());
+
+  run_dedup_pass({{canonical}, {target_lambda, caller_cls}});
+
+  for (const auto& mie : InstructionIterable(*caller_method->get_code())) {
+    if (mie.insn->opcode() == OPCODE_SGET_OBJECT) {
+      return get_referenced_type(mie.insn);
+    }
+  }
+  return nullptr;
+}
+
+} // namespace
+
+// A lambda that a method handle in a static field value names stays out of
+// deduplication too, like one that a const-method-handle names.
+TEST_F(KotlinLambdaDeduplicationPassTest, KeepsLambdaNamedByStaticValueHandle) {
+  const auto* sget_type = deduplicate_lambda_named_outside_code(
+      [](DexClass* caller, const DexType*) {
+        caller->add_field(
+            DexField::make_field(
+                "LSingletonCaller;.HANDLE:Ljava/lang/invoke/MethodHandle;")
+                ->make_concrete(
+                    ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+                    std::make_unique<DexEncodedValueMethodHandle>(
+                        DexMethodHandle::make_method_handle(
+                            METHOD_HANDLE_TYPE_INVOKE_INSTANCE,
+                            DexMethod::make_method(
+                                "LSingletonTarget$0;.invoke:()Ljava/lang/"
+                                "Object;")))));
+      });
+  EXPECT_EQ(sget_type, DexType::get_type("LSingletonTarget$0;"));
+}
+
+// The same for a method type that an annotation holds.
+TEST_F(KotlinLambdaDeduplicationPassTest,
+       KeepsLambdaNamedByAnnotationMethodType) {
+  const auto* sget_type = deduplicate_lambda_named_outside_code(
+      [](DexClass* caller, const DexType* target) {
+        auto annotation = std::make_unique<DexAnnotation>(
+            DexType::make_type("LAnno;"), DAV_RUNTIME);
+        annotation->add_element(
+            "value",
+            std::make_unique<DexEncodedValueMethodType>(DexProto::make_proto(
+                type::_void(),
+                DexTypeList::make_type_list({const_cast<DexType*>(target)}))));
+        auto annotation_set = std::make_unique<DexAnnotationSet>();
+        annotation_set->add_annotation(std::move(annotation));
+        ASSERT_TRUE(caller->attach_annotation_set(std::move(annotation_set)));
+      });
+  EXPECT_EQ(sget_type, DexType::get_type("LSingletonTarget$0;"));
+}

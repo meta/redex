@@ -274,17 +274,21 @@ void KotlinLambdaDeduplicationPass::run_pass(DexStoresVector& stores,
   // Step 5 redirects the type, field and method operands of instructions. It
   // cannot redirect what method handles, method types and call sites name: a
   // handle's call or field access, its call-site prototype and the code around
-  // it would have to change together. Lambdas that those name stay out of
-  // deduplication.
+  // it would have to change together. Lambdas that those name, in code, static
+  // field values or annotations, stay out of deduplication.
   ConcurrentSet<const DexType*> indirectly_named_types;
+  auto record_indirectly_named_type = [&](const DexType* type) {
+    // A type that is not an array is its own element type; null means an
+    // array whose element type does not exist, so no class has it.
+    if (const auto* element_type = type::get_element_type_if_array(type)) {
+      indirectly_named_types.insert(element_type);
+    }
+  };
   walk::parallel::opcodes(scope, [&](DexMethod*, IRInstruction* insn) {
-    for_each_indirectly_named_type(insn, [&](const DexType* type) {
-      // A type that is not an array is its own element type; null means an
-      // array whose element type does not exist, so no class has it.
-      if (const auto* element_type = type::get_element_type_if_array(type)) {
-        indirectly_named_types.insert(element_type);
-      }
-    });
+    for_each_indirectly_named_type(insn, record_indirectly_named_type);
+  });
+  walk::parallel::encoded_values(scope, [&](const Gatherable& value) {
+    for_each_indirectly_named_type(value, record_indirectly_named_type);
   });
 
   // Step 1: Collect all lambdas and insert their invoke methods.

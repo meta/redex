@@ -8,6 +8,7 @@
 #include "Deleter.h"
 
 #include "Debug.h"
+#include "MethodUtil.h"
 #include "ReachableClasses.h"
 #include "Show.h"
 #include "Trace.h"
@@ -25,27 +26,26 @@ std::vector<DexMethod*> delete_methods(
   walk::parallel::opcodes(
       scope, [](DexMethod* /*meth*/) { return true; },
       [&](DexMethod* meth, IRInstruction* insn) {
-        for_each_invoke(insn, [&](IROpcode opcode, DexMethodRef* method_ref,
-                                  const DexMethodHandle* method_handle) {
-          auto keep = [&](DexMethod* callee) {
-            if (callee != nullptr && (removable.count(callee) != 0u)) {
-              removable_to_erase.insert(callee);
-            }
-          };
-          if (method_handle == nullptr) {
-            keep(concurrent_resolver(method_ref, opcode_to_search(opcode),
-                                     meth));
-            return;
-          }
-          for (auto* callee :
-               resolve_method_handle_callees(method_handle, meth)) {
-            keep(callee);
-          }
-        });
+        if (!opcode::is_a_method_invoke(insn->opcode())) {
+          return;
+        }
+        auto* callee = concurrent_resolver(insn->get_method(),
+                                           opcode_to_search(insn), meth);
+        if (callee != nullptr && (removable.count(callee) != 0u)) {
+          removable_to_erase.insert(callee);
+        }
       });
   for (auto* method : UnorderedIterable(removable_to_erase)) {
     removable.erase(method);
   }
+
+  // if a method handle in code, a static field value or an annotation names a
+  // removable candidate or can run it, do not delete
+  const auto named_by_method_handles =
+      method::gather_methods_named_by_method_handles(scope);
+  unordered_erase_if(removable, [&](const DexMethod* method) {
+    return named_by_method_handles.count(method) != 0;
+  });
 
   // if a removable candidate is referenced by an annotation do not delete
   walk::annotations(scope, [&](DexAnnotation* anno) {

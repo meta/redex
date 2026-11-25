@@ -5334,6 +5334,36 @@ TEST_F(MethodInlineTest, delete_methods_keeps_method_handle_target) {
   EXPECT_EQ(foo_cls->get_dmethods().size(), 1);
 }
 
+// The same for a method handle that no code holds: the value of a static field.
+TEST_F(MethodInlineTest, delete_methods_keeps_encoded_method_handle_target) {
+  auto* foo_cls = create_a_class("LFoo;");
+  auto* helper = DexMethod::make_method("LFoo;.helper:(I)V")
+                     ->make_concrete(ACC_PUBLIC | ACC_STATIC,
+                                     assembler::ircode_from_string(R"((
+                                       (load-param v0)
+                                       (return-void)
+                                     ))"),
+                                     /* is_virtual */ false);
+  foo_cls->add_method(helper);
+  auto* bar_cls = create_a_class("LBar;");
+  bar_cls->add_field(
+      DexField::make_field("LBar;.HANDLE:Ljava/lang/invoke/MethodHandle;")
+          ->make_concrete(
+              ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+              std::make_unique<DexEncodedValueMethodHandle>(
+                  redex::make_method_handle(METHOD_HANDLE_TYPE_INVOKE_STATIC,
+                                            "LFoo;.helper:(I)V"))));
+  Scope scope{foo_cls, bar_cls};
+  walk::code(scope, [](auto*, IRCode& code) { code.build_cfg(); });
+
+  UnorderedSet<DexMethod*> removable{helper};
+  ConcurrentMethodResolverDeprecated concurrent_method_resolver;
+  auto deleted =
+      delete_methods(scope, removable, std::ref(concurrent_method_resolver));
+  EXPECT_TRUE(deleted.empty());
+  EXPECT_EQ(foo_cls->get_dmethods().size(), 1);
+}
+
 // Builds `LFoo;.callee:(I)I`, a switch on its argument whose every case costs
 // more than the invoke it would replace, called by three wrappers. Each wrapper
 // passes on the constant its two callers give it, so the constant is known at

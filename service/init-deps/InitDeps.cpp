@@ -91,7 +91,8 @@ auto compute_deps(const Scope& scope,
                                 add_dep(type_class(method->get_class()));
                               }
                             });
-            if (opcode::is_new_instance(insn->opcode())) {
+            if (opcode::is_new_instance(insn->opcode()) ||
+                insn->opcode() == IOPCODE_INIT_CLASS) {
               add_dep(type_class(insn->get_type()));
             }
             // Unlike an invoke-direct of a constructor, an invoke-constructor

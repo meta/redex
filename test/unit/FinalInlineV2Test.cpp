@@ -2783,3 +2783,62 @@ TEST_F(FinalInlineTest, clinitWithNothingToEncodeIsStillSimplified) {
   ASSERT_EQ(cls->get_clinit(), clinit);
   EXPECT_CODE_EQ(clinit->get_code(), expected.get());
 }
+
+TEST_F(FinalInlineTest, initClassIsADep) {
+  // Java:
+  //   class A { static { Sink.record(B.y); } static int five() { return 5; } }
+  //   class B { static int y = A.five(); }
+  // When B is initialized first, it starts A's initializer, which records 0.
+  // Inlining A.five() leaves `init-class A` in B's initializer, so A and B
+  // still form an initialization cycle and B.y must not be encoded as 5.
+  ClassCreator a_creator(DexType::make_type("LA;"));
+  a_creator.set_super(type::java_lang_Object());
+  auto* a_clinit = assembler::method_from_string(R"(
+    (method (public static constructor) "LA;.<clinit>:()V"
+     (
+      (sget "LB;.y:I")
+      (move-result-pseudo v0)
+      (invoke-static (v0) "LSink;.record:(I)V")
+      (return-void)
+     )
+    )
+  )");
+  a_creator.add_method(a_clinit);
+  a_creator.add_method(assembler::method_from_string(R"(
+    (method (public static) "LA;.five:()I"
+     (
+      (const v0 5)
+      (return v0)
+     )
+    )
+  )"));
+  auto* a_cls = a_creator.create();
+
+  ClassCreator b_creator(DexType::make_type("LB;"));
+  b_creator.set_super(type::java_lang_Object());
+  auto* field_y = create_field_with_zero_value("LB;.y:I", &b_creator);
+  auto* b_clinit = assembler::method_from_string(R"(
+    (method (public static constructor) "LB;.<clinit>:()V"
+     (
+      (init-class "LA;")
+      (const v0 5)
+      (sput v0 "LB;.y:I")
+      (return-void)
+     )
+    )
+  )");
+  b_creator.add_method(b_clinit);
+  auto* b_cls = b_creator.create();
+  auto expected_b =
+      assembler::ircode_from_string(assembler::to_string(b_clinit->get_code()));
+  auto expected_a =
+      assembler::ircode_from_string(assembler::to_string(a_clinit->get_code()));
+
+  run({b_cls, a_cls}, /* xstores */ nullptr);
+
+  EXPECT_EQ(field_y->get_static_value()->value(), 0);
+  ASSERT_EQ(b_cls->get_clinit(), b_clinit);
+  EXPECT_CODE_EQ(b_clinit->get_code(), expected_b.get());
+  ASSERT_EQ(a_cls->get_clinit(), a_clinit);
+  EXPECT_CODE_EQ(a_clinit->get_code(), expected_a.get());
+}

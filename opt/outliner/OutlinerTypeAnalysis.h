@@ -171,6 +171,12 @@ class Demand {
   // The widest type every use accepts; nullptr when a demand is unknown, there
   // is no use, or the demands name more than one type.
   const DexType* widest() const;
+  // Whether every use accepts the integral value `value`: every integral type a
+  // use needs holds it, so with no use any value is accepted. A use that needs
+  // any other type accepts no integral value. ART would take a constant at a
+  // `float` use, and 0 at a reference use, but this answers no for those too.
+  // When the type a use needs is unknown, nothing is accepted.
+  bool accepts(const IntegralType& value) const;
 
  private:
   bool m_unknown{false};

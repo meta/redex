@@ -62,6 +62,15 @@ class ModelMerger {
                             const DexType* parent,
                             const RefChecker& ref_checker,
                             bool preserve_unanimous_field_types);
+  // Gives each mergeable that relaxed inits instantiate a forwarding
+  // constructor for each super-type constructor they invoke, and points the
+  // relaxed inits at them, so that constructor merging handles them like any
+  // other constructor call.
+  void materialize_relaxed_inits(const Scope& scope,
+                                 ConfigFiles& conf,
+                                 Model& model,
+                                 const std::vector<const MergerType*>& mergers,
+                                 bool update_method_profiles_stats);
   void update_stats(const std::string& name,
                     const std::vector<const MergerType*>& mergers,
                     ModelMethodMerger& mm);

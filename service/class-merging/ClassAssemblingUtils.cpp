@@ -68,6 +68,36 @@ DexMethod* create_forwarding_ctor(DexType* owner, DexMethodRef* super_ctor) {
   return ctor;
 }
 
+bool is_forwarding_ctor(const DexMethod* ctor, const DexMethodRef* super_ctor) {
+  if (ctor->get_proto() != super_ctor->get_proto()) {
+    return false;
+  }
+  if (ctor->get_code() == nullptr) {
+    return false;
+  }
+  const auto& cfg = ctor->get_code()->cfg();
+  // A handler around the call would catch what the super constructor throws.
+  for (const auto* block : cfg.blocks()) {
+    if (cfg.get_succ_edge_of_type(block, cfg::EDGE_THROW) != nullptr) {
+      return false;
+    }
+  }
+  std::vector<reg_t> param_regs;
+  std::vector<const IRInstruction*> body;
+  for (const auto& mie : cfg::ConstInstructionIterable(cfg)) {
+    if (opcode::is_a_load_param(mie.insn->opcode())) {
+      param_regs.push_back(mie.insn->dest());
+    } else {
+      body.push_back(mie.insn);
+    }
+  }
+  return body.size() == 2 && opcode::is_invoke_direct(body[0]->opcode()) &&
+         body[0]->get_method() == super_ctor &&
+         std::equal(param_regs.begin(), param_regs.end(),
+                    body[0]->srcs().begin(), body[0]->srcs().end()) &&
+         opcode::is_return_void(body[1]->opcode());
+}
+
 DexClass* create_class(const DexType* type,
                        const DexType* super_type,
                        const std::string_view pkg_name,

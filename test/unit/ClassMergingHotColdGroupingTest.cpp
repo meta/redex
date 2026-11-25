@@ -221,6 +221,31 @@ TEST_F(ClassMergingHotColdGroupingTest, EnabledSplitsHotAndCold) {
   EXPECT_EQ(stats.m_hot_cold_dropped, 0u);
 }
 
+// Relaxed init inlining moves a constructor's body into the methods that
+// instantiate the class; a hot such method makes the class hot.
+TEST_F(ClassMergingHotColdGroupingTest, HotRelaxedInitIsHot) {
+  auto* use = make_class("LUse;", type::java_lang_Object());
+  for (const char* name : {"LA;", "LB;"}) {
+    auto* cls = make_class(name, m_base->get_type());
+    add_virtual(cls, "run");
+    m_hot_methods.push_back(
+        add_method(use, ir(R"(
+          (method (public static) "LUse;.make$CLS:()V"
+           ((new-instance "L$CLS;")
+            (move-result-pseudo-object v0)
+            (invoke-direct (v0) "LBase;.<init>:()V")
+            (return-void)))
+        )",
+                           {{"$CLS", std::string(name).substr(1, 1)}})));
+  }
+  make_mergeable("LC;");
+  make_mergeable("LD;");
+
+  EXPECT_EQ(
+      merger_groups(true),
+      (std::vector<std::vector<std::string>>{{"LA;", "LB;"}, {"LC;", "LD;"}}));
+}
+
 TEST_F(ClassMergingHotColdGroupingTest, UndersizedPartStaysUnmerged) {
   make_mergeable("LA;", false, true);
   make_mergeable("LB;");

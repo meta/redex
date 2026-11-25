@@ -26,10 +26,13 @@ UnorderedSet<const DexMethod*> get_hot_methods(const Scope& scope,
  * A mergeable is hot if any method that merging folds into a dispatch method
  * is in `hot_methods`: a constructor, or a virtual method other than the top
  * def of a non-interface, effectively final scope (those are relocated as they
- * are).
+ * are). A method that instantiates the mergeable through a relaxed init counts
+ * like a constructor, as the inlined constructor body runs there.
  */
-bool is_hot_mergeable(const DexClass* cls,
-                      const virtual_scope::VirtualScopes& vscopes,
-                      const UnorderedSet<const DexMethod*>& hot_methods);
+bool is_hot_mergeable(
+    const DexClass* cls,
+    const virtual_scope::VirtualScopes& vscopes,
+    const UnorderedSet<const DexMethod*>& hot_methods,
+    const std::vector<const DexMethod*>* relaxed_init_callers = nullptr);
 
 } // namespace class_merging

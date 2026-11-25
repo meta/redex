@@ -26,9 +26,11 @@ UnorderedSet<const DexMethod*> get_hot_methods(const Scope& scope,
   return hot_methods;
 }
 
-bool is_hot_mergeable(const DexClass* cls,
-                      const virtual_scope::VirtualScopes& vscopes,
-                      const UnorderedSet<const DexMethod*>& hot_methods) {
+bool is_hot_mergeable(
+    const DexClass* cls,
+    const virtual_scope::VirtualScopes& vscopes,
+    const UnorderedSet<const DexMethod*>& hot_methods,
+    const std::vector<const DexMethod*>* relaxed_init_callers) {
   const auto is_hot = [&hot_methods](const DexMethod* method) {
     return hot_methods.find(method) != hot_methods.end();
   };
@@ -37,6 +39,11 @@ bool is_hot_mergeable(const DexClass* cls,
     if (method::is_init(method) && is_hot(method)) {
       return true;
     }
+  }
+  if (relaxed_init_callers != nullptr &&
+      std::any_of(relaxed_init_callers->begin(), relaxed_init_callers->end(),
+                  is_hot)) {
+    return true;
   }
 
   UnorderedSet<const DexMethod*> relocated;

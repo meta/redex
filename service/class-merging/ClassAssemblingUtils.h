@@ -41,6 +41,12 @@ void cook_merger_fields_lookup(
  */
 DexMethod* create_forwarding_ctor(DexType* owner, DexMethodRef* super_ctor);
 
+/**
+ * Whether `ctor` only forwards its arguments to `super_ctor`, like the
+ * constructors that `create_forwarding_ctor` creates.
+ */
+bool is_forwarding_ctor(const DexMethod* ctor, const DexMethodRef* super_ctor);
+
 DexClass* create_class(const DexType* type,
                        const DexType* super_type,
                        const std::string_view pkg_name,

@@ -204,7 +204,10 @@ void Model::init(const Scope& scope,
   TRACE(CLMG, 4, "Generated types %zu", generated.size());
   exclude_types(spec.exclude_types);
   MergeabilityChecker checker(scope, spec, m_ref_checker, generated);
-  m_non_mergeables = checker.get_non_mergeables();
+  auto mergeability = checker.get_mergeability();
+  m_non_mergeables = std::move(mergeability.non_mergeables);
+  m_relaxed_inits = std::move(mergeability.relaxed_inits);
+  m_stats.m_relaxed_init_exclusions = mergeability.relaxed_init_exclusions;
   TRACE(CLMG, 3, "Non mergeables %zu", m_non_mergeables.size());
   m_stats.m_non_mergeables = static_cast<uint32_t>(m_non_mergeables.size());
   m_stats.m_all_types = static_cast<uint32_t>(m_spec.merging_targets.size());
@@ -416,7 +419,10 @@ void Model::create_hot_cold_mergers(
   for (const auto* type : group_values) {
     const auto* cls = type_class(type);
     always_assert(cls);
-    if (is_hot_mergeable(cls, m_vscopes, m_hot_methods)) {
+    const auto* relaxed_inits = get_relaxed_inits(type);
+    if (is_hot_mergeable(cls, m_vscopes, m_hot_methods,
+                         relaxed_inits == nullptr ? nullptr
+                                                  : &relaxed_inits->callers)) {
       hot.insert(type);
     } else {
       cold.insert(type);
@@ -833,7 +839,7 @@ void Model::collect_methods() {
                           SHOW(method));
         merger.dmethods.emplace_back(method);
       }
-      always_assert_log(has_ctor,
+      always_assert_log(has_ctor || get_relaxed_inits(mergeable),
                         "[ClassMerging] No ctor found for mergeable %s",
                         SHOW(mergeable));
 
@@ -1445,6 +1451,10 @@ ModelStats& ModelStats::operator+=(const ModelStats& stats) {
   m_position_join_stats += stats.m_position_join_stats;
   m_num_vmethods_dedupped += stats.m_num_vmethods_dedupped;
   m_num_const_lifted_methods += stats.m_num_const_lifted_methods;
+  m_relaxed_init_exclusions += stats.m_relaxed_init_exclusions;
+  m_relaxed_init_ctors_created += stats.m_relaxed_init_ctors_created;
+  m_relaxed_init_ctors_reused += stats.m_relaxed_init_ctors_reused;
+  m_relaxed_init_sites_rewritten += stats.m_relaxed_init_sites_rewritten;
   m_updated_profile_method += stats.m_updated_profile_method;
   return *this;
 }
@@ -1500,6 +1510,22 @@ void ModelStats::update_redex_stats(const std::string& prefix,
   mgr.incr_metric(prefix + "_vmethods_dedupped", m_num_vmethods_dedupped);
   mgr.incr_metric(prefix + "_updated_profile_method", m_updated_profile_method);
   mgr.set_metric(prefix + "_const_lifted_methods", m_num_const_lifted_methods);
+  mgr.incr_metric(prefix + "_relaxed_init_excluded_type_tag_not_generated",
+                  m_relaxed_init_exclusions.type_tag_not_generated);
+  mgr.incr_metric(prefix + "_relaxed_init_excluded_unsupported",
+                  m_relaxed_init_exclusions.unsupported);
+  mgr.incr_metric(prefix + "_relaxed_init_excluded_inaccessible",
+                  m_relaxed_init_exclusions.inaccessible);
+  mgr.incr_metric(prefix + "_relaxed_init_excluded_unsafe_refs",
+                  m_relaxed_init_exclusions.unsafe_refs);
+  mgr.incr_metric(prefix + "_relaxed_init_excluded_ctor_conflict",
+                  m_relaxed_init_exclusions.ctor_conflict);
+  mgr.incr_metric(prefix + "_relaxed_init_ctors_created",
+                  m_relaxed_init_ctors_created);
+  mgr.incr_metric(prefix + "_relaxed_init_ctors_reused",
+                  m_relaxed_init_ctors_reused);
+  mgr.incr_metric(prefix + "_relaxed_init_sites_rewritten",
+                  m_relaxed_init_sites_rewritten);
 }
 
 } // namespace class_merging

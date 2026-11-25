@@ -16,6 +16,7 @@
 #include "DexStore.h"
 #include "HotColdGrouping.h"
 #include "InterDexGrouping.h"
+#include "MergeabilityCheck.h"
 #include "MergerType.h"
 #include "MergingStrategies.h"
 #include "PassManager.h"
@@ -243,6 +244,11 @@ struct ModelStats {
   uint32_t m_num_vmethods_dedupped = 0;
   uint32_t m_num_const_lifted_methods = 0;
   uint32_t m_updated_profile_method = 0;
+  // Relaxed init stats
+  RelaxedInitExclusions m_relaxed_init_exclusions;
+  uint32_t m_relaxed_init_ctors_created = 0;
+  uint32_t m_relaxed_init_ctors_reused = 0;
+  uint32_t m_relaxed_init_sites_rewritten = 0;
 
   ModelStats& operator+=(const ModelStats& stats);
 
@@ -356,6 +362,22 @@ class Model {
 
   const TypeSystem& get_type_system() const { return m_type_system; }
 
+  /**
+   * How relaxed inits instantiate a mergeable type, if they do.
+   */
+  const RelaxedInits* get_relaxed_inits(const DexType* mergeable) const {
+    auto it = m_relaxed_inits.find(mergeable);
+    return it == m_relaxed_inits.end() ? nullptr : &it->second;
+  }
+
+  /**
+   * Adds a forwarding constructor created for relaxed inits of a mergeable of
+   * the given merger to the methods to merge.
+   */
+  void add_relaxed_init_ctor(const DexType* merger_type, DexMethod* ctor) {
+    m_mergers.at(merger_type).dmethods.push_back(ctor);
+  }
+
  private:
   static const TypeSet empty_set;
 
@@ -385,6 +407,7 @@ class Model {
   // The set of non mergeables types. Those are types that are not
   // erasable for whatever reason
   TypeSet m_non_mergeables;
+  RelaxedInitsByType m_relaxed_inits;
 
   const TypeSystem& m_type_system;
   // Built once per pass and shared across all ModelSpecs (like m_type_system),

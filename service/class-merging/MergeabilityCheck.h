@@ -7,6 +7,10 @@
 
 #pragma once
 
+#include <map>
+#include <vector>
+
+#include "ConcurrentContainers.h"
 #include "DexClass.h"
 
 class DexMethodHandle;
@@ -17,6 +21,61 @@ namespace class_merging {
 using TypeSet = std::set<const DexType*, dextypes_comparator>;
 
 struct ModelSpec;
+
+// A forwarding constructor `A.<init>(P) { super_ctor(this, P); }` that class
+// merging gives a merged type A, for the super-type constructor `super_ctor`
+// that relaxed inits of A invoke (see `constructor_analysis::RelaxedInit`).
+struct RelaxedInitForwarder {
+  DexMethod* super_ctor;
+  // A's constructor with proto P, which is already such a forwarder, if any.
+  DexMethod* existing_ctor;
+};
+
+// How relaxed inits instantiate a type.
+struct RelaxedInits {
+  // The forwarding constructors that merging the type requires, sorted by
+  // super-type constructor.
+  std::vector<RelaxedInitForwarder> forwarders;
+  // The methods with such relaxed inits, sorted. The inlined constructor
+  // bodies run there.
+  std::vector<const DexMethod*> callers;
+};
+
+using RelaxedInitsByType =
+    std::map<const DexType*, RelaxedInits, dextypes_comparator>;
+
+// Number of types with a relaxed init that class merging cannot handle, by
+// reason. Such a type is not merged.
+struct RelaxedInitExclusions {
+  // Redex does not generate the type tags, so the merged constructors do not
+  // store the tag that a forwarding constructor passes.
+  uint32_t type_tag_not_generated{0};
+  // The invoked constructor does not resolve to a constructor of a super type,
+  // or one constructor call initializes objects of different types.
+  uint32_t unsupported{0};
+  // The invoked constructor is external and neither public nor protected.
+  uint32_t inaccessible{0};
+  // The invoked constructor fails the RefChecker.
+  uint32_t unsafe_refs{0};
+  // Two invoked constructors share a proto, or the type already has a
+  // constructor with that proto that is not their forwarder.
+  uint32_t ctor_conflict{0};
+
+  RelaxedInitExclusions& operator+=(const RelaxedInitExclusions& other) {
+    type_tag_not_generated += other.type_tag_not_generated;
+    unsupported += other.unsupported;
+    inaccessible += other.inaccessible;
+    unsafe_refs += other.unsafe_refs;
+    ctor_conflict += other.ctor_conflict;
+    return *this;
+  }
+};
+
+struct Mergeability {
+  TypeSet non_mergeables;
+  RelaxedInitsByType relaxed_inits;
+  RelaxedInitExclusions relaxed_init_exclusions;
+};
 
 class MergeabilityChecker {
  public:
@@ -33,7 +92,7 @@ class MergeabilityChecker {
    * Java classes. As a result, we can make those generated classes easier to
    * optimize by Class Merging.
    */
-  TypeSet get_non_mergeables();
+  Mergeability get_mergeability();
 
  private:
   const Scope& m_scope;
@@ -43,7 +102,20 @@ class MergeabilityChecker {
   const UnorderedSet<DexType*>& m_const_class_safe_types;
   bool m_track_use_of_reflection;
 
-  void exclude_unsupported_cls_property(TypeSet& non_mergeables);
+  // Relaxed inits found in the scope, by instantiated type.
+  struct RelaxedInitCalls {
+    // nullptr stands for an invoked constructor that does not resolve.
+    UnorderedSet<DexMethod*> super_ctors;
+    UnorderedSet<const DexMethod*> callers;
+    // A constructor call that initializes an object of this type also
+    // initializes one of another type.
+    bool shares_invoke{false};
+  };
+  ConcurrentMap<const DexType*, RelaxedInitCalls> m_relaxed_init_calls;
+
+  void exclude_unsupported_cls_property(const RelaxedInitsByType& relaxed_inits,
+                                        TypeSet& non_mergeables);
+  void classify_relaxed_inits(Mergeability& mergeability);
   void exclude_unsupported_bytecode(TypeSet& non_mergeables);
   void exclude_method_handle_refs(TypeSet& non_mergeables);
   void exclude_unsupported_static_value_method_handles(TypeSet& non_mergeables);

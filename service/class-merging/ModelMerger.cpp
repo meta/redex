@@ -7,9 +7,11 @@
 
 #include "ModelMerger.h"
 
+#include "AtomicStatCounter.h"
 #include "CFGMutation.h"
 #include "ClassAssemblingUtils.h"
 #include "ConfigFiles.h"
+#include "ConstructorAnalysis.h"
 #include "Creators.h" // NOLINT
 #include "Debug.h"
 #include "Inliner.h"
@@ -18,6 +20,8 @@
 #include "ModelMethodMerger.h"
 #include "Resolver.h"
 #include "Show.h"
+#include "SourceBlocks.h"
+#include "SourceBlocksUtils.h"
 #include "TypeReference.h"
 #include "TypeStringRewriter.h"
 #include "TypeTagUtils.h"
@@ -558,6 +562,160 @@ void ModelMerger::update_stats(const std::string& model_name,
   m_stats += mm.get_stats();
 }
 
+namespace {
+
+// For each mergeable with relaxed inits, the forwarding constructor that
+// replaces each super-type constructor they invoke.
+using Forwarders =
+    UnorderedMap<const DexType*, UnorderedMap<const DexMethod*, DexMethod*>>;
+
+// The call sites that a created forwarding constructor serves, in a
+// deterministic order: their source blocks and the methods that hold them.
+struct ForwarderCallSites {
+  std::vector<SourceBlock*> source_blocks;
+  std::vector<DexMethod*> callers;
+};
+
+// Points each relaxed init of `forwarders`' mergeables at its forwarding
+// constructor. Returns the number of rewritten sites, and fills `call_sites`
+// for each constructor in `created`.
+size_t redirect_relaxed_inits(
+    const Scope& scope,
+    const Forwarders& forwarders,
+    const std::vector<DexMethod*>& created,
+    UnorderedMap<const DexMethod*, ForwarderCallSites>* call_sites) {
+  UnorderedSet<const DexMethod*> created_set;
+  insert_unordered_iterable(created_set, created);
+  struct Site {
+    DexMethod* caller;
+    size_t index;
+    SourceBlock* source_block;
+  };
+  ConcurrentMap<const DexMethod*, std::vector<Site>> sites_by_ctor;
+  AtomicStatCounter<size_t> sites_rewritten{0};
+  walk::parallel::code(scope, [&](DexMethod* method, IRCode& code) {
+    auto relaxed_inits = constructor_analysis::find_relaxed_inits(
+        method,
+        [&](const DexType* type) { return forwarders.count(type) != 0u; });
+    if (relaxed_inits.empty()) {
+      return;
+    }
+    UnorderedMap<const IRInstruction*, DexMethod*> invoke_to_ctor;
+    for (const auto& relaxed_init : relaxed_inits) {
+      const auto& mergeable_forwarders =
+          forwarders.at(relaxed_init.new_instance->get_type());
+      auto it = mergeable_forwarders.find(relaxed_init.resolved_init);
+      always_assert_log(it != mergeable_forwarders.end(),
+                        "No forwarding constructor for %s in %s",
+                        SHOW(relaxed_init.invoke), SHOW(method));
+      auto [invoke_it, emplaced] =
+          invoke_to_ctor.emplace(relaxed_init.invoke, it->second);
+      always_assert_log(emplaced || invoke_it->second == it->second,
+                        "%s initializes different types in %s",
+                        SHOW(relaxed_init.invoke), SHOW(method));
+    }
+    size_t index = 0;
+    auto iterable = cfg::InstructionIterable(code.cfg());
+    for (auto it = iterable.begin(); it != iterable.end(); ++it) {
+      auto ctor_it = invoke_to_ctor.find(it->insn);
+      if (ctor_it == invoke_to_ctor.end()) {
+        continue;
+      }
+      auto* ctor = ctor_it->second;
+      it->insn->set_method(ctor);
+      ++sites_rewritten;
+      if (created_set.contains(ctor)) {
+        auto* source_block = source_blocks::get_last_source_block_before(
+            it.block(), it.unwrap());
+        sites_by_ctor.update(
+            ctor, [&](const DexMethod*, std::vector<Site>& sites, bool) {
+              sites.push_back(Site{method, index, source_block});
+            });
+      }
+      ++index;
+    }
+  });
+
+  for (auto* ctor : created) {
+    auto* sites = sites_by_ctor.get_unsafe(ctor);
+    if (sites == nullptr) {
+      continue;
+    }
+    std::sort(sites->begin(), sites->end(), [](const Site& a, const Site& b) {
+      if (a.caller != b.caller) {
+        return compare_dexmethods(a.caller, b.caller);
+      }
+      return a.index < b.index;
+    });
+    auto& ctor_call_sites = (*call_sites)[ctor];
+    for (const auto& site : *sites) {
+      if (site.source_block != nullptr) {
+        ctor_call_sites.source_blocks.push_back(site.source_block);
+      }
+      if (ctor_call_sites.callers.empty() ||
+          ctor_call_sites.callers.back() != site.caller) {
+        ctor_call_sites.callers.push_back(site.caller);
+      }
+    }
+  }
+  return sites_rewritten;
+}
+
+} // namespace
+
+void ModelMerger::materialize_relaxed_inits(
+    const Scope& scope,
+    ConfigFiles& conf,
+    Model& model,
+    const std::vector<const MergerType*>& mergers,
+    bool update_method_profiles_stats) {
+  Forwarders forwarders;
+  std::vector<DexMethod*> created;
+  for (const auto* merger : mergers) {
+    for (const auto* mergeable : merger->mergeables) {
+      const auto* relaxed_inits = model.get_relaxed_inits(mergeable);
+      if (relaxed_inits == nullptr) {
+        continue;
+      }
+      auto& ctors = forwarders[mergeable];
+      for (const auto& forwarder : relaxed_inits->forwarders) {
+        auto* ctor = forwarder.existing_ctor;
+        if (ctor != nullptr) {
+          ++m_stats.m_relaxed_init_ctors_reused;
+        } else {
+          ctor = create_forwarding_ctor(const_cast<DexType*>(mergeable),
+                                        forwarder.super_ctor);
+          type_class(mergeable)->add_method(ctor);
+          model.add_relaxed_init_ctor(merger->type, ctor);
+          created.push_back(ctor);
+          ++m_stats.m_relaxed_init_ctors_created;
+        }
+        ctors.emplace(forwarder.super_ctor, ctor);
+      }
+    }
+  }
+  if (forwarders.empty()) {
+    return;
+  }
+
+  UnorderedMap<const DexMethod*, ForwarderCallSites> call_sites;
+  m_stats.m_relaxed_init_sites_rewritten +=
+      redirect_relaxed_inits(scope, forwarders, created, &call_sites);
+
+  auto& method_profiles = conf.get_method_profiles();
+  for (auto* ctor : created) {
+    auto it = call_sites.find(ctor);
+    if (it == call_sites.end()) {
+      continue;
+    }
+    source_blocks::insert_source_blocks_summing_call_sites(
+        ctor, it->second.source_blocks);
+    if (update_method_profiles_stats) {
+      method_profiles.derive_stats(ctor, it->second.callers);
+    }
+  }
+}
+
 std::vector<DexClass*> ModelMerger::merge_model(
     Scope& scope,
     DexStoresVector& stores,
@@ -634,6 +792,9 @@ std::vector<DexClass*> ModelMerger::merge_model(
     }
     to_materialize.emplace_back(&merger);
   });
+
+  materialize_relaxed_inits(scope, conf, model, to_materialize,
+                            update_method_profiles_stats);
 
   // Merging transformations.
   UnorderedMap<const DexType*, DexType*> mergeable_to_merger;

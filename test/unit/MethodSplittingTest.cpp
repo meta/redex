@@ -76,15 +76,24 @@ class MethodSplitterTest : public RedexTest {
       const std::string& sig,
       const std::string& code_str,
       const method_splitting_impl::Config& config,
-      std::initializer_list<std::pair<std::string, std::string>> expected) {
+      std::initializer_list<std::pair<std::string, std::string>> expected,
+      // Auxiliary classes the code under test references. They must go into the
+      // store, not just the global class registry: a type whose class is
+      // internal but held by no store is an illegal cross-store reference, so a
+      // split taking one as an argument would be dropped.
+      const std::vector<DexClass*>& extra_classes = {}) {
     auto [cls, m] = create(sig, code_str);
     m->get_code()->build_cfg();
     DexStoresVector stores;
     stores.emplace_back("test_store");
-    stores.front().get_dexen().push_back({cls});
+    DexClasses dex{cls};
+    dex.insert(dex.end(), extra_classes.begin(), extra_classes.end());
+    stores.front().get_dexen().push_back(std::move(dex));
+    method_splitting_impl::StoreRefCheckers store_ref_checkers(
+        stores, /* normal_primary_dex */ true, /* min_sdk_api */ nullptr);
     method_splitting_impl::Stats stats;
     method_splitting_impl::split_methods_in_stores(
-        stores, /* min_sdk */ 0, config,
+        stores, /* min_sdk */ 0, config, store_ref_checkers,
         /* create_init_class_insns */ false,
         /* reserved_mrefs */ 0, /* reserved_trefs */ 0, &stats);
     m->get_code()->cfg().simplify();
@@ -756,7 +765,7 @@ TEST_F(MethodSplitterTest, SplitSwitchPreferNotBreakingLargePackedSwitches) {
 TEST_F(MethodSplitterTest, SplitTypeDemands) {
   ClassCreator cc{DexType::make_type("LSpecificType;")};
   cc.set_super(type::java_lang_Object());
-  cc.create();
+  auto* specific_type_cls = cc.create();
 
   const auto* before = R"(
     (
@@ -832,7 +841,8 @@ TEST_F(MethodSplitterTest, SplitTypeDemands) {
            before,
            config,
            {std::make_pair<std::string, std::string>("", after),
-            std::make_pair<std::string, std::string>("split$cold0", split0)});
+            std::make_pair<std::string, std::string>("split$cold0", split0)},
+           {specific_type_cls});
   ASSERT_TRUE(res);
 }
 
@@ -842,7 +852,7 @@ TEST_F(MethodSplitterTest, SplitTypeDemands) {
 TEST_F(MethodSplitterTest, SplitTypeDemandsRegression) {
   ClassCreator cc{DexType::make_type("LSpecificType;")};
   cc.set_super(type::java_lang_Object());
-  cc.create();
+  auto* specific_type_cls = cc.create();
 
   const auto* before = R"(
     (
@@ -923,7 +933,8 @@ TEST_F(MethodSplitterTest, SplitTypeDemandsRegression) {
            before,
            config,
            {std::make_pair<std::string, std::string>("", after),
-            std::make_pair<std::string, std::string>("split$cold0", split0)});
+            std::make_pair<std::string, std::string>("split$cold0", split0)},
+           {specific_type_cls});
   ASSERT_TRUE(res);
 }
 

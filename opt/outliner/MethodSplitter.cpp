@@ -472,6 +472,7 @@ void split_methods_in_stores(
     DexStoresVector& stores,
     int32_t min_sdk,
     const Config& config,
+    const StoreRefCheckers& store_ref_checkers,
     bool create_init_class_insns,
     size_t reserved_mrefs,
     size_t reserved_trefs,
@@ -553,8 +554,9 @@ void split_methods_in_stores(
     TRACE(MS, 2, "=== iteration[%zu]", iteration);
     Timer t("iteration " + std::to_string(iteration++));
     auto splittable_closures = select_splittable_closures_based_on_costs(
-        methods, config, concurrent_hot_methods,
-        concurrent_splittable_no_optimizations_methods);
+        methods, config, store_ref_checkers, concurrent_hot_methods,
+        concurrent_splittable_no_optimizations_methods,
+        &stats->arg_type_illegal);
     ConcurrentSet<DexMethod*> concurrent_added_methods;
     methods = split_splittable_closures(
         config, dexen, min_sdk, init_classes_with_side_effects, reserved_trefs,

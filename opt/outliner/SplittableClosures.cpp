@@ -420,7 +420,10 @@ std::vector<ScoredClosure> get_scored_closures(const Config& config,
 std::vector<SplittableClosure> to_splittable_closures(
     size_t max_live_in,
     const std::shared_ptr<MethodClosures>& mcs,
-    std::vector<ScoredClosure> scored_closures) {
+    std::vector<ScoredClosure> scored_closures,
+    // Both null on the top-level-switch path, which has no store context.
+    const RefChecker* ref_checker,
+    std::atomic<size_t>* arg_type_illegal) {
   std::vector<SplittableClosure> splittable_closures;
   // We sort closures in a way that allows us to quickly prune contained
   // closures if we found a viable containing closure.
@@ -469,7 +472,8 @@ std::vector<SplittableClosure> to_splittable_closures(
   UnorderedSet<const ReducedBlock*> covered;
   std::erase_if(scored_closures, [&covered, &ota, &liveness_fp_iter,
                                   &uninitialized_objects, &insns, &def_uses,
-                                  max_live_in](auto& sc) {
+                                  max_live_in, ref_checker,
+                                  arg_type_illegal](auto& sc) {
     for (auto* c : sc.closures) {
       if (covered.count(c->reduced_block)) {
         // We already have this contained closure covered by a valid
@@ -513,6 +517,14 @@ std::vector<SplittableClosure> to_splittable_closures(
       }
       const auto* type = ota->get_type_demand(rcfgca, reg);
       if (!type) {
+        return true;
+      }
+      // The type demand is a meet over the uses, so it can name a type that no
+      // individual use named -- possibly an external one above the min-sdk
+      // floor, which type-checks at build time and fails to resolve on an old
+      // device.
+      if (ref_checker != nullptr && !ref_checker->check_type(type)) {
+        ++*arg_type_illegal;
         return true;
       }
       sc.args.push_back((ClosureArgument){reg, type, nullptr});
@@ -580,6 +592,18 @@ std::vector<SplittableClosure> to_splittable_closures(
 } // namespace
 
 namespace method_splitting_impl {
+
+StoreRefCheckers::StoreRefCheckers(const DexStoresVector& stores,
+                                   bool normal_primary_dex,
+                                   const api::AndroidSDK* min_sdk_api)
+    : m_xstores(stores, normal_primary_dex) {
+  m_ref_checkers.reserve(m_xstores.store_count());
+  for (size_t store_idx = 0; store_idx < m_xstores.store_count(); store_idx++) {
+    m_ref_checkers.push_back(
+        std::make_unique<RefChecker>(&m_xstores, store_idx, min_sdk_api));
+  }
+}
+
 std::vector<const DexType*> SplittableClosure::get_arg_types() const {
   std::vector<const DexType*> arg_types;
   for (auto arg : args) {
@@ -594,9 +618,11 @@ ConcurrentMap<DexType*, std::vector<SplittableClosure>>
 select_splittable_closures_based_on_costs(
     const ConcurrentSet<DexMethod*>& methods,
     const Config& config,
+    const StoreRefCheckers& store_ref_checkers,
     InsertOnlyConcurrentSet<const DexMethod*>* concurrent_hot_methods,
     InsertOnlyConcurrentMap<DexMethod*, size_t>*
-        concurrent_splittable_no_optimizations_methods) {
+        concurrent_splittable_no_optimizations_methods,
+    std::atomic<size_t>* arg_type_illegal) {
   Timer t("select_splittable_closures_based_on_costs");
   ConcurrentMap<DexType*, std::vector<SplittableClosure>>
       concurrent_splittable_closures;
@@ -656,7 +682,8 @@ select_splittable_closures_based_on_costs(
       return;
     }
     auto splittable_closures = to_splittable_closures(
-        config.max_live_in, mcs, std::move(scored_closures));
+        config.max_live_in, mcs, std::move(scored_closures),
+        &store_ref_checkers.get(method->get_class()), arg_type_illegal);
     concurrent_splittable_closures.update(
         method->get_class(), [&](auto, auto& v, bool) {
           v.insert(v.end(),
@@ -717,7 +744,9 @@ select_splittable_closures_from_top_level_switch_cases(
       scored_closures.emplace_back(std::move(sc));
     }
     auto splittable_closures =
-        to_splittable_closures(max_live_in, mcs, std::move(scored_closures));
+        to_splittable_closures(max_live_in, mcs, std::move(scored_closures),
+                               /* ref_checker */ nullptr,
+                               /* arg_type_illegal */ nullptr);
     if (!splittable_closures.empty()) {
       concurrent_splittable_closures.emplace(method,
                                              std::move(splittable_closures));

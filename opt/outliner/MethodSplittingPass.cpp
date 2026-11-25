@@ -100,8 +100,17 @@ void MethodSplittingPass::run_pass(DexStoresVector& stores,
       concurrent_new_hot_split_methods;
   InsertOnlyConcurrentMap<DexMethod*, size_t>
       concurrent_splittable_no_optimizations_methods;
+  int32_t min_sdk = mgr.get_redex_options().min_sdk;
+  const api::AndroidSDK* min_sdk_api{nullptr};
+  if (conf.get_android_sdk_api_file(min_sdk)) {
+    min_sdk_api = &conf.get_android_sdk_api(min_sdk);
+  } else {
+    mgr.incr_metric("min_sdk_no_file", 1);
+  }
+  StoreRefCheckers store_ref_checkers(stores, conf.normal_primary_dex(),
+                                      min_sdk_api);
   split_methods_in_stores(
-      stores, mgr.get_redex_options().min_sdk, m_config,
+      stores, min_sdk, m_config, store_ref_checkers,
       conf.create_init_class_insns(), reserved_mrefs, reserved_trefs, &stats,
       name_infix, &concurrent_hot_methods, &concurrent_new_hot_split_methods,
       &concurrent_splittable_no_optimizations_methods);
@@ -135,6 +144,10 @@ void MethodSplittingPass::run_pass(DexStoresVector& stores,
                  concurrent_new_hot_split_methods.size());
   mgr.set_metric("derived_method_profile_stats", derived_method_profile_stats);
   mgr.set_metric("excluded_methods", (size_t)stats.excluded_methods);
+  // A nonzero value on a run that also reports `min_sdk_no_file` means the gate
+  // rejected external types for want of an api model rather than on a real
+  // min-sdk violation.
+  mgr.set_metric("arg_type_illegal", (size_t)stats.arg_type_illegal);
   mgr.set_metric("iterations", stats.iterations);
   TRACE(MS, 1, "Split out %zu methods", stats.added_methods.size());
 

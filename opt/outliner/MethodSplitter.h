@@ -30,6 +30,9 @@ struct Stats {
   std::atomic<size_t> hot_cold_split_count{0};
   std::atomic<size_t> cold_split_count{0};
   std::atomic<size_t> dex_limits_hit{0};
+  // Closures dropped because a synthesized argument type was not loadable:
+  // external and above the min-sdk floor, or cross-store illegal.
+  std::atomic<size_t> arg_type_illegal{0};
   std::atomic<size_t> added_code_size{0};
   std::atomic<size_t> split_code_size{0};
   std::atomic<size_t> kept_large_packed_switches{0};
@@ -76,6 +79,7 @@ void split_methods_in_stores(
     DexStoresVector& stores,
     int32_t min_sdk,
     const Config& config,
+    const StoreRefCheckers& store_ref_checkers,
     bool create_init_class_insns,
     size_t reserved_mrefs,
     size_t reserved_trefs,

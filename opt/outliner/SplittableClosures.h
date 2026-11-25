@@ -7,13 +7,43 @@
 
 #pragma once
 
+#include <atomic>
+#include <memory>
 #include <optional>
+#include <vector>
 
 #include "ConcurrentContainers.h"
+#include "DexStore.h"
 #include "MethodClosures.h"
 #include "MethodSplittingConfig.h"
+#include "RefChecker.h"
+
+namespace api {
+class AndroidSDK;
+} // namespace api
 
 namespace method_splitting_impl {
+
+// One `RefChecker` per store, created up front and shared for the whole run:
+// `RefChecker` memoizes `check_type` in concurrent maps and takes the store
+// index as its only per-method input, so a per-method instance would throw the
+// memo away on every method of every splitting iteration.
+class StoreRefCheckers {
+ public:
+  // A null `min_sdk_api` makes every EXTERNAL type fail the check, so a missing
+  // api file leaves the checkers maximally conservative rather than permissive.
+  StoreRefCheckers(const DexStoresVector& stores,
+                   bool normal_primary_dex,
+                   const api::AndroidSDK* min_sdk_api);
+
+  const RefChecker& get(const DexType* type) const {
+    return *m_ref_checkers[m_xstores.get_store_idx(type)];
+  }
+
+ private:
+  XStoreRefs m_xstores;
+  std::vector<std::unique_ptr<RefChecker>> m_ref_checkers;
+};
 
 // Represents a single argument to a method closure. It must either have a type,
 // to pass the register value through a parameter, or a simple definition, which
@@ -54,14 +84,17 @@ struct SplittableClosure {
 };
 
 // Selects splittable closures for a given set of methods based of configured
-// costs.
+// costs. Closures whose synthesized argument types are not loadable are
+// dropped, counted in `arg_type_illegal`.
 ConcurrentMap<DexType*, std::vector<SplittableClosure>>
 select_splittable_closures_based_on_costs(
     const ConcurrentSet<DexMethod*>& methods,
     const Config& config,
+    const StoreRefCheckers& store_ref_checkers,
     InsertOnlyConcurrentSet<const DexMethod*>* concurrent_hot_methods,
     InsertOnlyConcurrentMap<DexMethod*, size_t>*
-        concurrent_splittable_no_optimizations_methods);
+        concurrent_splittable_no_optimizations_methods,
+    std::atomic<size_t>* arg_type_illegal);
 
 // Selects splittable closures for a given set of methods from all contained
 // top-level switch cases.

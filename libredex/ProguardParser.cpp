@@ -57,15 +57,15 @@ struct TokenIndex {
   std::string str() const { return std::string{it->data}; }
   std::string show() const { return it->show(); }
 
-  size_t line() const { return it->line; }
+  uint32_t line() const { return it->line; }
 
   TokenType type() const { return it->type; }
 
-  std::string show_context(size_t lines) const {
+  std::string show_context(uint32_t lines) const {
     return show_context(vec, it, lines);
   }
 
-  std::string show_last_context(size_t lines) const {
+  std::string show_last_context(uint32_t lines) const {
     return show_context(vec, last_it, lines);
   }
 
@@ -80,10 +80,10 @@ struct TokenIndex {
   // static so no accidental use of struct fields.
   static std::string show_context(const std::vector<Token>& v,
                                   const std::vector<Token>::const_iterator& i,
-                                  size_t lines) {
+                                  uint32_t lines) {
     redex_assert(i != v.end());
 
-    size_t this_line = i->line;
+    uint32_t this_line = i->line;
     // Lines are 1-based, so clamp instead of underflowing near the top of the
     // file, which would otherwise wrap around to a huge lower bound.
     size_t min_line = this_line > lines ? this_line - lines : 0;
@@ -111,7 +111,7 @@ struct TokenIndex {
     if (clipped_start) {
       ret.append("... ");
     }
-    std::optional<size_t> last_line = std::nullopt;
+    std::optional<uint32_t> last_line = std::nullopt;
     bool new_line = true;
     for (auto show_it = start_it; show_it != end_it; ++show_it) {
       if (!last_line || last_line != show_it->line) {
@@ -1001,7 +1001,7 @@ void parse(const std::vector<Token>& vec,
                 << idx.show_context(2) << '\n';
       if (diagnostics != nullptr) {
         diagnostics->unknown_commands.push_back(
-            {idx.show(), filename, (uint32_t)idx.line(), idx.show_context(2)});
+            {idx.show(), filename, idx.line(), idx.show_context(2)});
       }
       idx.next();
       skip_to_next_command(idx);
@@ -1208,9 +1208,8 @@ void parse(const std::vector<Token>& vec,
                   << " at line " << idx.line() << '\n'
                   << idx.show_context(2) << '\n';
         if (diagnostics != nullptr) {
-          diagnostics->skipped_commands.push_back({idx.show(), filename,
-                                                   (uint32_t)idx.line(),
-                                                   idx.show_context(2)});
+          diagnostics->skipped_commands.push_back(
+              {idx.show(), filename, idx.line(), idx.show_context(2)});
         }
         ++stats.unimplemented;
       }

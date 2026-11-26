@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -128,11 +129,11 @@ enum class TokenType {
 
 struct Token {
   TokenType type;
-  size_t line;
+  uint32_t line;
   std::string_view data;
 
-  Token(TokenType type, size_t line_number) : type{type}, line{line_number} {}
-  Token(TokenType type, size_t line_number, const std::string_view& data_in)
+  Token(TokenType type, uint32_t line_number) : type{type}, line{line_number} {}
+  Token(TokenType type, uint32_t line_number, const std::string_view& data_in)
       : type{type}, line{line_number}, data(data_in) {}
 
   Token(Token&&) noexcept = default;

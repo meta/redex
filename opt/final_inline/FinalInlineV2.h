@@ -105,7 +105,7 @@ constant_propagation::WholeProgramState analyze_and_simplify_clinits(
 
 class StaticFieldReadAnalysis {
  public:
-  using Result = sparta::PatriciaTreeSetAbstractDomain<const DexFieldRef*>;
+  using Result = sparta::PatriciaTreeSetAbstractDomain<const DexField*>;
 
   StaticFieldReadAnalysis(
       const call_graph::Graph& call_graph,

@@ -2902,3 +2902,44 @@ TEST_F(FinalInlineTest, callOnSuperclassWithoutDefinitionBlocksInference) {
 
   EXPECT_CODE_EQ(on_init->get_code(), expected.get());
 }
+
+// `LBase;.<clinit>` calls `LHelper;.h` before it assigns 5 to `x`. `h` reads
+// `x` through the subclass, as `LSub;.x`, and sees 0. So `x` must keep its
+// encoded value 0.
+TEST_F(FinalInlineTest, fieldReadThroughSubclassNotEncoded) {
+  ClassCreator base_creator(DexType::make_type("LBase;"));
+  base_creator.set_super(type::java_lang_Object());
+  auto* field_x = create_field_with_zero_value("LBase;.x:I", &base_creator);
+  base_creator.add_method(assembler::method_from_string(R"(
+    (method (public static constructor) "LBase;.<clinit>:()V"
+      (
+        (invoke-static () "LHelper;.h:()I")
+        (const v0 5)
+        (sput v0 "LBase;.x:I")
+        (return-void)
+      )
+    )
+  )"));
+  auto* base = base_creator.create();
+
+  ClassCreator sub_creator(DexType::make_type("LSub;"));
+  sub_creator.set_super(DexType::make_type("LBase;"));
+  auto* sub = sub_creator.create();
+
+  ClassCreator helper_creator(DexType::make_type("LHelper;"));
+  helper_creator.set_super(type::java_lang_Object());
+  helper_creator.add_method(assembler::method_from_string(R"(
+    (method (public static) "LHelper;.h:()I"
+      (
+        (sget "LSub;.x:I")
+        (move-result-pseudo v0)
+        (return v0)
+      )
+    )
+  )"));
+  auto* helper = helper_creator.create();
+
+  run({base, sub, helper}, /* xstores */ nullptr);
+
+  EXPECT_EQ(field_x->get_static_value()->value(), 0);
+}

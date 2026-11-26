@@ -152,7 +152,7 @@ class ClassInitStrategy final : public call_graph::SingleCalleeStrategy {
 
 void encode_values(DexClass* cls,
                    const FieldEnvironment& field_env,
-                   const PatriciaTreeSet<const DexFieldRef*>& blocklist,
+                   const PatriciaTreeSet<const DexField*>& blocklist,
                    const XStoreRefs* xstores) {
   for (auto* field : cls->get_sfields()) {
     if (blocklist.contains(field)) {
@@ -251,12 +251,14 @@ StaticFieldReadAnalysis::Result StaticFieldReadAnalysis::analyze(
       if (!opcode::is_an_sget(op)) {
         return;
       }
-      // The encoding checks definitions: a handle reads the field that ART
-      // resolves for it, which can be inherited.
+      // Reads are recorded as the field they resolve to, as writes are; a
+      // handle reads the field that ART resolves for it.
       auto* field = method_handle == nullptr
-                        ? nullptr
+                        ? resolve_field(field_ref, FieldSearch::Static)
                         : resolve_field_handle(method_handle);
-      ret.add(field != nullptr ? field : field_ref);
+      if (field != nullptr) {
+        ret.add(field);
+      }
     });
     return cfg_adapter::LOOP_CONTINUE;
   });

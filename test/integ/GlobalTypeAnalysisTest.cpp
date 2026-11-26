@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "DexClass.h"
+#include "DexUtil.h"
 #include "GlobalTypeAnalyzer.h"
 #include "TypeAnalysisTestBase.h"
 
@@ -16,7 +17,14 @@ using namespace type_analyzer::global;
 
 using TypeSet = sparta::PatriciaTreeSet<const DexType*>;
 
-class GlobalTypeAnalysisTest : public TypeAnalysisTestBase {};
+class GlobalTypeAnalysisTest : public TypeAnalysisTestBase {
+ public:
+  GlobalTypeAnalysisTest() {
+    // Joining two classes needs their common superclass, java.lang.Object, to
+    // resolve to a DexClass, as it does in an app build.
+    create_object_class();
+  }
+};
 
 TEST_F(GlobalTypeAnalysisTest, ReturnTypeTest) {
   auto scope = build_class_scope(stores);

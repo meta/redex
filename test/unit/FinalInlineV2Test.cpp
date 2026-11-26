@@ -2842,3 +2842,61 @@ TEST_F(FinalInlineTest, initClassIsADep) {
   ASSERT_EQ(a_cls->get_clinit(), a_clinit);
   EXPECT_CODE_EQ(a_clinit->get_code(), expected_a.get());
 }
+
+TEST_F(FinalInlineTest, callOnSuperclassWithoutDefinitionBlocksInference) {
+  // Java, where LibBase has no definition:
+  //   class D extends LibBase { D() { onInit(); } }
+  //   class Foo extends D {
+  //     int x;
+  //     Foo() { super(); x = 1; }
+  //     void onInit() { Log.v(x); }
+  //   }
+  // LibBase.onInit() may dispatch to Foo.onInit(), which logs 0 while x is
+  // still unwritten.
+  ClassCreator d_creator(DexType::make_type("LD;"));
+  d_creator.set_super(DexType::make_type("LLibBase;"));
+  d_creator.add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LD;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "LLibBase;.<init>:()V")
+      (invoke-virtual (v0) "LLibBase;.onInit:()V")
+      (return-void)
+     )
+    )
+  )"));
+  auto* d = d_creator.create();
+
+  m_cc->set_super(d->get_type());
+  add_instance_field("LFoo;.x:I");
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "LD;.<init>:()V")
+      (const v1 1)
+      (iput v1 v0 "LFoo;.x:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* on_init = assembler::method_from_string(R"(
+    (method (public) "LFoo;.onInit:()V"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.x:I")
+      (move-result-pseudo v1)
+      (invoke-static (v1) "LLog;.v:(I)V")
+      (return-void)
+     )
+    )
+  )");
+  m_cc->add_method(on_init);
+  auto* cls = m_cc->create();
+  auto expected =
+      assembler::ircode_from_string(assembler::to_string(on_init->get_code()));
+
+  run({d, cls}, nullptr);
+
+  EXPECT_CODE_EQ(on_init->get_code(), expected.get());
+}

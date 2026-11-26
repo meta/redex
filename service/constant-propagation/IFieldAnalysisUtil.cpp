@@ -14,7 +14,6 @@
 #include "Debug.h"
 #include "MethodOverrideGraph.h"
 #include "Resolver.h"
-#include "TypeSystem.h"
 #include "Walkers.h"
 
 namespace {
@@ -34,6 +33,12 @@ class DispatchTargets {
                   const DexClass* cls)
       : m_graph(graph), m_hierarchy(hierarchy), m_type(cls->get_type()) {
     collect_inherited_candidates(cls);
+  }
+
+  // Whether `type` is the class, one of its superclasses or an interface they
+  // implement, including those without a definition.
+  bool is_supertype(const DexType* type) const {
+    return m_supertypes.count(type) != 0u;
   }
 
   // Calls `f` on each method other than `callee` that `insn`, which resolves to
@@ -108,27 +113,29 @@ class DispatchTargets {
            method->get_proto() == callee->get_proto();
   }
 
-  // Collects the classes of the superclass chain and the default methods of
-  // all interfaces they implement. A superclass or interface without a
-  // definition makes the class's inherited implementations unknown.
+  // Collects the classes of the superclass chain, the default methods of all
+  // interfaces they implement, and the types of both. A superclass or
+  // interface without a definition makes the class's inherited
+  // implementations unknown.
   void collect_inherited_candidates(const DexClass* cls) {
     std::vector<const DexType*> interfaces;
     while (cls != nullptr) {
       m_superclass_chain.push_back(cls);
+      m_supertypes.insert(cls->get_type());
       for (const auto* intf : *cls->get_interfaces()) {
         interfaces.push_back(intf);
       }
       const auto* super_type = cls->get_super_class();
       cls = super_type == nullptr ? nullptr : type_class(super_type);
       if (super_type != nullptr && cls == nullptr) {
+        m_supertypes.insert(super_type);
         m_inherited_known = false;
       }
     }
-    UnorderedSet<const DexType*> visited;
     while (!interfaces.empty()) {
       const auto* intf = interfaces.back();
       interfaces.pop_back();
-      if (!visited.insert(intf).second) {
+      if (!m_supertypes.insert(intf).second) {
         continue;
       }
       const auto* intf_cls = type_class(intf);
@@ -188,6 +195,7 @@ class DispatchTargets {
   std::vector<const DexClass*> m_superclass_chain;
   std::vector<const DexMethod*> m_default_methods;
   bool m_inherited_known{true};
+  UnorderedSet<const DexType*> m_supertypes;
 };
 
 namespace check_this {
@@ -311,21 +319,14 @@ class ThisObjectAnalysis final
  */
 class EarlyReadFinder {
  public:
-  EarlyReadFinder(const TypeSystem& ts,
-                  const DispatchTargets& dispatch_targets,
+  EarlyReadFinder(const DispatchTargets& dispatch_targets,
                   const UnorderedSet<std::string>& allowlist_method_names,
                   const DexClass* ifield_cls,
                   InsertOnlyConcurrentSet<DexField*>* blocklist_ifields)
       : m_dispatch_targets(dispatch_targets),
         m_allowlist_method_names(allowlist_method_names),
         m_ifield_cls(ifield_cls),
-        m_blocklist_ifields(blocklist_ifields) {
-    const auto& parent_chain = ts.parent_chain(ifield_cls->get_type());
-    m_parent_intf_set.insert(parent_chain.begin(), parent_chain.end());
-    const auto& intf_set =
-        ts.get_implemented_interfaces(ifield_cls->get_type());
-    m_parent_intf_set.insert(intf_set.begin(), intf_set.end());
-  }
+        m_blocklist_ifields(blocklist_ifields) {}
 
   /**
    * Visits the methods that an invoke instruction may call. Returns false if
@@ -349,16 +350,16 @@ class EarlyReadFinder {
       // No need to check on methods whose class/arguments are not
       // superclass or interface of ifield_cls.
       if (callee != nullptr &&
-          (m_parent_intf_set.count(callee->get_class()) == 0u)) {
+          !m_dispatch_targets.is_supertype(callee->get_class())) {
         for (const auto& type : *callee->get_proto()->get_args()) {
-          if (m_parent_intf_set.count(type) != 0u) {
+          if (m_dispatch_targets.is_supertype(type)) {
             no_current_type = false;
           }
         }
       } else if (callee == nullptr &&
-                 (m_parent_intf_set.count(insn_method->get_class()) == 0u)) {
+                 !m_dispatch_targets.is_supertype(insn_method->get_class())) {
         for (const auto& type : *insn_method->get_proto()->get_args()) {
-          if (m_parent_intf_set.count(type) != 0u) {
+          if (m_dispatch_targets.is_supertype(type)) {
             no_current_type = false;
           }
         }
@@ -416,7 +417,7 @@ class EarlyReadFinder {
             // read the fields of an object passed to it.
             const auto* args = insn->get_callsite_proto()->get_args();
             if (std::any_of(args->begin(), args->end(), [&](const DexType* t) {
-                  return m_parent_intf_set.count(t) != 0u;
+                  return m_dispatch_targets.is_supertype(t);
                 })) {
               if (!visit_method(/* method */ nullptr)) {
                 res = false;
@@ -501,8 +502,6 @@ class EarlyReadFinder {
   const UnorderedSet<std::string>& m_allowlist_method_names;
   const DexClass* m_ifield_cls;
   InsertOnlyConcurrentSet<DexField*>* m_blocklist_ifields;
-  // ifield_cls, its superclasses and its interfaces.
-  UnorderedSet<const DexType*> m_parent_intf_set;
   UnorderedSet<const DexMethod*> m_visited;
 };
 
@@ -525,7 +524,6 @@ InsertOnlyConcurrentSet<DexField*> get_ifields_read_in_callees(
     const Scope& scope,
     const UnorderedSet<std::string>& allowlist_method_names) {
   InsertOnlyConcurrentSet<DexField*> return_ifields;
-  TypeSystem ts(scope);
   auto override_graph = method_override_graph::build_graph(scope);
   auto hierarchy = build_type_hierarchy(scope);
   std::vector<DexClass*> relevant_classes;
@@ -553,14 +551,14 @@ InsertOnlyConcurrentSet<DexField*> get_ifields_read_in_callees(
   });
   walk::parallel::classes(
       relevant_classes,
-      [&return_ifields, &ts, &override_graph, &hierarchy,
+      [&return_ifields, &override_graph, &hierarchy,
        &allowlist_method_names](DexClass* cls) {
         auto* ctor = cls->get_ctors().front();
         auto* code = ctor->get_code();
         always_assert(code != nullptr);
         DispatchTargets dispatch_targets(*override_graph, hierarchy, cls);
-        EarlyReadFinder finder(ts, dispatch_targets, allowlist_method_names,
-                               cls, &return_ifields);
+        EarlyReadFinder finder(dispatch_targets, allowlist_method_names, cls,
+                               &return_ifields);
         finder.visit_constructor(ctor);
       });
   return return_ifields;

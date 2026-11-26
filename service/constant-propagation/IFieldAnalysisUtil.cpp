@@ -522,9 +522,9 @@ class EarlyReadFinder {
  */
 InsertOnlyConcurrentSet<DexField*> get_ifields_read_in_callees(
     const Scope& scope,
-    const UnorderedSet<std::string>& allowlist_method_names) {
+    const UnorderedSet<std::string>& allowlist_method_names,
+    const method_override_graph::Graph& override_graph) {
   InsertOnlyConcurrentSet<DexField*> return_ifields;
-  auto override_graph = method_override_graph::build_graph(scope);
   auto hierarchy = build_type_hierarchy(scope);
   std::vector<DexClass*> relevant_classes;
   for (auto* cls : scope) {
@@ -556,7 +556,7 @@ InsertOnlyConcurrentSet<DexField*> get_ifields_read_in_callees(
         auto* ctor = cls->get_ctors().front();
         auto* code = ctor->get_code();
         always_assert(code != nullptr);
-        DispatchTargets dispatch_targets(*override_graph, hierarchy, cls);
+        DispatchTargets dispatch_targets(override_graph, hierarchy, cls);
         EarlyReadFinder finder(dispatch_targets, allowlist_method_names, cls,
                                &return_ifields);
         finder.visit_constructor(ctor);
@@ -690,7 +690,8 @@ UnorderedSet<const DexField*> gather_constructor_only_ifields(
 EligibleIfields gather_safely_inferable_ifield_candidates(
     const Scope& scope,
     const UnorderedSet<const DexField*>& candidate_ifields,
-    const UnorderedSet<std::string>& allowlist_method_names) {
+    const UnorderedSet<std::string>& allowlist_method_names,
+    const method_override_graph::Graph& method_override_graph) {
   EligibleIfields eligible_ifields;
   walk::fields(scope, [&](DexField* field) {
     if (candidate_ifields.count(field) == 0u) {
@@ -704,8 +705,8 @@ EligibleIfields gather_safely_inferable_ifield_candidates(
     }
     eligible_ifields.emplace(field);
   });
-  auto blocklist_ifields =
-      get_ifields_read_in_callees(scope, allowlist_method_names);
+  auto blocklist_ifields = get_ifields_read_in_callees(
+      scope, allowlist_method_names, method_override_graph);
   for (DexField* field : UnorderedIterable(blocklist_ifields)) {
     eligible_ifields.erase(field);
   }

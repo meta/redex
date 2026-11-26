@@ -15,6 +15,7 @@
 #include "IFieldAnalysisUtil.h"
 #include "IRAssembler.h"
 #include "IRCode.h"
+#include "MethodOverrideGraph.h"
 #include "RedexTest.h"
 #include "RedexTestUtils.h"
 #include "Show.h"
@@ -52,15 +53,16 @@ struct FinalInlineTest : public RedexTest {
     walk::code(scope, [&](DexMethod*, IRCode& code) { code.build_cfg(); });
     int min_sdk = 0;
     constant_propagation::NullCheckMethods state;
+    auto method_override_graph = method_override_graph::build_graph(scope);
     FinalInlinePassV2::run(scope, conf, min_sdk, init_classes_with_side_effects,
-                           xstores, state);
+                           xstores, state, *method_override_graph);
 
     const auto constructor_only_ifields =
         constant_propagation::gather_constructor_only_ifields(
             scope, local_pointers::analyze_constructors(scope, {}));
     auto eligible_ifields =
         constant_propagation::gather_safely_inferable_ifield_candidates(
-            scope, constructor_only_ifields, {});
+            scope, constructor_only_ifields, {}, *method_override_graph);
     FinalInlinePassV2::run_inline_ifields(
         scope, conf, min_sdk, init_classes_with_side_effects, xstores,
         eligible_ifields, constructor_only_ifields, state);
@@ -95,7 +97,7 @@ TEST_F(FinalInlineTest, finalFieldOfMultiConstructorClassIsEligible) {
           scope,
           constant_propagation::gather_constructor_only_ifields(
               scope, local_pointers::analyze_constructors(scope, {})),
-          {});
+          {}, *method_override_graph::build_graph(scope));
   EXPECT_EQ(eligible.count(count), 1u);
   walk::code(scope, [](DexMethod*, IRCode& code) { code.clear_cfg(); });
 }

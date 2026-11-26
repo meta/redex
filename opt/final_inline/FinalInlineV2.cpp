@@ -18,6 +18,7 @@
 #include "IRCode.h"
 #include "InitDeps.h"
 #include "LocalDce.h"
+#include "MethodOverrideGraph.h"
 #include "MethodUtil.h"
 #include "PassManager.h"
 #include "Resolver.h"
@@ -387,15 +388,15 @@ cp::WholeProgramState analyze_and_simplify_clinits(
     const UnorderedSet<const DexType*>& blocklist_types,
     const UnorderedSet<std::string>& allowed_opaque_callee_names,
     const cp::NullCheckMethods& null_check_methods,
+    const method_override_graph::Graph& method_override_graph,
     size_t* init_cycles,
     size_t* deleted_methods) {
   const UnorderedSet<DexMethodRef*> pure_methods = get_pure_methods();
   cp::WholeProgramState wps(blocklist_types);
   const auto clinit_only_fields = cp::get_clinit_only_written_fields(scope);
 
-  auto method_override_graph = method_override_graph::build_graph(scope);
   auto graph =
-      call_graph::Graph(ClassInitStrategy(*method_override_graph, scope));
+      call_graph::Graph(ClassInitStrategy(method_override_graph, scope));
   StaticFieldReadAnalysis analysis(graph, allowed_opaque_callee_names);
 
   for (DexClass* cls : reverse_tsort_by_clinit_deps(scope, *init_cycles)) {
@@ -653,13 +654,15 @@ FinalInlinePassV2::Stats FinalInlinePassV2::run(
         init_classes_with_side_effects,
     const XStoreRefs* xstores,
     const cp::NullCheckMethods& null_check_methods,
+    const method_override_graph::Graph& method_override_graph,
     const Config& config,
     std::optional<DexStoresVector*> stores) {
   size_t clinit_cycles = 0;
   size_t deleted_clinits = 0;
   auto wps = final_inline::analyze_and_simplify_clinits(
       scope, init_classes_with_side_effects, xstores, config.blocklist_types,
-      {}, null_check_methods, &clinit_cycles, &deleted_clinits);
+      {}, null_check_methods, method_override_graph, &clinit_cycles,
+      &deleted_clinits);
   auto res = inline_final_gets(stores, scope, conf, min_sdk,
                                init_classes_with_side_effects, xstores, wps,
                                config.blocklist_types, cp::FieldType::STATIC);
@@ -703,15 +706,20 @@ void FinalInlinePassV2::run_pass(DexStoresVector& stores,
       scope, conf.create_init_class_insns());
   XStoreRefs xstores(stores, conf.normal_primary_dex());
   cp::NullCheckMethods null_check_methods;
-  auto sfield_stats = run(scope, conf, min_sdk, init_classes_with_side_effects,
-                          &xstores, null_check_methods, m_config, &stores);
+  // The steps below change method bodies and delete <clinit>s, but never which
+  // virtual methods exist, so one graph serves both field analyses.
+  auto method_override_graph = method_override_graph::build_graph(scope);
+  auto sfield_stats =
+      run(scope, conf, min_sdk, init_classes_with_side_effects, &xstores,
+          null_check_methods, *method_override_graph, m_config, &stores);
   FinalInlinePassV2::Stats ifield_stats{};
   if (m_config.inline_instance_field) {
     const auto constructor_only_ifields = cp::gather_constructor_only_ifields(
         scope, local_pointers::analyze_constructors(scope, {}));
     cp::EligibleIfields eligible_ifields =
         cp::gather_safely_inferable_ifield_candidates(
-            scope, constructor_only_ifields, m_config.allowlist_method_names);
+            scope, constructor_only_ifields, m_config.allowlist_method_names,
+            *method_override_graph);
     ifield_stats =
         run_inline_ifields(scope, conf, min_sdk, init_classes_with_side_effects,
                            &xstores, eligible_ifields, constructor_only_ifields,

@@ -502,7 +502,8 @@ std::unique_ptr<GlobalTypeAnalyzer> GlobalTypeAnalysis::analyze(
             scope,
             constant_propagation::gather_ifields_written_only_by_constructors(
                 scope),
-            {});
+            {},
+            *method_override_graph);
   }
   size_t iteration_cnt = 0;
 

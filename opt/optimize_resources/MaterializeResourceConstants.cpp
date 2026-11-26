@@ -12,6 +12,7 @@
 #include "Debug.h"
 #include "FinalInlineV2.h"
 #include "InitClassesWithSideEffects.h"
+#include "MethodOverrideGraph.h"
 #include "PassManager.h"
 #include "RedexResources.h"
 #include "Resolver.h"
@@ -90,7 +91,8 @@ MaterializeResourceConstantsPass::run_impl(
       apply_scope, init_classes_with_side_effects,
       /* xstores= */ nullptr,
       /* blocklist_types= */ {}, /* allowed_opaque_callee_names= */ {},
-      null_check_methods, &clinit_cycles, &stats.deleted_clinits);
+      null_check_methods, *method_override_graph::build_graph(apply_scope),
+      &clinit_cycles, &stats.deleted_clinits);
   always_assert_log(clinit_cycles == 0,
                     "Should not have clinit cycles in R classes!");
 

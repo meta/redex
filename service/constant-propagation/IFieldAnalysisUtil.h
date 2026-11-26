@@ -42,6 +42,7 @@ UnorderedSet<const DexField*> gather_constructor_only_ifields(
 EligibleIfields gather_safely_inferable_ifield_candidates(
     const Scope& scope,
     const UnorderedSet<const DexField*>& candidate_ifields,
-    const UnorderedSet<std::string>& allowlist_method_names);
+    const UnorderedSet<std::string>& allowlist_method_names,
+    const method_override_graph::Graph& method_override_graph);
 
 } // namespace constant_propagation

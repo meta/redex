@@ -28,6 +28,7 @@
 #include "GlobalConfig.h"
 #include "IRList.h"
 #include "IROpcode.h"
+#include "Lazy.h"
 #include "Macros.h"
 #include "MethodOverrideGraph.h"
 #include "MetricsSink.h"
@@ -400,20 +401,14 @@ void fix_hot_method_cold_entry_violations(ControlFlowGraph* cfg) {
 
 namespace {
 
-size_t count_blocks(
-    Block*, const dominators::SimpleFastDominators<cfg::GraphInterface>&) {
-  return 1;
-}
-size_t count_block_has_sbs(
-    Block* b, const dominators::SimpleFastDominators<cfg::GraphInterface>&) {
+size_t count_blocks(Block*) { return 1; }
+size_t count_block_has_sbs(Block* b) {
   return source_blocks::has_source_blocks(b) ? 1 : 0;
 }
-size_t count_block_no_sbs(
-    Block* b, const dominators::SimpleFastDominators<cfg::GraphInterface>&) {
+size_t count_block_no_sbs(Block* b) {
   return source_blocks::has_source_blocks(b) ? 0 : 1;
 }
-size_t count_block_has_incomplete_sbs(
-    Block* b, const dominators::SimpleFastDominators<cfg::GraphInterface>&) {
+size_t count_block_has_incomplete_sbs(Block* b) {
   auto* sb = get_first_source_block(b);
   if (sb == nullptr) {
     return 0;
@@ -421,15 +416,13 @@ size_t count_block_has_incomplete_sbs(
   return static_cast<size_t>(
       sb->foreach_val_early([&](const auto& val) { return !val; }));
 }
-size_t count_all_sbs(
-    Block* b, const dominators::SimpleFastDominators<cfg::GraphInterface>&) {
+size_t count_all_sbs(Block* b) {
   size_t ret{0};
   source_blocks::foreach_source_block(
       b, [&](auto* sb ATTRIBUTE_UNUSED) { ++ret; });
   return ret;
 }
-size_t count_throw_delineated_no_sbs(
-    Block* b, const dominators::SimpleFastDominators<cfg::GraphInterface>&) {
+size_t count_throw_delineated_no_sbs(Block* b) {
   size_t num_violations = 0;
   bool had_sb = false;
   for (auto it = b->begin(); it != b->end(); ++it) {
@@ -493,10 +486,8 @@ ViolationsAndPotentialViolations hot_immediate_dom_not_hot(
   return hot_immediate_dom_not_hot_impl(block, dominators, ignore_undefined);
 }
 
-ViolationsAndPotentialViolations hot_no_hot_pred(
-    Block* block,
-    const dominators::SimpleFastDominators<cfg::GraphInterface>&,
-    bool ignore_undefined) {
+ViolationsAndPotentialViolations hot_no_hot_pred(Block* block,
+                                                 bool ignore_undefined) {
   auto* first_sb_current_b = source_blocks::get_first_source_block(block);
   if (!has_source_block_positive_val(first_sb_current_b)) {
     return {0, 0};
@@ -751,6 +742,13 @@ ViolationsAndPotentialViolations hot_all_children_cold_violations(
   return hot_all_children_cold(block, ignore_undefined);
 };
 
+ViolationsAndPotentialViolations hot_no_hot_pred_violations(
+    Block* block,
+    const dominators::SimpleFastDominators<cfg::GraphInterface>&,
+    bool ignore_undefined) {
+  return hot_no_hot_pred(block, ignore_undefined);
+}
+
 struct ChainAndDomState {
   const SourceBlock* last{nullptr};
   cfg::Block* dom_block{nullptr};
@@ -878,8 +876,7 @@ ViolationsAndPotentialViolations chain_and_dom_violations_coldstart(
 }
 
 // Ugly but necessary for constexpr below.
-using CounterFnPtr = size_t (*)(
-    Block*, const dominators::SimpleFastDominators<cfg::GraphInterface>&);
+using CounterFnPtr = size_t (*)(Block*);
 using ViolationCounterFnPtr = ViolationsAndPotentialViolations (*)(
     Block*,
     const dominators::SimpleFastDominators<cfg::GraphInterface>&,
@@ -911,7 +908,7 @@ constexpr std::array<std::pair<std::string_view, ViolationCounterFnPtr>, 7>
 constexpr std::array<std::pair<std::string_view, ViolationCounterFnPtr>, 2>
     gViolationCountersNonEntry = {{
         {"~flow~violation~idom", &hot_immediate_dom_not_hot},
-        {"~flow~violation~direct~predecessors", &hot_no_hot_pred},
+        {"~flow~violation~direct~predecessors", &hot_no_hot_pred_violations},
     }};
 
 struct SourceBlocksStats {
@@ -1035,7 +1032,7 @@ void track_source_block_coverage(MetricsSink& sm,
 
         for (auto* block : cfg.blocks()) {
           for (size_t i = 0; i != gCounters.size(); ++i) {
-            ret.global[i].count += (*gCounters[i].second)(block, dominators);
+            ret.global[i].count += (*gCounters[i].second)(block);
           }
           for (size_t i = 0; i != gViolationCounters.size(); ++i) {
             auto [violations, possible_violations] =
@@ -1431,31 +1428,12 @@ struct ViolationsHelper::ViolationsHelperImpl {
     not_reached();
   }
 
-  static bool needs_dominators(Violation v) {
-    switch (v) {
-    case Violation::kHotImmediateDomNotHot:
-    case Violation::kChainAndDom:
-    case Violation::kHotNoHotPred:
-    case Violation::kUncoveredThrowDelineatedBlocks:
-      return true;
-    case Violation::kUncoveredSourceBlocks:
-    case Violation::kHotMethodColdEntry:
-    case Violation::KHotAllChildrenCold:
-      return false;
-    case Violation::ViolationSize:
-      not_reached();
-    }
-    not_reached();
-  }
-
-  // Counts one kind over an already-prepared CFG.
+  // Counts one kind over an already-prepared CFG. The first `*dom` builds the
+  // dominators; later ones, for this kind or another, reuse them.
   static size_t count_violations(Violation v,
                                  cfg::ControlFlowGraph& cfg,
-                                 const std::optional<Dominators>& dom,
+                                 Lazy<Dominators>& dom,
                                  bool ignore_undefined) {
-    // compute_all builds the dominators whenever any requested kind needs
-    // them, so every kind that reaches a `*dom` below finds them here.
-    always_assert(dom.has_value() || !needs_dominators(v));
     size_t sum{0};
     switch (v) {
     case Violation::kHotImmediateDomNotHot:
@@ -1480,7 +1458,7 @@ struct ViolationsHelper::ViolationsHelperImpl {
       return hot_method_cold_entry_violations_cfg(cfg, ignore_undefined);
     case Violation::kHotNoHotPred:
       for (auto* b : cfg.blocks()) {
-        sum += hot_no_hot_pred(b, *dom, ignore_undefined).violations;
+        sum += hot_no_hot_pred(b, ignore_undefined).violations;
       }
       return sum;
     case Violation::KHotAllChildrenCold:
@@ -1490,7 +1468,7 @@ struct ViolationsHelper::ViolationsHelperImpl {
       return sum;
     case Violation::kUncoveredThrowDelineatedBlocks:
       for (auto* b : cfg.blocks()) {
-        sum += count_throw_delineated_no_sbs(b, *dom);
+        sum += count_throw_delineated_no_sbs(b);
       }
       return sum;
     case Violation::ViolationSize:
@@ -1500,25 +1478,20 @@ struct ViolationsHelper::ViolationsHelperImpl {
   }
 
   // Counts every requested kind over one method, doing the CFG normalization
-  // and the dominator computation once for all of them. Only the entries for
-  // the requested kinds are meaningful; the rest stay zero.
+  // and the dominator computation at most once for all of them. Only the
+  // entries for the requested kinds are meaningful; the rest stay zero.
   static ViolationCounts compute_all(const ViolationSet& kinds,
                                      cfg::ControlFlowGraph& cfg,
                                      bool ignore_undefined) {
     ViolationCounts counts{};
     bool any_removal = false;
-    bool any_dominators = false;
     for_each_kind(kinds, [&](Violation v) {
       any_removal |= needs_unreachable_removal(v);
-      any_dominators |= needs_dominators(v);
     });
     if (any_removal) {
       cfg.remove_unreachable_blocks();
     }
-    std::optional<Dominators> dom;
-    if (any_dominators) {
-      dom.emplace(cfg);
-    }
+    Lazy<Dominators> dom([&cfg] { return std::make_unique<Dominators>(cfg); });
     for_each_kind(kinds, [&](Violation v) {
       counts[static_cast<size_t>(v)] =
           count_violations(v, cfg, dom, ignore_undefined);

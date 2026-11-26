@@ -786,6 +786,36 @@ TEST_F(SourceBlocksTest, chain_and_dom_magnitude_fires_below_entry_block) {
   EXPECT_EQ(violations, 1u);
 }
 
+// The call can throw, so the source block before it does not cover the
+// `return-void` after it. A source block between the two covers it.
+TEST_F(SourceBlocksTest, uncovered_throw_delineated_blocks_counts_segments) {
+  auto count = [](const std::string& code) {
+    auto* method = create_method("LThrowSegments");
+    method->set_code(assembler::ircode_from_string(code));
+    method->get_code()->build_cfg();
+    return source_blocks::compute(
+        ViolationsHelper::Violation::kUncoveredThrowDelineatedBlocks,
+        method->get_code()->cfg());
+  };
+  EXPECT_EQ(count(R"(
+    (
+      (.src_block "LThrowSegments;.bar:()V" 0 (1.0 1.0))
+      (invoke-static () "LThrowSegments;.baz:()V")
+      (return-void)
+    )
+  )"),
+            1u);
+  EXPECT_EQ(count(R"(
+    (
+      (.src_block "LThrowSegments;.bar:()V" 0 (1.0 1.0))
+      (invoke-static () "LThrowSegments;.baz:()V")
+      (.src_block "LThrowSegments;.bar:()V" 1 (1.0 1.0))
+      (return-void)
+    )
+  )"),
+            0u);
+}
+
 // The whole-CFG scale is a SHARE of the dominated block's executions, so it is
 // at most 1. A dominating value larger than the dominated one -- incomplete
 // tracking, or a denominator pinned to a positive-magnitude floor -- must not

@@ -108,6 +108,42 @@ gather_methods_named_by_method_handles(const Scope& scope);
 InsertOnlyConcurrentSet<const DexField*> gather_fields_named_by_method_handles(
     const Scope& scope);
 
+/**
+ * The fields that the field method handles of a program name. Code outside the
+ * app can get or put such a field through a handle, as through reflection, so
+ * analyses treat these fields like kept fields. An analysis that changes only
+ * some classes still needs the fields that the whole program names: a handle
+ * that any class holds can name a field of any class.
+ */
+struct MethodHandleFields {
+  // Field types, by field name.
+  using NamesAndTypes =
+      UnorderedMap<const DexString*, UnorderedSet<const DexType*>>;
+
+  // The defined fields that field handles name, found as
+  // `gather_fields_named_by_method_handles` finds them. Ask `contains` whether
+  // a handle can access a given field.
+  UnorderedSet<const DexField*> defined;
+  // The names and types of the fields that handles name but that resolve to no
+  // definition: a field of a library class that Redex did not load, for
+  // example, or one that an app class inherits from such a class.
+  NamesAndTypes undefined;
+
+  // Whether a field handle can access the field `definition` (a field that
+  // `is_def`): whether one names it or a field that resolves to it, or, for a
+  // library field, names a field of its name and type that resolves to no
+  // definition and so can be `definition` at run time.
+  bool contains(const DexField* definition) const;
+  // Whether the program holds no field handle.
+  bool empty() const { return defined.empty() && undefined.empty(); }
+};
+
+/**
+ * The fields that the field method handles that code, static field values and
+ * annotations in `scope` hold name.
+ */
+MethodHandleFields gather_method_handle_fields(const Scope& scope);
+
 using ClInitHasNoSideEffectsPredicate = std::function<bool(const DexType*)>;
 
 /**

@@ -289,6 +289,156 @@ TEST_F(MethodUtilTest, gather_fields_named_by_method_handles) {
   EXPECT_EQ(fields.size(), 3);
 }
 
+// Every field method handle names its field, wherever it is held: in code, in
+// a static field value or in an annotation. A handle that calls a method names
+// no field.
+TEST_F(MethodUtilTest, gather_method_handle_fields) {
+  ClassCreator holder(DexType::make_type("LHandleFields;"));
+  holder.set_super(type::java_lang_Object());
+  for (const auto* field :
+       {"LHandleFields;.codePut:I", "LHandleFields;.valuePut:I",
+        "LHandleFields;.codeGet:I", "LHandleFields;.unnamed:I"}) {
+    holder.add_field(
+        DexField::make_field(field)->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  }
+  holder.add_field(DexField::make_field("LHandleFields;.annotatedPut:I")
+                       ->make_concrete(ACC_PUBLIC));
+  auto* holder_cls = holder.create();
+
+  ClassCreator user(DexType::make_type("LHandleUser;"));
+  user.set_super(type::java_lang_Object());
+  user.add_method(assembler::method_from_string(R"(
+    (method (public static) "LHandleUser;.use:()V"
+     (
+      (const-method-handle static-put "LHandleFields;.codePut:I")
+      (move-result-pseudo-object v0)
+      (const-method-handle static-get "LHandleFields;.codeGet:I")
+      (move-result-pseudo-object v0)
+      (const-method-handle invoke-static "LHandleUser;.use:()V")
+      (move-result-pseudo-object v0)
+      (return-void)
+     )
+    )
+  )"));
+  user.add_field(
+      DexField::make_field(
+          "LHandleUser;.HANDLE:Ljava/lang/invoke/MethodHandle;")
+          ->make_concrete(
+              ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+              std::make_unique<DexEncodedValueMethodHandle>(
+                  redex::make_method_handle(METHOD_HANDLE_TYPE_STATIC_PUT,
+                                            "LHandleFields;.valuePut:I"))));
+  auto* user_cls = user.create();
+  auto annotation = std::make_unique<DexAnnotation>(
+      DexType::make_type("LAnno;"), DAV_RUNTIME);
+  annotation->add_element(
+      "value",
+      std::make_unique<DexEncodedValueMethodHandle>(redex::make_method_handle(
+          METHOD_HANDLE_TYPE_INSTANCE_PUT, "LHandleFields;.annotatedPut:I")));
+  auto annotation_set = std::make_unique<DexAnnotationSet>();
+  annotation_set->add_annotation(std::move(annotation));
+  ASSERT_TRUE(user_cls->attach_annotation_set(std::move(annotation_set)));
+
+  auto fields = method::gather_method_handle_fields({holder_cls, user_cls});
+
+  auto named = [&](const char* field) {
+    return fields.contains(DexField::get_field(field)->as_def());
+  };
+  EXPECT_TRUE(named("LHandleFields;.codePut:I"));
+  EXPECT_TRUE(named("LHandleFields;.valuePut:I"));
+  EXPECT_TRUE(named("LHandleFields;.annotatedPut:I"));
+  EXPECT_TRUE(named("LHandleFields;.codeGet:I"));
+  EXPECT_FALSE(named("LHandleFields;.unnamed:I"));
+  EXPECT_EQ(fields.defined.size(), 4);
+  EXPECT_FALSE(fields.empty());
+  EXPECT_TRUE(method::MethodHandleFields().empty());
+}
+
+// A handle may access a field that it names but that resolves to no
+// definition, which can then be any library field of that name and type: here
+// `slot` and `other`, which the app class `LAppSub;` inherits from the library
+// class `LLibBase;`, which is not loaded, and `SDK_INT` of a library class that
+// is not loaded either.
+TEST_F(MethodUtilTest, gather_method_handle_fields_undefined) {
+  ClassCreator app_sub(DexType::make_type("LAppSub;"));
+  app_sub.set_super(DexType::make_type("LLibBase;"));
+  app_sub.add_method(assembler::method_from_string(R"(
+    (method (public static) "LAppSub;.use:()V"
+     (
+      (const-method-handle static-put "LAppSub;.slot:I")
+      (move-result-pseudo-object v0)
+      (const-method-handle static-put "Landroid/os/Build$VERSION;.SDK_INT:I")
+      (move-result-pseudo-object v0)
+      (const-method-handle static-get "LAppSub;.other:J")
+      (move-result-pseudo-object v0)
+      (return-void)
+     )
+    )
+  )"));
+
+  auto fields = method::gather_method_handle_fields({app_sub.create()});
+
+  EXPECT_TRUE(fields.defined.empty());
+  EXPECT_FALSE(fields.empty());
+  // The library fields that the unresolved references can reach.
+  ClassCreator lib(DexType::make_type("LLib;"));
+  lib.set_super(type::java_lang_Object());
+  lib.set_external();
+  for (const auto* spec :
+       {"LLib;.slot:I", "LLib;.slot:J", "LLib;.other:I", "LLib;.other:J"}) {
+    lib.add_field(
+        DexField::make_field(spec)->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  }
+  lib.create();
+  ClassCreator version(DexType::make_type("Landroid/os/Build$VERSION;"));
+  version.set_super(type::java_lang_Object());
+  version.set_external();
+  version.add_field(DexField::make_field("Landroid/os/Build$VERSION;.SDK_INT:I")
+                        ->make_concrete(ACC_PUBLIC | ACC_STATIC | ACC_FINAL));
+  version.create();
+  auto named = [&](const char* field) {
+    return fields.contains(DexField::get_field(field)->as_def());
+  };
+  EXPECT_TRUE(named("LLib;.slot:I"));
+  EXPECT_TRUE(named("LLib;.other:J"));
+  EXPECT_TRUE(named("Landroid/os/Build$VERSION;.SDK_INT:I"));
+  EXPECT_FALSE(named("LLib;.slot:J"));
+  EXPECT_FALSE(named("LLib;.other:I"));
+  // A field that resolves to no definition cannot be a field of an app class.
+  ClassCreator app_other(DexType::make_type("LAppOther;"));
+  app_other.set_super(type::java_lang_Object());
+  app_other.add_field(DexField::make_field("LAppOther;.slot:I")
+                          ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  app_other.create();
+  EXPECT_FALSE(named("LAppOther;.slot:I"));
+}
+
+// A handle that names a field through a subclass names the field that the
+// reference resolves to.
+TEST_F(MethodUtilTest, gather_method_handle_fields_named_through_subclass) {
+  ClassCreator base(DexType::make_type("LBase;"));
+  base.set_super(type::java_lang_Object());
+  base.add_field(DexField::make_field("LBase;.slot:I")
+                     ->make_concrete(ACC_PUBLIC | ACC_STATIC));
+  auto* base_cls = base.create();
+  ClassCreator sub(DexType::make_type("LSub;"));
+  sub.set_super(base_cls->get_type());
+  sub.add_method(assembler::method_from_string(R"(
+    (method (public static) "LSub;.use:()V"
+     (
+      (const-method-handle static-put "LSub;.slot:I")
+      (move-result-pseudo-object v0)
+      (return-void)
+     )
+    )
+  )"));
+
+  auto fields = method::gather_method_handle_fields({base_cls, sub.create()});
+
+  EXPECT_TRUE(fields.contains(DexField::get_field("LBase;.slot:I")->as_def()));
+  EXPECT_TRUE(fields.undefined.empty());
+}
+
 TEST_F(MethodUtilTest, runs_method_handle_target) {
   EXPECT_TRUE(method::runs_method_handle_target(DexMethod::make_method(
       "Ljava/lang/invoke/MethodHandle;.invokeWithArguments:([Ljava/lang/"

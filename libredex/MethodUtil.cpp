@@ -608,6 +608,53 @@ gather_methods_named_by_method_handles(const Scope& scope) {
   return methods;
 }
 
+namespace {
+
+// Records in `defined` the field that the field method handle
+// `method_handle` names, when that field is defined, and the field that it
+// resolves to (`resolve_field_handle`); when it resolves to no definition,
+// records the field that it names in `undefined`.
+void record_fields_of_method_handle(
+    const DexMethodHandle* method_handle,
+    InsertOnlyConcurrentSet<const DexField*>* defined,
+    InsertOnlyConcurrentSet<const DexFieldRef*>* undefined) {
+  if (auto* field = method_handle->fieldref()->as_def()) {
+    defined->insert(field);
+  }
+  if (auto* field = resolve_field_handle(method_handle)) {
+    defined->insert(field);
+  } else {
+    undefined->insert(method_handle->fieldref());
+  }
+}
+
+MethodHandleFields::NamesAndTypes get_names_and_types(
+    const InsertOnlyConcurrentSet<const DexFieldRef*>& fields) {
+  MethodHandleFields::NamesAndTypes names_and_types;
+  for (const auto* field : UnorderedIterable(fields)) {
+    names_and_types[field->get_name()].insert(field->get_type());
+  }
+  return names_and_types;
+}
+
+} // namespace
+
+bool MethodHandleFields::contains(const DexField* definition) const {
+  always_assert_log(definition->is_def(), "%s is not a definition",
+                    SHOW(definition));
+  if (defined.contains(definition)) {
+    return true;
+  }
+  // A field that resolves to no definition belongs to a type missing from the
+  // input or to a library type above one, never to an app class: a missing type
+  // is not a subtype of an app type.
+  if (type_class_internal(definition->get_class()) != nullptr) {
+    return false;
+  }
+  auto it = undefined.find(definition->get_name());
+  return it != undefined.end() && it->second.contains(definition->get_type());
+}
+
 InsertOnlyConcurrentSet<const DexField*> gather_fields_named_by_method_handles(
     const Scope& scope) {
   InsertOnlyConcurrentSet<const DexField*> fields;
@@ -624,6 +671,22 @@ InsertOnlyConcurrentSet<const DexField*> gather_fields_named_by_method_handles(
           fields.insert(field);
         }
       });
+  return fields;
+}
+
+MethodHandleFields gather_method_handle_fields(const Scope& scope) {
+  InsertOnlyConcurrentSet<const DexField*> defined;
+  InsertOnlyConcurrentSet<const DexFieldRef*> undefined;
+  walk_method_handles(
+      scope,
+      [&](const DexMethodHandle* method_handle, const DexMethod* /* caller */) {
+        if (!DexMethodHandle::isInvokeType(method_handle->type())) {
+          record_fields_of_method_handle(method_handle, &defined, &undefined);
+        }
+      });
+  MethodHandleFields fields;
+  insert_unordered_iterable(fields.defined, defined);
+  fields.undefined = get_names_and_types(undefined);
   return fields;
 }
 

@@ -1462,6 +1462,65 @@ TEST_F(FinalInlineTest, instanceFieldReadThroughCallSiteInCallee) {
   EXPECT_CODE_EQ(reader->get_code(), expected.get());
 }
 
+TEST_F(FinalInlineTest, calleeExcludedFromOptimizationBlocksInference) {
+  // Java:
+  //   class Sdk { static void observe(Foo f) {} }
+  //   class Foo {
+  //     final int count;
+  //     Foo() { Sdk.observe(this); count = 7; }
+  //     static int getCount(Foo f) { return f.count; }
+  //   }
+  // Sdk.observe is excluded from optimization: the code that runs may differ
+  // from the code in the input, and may call getCount(this) before count is
+  // written, which returns 0.
+  ClassCreator sdk_cc(DexType::make_type("LSdk;"));
+  sdk_cc.set_super(type::java_lang_Object());
+  auto* observe = assembler::method_from_string(R"(
+    (method (public static) "LSdk;.observe:(LFoo;)V"
+     (
+      (load-param-object v0)
+      (return-void)
+     )
+    )
+  )");
+  observe->rstate.set_no_optimizations();
+  sdk_cc.add_method(observe);
+  auto* sdk = sdk_cc.create();
+
+  auto* count = DexField::make_field("LFoo;.count:I")
+                    ->make_concrete(ACC_PUBLIC | ACC_FINAL);
+  m_cc->add_field(count);
+  m_cc->add_method(assembler::method_from_string(R"(
+    (method (public constructor) "LFoo;.<init>:()V"
+     (
+      (load-param-object v0)
+      (invoke-direct (v0) "Ljava/lang/Object;.<init>:()V")
+      (invoke-static (v0) "LSdk;.observe:(LFoo;)V")
+      (const v1 7)
+      (iput v1 v0 "LFoo;.count:I")
+      (return-void)
+     )
+    )
+  )"));
+  auto* reader = assembler::method_from_string(R"(
+    (method (public static) "LFoo;.getCount:(LFoo;)I"
+     (
+      (load-param-object v0)
+      (iget v0 "LFoo;.count:I")
+      (move-result-pseudo v0)
+      (return v0)
+     )
+    )
+  )");
+  m_cc->add_method(reader);
+  auto* cls = m_cc->create();
+  auto expected = std::make_unique<IRCode>(*reader->get_code());
+
+  run({sdk, cls}, nullptr);
+
+  EXPECT_CODE_EQ(reader->get_code(), expected.get());
+}
+
 class FinalInlinePutHandleTest : public FinalInlineTest,
                                  public ::testing::WithParamInterface<bool> {};
 

@@ -13,6 +13,7 @@
 #include "ClassHierarchy.h"
 #include "Debug.h"
 #include "MethodOverrideGraph.h"
+#include "MethodUtil.h"
 #include "Resolver.h"
 #include "Walkers.h"
 
@@ -393,7 +394,9 @@ class EarlyReadFinder {
         }
       }
     }
-    if (method == nullptr || method->get_code() == nullptr) {
+    // A method excluded from optimization may run code other than the body
+    // Redex sees, so it is as unknown as a method without code.
+    if (method == nullptr || !method::is_optimizable(method)) {
       // We can't track down further, don't process any ifields from ifield_cls.
       return blocklist_all();
     }
